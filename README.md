@@ -104,11 +104,66 @@ Star Citizen のゲーム内テキストを AI で日本語に翻訳し、ゲー
 
 | バックエンド | 特徴 | 必要なもの |
 |---|---|---|
-| **Claude** (Anthropic) | 高品質な翻訳 | API キー |
-| **Gemini** (Google) | 高速・大量処理向き | API キー |
-| **Ollama** (ローカル) | 無料・オフライン対応 | Ollama サーバー + モデル |
+| **Claude** (Anthropic) | 高品質な翻訳 | API キー ([取得方法](docs/API_Key_取得_Claude.md)) |
+| **Gemini** (Google) | 高速・大量処理向き | API キー ([取得方法](docs/API_Key_取得_Gemini.md)) |
+| **Ollama** (ローカル) | 無料・オフライン対応 | [Ollama](docs/Ollama_Install.md) + モデル |
 
 複数バックエンドを有効にすると、バッチを分散して**並列翻訳**します。
+
+#### Ollama + Gemma4 の設定方法
+
+ローカル LLM を使えば **API キー不要・無料** で翻訳できます。
+
+**1. Ollama をインストール** ([詳細ガイド](docs/Ollama_Install.md))
+
+[ollama.com](https://ollama.com/) からインストーラーをダウンロード・実行します。
+
+**2. 翻訳用モデルをダウンロード**
+
+コマンドプロンプトで以下を実行します:
+
+```bash
+# 高品質モデル (VRAM 4GB 以上推奨)
+ollama pull gemma4:4b
+
+# 軽量モデル (VRAM 2GB でも動作)
+ollama pull gemma4:2b
+```
+
+> VRAM に余裕があれば `gemma4:27b` (高精度) や `gemma4:12b` (バランス型) も使えます。
+> 詳細: [Gemma4 e4b ガイド](docs/Gemma4_e4b_Install.md) / [Gemma4 e2b ガイド](docs/Gemma4_e2b_Install.md)
+
+**3. AI 設定ダイアログで設定**
+
+```
+┌─ AI 設定 ──────────────────────────────────────────┐
+│                                                     │
+│  ┌─ LocalLLM ─────────────────────────────────────┐│
+│  │ [x] 有効   Name: LocalLLM   Type: Ollama       ││
+│  │                                                 ││
+│  │ Base URL:  http://localhost:11434               ││
+│  │ Model:     gemma4:4b                            ││
+│  │ Batch:     15                                   ││
+│  └─────────────────────────────────────────────────┘│
+│                                                     │
+│           [バックエンド追加]  [保存]  [キャンセル]    │
+└─────────────────────────────────────────────────────┘
+```
+
+| 項目 | 設定値 | 説明 |
+|---|---|---|
+| **Type** | `Ollama` | ドロップダウンから選択 |
+| **Base URL** | `http://localhost:11434` | Ollama のアドレス (別 PC の場合は IP を変更) |
+| **Model** | `gemma4:4b` or `gemma4:2b` | ダウンロードしたモデル名を入力 |
+| **Batch** | `15` | 一度に送る翻訳数 (VRAM に応じて調整) |
+
+> **別 PC の Ollama を使う場合**: Base URL を `http://192.168.x.x:11434` のように変更します。
+> Ollama 側で `OLLAMA_HOST=0.0.0.0` の環境変数を設定してください。
+
+**4. 翻訳を実行**
+
+チェックボックスを有効にして [保存] → メイン画面の [2. 翻訳] で開始します。
+Claude や Gemini と同時に有効にすれば、3 つのバックエンドで並列翻訳されます。
 
 ---
 

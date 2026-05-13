@@ -64,7 +64,7 @@ $headers = @{
 }
 
 $releaseBody = if ($Message) { $Message } else { "Release v$Version" }
-$body = @{
+$bodyJson = @{
     tag_name   = "v$Version"
     name       = "v$Version"
     body       = $releaseBody
@@ -72,7 +72,7 @@ $body = @{
     prerelease = $false
 } | ConvertTo-Json
 
-$release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases" -Method Post -Headers $headers -Body $body
+$release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases" -Method Post -Headers $headers -Body ([System.Text.Encoding]::UTF8.GetBytes($bodyJson)) -ContentType "application/json; charset=utf-8"
 $releaseId = $release.id
 Write-Host "Release created: $($release.html_url)" -ForegroundColor Green
 
