@@ -267,6 +267,29 @@ AI は以下のルールに基づいて翻訳します:
 
 ---
 
+## セットアップガイド
+
+翻訳バックエンドの設定方法は以下のドキュメントを参照してください。
+
+### API キー取得
+
+| バックエンド | ガイド | 概要 |
+|---|---|---|
+| **Claude** (Anthropic) | [API_Key_取得_Claude.md](docs/API_Key_取得_Claude.md) | Anthropic Console でのアカウント作成・課金設定・APIキー発行 |
+| **Gemini** (Google) | [API_Key_取得_Gemini.md](docs/API_Key_取得_Gemini.md) | Google AI Studio でのAPIキー取得（無料枠あり） |
+
+### ローカル LLM (Ollama)
+
+API キー不要・無料・オフライン対応のローカル翻訳環境を構築できます。
+
+| ドキュメント | 内容 |
+|---|---|
+| [Ollama_Install.md](docs/Ollama_Install.md) | Ollama 本体のインストールと基本操作 |
+| [Gemma4_e4b_Install.md](docs/Gemma4_e4b_Install.md) | 高品質モデル (4B) — ミッション説明・長文向け |
+| [Gemma4_e2b_Install.md](docs/Gemma4_e2b_Install.md) | 軽量モデル (2B) — UIラベル・短文・高速応答向け |
+
+---
+
 ## ビルド方法
 
 ```bash

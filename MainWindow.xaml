@@ -220,13 +220,20 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <ListBox x:Name="lstCharSaves" Grid.Row="0" MinHeight="200"/>
-                            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,8,0,0">
-                                <Button Content="保存" Click="SaveChar_Click" Style="{StaticResource ActionButton}"/>
-                                <Button Content="読込" Click="LoadChar_Click" Style="{StaticResource ActionButton}"/>
-                                <Button Content="更新" Click="RefreshCharSaves_Click" Padding="10,4" Margin="4"/>
-                            </StackPanel>
+                            <WrapPanel Grid.Row="1" Margin="0,8,0,0">
+                                <Button Content="ゲームから保存" Click="SaveChar_Click" Padding="10,4" Margin="0,0,4,4"/>
+                                <Button Content="外部から取込" Click="ImportChar_Click" Padding="10,4" Margin="0,0,4,4"/>
+                                <Button Content="コピー" Click="CopyChar_Click" Padding="10,4" Margin="0,0,4,4"/>
+                            </WrapPanel>
+                            <WrapPanel Grid.Row="2">
+                                <Button Content="ゲームに反映" Click="ApplyChar_Click" Padding="10,4" Margin="0,0,4,4"
+                                        FontWeight="Bold" Background="#4CAF50" Foreground="White"/>
+                                <Button Content="削除" Click="DeleteChar_Click" Padding="10,4" Margin="0,0,4,4" Foreground="#C00"/>
+                                <Button Content="更新" Click="RefreshCharSaves_Click" Padding="10,4" Margin="0,0,4,4"/>
+                            </WrapPanel>
                         </Grid>
                     </GroupBox>
 
@@ -235,13 +242,22 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <ListBox x:Name="lstCtrlSaves" Grid.Row="0" MinHeight="200"/>
-                            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,8,0,0">
-                                <Button Content="保存" Click="SaveCtrl_Click" Style="{StaticResource ActionButton}"/>
-                                <Button Content="読込" Click="LoadCtrl_Click" Style="{StaticResource ActionButton}"/>
-                                <Button Content="更新" Click="RefreshCtrlSaves_Click" Padding="10,4" Margin="4"/>
-                            </StackPanel>
+                            <WrapPanel Grid.Row="1" Margin="0,8,0,0">
+                                <Button Content="ゲームから保存" Click="SaveCtrl_Click" Padding="10,4" Margin="0,0,4,4"/>
+                                <Button Content="外部から取込" Click="ImportCtrl_Click" Padding="10,4" Margin="0,0,4,4"/>
+                                <Button Content="コピー" Click="CopyCtrl_Click" Padding="10,4" Margin="0,0,4,4"/>
+                            </WrapPanel>
+                            <WrapPanel Grid.Row="2">
+                                <Button Content="ゲームに反映" Click="ApplyCtrl_Click" Padding="10,4" Margin="0,0,4,4"
+                                        FontWeight="Bold" Background="#4CAF50" Foreground="White"/>
+                                <Button Content="詳細設定" Click="KeybindEditor_Click" Padding="10,4" Margin="0,0,4,4"
+                                        FontWeight="Bold" Background="#4A90D9" Foreground="White"/>
+                                <Button Content="削除" Click="DeleteCtrl_Click" Padding="10,4" Margin="0,0,4,4" Foreground="#C00"/>
+                                <Button Content="更新" Click="RefreshCtrlSaves_Click" Padding="10,4" Margin="0,0,4,4"/>
+                            </WrapPanel>
                         </Grid>
                     </GroupBox>
 

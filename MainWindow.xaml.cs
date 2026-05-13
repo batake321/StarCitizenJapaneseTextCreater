@@ -357,8 +357,11 @@ public partial class MainWindow : Window
                             Log("翻訳を中断しました。完了分をDBに保存します...");
                         }
 
-                        using var db = new TranslationDatabase(DbPath);
-                        db.ImportAiTranslations(TranslatedPath);
+                        if (File.Exists(TranslatedPath))
+                        {
+                            using var db = new TranslationDatabase(DbPath);
+                            db.ImportAiTranslations(TranslatedPath);
+                        }
                     }
                     SetProgress(90, "翻訳完了");
                     Dispatcher.Invoke(RefreshEditor);
@@ -399,7 +402,11 @@ public partial class MainWindow : Window
             Console.SetOut(oldOut);
             _running = false;
             _cts = null;
-            SetButtons(true);
+            btnExtract.IsEnabled = true;
+            btnTranslate.IsEnabled = true;
+            btnApply.IsEnabled = true;
+            btnCancel.Visibility = Visibility.Collapsed;
+            btnCancel.IsEnabled = false;
         }
     }
 
@@ -873,7 +880,7 @@ public partial class MainWindow : Window
         {
             var savePath = Path.Combine(CharSavesDir, name);
             ProfileManager.SaveCharacter(App.Config.GamePath, savePath);
-            txtProfileLog.AppendText($"キャラクター保存完了: {name}\n");
+            txtProfileLog.AppendText($"[{DateTime.Now:HH:mm:ss}] キャラクター保存完了: {name}\n");
             RefreshCharSaves();
         }
         catch (Exception ex)
@@ -882,17 +889,90 @@ public partial class MainWindow : Window
         }
     }
 
-    private void LoadChar_Click(object sender, RoutedEventArgs e)
+    private void ImportChar_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFolderDialog { Title = "キャラクターデータのフォルダを選択 (.chf ファイルを含むフォルダ)" };
+        if (dlg.ShowDialog() != true) return;
+
+        var name = PromptInput("保存名を入力してください:");
+        if (string.IsNullOrEmpty(name)) return;
+
+        try
+        {
+            var destPath = Path.Combine(CharSavesDir, name);
+            Directory.CreateDirectory(destPath);
+            int count = 0;
+            foreach (var file in Directory.GetFiles(dlg.FolderName, "*.chf"))
+            {
+                File.Copy(file, Path.Combine(destPath, Path.GetFileName(file)), overwrite: true);
+                count++;
+            }
+            txtProfileLog.AppendText($"[{DateTime.Now:HH:mm:ss}] 外部取込完了: {name} ({count} files)\n");
+            RefreshCharSaves();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+        }
+    }
+
+    private void CopyChar_Click(object sender, RoutedEventArgs e)
     {
         var selected = lstCharSaves.SelectedItem?.ToString();
-        if (selected == null) { MessageBox.Show("保存データを選択してください。"); return; }
+        if (selected == null) { MessageBox.Show("コピー元を選択してください。"); return; }
+        var srcName = selected.Split(' ')[0];
+        var newName = PromptInput($"「{srcName}」のコピー先の名前を入力してください:");
+        if (string.IsNullOrEmpty(newName)) return;
+
+        try
+        {
+            var srcPath = Path.Combine(CharSavesDir, srcName);
+            var destPath = Path.Combine(CharSavesDir, newName);
+            CopyDirectory(srcPath, destPath);
+            txtProfileLog.AppendText($"[{DateTime.Now:HH:mm:ss}] コピー完了: {srcName} → {newName}\n");
+            RefreshCharSaves();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+        }
+    }
+
+    private void ApplyChar_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = lstCharSaves.SelectedItem?.ToString();
+        if (selected == null) { MessageBox.Show("反映するデータを選択してください。"); return; }
         var name = selected.Split(' ')[0];
+
+        if (MessageBox.Show($"「{name}」をゲームに反映しますか？\n現在のキャラクターデータが上書きされます。",
+            "確認", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
 
         try
         {
             var loadPath = Path.Combine(CharSavesDir, name);
             ProfileManager.LoadCharacter(App.Config.GamePath, loadPath);
-            txtProfileLog.AppendText($"キャラクター読込完了: {name}\n");
+            txtProfileLog.AppendText($"[{DateTime.Now:HH:mm:ss}] ゲームに反映完了: {name}\n");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+        }
+    }
+
+    private void DeleteChar_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = lstCharSaves.SelectedItem?.ToString();
+        if (selected == null) { MessageBox.Show("削除するデータを選択してください。"); return; }
+        var name = selected.Split(' ')[0];
+
+        if (MessageBox.Show($"「{name}」を削除しますか？", "確認", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            return;
+
+        try
+        {
+            Directory.Delete(Path.Combine(CharSavesDir, name), true);
+            txtProfileLog.AppendText($"[{DateTime.Now:HH:mm:ss}] 削除完了: {name}\n");
+            RefreshCharSaves();
         }
         catch (Exception ex)
         {
@@ -909,7 +989,7 @@ public partial class MainWindow : Window
         {
             var savePath = Path.Combine(CtrlSavesDir, name);
             ProfileManager.SaveControls(App.Config.GamePath, savePath);
-            txtProfileLog.AppendText($"コントロール設定保存完了: {name}\n");
+            txtProfileLog.AppendText($"[{DateTime.Now:HH:mm:ss}] コントロール設定保存完了: {name}\n");
             RefreshCtrlSaves();
         }
         catch (Exception ex)
@@ -918,22 +998,112 @@ public partial class MainWindow : Window
         }
     }
 
-    private void LoadCtrl_Click(object sender, RoutedEventArgs e)
+    private void ImportCtrl_Click(object sender, RoutedEventArgs e)
     {
-        var selected = lstCtrlSaves.SelectedItem?.ToString();
-        if (selected == null) { MessageBox.Show("保存データを選択してください。"); return; }
-        var name = selected.Split(' ')[0];
+        var dlg = new OpenFolderDialog { Title = "コントロール設定のフォルダを選択" };
+        if (dlg.ShowDialog() != true) return;
+
+        var name = PromptInput("保存名を入力してください:");
+        if (string.IsNullOrEmpty(name)) return;
 
         try
         {
-            var loadPath = Path.Combine(CtrlSavesDir, name);
-            ProfileManager.LoadControls(App.Config.GamePath, loadPath);
-            txtProfileLog.AppendText($"コントロール設定読込完了: {name}\n");
+            var destPath = Path.Combine(CtrlSavesDir, name);
+            CopyDirectory(dlg.FolderName, destPath);
+            var count = Directory.GetFiles(destPath, "*", SearchOption.AllDirectories).Length;
+            txtProfileLog.AppendText($"[{DateTime.Now:HH:mm:ss}] 外部取込完了: {name} ({count} files)\n");
+            RefreshCtrlSaves();
         }
         catch (Exception ex)
         {
             MessageBox.Show($"エラー: {ex.Message}", "エラー");
         }
+    }
+
+    private void CopyCtrl_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = lstCtrlSaves.SelectedItem?.ToString();
+        if (selected == null) { MessageBox.Show("コピー元を選択してください。"); return; }
+        var srcName = selected.Split(' ')[0];
+        var newName = PromptInput($"「{srcName}」のコピー先の名前を入力してください:");
+        if (string.IsNullOrEmpty(newName)) return;
+
+        try
+        {
+            var srcPath = Path.Combine(CtrlSavesDir, srcName);
+            var destPath = Path.Combine(CtrlSavesDir, newName);
+            CopyDirectory(srcPath, destPath);
+            txtProfileLog.AppendText($"[{DateTime.Now:HH:mm:ss}] コピー完了: {srcName} → {newName}\n");
+            RefreshCtrlSaves();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+        }
+    }
+
+    private void ApplyCtrl_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = lstCtrlSaves.SelectedItem?.ToString();
+        if (selected == null) { MessageBox.Show("反映するデータを選択してください。"); return; }
+        var name = selected.Split(' ')[0];
+
+        if (MessageBox.Show($"「{name}」をゲームに反映しますか？\n現在のコントロール設定が上書きされます。",
+            "確認", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
+
+        try
+        {
+            var loadPath = Path.Combine(CtrlSavesDir, name);
+            ProfileManager.LoadControls(App.Config.GamePath, loadPath);
+            txtProfileLog.AppendText($"[{DateTime.Now:HH:mm:ss}] ゲームに反映完了: {name}\n");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+        }
+    }
+
+    private void DeleteCtrl_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = lstCtrlSaves.SelectedItem?.ToString();
+        if (selected == null) { MessageBox.Show("削除するデータを選択してください。"); return; }
+        var name = selected.Split(' ')[0];
+
+        if (MessageBox.Show($"「{name}」を削除しますか？", "確認", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            return;
+
+        try
+        {
+            Directory.Delete(Path.Combine(CtrlSavesDir, name), true);
+            txtProfileLog.AppendText($"[{DateTime.Now:HH:mm:ss}] 削除完了: {name}\n");
+            RefreshCtrlSaves();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+        }
+    }
+
+    private void KeybindEditor_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var dlg = new KeybindEditorWindow(App.Config.GamePath) { Owner = this };
+            dlg.ShowDialog();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+        }
+    }
+
+    private static void CopyDirectory(string srcDir, string destDir)
+    {
+        Directory.CreateDirectory(destDir);
+        foreach (var file in Directory.GetFiles(srcDir))
+            File.Copy(file, Path.Combine(destDir, Path.GetFileName(file)), overwrite: true);
+        foreach (var dir in Directory.GetDirectories(srcDir))
+            CopyDirectory(dir, Path.Combine(destDir, Path.GetFileName(dir)));
     }
 
     // === Settings ===
