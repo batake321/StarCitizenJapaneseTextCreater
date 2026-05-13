@@ -66,6 +66,26 @@ public static class ActionMapParser
         var defaultProfilePath = Path.Combine(gamePath, "data", "Libs", "Config", "defaultProfile.xml");
         var userOverridePath = Path.Combine(gamePath, "user", "client", "0", "Profiles", "default", "actionmaps.xml");
 
+        // Extract from Data.p4k if not on disk
+        if (!File.Exists(defaultProfilePath))
+        {
+            var p4kPath = Path.Combine(gamePath, "Data.p4k");
+            if (File.Exists(p4kPath))
+            {
+                try
+                {
+                    Console.WriteLine("defaultProfile.xml を Data.p4k から抽出中...");
+                    var extractDir = Path.Combine(Path.GetTempPath(), "SCJPKeybind");
+                    defaultProfilePath = Path.Combine(extractDir, "defaultProfile.xml");
+                    P4kExtractor.Extract(p4kPath, "Data/Libs/Config/defaultProfile.xml", defaultProfilePath);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Data.p4k extraction error: {ex.Message}");
+                }
+            }
+        }
+
         // Load defaults
         if (File.Exists(defaultProfilePath))
         {
@@ -79,6 +99,10 @@ public static class ActionMapParser
                 Console.WriteLine($"defaultProfile.xml parse error: {ex.Message}");
             }
         }
+        else
+        {
+            Console.WriteLine("defaultProfile.xml が見つかりません。");
+        }
 
         // Apply user overrides
         if (File.Exists(userOverridePath))
@@ -91,6 +115,66 @@ public static class ActionMapParser
             catch (Exception ex)
             {
                 Console.WriteLine($"actionmaps.xml parse error: {ex.Message}");
+            }
+        }
+
+        return data;
+    }
+
+    public static ActionMapData LoadFromGameAndSave(string gamePath, string savePath)
+    {
+        var data = new ActionMapData();
+
+        var defaultProfilePath = Path.Combine(gamePath, "data", "Libs", "Config", "defaultProfile.xml");
+
+        if (!File.Exists(defaultProfilePath))
+        {
+            var p4kPath = Path.Combine(gamePath, "Data.p4k");
+            if (File.Exists(p4kPath))
+            {
+                try
+                {
+                    Console.WriteLine("defaultProfile.xml を Data.p4k から抽出中...");
+                    var extractDir = Path.Combine(Path.GetTempPath(), "SCJPKeybind");
+                    defaultProfilePath = Path.Combine(extractDir, "defaultProfile.xml");
+                    P4kExtractor.Extract(p4kPath, "Data/Libs/Config/defaultProfile.xml", defaultProfilePath);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Data.p4k extraction error: {ex.Message}");
+                }
+            }
+        }
+
+        if (File.Exists(defaultProfilePath))
+        {
+            try
+            {
+                var doc = CryXmlParser.Parse(defaultProfilePath);
+                ParseDefaultProfile(doc, data);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"defaultProfile.xml parse error: {ex.Message}");
+            }
+        }
+        else
+        {
+            Console.WriteLine("defaultProfile.xml が見つかりません。");
+        }
+
+        // Apply overrides from saved profile
+        var saveOverridePath = Path.Combine(savePath, "Profiles", "default", "actionmaps.xml");
+        if (File.Exists(saveOverridePath))
+        {
+            try
+            {
+                var doc = XDocument.Load(saveOverridePath);
+                ApplyUserOverrides(doc, data);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"saved actionmaps.xml parse error: {ex.Message}");
             }
         }
 

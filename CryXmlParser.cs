@@ -21,6 +21,13 @@ public static class CryXmlParser
 
         var fileHeader = ReadFileHeader(data, ref offset);
 
+        if (fileHeader.NodeCount <= 0 || fileHeader.NodeCount > 500000)
+            throw new InvalidDataException($"Invalid node count: {fileHeader.NodeCount}");
+        if (fileHeader.AttrCount < 0 || fileHeader.AttrCount > 2000000)
+            throw new InvalidDataException($"Invalid attr count: {fileHeader.AttrCount}");
+        if (fileHeader.ChildCount < 0 || fileHeader.ChildCount > 500000)
+            throw new InvalidDataException($"Invalid child count: {fileHeader.ChildCount}");
+
         var nodes = new CryNode[fileHeader.NodeCount];
         for (int i = 0; i < fileHeader.NodeCount; i++)
             nodes[i] = ReadNode(data, ref offset);
@@ -64,7 +71,9 @@ public static class CryXmlParser
 
             for (int i = 0; i < node.AttrCount; i++)
             {
-                var attr = attrs[node.FirstAttrIndex + i];
+                var idx = node.FirstAttrIndex + i;
+                if (idx < 0 || idx >= attrs.Length) break;
+                var attr = attrs[idx];
                 var key = GetStr(attr.KeyStringOffset);
                 var val = GetStr(attr.ValueStringOffset);
                 if (!string.IsNullOrEmpty(key))
@@ -76,7 +85,10 @@ public static class CryXmlParser
 
             for (int i = 0; i < node.ChildCount; i++)
             {
-                var childIdx = childIndices[node.FirstChildIndex + i];
+                var cidx = node.FirstChildIndex + i;
+                if (cidx < 0 || cidx >= childIndices.Length) break;
+                var childIdx = childIndices[cidx];
+                if (childIdx < 0 || childIdx >= nodes.Length) continue;
                 el.Add(BuildElement(childIdx));
             }
 

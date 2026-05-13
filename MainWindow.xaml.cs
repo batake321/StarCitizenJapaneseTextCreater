@@ -1086,10 +1086,20 @@ public partial class MainWindow : Window
 
     private void KeybindEditor_Click(object sender, RoutedEventArgs e)
     {
+        var selected = lstCtrlSaves.SelectedItem?.ToString();
+        if (selected == null)
+        {
+            MessageBox.Show("編集するコントロール設定をリストから選択してください。\n\nまだ保存がない場合は「ゲームから保存」で現在の設定を保存してください。", "選択してください");
+            return;
+        }
+        var name = selected.Split(' ')[0];
+        var savePath = Path.Combine(CtrlSavesDir, name);
+
         try
         {
-            var dlg = new KeybindEditorWindow(App.Config.GamePath) { Owner = this };
+            var dlg = new KeybindEditorWindow(App.Config.GamePath, savePath) { Owner = this };
             dlg.ShowDialog();
+            RefreshCtrlSaves();
         }
         catch (Exception ex)
         {

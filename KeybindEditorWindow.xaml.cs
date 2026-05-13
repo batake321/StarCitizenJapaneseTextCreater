@@ -15,18 +15,39 @@ public partial class KeybindEditorWindow : Window
     private List<ActionBinding> _allActions = new();
     private List<ActionBinding> _filteredActions = new();
     private readonly string _gamePath;
+    private readonly string _savePath;
 
-    public KeybindEditorWindow(string gamePath)
+    public KeybindEditorWindow(string gamePath, string savePath)
     {
         InitializeComponent();
         _gamePath = gamePath;
+        _savePath = savePath;
+        Title = $"キーバインド エディタ — {Path.GetFileName(savePath)}";
         LoadData();
     }
 
     private void LoadData()
     {
-        _data = ActionMapParser.LoadFromGame(_gamePath);
+        try
+        {
+            _data = ActionMapParser.LoadFromGameAndSave(_gamePath, _savePath);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"キーバインドデータの読み込みに失敗しました:\n{ex.Message}", "エラー");
+            _data = new ActionMapData();
+        }
+
         _allActions = _data.Categories.SelectMany(c => c.Actions).ToList();
+
+        if (_allActions.Count == 0)
+        {
+            MessageBox.Show(
+                "キーバインドデータが見つかりませんでした。\n\n" +
+                "先に「1. 抽出」を実行して Data.p4k からデータを抽出してください。\n" +
+                "または、ゲームパスが正しいか確認してください。",
+                "データなし", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
 
         cmbCategory.Items.Clear();
         cmbCategory.Items.Add(new CategoryItem { Name = "", DisplayName = "全カテゴリ", ActionCount = $"({_allActions.Count})" });
@@ -248,12 +269,12 @@ public partial class KeybindEditorWindow : Window
 
     private void SaveApply_Click(object sender, RoutedEventArgs e)
     {
-        var outputPath = Path.Combine(_gamePath, "user", "client", "0", "Profiles", "default", "actionmaps.xml");
+        var outputPath = Path.Combine(_savePath, "Profiles", "default", "actionmaps.xml");
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+            Directory.CreateDirectory(_savePath);
             ActionMapParser.SaveUserOverrides(_data, outputPath);
-            MessageBox.Show($"キーバインドを保存しました。\n{outputPath}", "保存完了");
+            MessageBox.Show($"セーブに保存しました。\n{outputPath}\n\nゲームに反映するには「ゲームに反映」ボタンを使用してください。", "保存完了");
         }
         catch (Exception ex)
         {

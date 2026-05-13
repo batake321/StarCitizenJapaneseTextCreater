@@ -13,10 +13,22 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
-        ConfigPath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+        var appDataDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "StarCitizenJapaneseTextCreater");
+        Directory.CreateDirectory(appDataDir);
+        ConfigPath = Path.Combine(appDataDir, "appsettings.json");
+
+        // Migrate: if user config doesn't exist yet but exe-local one has user data, copy it
+        var exeLocalConfig = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+        if (!File.Exists(ConfigPath) && File.Exists(exeLocalConfig))
+            File.Copy(exeLocalConfig, ConfigPath, overwrite: false);
+
+        // Load: user config (AppData) > default (exe dir)
         var configBuilder = new ConfigurationBuilder()
             .SetBasePath(AppContext.BaseDirectory)
-            .AddJsonFile("appsettings.json", optional: false);
+            .AddJsonFile("appsettings.json", optional: false)
+            .AddJsonFile(ConfigPath, optional: true, reloadOnChange: false);
         var configuration = configBuilder.Build();
         Config = configuration.Get<AppConfig>() ?? new AppConfig();
 

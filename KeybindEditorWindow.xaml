@@ -165,7 +165,7 @@
                 </Grid.ColumnDefinitions>
                 <TextBlock x:Name="txtStatus" VerticalAlignment="Center" Foreground="#666"/>
                 <StackPanel Grid.Column="1" Orientation="Horizontal">
-                    <Button Content="保存して適用" Click="SaveApply_Click" Padding="16,4" Margin="0,0,4,0"
+                    <Button Content="セーブに保存" Click="SaveApply_Click" Padding="16,4" Margin="0,0,4,0"
                             FontWeight="Bold" Background="#4CAF50" Foreground="White"/>
                     <Button Content="閉じる" Click="Close_Click" Padding="16,4" IsCancel="True"/>
                 </StackPanel>

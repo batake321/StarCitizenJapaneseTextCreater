@@ -5,8 +5,15 @@ namespace StarCitizenJapaneseTextCreater;
 
 public partial class BindingEditDialog : Window
 {
-    private readonly ActionBinding _binding;
+    private readonly ActionBinding _original;
     private string _editTarget = "keyboard";
+
+    // Editing copies - not applied until OK
+    private string _keyboard;
+    private string _mouse;
+    private string _gamepad;
+    private string _joystick;
+    private bool _isLongPress;
 
     private static readonly List<InputItem> KeyboardKeys = new()
     {
@@ -71,7 +78,13 @@ public partial class BindingEditDialog : Window
     public BindingEditDialog(ActionBinding binding)
     {
         InitializeComponent();
-        _binding = binding;
+        _original = binding;
+
+        _keyboard = binding.Keyboard;
+        _mouse = binding.Mouse;
+        _gamepad = binding.Gamepad;
+        _joystick = binding.Joystick;
+        _isLongPress = binding.IsLongPress;
 
         txtActionName.Text = $"{binding.DisplayName} ({binding.ActionName})";
         txtCategory.Text = ActionMapNames.GetCategoryName(binding.CategoryName);
@@ -82,11 +95,11 @@ public partial class BindingEditDialog : Window
 
     private void UpdateFields()
     {
-        txtKeyboard.Text = _binding.KeyboardDisplay;
-        txtMouse.Text = _binding.MouseDisplay;
-        txtGamepad.Text = _binding.GamepadDisplay;
-        txtJoystick.Text = _binding.JoystickDisplay;
-        chkLongPress.IsChecked = _binding.IsLongPress;
+        txtKeyboard.Text = InputDisplayHelper.FormatInput(_keyboard);
+        txtMouse.Text = InputDisplayHelper.FormatInput(_mouse);
+        txtGamepad.Text = InputDisplayHelper.FormatInput(_gamepad);
+        txtJoystick.Text = InputDisplayHelper.FormatInput(_joystick);
+        chkLongPress.IsChecked = _isLongPress;
     }
 
     private void ShowKeyList(string target)
@@ -137,10 +150,10 @@ public partial class BindingEditDialog : Window
 
         switch (_editTarget)
         {
-            case "keyboard": _binding.Keyboard = inputValue; break;
-            case "mouse": _binding.Mouse = inputValue; break;
-            case "gamepad": _binding.Gamepad = inputValue; break;
-            case "joystick": _binding.Joystick = inputValue; break;
+            case "keyboard": _keyboard = inputValue; break;
+            case "mouse": _mouse = inputValue; break;
+            case "gamepad": _gamepad = inputValue; break;
+            case "joystick": _joystick = inputValue; break;
         }
 
         UpdateFields();
@@ -149,10 +162,10 @@ public partial class BindingEditDialog : Window
 
     private void ResetDefault_Click(object sender, RoutedEventArgs e)
     {
-        _binding.Keyboard = _binding.DefaultKeyboard;
-        _binding.Mouse = _binding.DefaultMouse;
-        _binding.Gamepad = _binding.DefaultGamepad;
-        _binding.Joystick = _binding.DefaultJoystick;
+        _keyboard = _original.DefaultKeyboard;
+        _mouse = _original.DefaultMouse;
+        _gamepad = _original.DefaultGamepad;
+        _joystick = _original.DefaultJoystick;
         UpdateFields();
     }
 
@@ -160,17 +173,21 @@ public partial class BindingEditDialog : Window
     {
         switch (_editTarget)
         {
-            case "keyboard": _binding.Keyboard = ""; break;
-            case "mouse": _binding.Mouse = ""; break;
-            case "gamepad": _binding.Gamepad = ""; break;
-            case "joystick": _binding.Joystick = ""; break;
+            case "keyboard": _keyboard = ""; break;
+            case "mouse": _mouse = ""; break;
+            case "gamepad": _gamepad = ""; break;
+            case "joystick": _joystick = ""; break;
         }
         UpdateFields();
     }
 
     private void Ok_Click(object sender, RoutedEventArgs e)
     {
-        _binding.IsLongPress = chkLongPress.IsChecked == true;
+        _original.Keyboard = _keyboard;
+        _original.Mouse = _mouse;
+        _original.Gamepad = _gamepad;
+        _original.Joystick = _joystick;
+        _original.IsLongPress = chkLongPress.IsChecked == true;
         DialogResult = true;
     }
 
