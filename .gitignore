@@ -1,5 +1,7 @@
 bin/
 obj/
 work/
+publish/
 *.user
+*.zip
 .vs/

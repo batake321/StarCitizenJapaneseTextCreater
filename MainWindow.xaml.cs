@@ -348,7 +348,14 @@ public partial class MainWindow : Window
                         orchestrator.ProgressChanged += (done, total, ok, fail) =>
                             SetTranslationProgress(done, total, ok, fail);
                         orchestrator.BatchTranslated += items => OnBatchTranslated(items);
-                        await orchestrator.RunAsync(_cts!.Token);
+                        try
+                        {
+                            await orchestrator.RunAsync(_cts!.Token);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            Log("翻訳を中断しました。完了分をDBに保存します...");
+                        }
 
                         using var db = new TranslationDatabase(DbPath);
                         db.ImportAiTranslations(TranslatedPath);
