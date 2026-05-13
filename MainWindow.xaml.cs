@@ -38,12 +38,14 @@ public partial class MainWindow : Window
         txtSettingsGamePath.Text = config.GamePath;
         txtWorkDir.Text = config.WorkingDirectory;
         txtOutputLang.Text = config.OutputLanguage;
+        txtScApiKey.Text = config.ScApiKey;
 
         PopulateChannels();
         UpdateBackendSummary();
         UpdateDbPathDisplay();
         RefreshProfileLists();
         LoadGlossary();
+        InitChat();
     }
 
     private void PopulateChannels()
@@ -1170,6 +1172,7 @@ public partial class MainWindow : Window
         App.Config.GamePath = txtSettingsGamePath.Text.Trim();
         App.Config.WorkingDirectory = txtWorkDir.Text.Trim();
         App.Config.OutputLanguage = txtOutputLang.Text.Trim();
+        App.Config.ScApiKey = txtScApiKey.Text.Trim();
         txtGamePath.Text = App.Config.GamePath;
 
         SaveConfigToFile();
@@ -1191,7 +1194,8 @@ public partial class MainWindow : Window
                     App.Config.Translation.MaxRetries,
                     App.Config.Translation.Backends
                 },
-                App.Config.ForceEnglishPatterns
+                App.Config.ForceEnglishPatterns,
+                App.Config.ScApiKey
             };
 
             var json = JsonSerializer.Serialize(config, new JsonSerializerOptions
@@ -1213,6 +1217,224 @@ public partial class MainWindow : Window
     {
         var dlg = new InputDialog(message);
         return dlg.ShowDialog() == true ? dlg.ResponseText : null;
+    }
+
+    // === Chat Tab ===
+
+    private readonly ObservableCollection<ChatBubble> _chatBubbles = new();
+    private readonly List<ChatMessage> _chatHistory = new();
+    private bool _chatSending;
+    private GameDataExtractor? _gameDataExtractor;
+
+    private void InitChat()
+    {
+        icChatMessages.ItemsSource = _chatBubbles;
+
+        cmbChatBackend.Items.Clear();
+        foreach (var b in App.Config.Translation.Backends)
+        {
+            if (b.Enabled)
+                cmbChatBackend.Items.Add($"{b.Name} ({b.Model})");
+        }
+        if (cmbChatBackend.Items.Count > 0)
+            cmbChatBackend.SelectedIndex = 0;
+
+        _chatBubbles.Add(new ChatBubble
+        {
+            Text = "Star Citizen について質問してください。\nUEX API・SC Trade Tools・Wiki・ゲームファイルから最新データを取得して回答します。",
+            IsUser = false
+        });
+
+        InitGameDataExtractor();
+    }
+
+    private void InitGameDataExtractor()
+    {
+        var workDir = App.Config.WorkingDirectory;
+        if (string.IsNullOrEmpty(workDir)) workDir = AppDomain.CurrentDomain.BaseDirectory;
+
+        _gameDataExtractor = new GameDataExtractor(workDir);
+        ChatService.SetGameDataExtractor(_gameDataExtractor);
+
+        var ver = _gameDataExtractor.GetCachedVersion();
+        if (ver != null)
+            txtGameDataStatus.Text = $"インデックス済み ({ver})";
+        else if (_gameDataExtractor.IsStarBreakerInstalled)
+            txtGameDataStatus.Text = "未インデックス (インデックス構築で高速化)";
+        else
+            txtGameDataStatus.Text = "StarBreaker 未導入 (初回は自動ダウンロード)";
+    }
+
+    private async void ExtractGameData_Click(object sender, RoutedEventArgs e)
+    {
+        if (_gameDataExtractor == null)
+        {
+            MessageBox.Show("GameDataExtractor が初期化されていません。", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        var p4kPath = _gameDataExtractor.FindDataP4k();
+        if (string.IsNullOrEmpty(p4kPath))
+        {
+            var gamePath = txtSettingsGamePath.Text.Trim();
+            if (!string.IsNullOrEmpty(gamePath))
+            {
+                var candidates = new[]
+                {
+                    Path.Combine(gamePath, "Data.p4k"),
+                    Path.Combine(Path.GetDirectoryName(gamePath) ?? "", "Data.p4k"),
+                    gamePath,
+                };
+                p4kPath = candidates.FirstOrDefault(File.Exists);
+            }
+        }
+
+        if (string.IsNullOrEmpty(p4kPath) || !File.Exists(p4kPath))
+        {
+            MessageBox.Show("Data.p4k が見つかりません。\n設定タブで GamePath を正しく設定してください。",
+                "エラー", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        btnExtractGameData.IsEnabled = false;
+        txtGameDataStatus.Text = "構築中...";
+
+        _gameDataExtractor.ProgressChanged += OnGameDataProgress;
+        _gameDataExtractor.StatusChanged += OnGameDataStatus;
+
+        try
+        {
+            await _gameDataExtractor.BuildIndexAsync(p4kPath);
+            var ver = _gameDataExtractor.GetCachedVersion();
+            txtGameDataStatus.Text = $"インデックス済み ({ver})";
+        }
+        catch (Exception ex)
+        {
+            txtGameDataStatus.Text = "構築失敗";
+            MessageBox.Show($"インデックス構築エラー:\n{ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            _gameDataExtractor.ProgressChanged -= OnGameDataProgress;
+            _gameDataExtractor.StatusChanged -= OnGameDataStatus;
+            btnExtractGameData.IsEnabled = true;
+        }
+    }
+
+    private void OnGameDataProgress(int pct, string detail)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            pbGameData.Value = pct;
+            txtGameDataPct.Text = $"{pct}%";
+            txtGameDataDetail.Text = detail;
+        });
+    }
+
+    private void OnGameDataStatus(string status)
+    {
+        Dispatcher.BeginInvoke(() => txtGameDataStatus.Text = status);
+    }
+
+    private BackendConfig? GetSelectedChatBackend()
+    {
+        if (cmbChatBackend.SelectedIndex < 0) return null;
+        var enabled = App.Config.Translation.Backends.Where(b => b.Enabled).ToList();
+        return cmbChatBackend.SelectedIndex < enabled.Count ? enabled[cmbChatBackend.SelectedIndex] : null;
+    }
+
+    private async void ChatSend_Click(object sender, RoutedEventArgs e) => await SendChatMessageAsync();
+
+    private async void ChatInput_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))
+            {
+                var tb = (TextBox)sender;
+                var caret = tb.CaretIndex;
+                tb.Text = tb.Text.Insert(caret, Environment.NewLine);
+                tb.CaretIndex = caret + Environment.NewLine.Length;
+                e.Handled = true;
+            }
+            else
+            {
+                e.Handled = true;
+                await SendChatMessageAsync();
+            }
+        }
+    }
+
+    private async Task SendChatMessageAsync()
+    {
+        if (_chatSending) return;
+        var text = txtChatInput.Text.Trim();
+        if (string.IsNullOrEmpty(text)) return;
+
+        var backend = GetSelectedChatBackend();
+        if (backend == null)
+        {
+            MessageBox.Show("AI バックエンドが選択されていません。\n設定画面でバックエンドを有効にしてください。",
+                "エラー", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        _chatSending = true;
+        btnChatSend.IsEnabled = false;
+        txtChatInput.Text = "";
+
+        _chatBubbles.Add(new ChatBubble { Text = text, IsUser = true });
+        _chatHistory.Add(new ChatMessage { Role = "user", Content = text });
+        ScrollChatToBottom();
+
+        _chatBubbles.Add(new ChatBubble { Text = "考え中...", IsUser = false });
+        ScrollChatToBottom();
+
+        try
+        {
+            string scData = "";
+            if (chkFetchScData.IsChecked == true)
+            {
+                _chatBubbles[^1] = new ChatBubble { Text = "Star Citizen データを取得中...", IsUser = false };
+                scData = await ChatService.FetchScDataAsync(text);
+            }
+
+            _chatBubbles[^1] = new ChatBubble { Text = "AI が回答を生成中...", IsUser = false };
+
+            var response = await ChatService.SendChatAsync(backend, _chatHistory, scData);
+
+            _chatBubbles[^1] = new ChatBubble { Text = response, IsUser = false };
+            _chatHistory.Add(new ChatMessage { Role = "assistant", Content = response });
+        }
+        catch (Exception ex)
+        {
+            _chatBubbles[^1] = new ChatBubble { Text = $"エラー: {ex.Message}", IsUser = false, IsError = true };
+        }
+        finally
+        {
+            _chatSending = false;
+            btnChatSend.IsEnabled = true;
+            ScrollChatToBottom();
+        }
+    }
+
+    private void ChatClear_Click(object sender, RoutedEventArgs e)
+    {
+        _chatBubbles.Clear();
+        _chatHistory.Clear();
+        _chatBubbles.Add(new ChatBubble
+        {
+            Text = "Star Citizen について質問してください。\nUEX API から最新データを取得して回答します。",
+            IsUser = false
+        });
+    }
+
+    private void ScrollChatToBottom()
+    {
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, () =>
+        {
+            svChat.ScrollToEnd();
+        });
     }
 }
 
@@ -1245,6 +1467,27 @@ public class GlossaryRow
 {
     public string English { get; set; } = "";
     public string Japanese { get; set; } = "";
+}
+
+public class ChatBubble
+{
+    public string Text { get; set; } = "";
+    public bool IsUser { get; set; }
+    public bool IsError { get; set; }
+
+    public System.Windows.Media.Brush Background => IsError
+        ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xEB, 0xEE))
+        : IsUser
+            ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xE3, 0xF2, 0xFD))
+            : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xF5, 0xF5, 0xF5));
+
+    public System.Windows.Media.Brush Foreground => IsError
+        ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xC6, 0x28, 0x28))
+        : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x21, 0x21, 0x21));
+
+    public System.Windows.HorizontalAlignment Alignment => IsUser
+        ? System.Windows.HorizontalAlignment.Right
+        : System.Windows.HorizontalAlignment.Left;
 }
 
 public class UiTextWriter : TextWriter

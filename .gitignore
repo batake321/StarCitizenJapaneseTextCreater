@@ -6,3 +6,4 @@ publish/
 *.user
 *.zip
 .vs/
+tools/

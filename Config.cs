@@ -7,6 +7,7 @@ public class AppConfig
     public string OutputLanguage { get; set; } = "japanese_(japan)";
     public TranslationConfig Translation { get; set; } = new();
     public List<string> ForceEnglishPatterns { get; set; } = new();
+    public string ScApiKey { get; set; } = "";
 }
 
 public class TranslationConfig

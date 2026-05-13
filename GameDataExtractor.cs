@@ -1,0 +1,446 @@
+using System.Diagnostics;
+using System.IO;
+using System.IO.Compression;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Data.Sqlite;
+
+namespace StarCitizenJapaneseTextCreater;
+
+public class GameDataExtractor
+{
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(5) };
+    private const string StarBreakerVersion = "v0.2.2";
+    private const string StarBreakerUrl =
+        $"https://github.com/diogotr7/StarBreaker/releases/download/{StarBreakerVersion}/starbreaker-cli-{StarBreakerVersion}-windows-x86_64.zip";
+
+    public string ToolsDir { get; }
+    public string DbPath { get; }
+    public string StarBreakerExe { get; }
+
+    public event Action<int, string>? ProgressChanged;
+    public event Action<string>? StatusChanged;
+
+    private SqliteConnection? _db;
+
+    public GameDataExtractor(string workingDirectory)
+    {
+        ToolsDir = Path.Combine(workingDirectory, "tools", "starbreaker");
+        DbPath = Path.Combine(workingDirectory, "gamedata_cache.db");
+        StarBreakerExe = Path.Combine(ToolsDir, "starbreaker.exe");
+    }
+
+    public bool IsStarBreakerInstalled => File.Exists(StarBreakerExe);
+    public bool IsReady => IsStarBreakerInstalled && FindDataP4k() != null;
+
+    public string? FindDataP4k()
+    {
+        var gamePath = App.Config.GamePath;
+        if (string.IsNullOrEmpty(gamePath)) return null;
+
+        var candidates = new[]
+        {
+            Path.Combine(gamePath, "Data.p4k"),
+            Path.Combine(gamePath, "data", "Data.p4k"),
+            Path.Combine(Path.GetDirectoryName(gamePath) ?? "", "Data.p4k"),
+        };
+
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
+    private void EnsureDb()
+    {
+        if (_db != null) return;
+        _db = new SqliteConnection($"Data Source={DbPath}");
+        _db.Open();
+
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = """
+            CREATE TABLE IF NOT EXISTS gamedata_cache (
+                query_key TEXT PRIMARY KEY,
+                result_json TEXT NOT NULL,
+                cached_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS gamedata_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+        """;
+        cmd.ExecuteNonQuery();
+    }
+
+    public string? GetCachedVersion()
+    {
+        EnsureDb();
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "SELECT value FROM gamedata_meta WHERE key='game_version'";
+        return cmd.ExecuteScalar() as string;
+    }
+
+    private void SetMeta(string key, string value)
+    {
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "INSERT OR REPLACE INTO gamedata_meta(key,value) VALUES(@k,@v)";
+        cmd.Parameters.AddWithValue("@k", key);
+        cmd.Parameters.AddWithValue("@v", value);
+        cmd.ExecuteNonQuery();
+    }
+
+    private string? GetCache(string queryKey)
+    {
+        EnsureDb();
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "SELECT result_json FROM gamedata_cache WHERE query_key=@k";
+        cmd.Parameters.AddWithValue("@k", queryKey);
+        return cmd.ExecuteScalar() as string;
+    }
+
+    private void SetCache(string queryKey, string json)
+    {
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "INSERT OR REPLACE INTO gamedata_cache(query_key,result_json,cached_at) VALUES(@k,@v,@t)";
+        cmd.Parameters.AddWithValue("@k", queryKey);
+        cmd.Parameters.AddWithValue("@v", json);
+        cmd.Parameters.AddWithValue("@t", DateTime.UtcNow.ToString("o"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public async Task EnsureStarBreakerAsync()
+    {
+        if (IsStarBreakerInstalled) return;
+
+        StatusChanged?.Invoke("StarBreaker CLI をダウンロード中...");
+        ProgressChanged?.Invoke(0, "ダウンロード中...");
+
+        Directory.CreateDirectory(ToolsDir);
+        var zipPath = Path.Combine(ToolsDir, "starbreaker-cli.zip");
+
+        using (var response = await Http.GetAsync(StarBreakerUrl, HttpCompletionOption.ResponseHeadersRead))
+        {
+            response.EnsureSuccessStatusCode();
+            var totalBytes = response.Content.Headers.ContentLength ?? 0;
+
+            using var contentStream = await response.Content.ReadAsStreamAsync();
+            using var fileStream = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None);
+
+            var buffer = new byte[81920];
+            long downloaded = 0;
+            int bytesRead;
+            while ((bytesRead = await contentStream.ReadAsync(buffer)) > 0)
+            {
+                await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead));
+                downloaded += bytesRead;
+                if (totalBytes > 0)
+                {
+                    var pct = (int)(downloaded * 100 / totalBytes);
+                    ProgressChanged?.Invoke(pct, $"ダウンロード中... {downloaded / 1024 / 1024}MB / {totalBytes / 1024 / 1024}MB");
+                }
+            }
+        }
+
+        StatusChanged?.Invoke("展開中...");
+        ZipFile.ExtractToDirectory(zipPath, ToolsDir, overwriteFiles: true);
+        File.Delete(zipPath);
+
+        ProgressChanged?.Invoke(100, "StarBreaker CLI 準備完了");
+    }
+
+    public async Task BuildIndexAsync(string dataP4kPath, CancellationToken ct = default)
+    {
+        await EnsureStarBreakerAsync();
+        EnsureDb();
+
+        // キャッシュクリア
+        using (var cmd = _db!.CreateCommand())
+        {
+            cmd.CommandText = "DELETE FROM gamedata_cache; DELETE FROM gamedata_meta;";
+            cmd.ExecuteNonQuery();
+        }
+
+        StatusChanged?.Invoke("ゲームデータのインデックスを構築中...");
+        var sw = Stopwatch.StartNew();
+        int step = 0;
+        int totalSteps = 4;
+
+        // Step 1: 全船名を取得
+        step++;
+        ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] 船名リストを取得中...");
+        var shipsJson = await RunDcbQueryAsync(dataP4kPath,
+            "EntityClassDefinition.Components[SAttachableComponentParams].AttachDef.Type",
+            "*Vehicle*", ct);
+        // 船名のフィルタリングが必要なので、代わりにレコード名のリストを取得
+        var shipNames = await RunDcbQueryNamesAsync(dataP4kPath, "EntityClassDefinition", "*_Vehicle", ct);
+        SetCache("index:ships", JsonSerializer.Serialize(shipNames));
+
+        // Step 2: 主要な武器タイプのリストをキャッシュ
+        step++;
+        ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] 武器データをインデックス中...");
+        var weaponNames = await RunDcbQueryNamesAsync(dataP4kPath, "EntityClassDefinition", "*WeaponGun*", ct);
+        SetCache("index:weapons", JsonSerializer.Serialize(weaponNames));
+
+        // Step 3: シールド・パワープラント等コンポーネント
+        step++;
+        ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] コンポーネントデータをインデックス中...");
+        var compNames = await RunDcbQueryNamesAsync(dataP4kPath, "EntityClassDefinition", "*SCItem_Cooler*", ct);
+        var shieldNames = await RunDcbQueryNamesAsync(dataP4kPath, "EntityClassDefinition", "*SCItem_Shield*", ct);
+        var powerNames = await RunDcbQueryNamesAsync(dataP4kPath, "EntityClassDefinition", "*SCItem_PowerPlant*", ct);
+        var qdNames = await RunDcbQueryNamesAsync(dataP4kPath, "EntityClassDefinition", "*SCItem_QuantumDrive*", ct);
+        var allComps = compNames.Concat(shieldNames).Concat(powerNames).Concat(qdNames).Distinct().ToList();
+        SetCache("index:components", JsonSerializer.Serialize(allComps));
+
+        // Step 4: ゲームバージョン取得
+        step++;
+        ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] バージョン情報を保存中...");
+        var p4kModified = File.GetLastWriteTime(dataP4kPath);
+        SetMeta("game_version", p4kModified.ToString("yyyy-MM-dd HH:mm"));
+        SetMeta("indexed_at", DateTime.Now.ToString("o"));
+        SetMeta("p4k_path", dataP4kPath);
+
+        sw.Stop();
+        ProgressChanged?.Invoke(100, $"完了！ ({sw.Elapsed.TotalSeconds:F1}秒)");
+        StatusChanged?.Invoke($"インデックス構築完了 ({sw.Elapsed.TotalSeconds:F1}秒) - 船: {shipNames.Count}, 武器: {weaponNames.Count}, コンポーネント: {allComps.Count}");
+    }
+
+    public async Task<string?> QueryGameDataAsync(string query)
+    {
+        var p4kPath = FindDataP4k();
+        if (p4kPath == null || !IsStarBreakerInstalled) return null;
+
+        var sb = new StringBuilder();
+        var tasks = new List<Task<string?>>();
+
+        var shipName = ChatService.ExtractShipNamePublic(query);
+        if (!string.IsNullOrEmpty(shipName))
+            tasks.Add(QueryShipAsync(p4kPath, shipName));
+
+        var itemKw = ExtractGameDataKeyword(query);
+        if (!string.IsNullOrEmpty(itemKw))
+            tasks.Add(QueryItemAsync(p4kPath, itemKw));
+
+        if (tasks.Count == 0) return null;
+
+        var results = await Task.WhenAll(tasks);
+        foreach (var r in results)
+            if (!string.IsNullOrEmpty(r)) sb.AppendLine(r);
+
+        return sb.Length > 0 ? sb.ToString() : null;
+    }
+
+    private async Task<string?> QueryShipAsync(string p4kPath, string shipName)
+    {
+        var cacheKey = $"ship:{shipName}";
+        var cached = GetCache(cacheKey);
+        if (cached != null) return cached;
+
+        var filter = "*" + shipName.Replace(" ", "_").Replace("-", "_") + "*";
+        var rawJson = await RunDcbQueryRawAsync(p4kPath, "EntityClassDefinition", filter);
+        if (string.IsNullOrEmpty(rawJson)) return null;
+
+        var result = ParseShipRecords(shipName, rawJson);
+        if (!string.IsNullOrEmpty(result))
+            SetCache(cacheKey, result);
+
+        return result;
+    }
+
+    private async Task<string?> QueryItemAsync(string p4kPath, string keyword)
+    {
+        var cacheKey = $"item:{keyword}";
+        var cached = GetCache(cacheKey);
+        if (cached != null) return cached;
+
+        var filter = "*" + keyword + "*";
+        var rawJson = await RunDcbQueryRawAsync(p4kPath, "EntityClassDefinition", filter);
+        if (string.IsNullOrEmpty(rawJson)) return null;
+
+        var result = ParseItemRecords(keyword, rawJson);
+        if (!string.IsNullOrEmpty(result))
+            SetCache(cacheKey, result);
+
+        return result;
+    }
+
+    private string? ParseShipRecords(string shipName, string jsonOutput)
+    {
+        var sb = new StringBuilder($"=== ゲームファイル (Data.p4k): {shipName} ===\n");
+        int found = 0;
+
+        foreach (var block in SplitJsonBlocks(jsonOutput))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+
+                if (!root.TryGetProperty("_RecordValue_", out var rv) ||
+                    !rv.TryGetProperty("Components", out var components)) continue;
+
+                var parts = new List<string>();
+                foreach (var comp in components.EnumerateArray())
+                {
+                    var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
+
+                    if (type == "SAttachableComponentParams" && comp.TryGetProperty("AttachDef", out var ad))
+                    {
+                        var itemType = ad.TryGetProperty("Type", out var it) ? it.GetString() ?? "" : "";
+                        var size = ad.TryGetProperty("Size", out var sz) ? sz.GetInt32() : 0;
+                        var locName = "";
+                        if (ad.TryGetProperty("Localization", out var loc))
+                            locName = loc.TryGetProperty("Name", out var n) ? n.GetString() ?? "" : "";
+
+                        if (!string.IsNullOrEmpty(itemType) && itemType != "UNDEFINED")
+                            parts.Add($"  - {itemType} (Size {size}): {locName}");
+                    }
+
+                    if (type == "SVehicleComponentParams")
+                    {
+                        var career = comp.TryGetProperty("vehicleCareer", out var c) ? c.GetString() : "";
+                        var role = comp.TryGetProperty("vehicleRole", out var r) ? r.GetString() : "";
+                        var crew = comp.TryGetProperty("crewSize", out var cr) ? cr.ToString() : "";
+                        if (!string.IsNullOrEmpty(career)) parts.Add($"  職業: {career}");
+                        if (!string.IsNullOrEmpty(role)) parts.Add($"  役割: {role}");
+                        if (!string.IsNullOrEmpty(crew)) parts.Add($"  乗員: {crew}");
+                    }
+                }
+
+                if (parts.Count > 0)
+                {
+                    sb.AppendLine($"\n【{recordName}】");
+                    foreach (var p in parts) sb.AppendLine(p);
+                    found++;
+                }
+            }
+            catch { }
+        }
+
+        return found > 0 ? sb.ToString() : null;
+    }
+
+    private string? ParseItemRecords(string keyword, string jsonOutput)
+    {
+        var sb = new StringBuilder($"=== ゲームファイル アイテム: {keyword} ===\n");
+        int found = 0;
+
+        foreach (var block in SplitJsonBlocks(jsonOutput))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+
+                if (!root.TryGetProperty("_RecordValue_", out var rv) ||
+                    !rv.TryGetProperty("Components", out var components)) continue;
+
+                string itemName = "", itemType = "";
+                int size = 0, grade = 0;
+
+                foreach (var comp in components.EnumerateArray())
+                {
+                    var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
+                    if (type == "SAttachableComponentParams" && comp.TryGetProperty("AttachDef", out var ad))
+                    {
+                        itemType = ad.TryGetProperty("Type", out var it) ? it.GetString() ?? "" : "";
+                        size = ad.TryGetProperty("Size", out var sz) ? sz.GetInt32() : 0;
+                        grade = ad.TryGetProperty("Grade", out var g) ? g.GetInt32() : 0;
+                        if (ad.TryGetProperty("Localization", out var loc))
+                            itemName = loc.TryGetProperty("Name", out var n) ? n.GetString() ?? "" : "";
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(itemType) && itemType != "UNDEFINED")
+                {
+                    sb.AppendLine($"- {itemName} | タイプ: {itemType} | サイズ: {size} | グレード: {grade}");
+                    if (++found >= 20) break;
+                }
+            }
+            catch { }
+        }
+
+        return found > 0 ? sb.ToString() : null;
+    }
+
+    private static IEnumerable<string> SplitJsonBlocks(string output)
+    {
+        int depth = 0;
+        int start = -1;
+        for (int i = 0; i < output.Length; i++)
+        {
+            if (output[i] == '{')
+            {
+                if (depth == 0) start = i;
+                depth++;
+            }
+            else if (output[i] == '}')
+            {
+                depth--;
+                if (depth == 0 && start >= 0)
+                {
+                    yield return output[start..(i + 1)];
+                    start = -1;
+                }
+            }
+        }
+    }
+
+    private async Task<List<string>> RunDcbQueryNamesAsync(string p4kPath, string recordType, string filter, CancellationToken ct = default)
+    {
+        var output = await RunDcbQueryRawAsync(p4kPath, recordType, filter, ct);
+        var names = new List<string>();
+        foreach (var block in SplitJsonBlocks(output))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                if (doc.RootElement.TryGetProperty("_RecordName_", out var rn))
+                    names.Add(rn.GetString() ?? "");
+            }
+            catch { }
+        }
+        return names;
+    }
+
+    private async Task<string> RunDcbQueryRawAsync(string p4kPath, string recordType, string filter, CancellationToken ct = default)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = StarBreakerExe,
+            Arguments = $"dcb query \"{recordType}\" --p4k \"{p4kPath}\" --filter \"{filter}\"",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+        };
+
+        using var proc = Process.Start(psi)!;
+        var stdout = await proc.StandardOutput.ReadToEndAsync(ct);
+        await proc.WaitForExitAsync(ct);
+        return stdout;
+    }
+
+    private async Task<string> RunDcbQueryAsync(string p4kPath, string path, string filter, CancellationToken ct = default)
+    {
+        return await RunDcbQueryRawAsync(p4kPath, path, filter, ct);
+    }
+
+    private static string ExtractGameDataKeyword(string query)
+    {
+        var keywords = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            {"リピーター", "repeater"}, {"キャノン", "cannon"}, {"ガトリング", "gatling"},
+            {"スキャッターガン", "scattergun"}, {"レーザー", "laser"},
+            {"バリスティック", "ballistic"}, {"ディストーション", "distortion"},
+            {"パワープラント", "powerplant"}, {"クーラー", "cooler"},
+            {"シールドジェネレーター", "shield_generator"}, {"クォンタムドライブ", "quantum_drive"},
+            {"ミサイル", "missile"}, {"タレット", "turret"},
+        };
+
+        foreach (var (ja, en) in keywords)
+            if (query.Contains(ja, StringComparison.OrdinalIgnoreCase))
+                return en;
+
+        return "";
+    }
+}
