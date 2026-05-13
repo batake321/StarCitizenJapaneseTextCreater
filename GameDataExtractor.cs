@@ -216,10 +216,16 @@ public class GameDataExtractor
 
         var itemKw = ExtractGameDataKeyword(query);
         if (!string.IsNullOrEmpty(itemKw))
-            tasks.Add(QueryItemAsync(p4kPath, itemKw));
+        {
+            var compType = DetectComponentType(query);
+            tasks.Add(QueryItemAsync(p4kPath, itemKw, compType));
+        }
 
         if (ContainsMissionKeyword(query))
             tasks.Add(QueryMissionsInternalAsync(p4kPath));
+
+        if (ContainsCommodityKeyword(query))
+            tasks.Add(QueryCommoditiesAsync(query));
 
         if (tasks.Count == 0) return null;
 
@@ -239,6 +245,36 @@ public class GameDataExtractor
         return false;
     }
 
+    private static bool ContainsCommodityKeyword(string query)
+    {
+        var keywords = new[] { "コモディティ", "商品", "資源", "commodity", "resource", "cargo", "貿易", "交易", "trade" };
+        foreach (var kw in keywords)
+            if (query.Contains(kw, StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
+    }
+
+    public static string? DetectComponentType(string query)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            {"シールド", "SCItemShieldGeneratorParams"}, {"shield", "SCItemShieldGeneratorParams"},
+            {"クォンタムドライブ", "SCItemQuantumDriveParams"}, {"quantum_drive", "SCItemQuantumDriveParams"},
+            {"quantum drive", "SCItemQuantumDriveParams"}, {"QD", "SCItemQuantumDriveParams"},
+            {"パワープラント", "SCItemPowerPlantParams"}, {"power_plant", "SCItemPowerPlantParams"},
+            {"power plant", "SCItemPowerPlantParams"}, {"powerplant", "SCItemPowerPlantParams"},
+            {"クーラー", "SCItemCoolerParams"}, {"cooler", "SCItemCoolerParams"},
+            {"武器", "SCItemWeaponComponentParams"}, {"weapon", "SCItemWeaponComponentParams"},
+            {"gun", "SCItemWeaponComponentParams"}, {"cannon", "SCItemWeaponComponentParams"},
+            {"リピーター", "SCItemWeaponComponentParams"}, {"ガトリング", "SCItemWeaponComponentParams"},
+            {"ミサイル", "SAmmoContainerComponentParams"}, {"missile", "SAmmoContainerComponentParams"},
+        };
+        foreach (var (kw, comp) in map)
+            if (query.Contains(kw, StringComparison.OrdinalIgnoreCase))
+                return comp;
+        return null;
+    }
+
     public async Task<string?> QueryMissionsAsync(string query)
     {
         var p4kPath = FindDataP4k();
@@ -255,13 +291,9 @@ public class GameDataExtractor
         var sb = new StringBuilder("=== ゲームファイル (Data.p4k): ミッション/契約 ===\n");
         int found = 0;
 
-        var primaryFilters = new[] { "MissionDefinition:*", "MissionBroker:*" };
-        var secondaryFilters = new[] { "MissionRequest:*", "ContractManager:*" };
-
-        foreach (var filter in primaryFilters)
+        var json = await RunDcbQueryRawAsync(p4kPath, "MissionBrokerEntry", "*");
+        if (!string.IsNullOrEmpty(json))
         {
-            var json = await RunDcbQueryRawAsync(p4kPath, filter, "*");
-            if (string.IsNullOrEmpty(json)) continue;
             foreach (var block in SplitJsonBlocks(json))
             {
                 try
@@ -269,23 +301,31 @@ public class GameDataExtractor
                     using var doc = JsonDocument.Parse(block);
                     var root = doc.RootElement;
                     var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
-                    if (!string.IsNullOrEmpty(recordName))
+                    if (string.IsNullOrEmpty(recordName)) continue;
+
+                    var parts = new List<string> { recordName };
+                    if (root.TryGetProperty("_RecordValue_", out var rv))
                     {
-                        sb.AppendLine($"- {recordName}");
-                        if (++found >= 100) break;
+                        var title = rv.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+                        var difficulty = rv.TryGetProperty("difficulty", out var d) ? d.GetString() ?? "" : "";
+                        var mType = rv.TryGetProperty("type", out var mt) ? mt.GetString() ?? "" : "";
+                        var giver = rv.TryGetProperty("missionGiver", out var mg) ? mg.GetString() ?? "" : "";
+                        if (!string.IsNullOrEmpty(title)) parts.Add($"タイトル: {title}");
+                        if (!string.IsNullOrEmpty(difficulty)) parts.Add($"難易度: {difficulty}");
+                        if (!string.IsNullOrEmpty(mType)) parts.Add($"種別: {mType}");
+                        if (!string.IsNullOrEmpty(giver)) parts.Add($"依頼者: {giver}");
                     }
+                    sb.AppendLine($"- {string.Join(" | ", parts)}");
+                    if (++found >= 100) break;
                 }
                 catch { }
             }
-            if (found >= 100) break;
         }
 
-        foreach (var filter in secondaryFilters)
+        var contractJson = await RunDcbQueryRawAsync(p4kPath, "ContractManager", "*");
+        if (!string.IsNullOrEmpty(contractJson) && found < 150)
         {
-            if (found >= 100) break;
-            var json = await RunDcbQueryRawAsync(p4kPath, filter, "*");
-            if (string.IsNullOrEmpty(json)) continue;
-            foreach (var block in SplitJsonBlocks(json))
+            foreach (var block in SplitJsonBlocks(contractJson))
             {
                 try
                 {
@@ -324,20 +364,74 @@ public class GameDataExtractor
         return result;
     }
 
-    private async Task<string?> QueryItemAsync(string p4kPath, string keyword)
+    private async Task<string?> QueryItemAsync(string p4kPath, string keyword, string? componentType = null)
     {
-        var cacheKey = $"item:{keyword}";
+        var cacheKey = $"item:{keyword}:{componentType ?? "any"}";
         var cached = GetCache(cacheKey);
         if (cached != null) return cached;
 
         var filter = "*" + keyword + "*";
         var rawJson = await RunDcbQueryRawAsync(p4kPath, "EntityClassDefinition", filter);
+
+        if (!string.IsNullOrEmpty(rawJson) && !string.IsNullOrEmpty(componentType))
+        {
+            var result = ParseItemRecordsWithComponent(keyword, rawJson, componentType);
+            if (!string.IsNullOrEmpty(result))
+                SetCache(cacheKey, result);
+            return result;
+        }
+
         if (string.IsNullOrEmpty(rawJson)) return null;
 
-        var result = ParseItemRecords(keyword, rawJson);
-        if (!string.IsNullOrEmpty(result))
-            SetCache(cacheKey, result);
+        var genericResult = ParseItemRecords(keyword, rawJson);
+        if (!string.IsNullOrEmpty(genericResult))
+            SetCache(cacheKey, genericResult);
 
+        return genericResult;
+    }
+
+    public async Task<string?> QueryCommoditiesAsync(string query)
+    {
+        var p4kPath = FindDataP4k();
+        if (p4kPath == null || !IsStarBreakerInstalled) return null;
+
+        var cacheKey = $"commodity:{query}";
+        var cached = GetCache(cacheKey);
+        if (cached != null) return cached;
+
+        var filter = string.IsNullOrEmpty(query) ? "*" : $"*{query}*";
+        var rawJson = await RunDcbQueryRawAsync(p4kPath, "CommoditySubtype", filter);
+        if (string.IsNullOrEmpty(rawJson)) return null;
+
+        var sb = new StringBuilder("=== ゲームファイル (Data.p4k): コモディティ ===\n");
+        int found = 0;
+        foreach (var block in SplitJsonBlocks(rawJson))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+                if (string.IsNullOrEmpty(recordName)) continue;
+
+                var parts = new List<string> { recordName };
+                if (root.TryGetProperty("_RecordValue_", out var rv))
+                {
+                    var name = rv.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                    var symbol = rv.TryGetProperty("symbol", out var s) ? s.GetString() ?? "" : "";
+                    var volatility = rv.TryGetProperty("volatility", out var v) ? v.ToString() : "";
+                    if (!string.IsNullOrEmpty(name)) parts.Add($"名前: {name}");
+                    if (!string.IsNullOrEmpty(symbol)) parts.Add($"シンボル: {symbol}");
+                    if (!string.IsNullOrEmpty(volatility)) parts.Add($"変動性: {volatility}");
+                }
+                sb.AppendLine($"- {string.Join(" | ", parts)}");
+                if (++found >= 50) break;
+            }
+            catch { }
+        }
+
+        var result = found > 0 ? sb.ToString() : null;
+        if (result != null) SetCache(cacheKey, result);
         return result;
     }
 
@@ -434,6 +528,86 @@ public class GameDataExtractor
                     sb.AppendLine($"- {itemName} | タイプ: {itemType} | サイズ: {size} | グレード: {grade}");
                     if (++found >= 20) break;
                 }
+            }
+            catch { }
+        }
+
+        return found > 0 ? sb.ToString() : null;
+    }
+
+    private string? ParseItemRecordsWithComponent(string keyword, string jsonOutput, string componentType)
+    {
+        var sb = new StringBuilder($"=== ゲームファイル アイテム: {keyword} ({componentType}) ===\n");
+        int found = 0;
+
+        foreach (var block in SplitJsonBlocks(jsonOutput))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+
+                if (!root.TryGetProperty("_RecordValue_", out var rv) ||
+                    !rv.TryGetProperty("Components", out var components)) continue;
+
+                bool hasTargetComponent = false;
+                string itemName = "", itemType = "";
+                int size = 0, grade = 0;
+                var extraProps = new List<string>();
+
+                foreach (var comp in components.EnumerateArray())
+                {
+                    var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
+
+                    if (type == "SAttachableComponentParams" && comp.TryGetProperty("AttachDef", out var ad))
+                    {
+                        itemType = ad.TryGetProperty("Type", out var it) ? it.GetString() ?? "" : "";
+                        size = ad.TryGetProperty("Size", out var sz) ? sz.GetInt32() : 0;
+                        grade = ad.TryGetProperty("Grade", out var g) ? g.GetInt32() : 0;
+                        if (ad.TryGetProperty("Localization", out var loc))
+                            itemName = loc.TryGetProperty("Name", out var n) ? n.GetString() ?? "" : "";
+                    }
+
+                    if (type == componentType)
+                    {
+                        hasTargetComponent = true;
+                        if (type == "SCItemShieldGeneratorParams")
+                        {
+                            var maxHp = comp.TryGetProperty("MaxShieldHealth", out var mh) ? mh.ToString() : "";
+                            var regen = comp.TryGetProperty("MaxShieldRegen", out var mr) ? mr.ToString() : "";
+                            if (!string.IsNullOrEmpty(maxHp)) extraProps.Add($"最大HP: {maxHp}");
+                            if (!string.IsNullOrEmpty(regen)) extraProps.Add($"再生: {regen}");
+                        }
+                        else if (type == "SCItemQuantumDriveParams")
+                        {
+                            var fuel = comp.TryGetProperty("quantumFuelRequirement", out var f) ? f.ToString() : "";
+                            var range = comp.TryGetProperty("jumpRange", out var r) ? r.ToString() : "";
+                            var spool = comp.TryGetProperty("spoolUpTime", out var s) ? s.ToString() : "";
+                            if (!string.IsNullOrEmpty(fuel)) extraProps.Add($"燃料: {fuel}");
+                            if (!string.IsNullOrEmpty(range)) extraProps.Add($"距離: {range}");
+                            if (!string.IsNullOrEmpty(spool)) extraProps.Add($"スプール: {spool}");
+                        }
+                        else if (type == "SCItemWeaponComponentParams")
+                        {
+                            var fireRate = comp.TryGetProperty("fireRate", out var fr) ? fr.ToString() : "";
+                            if (!string.IsNullOrEmpty(fireRate)) extraProps.Add($"発射速度: {fireRate}");
+                        }
+                        else if (type == "SAmmoContainerComponentParams")
+                        {
+                            var maxAmmo = comp.TryGetProperty("maxAmmoCount", out var ma) ? ma.ToString() : "";
+                            if (!string.IsNullOrEmpty(maxAmmo)) extraProps.Add($"弾数: {maxAmmo}");
+                        }
+                    }
+                }
+
+                if (!hasTargetComponent) continue;
+                if (string.IsNullOrEmpty(itemType) || itemType == "UNDEFINED") continue;
+
+                var line = $"- {itemName} | タイプ: {itemType} | サイズ: {size} | グレード: {grade}";
+                if (extraProps.Count > 0) line += " | " + string.Join(" | ", extraProps);
+                sb.AppendLine(line);
+                if (++found >= 30) break;
             }
             catch { }
         }

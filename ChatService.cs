@@ -269,9 +269,21 @@ public class ChatService
         var name = args.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
         var system = args.TryGetProperty("system", out var s) ? s.GetString() : null;
 
+        var dcbCommodityResult = "";
+        if (_gameDataExtractor?.IsReady == true)
+        {
+            try
+            {
+                var dcbData = await _gameDataExtractor.QueryCommoditiesAsync(name);
+                if (!string.IsNullOrEmpty(dcbData)) dcbCommodityResult = dcbData;
+            }
+            catch { }
+        }
+
         var commResp = await Http.GetStringAsync("https://api.uexcorp.space/2.0/commodities");
         using var commDoc = JsonDocument.Parse(commResp);
-        if (!commDoc.RootElement.TryGetProperty("data", out var commData)) return "[データ取得失敗]";
+        if (!commDoc.RootElement.TryGetProperty("data", out var commData))
+            return string.IsNullOrEmpty(dcbCommodityResult) ? "[データ取得失敗]" : dcbCommodityResult;
 
         var resolvedName = name;
         if (CommodityNameMap.TryGetValue(name, out var mapped)) resolvedName = mapped;
@@ -318,7 +330,10 @@ public class ChatService
             }
         }
 
-        return count > 0 ? sb.ToString() : $"'{commodityName}' の価格データが見つかりませんでした。";
+        var uexResult = count > 0 ? sb.ToString() : $"'{commodityName}' の価格データが見つかりませんでした。";
+        if (!string.IsNullOrEmpty(dcbCommodityResult))
+            return dcbCommodityResult + "\n" + uexResult;
+        return uexResult;
     }
 
     private static async Task<string> ExecuteSearchItemAsync(JsonElement args)
@@ -354,7 +369,20 @@ public class ChatService
             if (total >= 30) break;
         }
 
-        if (total == 0)
+        if (_gameDataExtractor?.IsReady == true)
+        {
+            try
+            {
+                var compType = GameDataExtractor.DetectComponentType(query);
+                if (compType == null && !string.IsNullOrEmpty(category))
+                    compType = GameDataExtractor.DetectComponentType(category);
+                var dcbData = await _gameDataExtractor.QueryGameDataAsync(query);
+                if (!string.IsNullOrEmpty(dcbData)) sb.AppendLine(dcbData);
+            }
+            catch { }
+        }
+
+        if (total == 0 && sb.Length == 0)
         {
             var scResult = await FetchScTradeItemAsync(query);
             if (!string.IsNullOrEmpty(scResult)) return scResult;
