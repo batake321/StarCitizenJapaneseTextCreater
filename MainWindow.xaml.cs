@@ -1103,7 +1103,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+            MessageBox.Show($"エラー: {ex.Message}\n\n{ex.StackTrace}", "エラー");
         }
     }
 

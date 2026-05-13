@@ -51,6 +51,11 @@ public class ActionBinding : INotifyPropertyChanged
 
     public bool IsModified => Keyboard != DefaultKeyboard || Mouse != DefaultMouse ||
                               Gamepad != DefaultGamepad || Joystick != DefaultJoystick;
+    public bool IsKeyboardModified => Keyboard != DefaultKeyboard;
+    public bool IsMouseModified => Mouse != DefaultMouse;
+    public bool IsGamepadModified => Gamepad != DefaultGamepad;
+    public bool IsJoystickModified => Joystick != DefaultJoystick;
+    public string CategoryDisplayName => ActionMapNames.GetCategoryName(CategoryName);
 
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged([CallerMemberName] string? name = null) =>
@@ -124,43 +129,34 @@ public static class ActionMapParser
     public static ActionMapData LoadFromGameAndSave(string gamePath, string savePath)
     {
         var data = new ActionMapData();
-
-        var defaultProfilePath = Path.Combine(gamePath, "data", "Libs", "Config", "defaultProfile.xml");
-
-        if (!File.Exists(defaultProfilePath))
+        if (!string.IsNullOrEmpty(gamePath))
         {
-            var p4kPath = Path.Combine(gamePath, "Data.p4k");
-            if (File.Exists(p4kPath))
+            var defaultProfilePath = Path.Combine(gamePath, "data", "Libs", "Config", "defaultProfile.xml");
+
+            if (!File.Exists(defaultProfilePath))
+            {
+                var p4kPath = Path.Combine(gamePath, "Data.p4k");
+                if (File.Exists(p4kPath))
+                {
+                    try
+                    {
+                        var extractDir = Path.Combine(Path.GetTempPath(), "SCJPKeybind");
+                        defaultProfilePath = Path.Combine(extractDir, "defaultProfile.xml");
+                        P4kExtractor.Extract(p4kPath, "Data/Libs/Config/defaultProfile.xml", defaultProfilePath);
+                    }
+                    catch { }
+                }
+            }
+
+            if (File.Exists(defaultProfilePath))
             {
                 try
                 {
-                    Console.WriteLine("defaultProfile.xml を Data.p4k から抽出中...");
-                    var extractDir = Path.Combine(Path.GetTempPath(), "SCJPKeybind");
-                    defaultProfilePath = Path.Combine(extractDir, "defaultProfile.xml");
-                    P4kExtractor.Extract(p4kPath, "Data/Libs/Config/defaultProfile.xml", defaultProfilePath);
+                    var doc = CryXmlParser.Parse(defaultProfilePath);
+                    ParseDefaultProfile(doc, data);
                 }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Data.p4k extraction error: {ex.Message}");
-                }
+                catch { }
             }
-        }
-
-        if (File.Exists(defaultProfilePath))
-        {
-            try
-            {
-                var doc = CryXmlParser.Parse(defaultProfilePath);
-                ParseDefaultProfile(doc, data);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"defaultProfile.xml parse error: {ex.Message}");
-            }
-        }
-        else
-        {
-            Console.WriteLine("defaultProfile.xml が見つかりません。");
         }
 
         // Apply overrides from saved profile
@@ -242,6 +238,17 @@ public static class ActionMapParser
                     ActionName = actionName,
                 };
 
+                // Attribute-based bindings (defaultProfile format)
+                var kb = action.Attribute("keyboard")?.Value?.Trim();
+                var mo = action.Attribute("mouse")?.Value?.Trim();
+                var gp = action.Attribute("gamepad")?.Value?.Trim();
+                var js = action.Attribute("joystick")?.Value?.Trim();
+                if (!string.IsNullOrEmpty(kb)) { binding.Keyboard = kb; binding.DefaultKeyboard = kb; }
+                if (!string.IsNullOrEmpty(mo)) { binding.Mouse = mo; binding.DefaultMouse = mo; }
+                if (!string.IsNullOrEmpty(gp)) { binding.Gamepad = gp; binding.DefaultGamepad = gp; }
+                if (!string.IsNullOrEmpty(js)) { binding.Joystick = js; binding.DefaultJoystick = js; }
+
+                // Also check rebind child elements
                 foreach (var rebind in action.Elements("rebind"))
                 {
                     var input = rebind.Attribute("input")?.Value ?? "";
@@ -530,11 +537,17 @@ public static class ActionMapNames
         ["spaceship_general"] = "宇宙船 - 全般",
         ["spaceship_turret"] = "宇宙船 - タレット",
         ["spaceship_radar"] = "宇宙船 - レーダー",
+        ["spaceship_auto_weapons"] = "宇宙船 - 自動兵器",
+        ["spaceship_docking"] = "宇宙船 - ドッキング",
+        ["spaceship_quantum"] = "宇宙船 - クォンタム",
         ["vehicle_movement"] = "地上車両 - 移動",
         ["vehicle_general"] = "地上車両 - 全般",
         ["player"] = "歩行 - 全般",
         ["player_movement"] = "歩行 - 移動",
         ["player_input_fps"] = "歩行 - FPS",
+        ["player_choice"] = "プレイヤー選択",
+        ["player_emotes"] = "エモート",
+        ["player_input_optical_tracking"] = "トラッキング",
         ["prone"] = "伏せ",
         ["zero_gravity_eva"] = "EVA (無重力)",
         ["social"] = "ソーシャル",
@@ -544,21 +557,46 @@ public static class ActionMapNames
         ["ui"] = "UI",
         ["visor"] = "バイザー",
         ["lights"] = "ライト",
+        ["lights_controller"] = "ライトコントロール",
         ["emote"] = "エモート",
         ["commlink"] = "通信リンク",
+        ["seat_general"] = "座席 - 全般",
+        ["flycam"] = "フリーカメラ",
+        ["hacking"] = "ハッキング",
+        ["mining"] = "マイニング (歩行)",
+        ["mapui"] = "マップUI",
+        ["debug"] = "デバッグ",
+        ["character_customizer"] = "キャラクターカスタマイズ",
+        ["IFCS_controls"] = "IFCS制御",
+        ["incapacitated"] = "行動不能",
+        ["server_renderer"] = "サーバーレンダラー",
+        ["RemoteRigidEntityController"] = "リモート制御",
     };
 
     private static readonly Dictionary<string, string> ActionNames = new()
     {
+        // Ship movement
         ["v_roll"] = "ロール",
         ["v_pitch"] = "ピッチ",
         ["v_yaw"] = "ヨー",
+        ["v_pitch_mouse"] = "ピッチ (マウス)",
+        ["v_yaw_mouse"] = "ヨー (マウス)",
+        ["v_roll_mouse"] = "ロール (マウス)",
+        ["v_pitch_up"] = "ピッチ上",
+        ["v_pitch_down"] = "ピッチ下",
+        ["v_yaw_left"] = "ヨー左",
+        ["v_yaw_right"] = "ヨー右",
+        ["v_roll_left"] = "ロール左",
+        ["v_roll_right"] = "ロール右",
         ["v_strafe_up"] = "上昇",
         ["v_strafe_down"] = "下降",
         ["v_strafe_left"] = "左移動",
         ["v_strafe_right"] = "右移動",
         ["v_strafe_forward"] = "前進",
         ["v_strafe_back"] = "後退",
+        ["v_strafe_vertical"] = "垂直移動",
+        ["v_strafe_lateral"] = "横移動",
+        ["v_strafe_longitudinal"] = "前後移動",
         ["v_speed_range_up"] = "速度+",
         ["v_speed_range_down"] = "速度-",
         ["v_speed_range_abs"] = "速度 (絶対値)",
@@ -570,41 +608,118 @@ public static class ActionMapNames
         ["v_ifcs_toggle_cruise_control"] = "クルーズコントロール切替",
         ["v_ifcs_toggle_esp"] = "ESP切替",
         ["v_ifcs_toggle_gforce_safety"] = "Gフォースセーフティ切替",
+        ["v_toggle_relative_mouse_mode"] = "相対マウスモード切替",
+        ["v_toggle_yaw_roll_swap"] = "ヨー/ロール入替",
+        // Ship quantum
         ["v_toggle_quantum_mode"] = "クォンタムモード切替",
         ["v_activate_quantum_drive"] = "クォンタムドライブ起動",
+        // Ship weapons
         ["v_attack1"] = "射撃",
+        ["v_attack1_group1"] = "射撃 (グループ1)",
         ["v_attack1_group2"] = "射撃 (グループ2)",
+        ["v_attack_all"] = "全武器射撃",
         ["v_weapon_cycle_aimmode"] = "照準モード切替",
+        ["v_weapon_toggle_ai"] = "AI武器切替",
+        // Ship targeting
         ["v_target_cycle_hostile_fwd"] = "敵ターゲット (次)",
         ["v_target_cycle_hostile_back"] = "敵ターゲット (前)",
         ["v_target_cycle_friendly_fwd"] = "味方ターゲット (次)",
+        ["v_target_cycle_friendly_back"] = "味方ターゲット (前)",
         ["v_target_cycle_all_fwd"] = "全ターゲット (次)",
+        ["v_target_cycle_all_back"] = "全ターゲット (前)",
         ["v_target_nearest_hostile"] = "最寄り敵ターゲット",
         ["v_target_lock_selected"] = "ターゲットロック",
+        ["v_target_unlock_selected"] = "ターゲットロック解除",
+        ["v_target_cycle_subitem_fwd"] = "サブアイテム (次)",
+        ["v_target_cycle_subitem_back"] = "サブアイテム (前)",
+        ["v_target_reticle_focus"] = "レティクルフォーカス",
+        // Ship missiles
         ["v_launch_missile"] = "ミサイル発射",
+        ["v_lock_missile"] = "ミサイルロック",
+        ["v_cycle_missile_fwd"] = "ミサイル (次)",
+        ["v_cycle_missile_back"] = "ミサイル (前)",
+        // Ship defensive
         ["v_weapon_launch_countermeasure"] = "カウンターメジャー",
         ["v_shield_raise_level_forward"] = "シールド (前面強化)",
         ["v_shield_raise_level_back"] = "シールド (後方強化)",
+        ["v_shield_raise_level_left"] = "シールド (左面強化)",
+        ["v_shield_raise_level_right"] = "シールド (右面強化)",
+        ["v_shield_raise_level_up"] = "シールド (上面強化)",
+        ["v_shield_raise_level_down"] = "シールド (下面強化)",
         ["v_shield_reset_level"] = "シールドリセット",
+        // Ship power
         ["v_power_toggle"] = "電源切替",
         ["v_power_throttle_up"] = "パワー出力+",
         ["v_power_throttle_down"] = "パワー出力-",
+        ["v_power_focus_weapons"] = "パワー→武器",
+        ["v_power_focus_shields"] = "パワー→シールド",
+        ["v_power_focus_engines"] = "パワー→エンジン",
+        ["v_power_reset"] = "パワー配分リセット",
+        // Ship HUD
+        ["v_toggle_all_doorlocks"] = "ドアロック切替",
+        ["v_toggle_all_doors"] = "全ドア切替",
+        ["v_open_all_doors"] = "全ドア開",
+        ["v_close_all_doors"] = "全ドア閉",
+        ["v_lock_all_doors"] = "全ドアロック",
+        ["v_unlock_all_doors"] = "全ドアロック解除",
+        // Ship general
+        ["v_eject"] = "緊急脱出",
+        ["v_self_destruct"] = "自爆",
+        ["v_emergency_exit"] = "緊急退出",
+        ["v_enter"] = "搭乗",
+        ["v_exit"] = "降機",
+        ["v_horn"] = "ホーン",
+        ["v_lights"] = "ライト",
+        // Ship mining
+        ["v_mining_laser_fire"] = "マイニングレーザー発射",
+        ["v_mining_throttle_up"] = "マイニング出力+",
+        ["v_mining_throttle_down"] = "マイニング出力-",
+        // FPS
         ["attack1"] = "攻撃",
         ["zoom"] = "ズーム / ADS",
         ["reload"] = "リロード",
         ["sprint"] = "スプリント",
+        ["walk"] = "歩行",
         ["crouch"] = "しゃがみ",
         ["prone"] = "伏せ",
         ["jump"] = "ジャンプ",
+        ["jump_hold"] = "ジャンプ (長押し)",
+        ["jump_release"] = "ジャンプ (離す)",
         ["interact"] = "インタラクト",
         ["weapon_melee"] = "近接攻撃",
         ["grenade"] = "グレネード",
         ["holster"] = "武器収納",
         ["weapon_cycle"] = "武器切替",
+        ["weapon_stow"] = "武器しまう",
+        ["weapon_draw"] = "武器構える",
         ["headlook_toggle"] = "フリールック切替",
+        ["moveleft"] = "左移動",
+        ["moveright"] = "右移動",
+        ["moveforward"] = "前進",
+        ["moveback"] = "後退",
+        ["rotateyaw"] = "横回転",
+        ["rotatepitch"] = "縦回転",
+        ["gp_movex"] = "移動X (パッド)",
+        ["gp_movey"] = "移動Y (パッド)",
+        ["gp_rotateyaw"] = "横回転 (パッド)",
+        ["gp_rotatepitch"] = "縦回転 (パッド)",
+        ["gp_jump"] = "ジャンプ (パッド)",
+        ["gp_crouch"] = "しゃがみ (パッド)",
+        ["leanleft"] = "左リーン",
+        ["leanright"] = "右リーン",
+        ["stabilize"] = "安定化",
+        ["inspect"] = "検査",
+        // UI/Social
         ["scoreboard"] = "スコアボード",
         ["mobiglas"] = "mobiGlas",
         ["chat"] = "チャット",
+        ["toggle_contact"] = "コンタクト切替",
+        ["toggle_chat"] = "チャット切替",
+        ["starmap"] = "スターマップ",
+        ["respawn"] = "リスポーン",
+        ["force_respawn"] = "強制リスポーン",
+        // Inventory
+        ["personal_inventory"] = "パーソナルインベントリ",
     };
 
     public static string GetCategoryName(string name)

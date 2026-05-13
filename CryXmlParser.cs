@@ -32,16 +32,16 @@ public static class CryXmlParser
         for (int i = 0; i < fileHeader.NodeCount; i++)
             nodes[i] = ReadNode(data, ref offset);
 
-        var attrs = new CryAttribute[fileHeader.AttrCount];
-        for (int i = 0; i < fileHeader.AttrCount; i++)
-            attrs[i] = ReadAttribute(data, ref offset);
-
         var childIndices = new int[fileHeader.ChildCount];
         for (int i = 0; i < fileHeader.ChildCount; i++)
         {
             childIndices[i] = BitConverter.ToInt32(data, offset);
             offset += 4;
         }
+
+        var attrs = new CryAttribute[fileHeader.AttrCount];
+        for (int i = 0; i < fileHeader.AttrCount; i++)
+            attrs[i] = ReadAttribute(data, ref offset);
 
         var strings = new Dictionary<int, string>();
         int strStart = offset;
@@ -130,8 +130,8 @@ public static class CryXmlParser
             StringTableOffset = BitConverter.ToInt32(data, offset + 28),
             StringSize = BitConverter.ToInt32(data, offset + 32),
         };
-        h.AttrCount = h.AttrSize / 8;
-        offset = 8 + h.NodeTableOffset;
+        h.AttrCount = h.AttrSize;
+        offset = h.NodeTableOffset;
         return h;
     }
 

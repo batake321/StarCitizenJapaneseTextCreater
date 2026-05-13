@@ -20,8 +20,8 @@ public partial class KeybindEditorWindow : Window
     public KeybindEditorWindow(string gamePath, string savePath)
     {
         InitializeComponent();
-        _gamePath = gamePath;
-        _savePath = savePath;
+        _gamePath = gamePath ?? "";
+        _savePath = savePath ?? "";
         Title = $"キーバインド エディタ — {Path.GetFileName(savePath)}";
         LoadData();
     }
@@ -34,7 +34,7 @@ public partial class KeybindEditorWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"キーバインドデータの読み込みに失敗しました:\n{ex.Message}", "エラー");
+            MessageBox.Show($"キーバインドデータの読み込みに失敗しました:\n{ex.Message}\n\n{ex.StackTrace}", "エラー");
             _data = new ActionMapData();
         }
 
@@ -74,6 +74,8 @@ public partial class KeybindEditorWindow : Window
 
     private void ApplyFilter()
     {
+        if (dgActions == null || txtStatus == null) return;
+
         var search = txtSearch?.Text?.Trim() ?? "";
         var catItem = cmbCategory?.SelectedItem as CategoryItem;
         var catFilter = catItem?.Name ?? "";

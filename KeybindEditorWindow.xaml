@@ -97,6 +97,16 @@
                       AlternatingRowBackground="#FAFAFA" FontSize="13"
                       MouseDoubleClick="DgActions_DoubleClick"
                       RowHeight="32">
+                <DataGrid.RowStyle>
+                    <Style TargetType="DataGridRow">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsModified}" Value="True">
+                                <Setter Property="Background" Value="#FFF8E1"/>
+                                <Setter Property="FontWeight" Value="SemiBold"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </DataGrid.RowStyle>
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="機能" Binding="{Binding DisplayName}" Width="200"
                                         SortMemberPath="ActionName">
@@ -112,6 +122,13 @@
                             <Style TargetType="TextBlock">
                                 <Setter Property="VerticalAlignment" Value="Center"/>
                                 <Setter Property="FontFamily" Value="Consolas"/>
+                                <Setter Property="Foreground" Value="#999"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsKeyboardModified}" Value="True">
+                                        <Setter Property="Foreground" Value="#E65100"/>
+                                        <Setter Property="FontWeight" Value="Bold"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
                             </Style>
                         </DataGridTextColumn.ElementStyle>
                     </DataGridTextColumn>
@@ -120,19 +137,28 @@
                             <Style TargetType="TextBlock">
                                 <Setter Property="VerticalAlignment" Value="Center"/>
                                 <Setter Property="FontFamily" Value="Consolas"/>
+                                <Setter Property="Foreground" Value="#999"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsMouseModified}" Value="True">
+                                        <Setter Property="Foreground" Value="#E65100"/>
+                                        <Setter Property="FontWeight" Value="Bold"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
                             </Style>
                         </DataGridTextColumn.ElementStyle>
                     </DataGridTextColumn>
                     <DataGridTextColumn Header="ゲームパッド" Binding="{Binding GamepadDisplay}" Width="160">
-                        <DataGridTextColumn.CellStyle>
-                            <Style TargetType="DataGridCell">
-                                <Setter Property="Foreground" Value="#1565C0"/>
-                            </Style>
-                        </DataGridTextColumn.CellStyle>
                         <DataGridTextColumn.ElementStyle>
                             <Style TargetType="TextBlock">
                                 <Setter Property="VerticalAlignment" Value="Center"/>
                                 <Setter Property="FontFamily" Value="Consolas"/>
+                                <Setter Property="Foreground" Value="#90CAF9"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsGamepadModified}" Value="True">
+                                        <Setter Property="Foreground" Value="#1565C0"/>
+                                        <Setter Property="FontWeight" Value="Bold"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
                             </Style>
                         </DataGridTextColumn.ElementStyle>
                     </DataGridTextColumn>
@@ -141,10 +167,17 @@
                             <Style TargetType="TextBlock">
                                 <Setter Property="VerticalAlignment" Value="Center"/>
                                 <Setter Property="FontFamily" Value="Consolas"/>
+                                <Setter Property="Foreground" Value="#999"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsJoystickModified}" Value="True">
+                                        <Setter Property="Foreground" Value="#E65100"/>
+                                        <Setter Property="FontWeight" Value="Bold"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
                             </Style>
                         </DataGridTextColumn.ElementStyle>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Header="カテゴリ" Binding="{Binding CategoryName}" Width="160">
+                    <DataGridTextColumn Header="カテゴリ" Binding="{Binding CategoryDisplayName}" Width="160">
                         <DataGridTextColumn.ElementStyle>
                             <Style TargetType="TextBlock">
                                 <Setter Property="VerticalAlignment" Value="Center"/>
