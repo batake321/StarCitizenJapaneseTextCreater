@@ -90,7 +90,9 @@ public class ChatService
             tasks.Add(FetchScTradeItemAsync(itemKeyword));
 
         // SC Trade Tools 商品ショップ一覧（貿易・経済関連の質問時）
-        if (ContainsAny(lowerQuery, "trade", "route", "profit", "貿易", "交易", "ルート", "利益", "稼"))
+        if (ContainsAny(lowerQuery, "trade", "route", "profit", "貿易", "交易", "ルート", "利益", "稼",
+            "安い", "高い", "最安", "最高", "cheapest", "expensive", "price", "値段", "価格", "いくら",
+            "買える", "売れる", "どこで買", "どこで売"))
             tasks.Add(FetchScTradeCommodityShopsAsync());
 
         var scApiKey = App.Config.ScApiKey;
@@ -130,9 +132,12 @@ public class ChatService
             if (query.Contains(keyword, StringComparison.OrdinalIgnoreCase))
                 foreach (var id in cats) ids.Add(id);
         }
-        // 機体名が含まれていたら武器+コンポーネント全部取得
-        if (ids.Count == 0 && ExtractShipName(query) != null)
-            foreach (var id in new[] { 32, 33, 34, 35, 19, 21, 22, 23 }) ids.Add(id);
+        if (ids.Count == 0)
+        {
+            if (ExtractShipName(query) != null ||
+                ContainsAny(query, "武装", "装備", "ハードポイント", "hardpoint", "loadout", "デフォルト"))
+                foreach (var id in new[] { 32, 33, 34, 35, 19, 21, 22, 23 }) ids.Add(id);
+        }
         return ids.ToArray();
     }
 
@@ -173,10 +178,100 @@ public class ChatService
         return false;
     }
 
+    private static readonly Dictionary<string, string> ShipAliasMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "F7C mk2", "F7C Hornet Mk II" },
+        { "F7C mkII", "F7C Hornet Mk II" },
+        { "F7C Mk2", "F7C Hornet Mk II" },
+        { "F7C mk 2", "F7C Hornet Mk II" },
+        { "F7C mk ii", "F7C Hornet Mk II" },
+        { "F7C mk1", "F7C Hornet Mk I" },
+        { "F7C mkI", "F7C Hornet Mk I" },
+        { "F7C Mk1", "F7C Hornet Mk I" },
+        { "F7A mk2", "F7A Hornet Mk II" },
+        { "F7A mkII", "F7A Hornet Mk II" },
+        { "F7A Mk2", "F7A Hornet Mk II" },
+        { "F7A mk ii", "F7A Hornet Mk II" },
+        { "F7A mk1", "F7A Hornet Mk I" },
+        { "F7A mkI", "F7A Hornet Mk I" },
+        { "F7A Mk1", "F7A Hornet Mk I" },
+        { "Super Hornet mk2", "F7C-M Super Hornet Mk II" },
+        { "Super Hornet mkII", "F7C-M Super Hornet Mk II" },
+        { "Super Hornet Mk2", "F7C-M Super Hornet Mk II" },
+        { "Super Hornet mk ii", "F7C-M Super Hornet Mk II" },
+        { "Super Hornet mk1", "F7C-M Super Hornet Mk I" },
+        { "Super Hornet mkI", "F7C-M Super Hornet Mk I" },
+        { "Hornet mk2", "F7C Hornet Mk II" },
+        { "Hornet mkII", "F7C Hornet Mk II" },
+        { "Hornet Mk2", "F7C Hornet Mk II" },
+        { "Hornet mk ii", "F7C Hornet Mk II" },
+        { "Hornet mk1", "F7C Hornet Mk I" },
+        { "Hornet mkI", "F7C Hornet Mk I" },
+        { "ホーネット", "F7C Hornet Mk II" },
+        { "スーパーホーネット", "F7C-M Super Hornet Mk II" },
+        { "グラディウス", "Gladius" },
+        { "カタピラー", "Caterpillar" },
+        { "フリーランサー", "Freelancer" },
+        { "オーロラ", "Aurora MR" },
+        { "コンステレーション", "Constellation Andromeda" },
+        { "コンステ", "Constellation Andromeda" },
+        { "カットラス", "Cutlass Black" },
+        { "アベンジャー", "Avenger Titan" },
+        { "マーキュリー", "Mercury Star Runner" },
+        { "スターランナー", "Mercury Star Runner" },
+        { "コルセア", "Corsair" },
+        { "ハリケーン", "Hurricane" },
+        { "リクレイマー", "Reclaimer" },
+        { "キャラック", "Carrack" },
+        { "ハンマーヘッド", "Hammerhead" },
+        { "バルキリー", "Valkyrie" },
+        { "リディーマー", "Redeemer" },
+        { "プロスペクター", "Prospector" },
+        { "バルチャー", "Vulture" },
+        { "セイバー", "Sabre" },
+        { "スコーピアス", "Scorpius" },
+        { "ヘラルド", "Herald" },
+        { "マーチャントマン", "Merchantman" },
+        { "BMM", "Merchantman" },
+        { "リタリエーター", "Retaliator Bomber" },
+        { "エクリプス", "Eclipse" },
+        { "イクリプス", "Eclipse" },
+        { "スターファーラー", "Starfarer" },
+        { "ノマド", "Nomad" },
+        { "ディフェンダー", "Defender" },
+        { "プラウラー", "Prowler" },
+        { "ドラゴンフライ", "Dragonfly" },
+        { "サイクロン", "Cyclone" },
+        { "バリスタ", "Ballista" },
+        { "ギャラクシー", "Galaxy" },
+        { "リベレーター", "Liberator" },
+        { "アロー", "Arrow" },
+        { "バッカニア", "Buccaneer" },
+        { "レイザー", "Razor" },
+        { "マスタング", "Mustang Alpha" },
+        { "ピスケス", "Pisces" },
+        { "モール", "Mole" },
+        { "MSR", "Mercury Star Runner" },
+        { "Connie", "Constellation Andromeda" },
+        { "Cat", "Caterpillar" },
+        { "Lancer", "Freelancer" },
+        { "Tali", "Retaliator Bomber" },
+        { "Vanguard", "Vanguard Warden" },
+        { "Cutty Black", "Cutlass Black" },
+        { "Cutty", "Cutlass Black" },
+        { "MIS", "Freelancer MIS" },
+    };
+
     public static string? ExtractShipNamePublic(string query) => ExtractShipName(query);
 
     private static string? ExtractShipName(string query)
     {
+        foreach (var (alias, fullName) in ShipAliasMap.OrderByDescending(kv => kv.Key.Length))
+        {
+            if (query.Contains(alias, StringComparison.OrdinalIgnoreCase))
+                return fullName;
+        }
+
         var knownShips = new[] {
             "F7C Hornet Mk II", "F7C Hornet Mk I", "F7A Hornet Mk II", "F7A Hornet Mk I",
             "F7C-M Super Hornet Mk II", "F7C-M Super Hornet Mk I", "F7C-M Super Hornet",
@@ -209,7 +304,6 @@ public class ChatService
                 return ship;
         }
 
-        // UEX の機体名リストでも検索
         return null;
     }
 
@@ -218,23 +312,79 @@ public class ChatService
         try
         {
             var wikiTitle = shipName.Replace(" ", "_");
-            var url = $"https://starcitizen.tools/api.php?action=parse&page={Uri.EscapeDataString(wikiTitle)}&prop=text&section=0&format=json";
-            var resp = await Http.GetStringAsync(url);
-            using var doc = JsonDocument.Parse(resp);
+            var escapedTitle = Uri.EscapeDataString(wikiTitle);
+
+            var introUrl = $"https://starcitizen.tools/api.php?action=parse&page={escapedTitle}&prop=text&section=0&format=json";
+            var introResp = await Http.GetAsync(introUrl);
+            if (!introResp.IsSuccessStatusCode) return null;
+            var introJson = await introResp.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(introJson);
 
             if (!doc.RootElement.TryGetProperty("parse", out var parse)) return null;
             var introHtml = parse.GetProperty("text").GetProperty("*").GetString() ?? "";
             var introText = StripHtml(introHtml);
 
-            // ハードポイント（Specifications セクション = section 2）
-            var specUrl = $"https://starcitizen.tools/api.php?action=parse&page={Uri.EscapeDataString(wikiTitle)}&prop=text&section=2&format=json";
-            var specResp = await Http.GetStringAsync(specUrl);
-            using var specDoc = JsonDocument.Parse(specResp);
             var specText = "";
-            if (specDoc.RootElement.TryGetProperty("parse", out var specParse))
+            var sectionsUrl = $"https://starcitizen.tools/api.php?action=parse&page={escapedTitle}&prop=sections&format=json";
+            var sectionsResp = await Http.GetAsync(sectionsUrl);
+            if (sectionsResp.IsSuccessStatusCode)
             {
-                var specHtml = specParse.GetProperty("text").GetProperty("*").GetString() ?? "";
-                specText = StripHtml(specHtml);
+                var sectionsJson = await sectionsResp.Content.ReadAsStringAsync();
+                using var sectionsDoc = JsonDocument.Parse(sectionsJson);
+                var specSectionNumbers = new List<string>();
+                if (sectionsDoc.RootElement.TryGetProperty("parse", out var secParse) &&
+                    secParse.TryGetProperty("sections", out var sections))
+                {
+                    foreach (var sec in sections.EnumerateArray())
+                    {
+                        var title = sec.TryGetProperty("line", out var l) ? l.GetString() ?? "" : "";
+                        if (title.Contains("Specifications", StringComparison.OrdinalIgnoreCase) ||
+                            title.Contains("Hardpoints", StringComparison.OrdinalIgnoreCase) ||
+                            title.Contains("Equipment", StringComparison.OrdinalIgnoreCase) ||
+                            title.Contains("Weapons", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var idx = sec.TryGetProperty("index", out var i) ? i.ToString() : "";
+                            if (!string.IsNullOrEmpty(idx))
+                                specSectionNumbers.Add(idx);
+                        }
+                    }
+                }
+
+                if (specSectionNumbers.Count > 0)
+                {
+                    var specParts = new StringBuilder();
+                    foreach (var secNum in specSectionNumbers)
+                    {
+                        var secUrl = $"https://starcitizen.tools/api.php?action=parse&page={escapedTitle}&prop=text&section={secNum}&format=json";
+                        var secResp = await Http.GetAsync(secUrl);
+                        if (!secResp.IsSuccessStatusCode) continue;
+                        var secJson = await secResp.Content.ReadAsStringAsync();
+                        using var secDoc = JsonDocument.Parse(secJson);
+                        if (secDoc.RootElement.TryGetProperty("parse", out var sp))
+                        {
+                            var html = sp.GetProperty("text").GetProperty("*").GetString() ?? "";
+                            var text = StripHtml(html);
+                            if (text.Length > 30)
+                                specParts.AppendLine(text);
+                        }
+                    }
+                    specText = specParts.ToString();
+                }
+                else
+                {
+                    var fullUrl = $"https://starcitizen.tools/api.php?action=parse&page={escapedTitle}&prop=text&format=json";
+                    var fullResp = await Http.GetAsync(fullUrl);
+                    if (fullResp.IsSuccessStatusCode)
+                    {
+                        var fullJson = await fullResp.Content.ReadAsStringAsync();
+                        using var fullDoc = JsonDocument.Parse(fullJson);
+                        if (fullDoc.RootElement.TryGetProperty("parse", out var fp))
+                        {
+                            var html = fp.GetProperty("text").GetProperty("*").GetString() ?? "";
+                            specText = StripHtml(html);
+                        }
+                    }
+                }
             }
 
             var sb = new StringBuilder($"=== starcitizen.tools Wiki: {shipName} ===\n");
@@ -243,7 +393,7 @@ public class ChatService
                 sb.AppendLine($"概要: {introText[..Math.Min(1500, introText.Length)]}");
 
             if (specText.Length > 50)
-                sb.AppendLine($"\nスペック・ハードポイント:\n{specText[..Math.Min(3000, specText.Length)]}");
+                sb.AppendLine($"\nスペック・ハードポイント:\n{specText[..Math.Min(4000, specText.Length)]}");
 
             return sb.Length > 50 ? sb.ToString() : null;
         }
@@ -268,8 +418,14 @@ public class ChatService
             using var doc = JsonDocument.Parse(resp);
             if (!doc.RootElement.TryGetProperty("data", out var data)) return null;
 
-            var sb = new StringBuilder("=== UEX 機体データ ===\n");
-            int count = 0;
+            var shipName = ExtractShipName(query);
+            var lowerQuery = query.ToLowerInvariant();
+            var queryWords = lowerQuery.Split(' ', '　', '?', '？', 'の', 'を', 'は', 'で', 'が', 'に')
+                .Where(w => w.Trim().Length >= 2).Select(w => w.Trim()).ToArray();
+
+            var matched = new List<string>();
+            var unmatched = new List<string>();
+
             foreach (var v in data.EnumerateArray())
             {
                 var name = v.GetProperty("name").GetString() ?? "";
@@ -280,9 +436,39 @@ public class ChatService
                 var price = v.TryGetProperty("price", out var p) ? p.ToString() : "";
                 var size = v.TryGetProperty("size", out var sz) ? sz.GetString() ?? "" : "";
 
-                sb.AppendLine($"- {manufacturer} {name} | 役割: {focus} | 乗員: {crew} | カーゴ: {cargo} SCU | サイズ: {size} | 価格: {price} aUEC");
-                count++;
+                var line = $"- {manufacturer} {name} | 役割: {focus} | 乗員: {crew} | カーゴ: {cargo} SCU | サイズ: {size} | 価格: {price} aUEC";
+
+                bool isMatch = false;
+                if (!string.IsNullOrEmpty(shipName))
+                    isMatch = name.Contains(shipName, StringComparison.OrdinalIgnoreCase);
+                else
+                {
+                    var fullEntry = $"{manufacturer} {name} {focus}".ToLowerInvariant();
+                    foreach (var w in queryWords)
+                    {
+                        if (fullEntry.Contains(w))
+                        {
+                            isMatch = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (isMatch)
+                    matched.Add(line);
+                else
+                    unmatched.Add(line);
             }
+
+            var sb = new StringBuilder("=== UEX 機体データ ===\n");
+            foreach (var line in matched)
+                sb.AppendLine(line);
+            if (matched.Count == 0)
+            {
+                foreach (var line in unmatched.Take(20))
+                    sb.AppendLine(line);
+            }
+            int count = matched.Count > 0 ? matched.Count : Math.Min(unmatched.Count, 20);
             return count > 0 ? sb.ToString() : null;
         }
         catch (Exception ex)
@@ -325,6 +511,13 @@ public class ChatService
         {"クオンタニウム", "quantanium"}, {"ラナイト", "laranite"}, {"アグリシウム", "agricium"},
         {"コランダム", "corundum"}, {"ベリル", "beryl"}, {"水素", "hydrogen"}, {"医療", "medical"},
         {"スクラップ", "scrap"}, {"廃棄物", "waste"}, {"食料", "food"}, {"蒸留酒", "distilled"},
+        {"アルミ", "aluminum"}, {"ダイヤ", "diamond"}, {"クオンタ", "quantanium"},
+        {"ラナ", "laranite"}, {"アグリ", "agricium"}, {"タングス", "tungsten"},
+        {"ベリリウム", "beryl"}, {"スクラップメタル", "scrap"}, {"ウィドウ", "widow"},
+        {"スラム", "slam"}, {"ネオン", "neon"}, {"アスタロ", "astro"}, {"フルオリン", "fluorine"},
+        {"クオーツ", "quartz"}, {"黒曜石", "obsidian"}, {"ハダナイト", "hadanite"},
+        {"アパタイト", "aphorite"}, {"ドリヴァイン", "dolivine"}, {"タラナイト", "taranite"},
+        {"リサイクル", "recycl"}, {"alum", "aluminum"},
     };
 
     private static string ExtractCommodityKeyword(string query)
@@ -374,7 +567,19 @@ public class ChatService
             using var priceDoc = JsonDocument.Parse(priceResp);
             if (!priceDoc.RootElement.TryGetProperty("data", out var priceData)) return null;
 
-            var sb = new StringBuilder($"=== UEX 場所別価格: {commodityName} ===\n");
+            string? systemFilter = null;
+            var systemNames = new[] { "stanton", "pyro", "nyx", "terra", "sol" };
+            var lowerQ = query.ToLowerInvariant();
+            foreach (var sys in systemNames)
+            {
+                if (lowerQ.Contains(sys))
+                {
+                    systemFilter = sys;
+                    break;
+                }
+            }
+
+            var sb = new StringBuilder($"=== UEX 場所別価格: {commodityName}{(systemFilter != null ? $" ({systemFilter}系のみ)" : "")} ===\n");
             int count = 0;
             foreach (var item in priceData.EnumerateArray())
             {
@@ -382,15 +587,18 @@ public class ChatService
                 var city = item.TryGetProperty("city_name", out var cn) ? cn.GetString() ?? "" : "";
                 var planet = item.TryGetProperty("planet_name", out var pn) ? pn.GetString() ?? "" : "";
                 var star = item.TryGetProperty("star_system_name", out var sn) ? sn.GetString() ?? "" : "";
-                var buy = item.TryGetProperty("price_buy", out var pb) ? pb.GetInt32() : 0;
-                var sell = item.TryGetProperty("price_sell", out var ps) ? ps.GetInt32() : 0;
+                var buy = item.TryGetProperty("price_buy", out var pb) && pb.ValueKind == JsonValueKind.Number ? pb.GetDouble() : 0;
+                var sell = item.TryGetProperty("price_sell", out var ps) && ps.ValueKind == JsonValueKind.Number ? ps.GetDouble() : 0;
+
+                if (systemFilter != null && !star.Contains(systemFilter, StringComparison.OrdinalIgnoreCase))
+                    continue;
 
                 if (buy > 0 || sell > 0)
                 {
                     var location = string.Join(" > ", new[] { star, planet, city, terminal }.Where(s => !string.IsNullOrEmpty(s)));
                     var priceInfo = new List<string>();
-                    if (buy > 0) priceInfo.Add($"買値: {buy}");
-                    if (sell > 0) priceInfo.Add($"売値: {sell}");
+                    if (buy > 0) priceInfo.Add($"買値: {buy:0.##}");
+                    if (sell > 0) priceInfo.Add($"売値: {sell:0.##}");
                     sb.AppendLine($"- {location} | {string.Join(" | ", priceInfo)} aUEC");
                     count++;
                 }
@@ -498,12 +706,12 @@ public class ChatService
                     var city = p.TryGetProperty("city_name", out var cn) ? cn.GetString() ?? "" : "";
                     var planet = p.TryGetProperty("planet_name", out var pn) ? pn.GetString() ?? "" : "";
                     var star = p.TryGetProperty("star_system_name", out var sn) ? sn.GetString() ?? "" : "";
-                    var buy = p.TryGetProperty("price_buy", out var pb) ? pb.GetInt32() : 0;
+                    var buy = p.TryGetProperty("price_buy", out var pb) && pb.ValueKind == JsonValueKind.Number ? pb.GetDouble() : 0;
 
                     if (buy > 0)
                     {
                         var location = string.Join(" > ", new[] { star, planet, city, terminal }.Where(s => !string.IsNullOrEmpty(s)));
-                        sb.AppendLine($"  - {location} | 価格: {buy} aUEC");
+                        sb.AppendLine($"  - {location} | 価格: {buy:0.##} aUEC");
                         count++;
                     }
                 }
