@@ -23,7 +23,10 @@ Star Citizen のゲーム内テキストを AI で日本語に翻訳し、ゲー
 - Windows 10 / 11
 - [.NET 8.0 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (デスクトップランタイム)
 - Star Citizen がインストール済みであること
-- AI 翻訳を利用する場合: Claude API キー / Gemini API キー / Ollama サーバーのいずれか
+- AI 翻訳を利用する場合 (いずれか1つ以上):
+  - [Claude API キー](docs/API_Key_取得_Claude.md)
+  - [Gemini API キー](docs/API_Key_取得_Gemini.md)
+  - [Ollama](docs/Ollama_Install.md) + [Gemma e4b](docs/Gemma4_e4b_Install.md) or [e2b](docs/Gemma4_e2b_Install.md) (ローカル・無料)
 
 ---
 
