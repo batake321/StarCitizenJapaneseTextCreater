@@ -218,6 +218,9 @@ public class GameDataExtractor
         if (!string.IsNullOrEmpty(itemKw))
             tasks.Add(QueryItemAsync(p4kPath, itemKw));
 
+        if (ContainsMissionKeyword(query))
+            tasks.Add(QueryMissionsInternalAsync(p4kPath));
+
         if (tasks.Count == 0) return null;
 
         var results = await Task.WhenAll(tasks);
@@ -225,6 +228,83 @@ public class GameDataExtractor
             if (!string.IsNullOrEmpty(r)) sb.AppendLine(r);
 
         return sb.Length > 0 ? sb.ToString() : null;
+    }
+
+    private static bool ContainsMissionKeyword(string query)
+    {
+        var keywords = new[] { "ミッション", "契約", "mission", "contract", "bounty" };
+        foreach (var kw in keywords)
+            if (query.Contains(kw, StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
+    }
+
+    public async Task<string?> QueryMissionsAsync(string query)
+    {
+        var p4kPath = FindDataP4k();
+        if (p4kPath == null || !IsStarBreakerInstalled) return null;
+        return await QueryMissionsInternalAsync(p4kPath);
+    }
+
+    private async Task<string?> QueryMissionsInternalAsync(string p4kPath)
+    {
+        var cacheKey = "missions:all";
+        var cached = GetCache(cacheKey);
+        if (cached != null) return cached;
+
+        var sb = new StringBuilder("=== ゲームファイル (Data.p4k): ミッション/契約 ===\n");
+        int found = 0;
+
+        var primaryFilters = new[] { "MissionDefinition:*", "MissionBroker:*" };
+        var secondaryFilters = new[] { "MissionRequest:*", "ContractManager:*" };
+
+        foreach (var filter in primaryFilters)
+        {
+            var json = await RunDcbQueryRawAsync(p4kPath, filter, "*");
+            if (string.IsNullOrEmpty(json)) continue;
+            foreach (var block in SplitJsonBlocks(json))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(block);
+                    var root = doc.RootElement;
+                    var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+                    if (!string.IsNullOrEmpty(recordName))
+                    {
+                        sb.AppendLine($"- {recordName}");
+                        if (++found >= 100) break;
+                    }
+                }
+                catch { }
+            }
+            if (found >= 100) break;
+        }
+
+        foreach (var filter in secondaryFilters)
+        {
+            if (found >= 100) break;
+            var json = await RunDcbQueryRawAsync(p4kPath, filter, "*");
+            if (string.IsNullOrEmpty(json)) continue;
+            foreach (var block in SplitJsonBlocks(json))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(block);
+                    var root = doc.RootElement;
+                    var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+                    if (!string.IsNullOrEmpty(recordName))
+                    {
+                        sb.AppendLine($"- {recordName}");
+                        if (++found >= 150) break;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        var result = found > 0 ? sb.ToString() : null;
+        if (result != null) SetCache(cacheKey, result);
+        return result;
     }
 
     private async Task<string?> QueryShipAsync(string p4kPath, string shipName)

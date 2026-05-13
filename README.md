@@ -307,6 +307,7 @@ dotnet build -c Release
 | ツール / サービス | 用途 | URL |
 |---|---|---|
 | **StarBreaker** | Data.p4k の DCB データベースからエンティティ情報をクエリ | [github.com/diogotr7/StarBreaker](https://github.com/diogotr7/StarBreaker) |
+| [unp4k_rs](https://github.com/StarCitizenToolBox/unp4k_rs) | Data.p4k 解析ツール（MCP サーバー対応）。将来のデータソース拡張候補 | [github.com/StarCitizenToolBox/unp4k_rs](https://github.com/StarCitizenToolBox/unp4k_rs) |
 | **UEX Corp API** | 機体・商品・価格・取引場所のリアルタイムデータ | [uexcorp.space](https://uexcorp.space/) |
 | **SC Trade Tools API** | アイテム詳細 (7,500+ 件)・商品取引ショップ一覧 | [sc-trade.tools](https://sc-trade.tools/) |
 | **starcitizen.tools** | 船の概要・スペック・ハードポイント (MediaWiki API) | [starcitizen.tools](https://starcitizen.tools/) |

@@ -16,13 +16,20 @@ public class ChatService
 
     private static readonly string ChatSystemPrompt =
         "あなたはゲーム「Star Citizen」の情報アシスタントです。プレイヤーからの質問に日本語で回答してください。\n\n" +
-        "【最重要ルール】以下に「Star Citizen データ」が提供されている場合、そのデータは複数の情報源（UEX Corp API、SC Trade Tools、starcitizen.tools Wiki）からリアルタイムに取得した最新の正確なゲーム内データです。\n" +
-        "このデータに含まれる商品・資源・機体・武器・装備・場所は実際にゲーム内に存在します。「存在しない」「データがない」と回答しないでください。\n" +
-        "提供データを最優先で参照し、データに基づいて回答してください。\n" +
-        "複数ソースのデータがある場合は相互に検証し、最も詳細で正確な情報を提供してください。\n" +
-        "データがない項目についてのみ、あなたの知識に基づいて回答してください。\n" +
-        "憶測で回答しないでください。データに記載がなく、確信が持てない場合は「わかりません」と正直に答えてください。\n\n" +
-        "回答は簡潔で分かりやすい日本語でお願いします。";
+        "【重要】以下のツール（スキル）を使って最新のゲームデータを取得できます。質問に答えるために必要なデータは必ずツールを使って取得してください。\n" +
+        "- search_ship: 船・機体の検索（部分一致で複数候補がある場合は番号付きリストで提示し、ユーザーに選択させてください）\n" +
+        "- search_commodity: 商品・資源の検索と場所別価格\n" +
+        "- search_item: 武器・コンポーネントの検索\n" +
+        "- search_mission: ミッション・契約の検索\n" +
+        "- search_price: アイテムの販売場所・価格の検索\n" +
+        "- search_wiki: Wiki からの詳細情報取得\n" +
+        "- search_pledge: RSI プレッジ価格・Warbond 割引情報（販売状況は変動するため公式確認を案内）\n\n" +
+        "【候補提示ルール】\n" +
+        "- 検索結果が複数ある場合は、番号付きリストで候補を提示してください\n" +
+        "- ユーザーが番号で選択したら、その候補の詳細を取得してください\n" +
+        "- 「その他」で直接入力も可能にしてください\n\n" +
+        "回答は簡潔で分かりやすい日本語でお願いします。\n" +
+        "憶測で回答しないでください。データに記載がなく、確信が持てない場合は「わかりません」と正直に答えてください。";
 
     // UEX カテゴリID: 武器・コンポーネント系
     private static readonly Dictionary<string, int[]> ItemCategoryMap = new(StringComparer.OrdinalIgnoreCase)
@@ -53,6 +60,506 @@ public class ChatService
     public static void SetGameDataExtractor(GameDataExtractor extractor)
     {
         _gameDataExtractor = extractor;
+    }
+
+    private static readonly JsonSerializerOptions JsonOpts = new()
+    {
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    public static List<Dictionary<string, object>> GetToolDefinitions()
+    {
+        return new List<Dictionary<string, object>>
+        {
+            new()
+            {
+                ["name"] = "search_ship",
+                ["description"] = "船・機体を名前で検索。部分一致で複数候補がある場合は候補リストを返す。ユーザーに番号で選択させること。",
+                ["input_schema"] = new Dictionary<string, object>
+                {
+                    ["type"] = "object",
+                    ["properties"] = new Dictionary<string, object>
+                    {
+                        ["query"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "船名（部分一致可）" },
+                        ["exact"] = new Dictionary<string, object> { ["type"] = "boolean", ["description"] = "完全一致検索するか" }
+                    },
+                    ["required"] = new[] { "query" }
+                }
+            },
+            new()
+            {
+                ["name"] = "search_commodity",
+                ["description"] = "商品・資源を検索（場所別価格含む）",
+                ["input_schema"] = new Dictionary<string, object>
+                {
+                    ["type"] = "object",
+                    ["properties"] = new Dictionary<string, object>
+                    {
+                        ["name"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "商品名" },
+                        ["system"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "星系名（例: Stanton）" }
+                    },
+                    ["required"] = new[] { "name" }
+                }
+            },
+            new()
+            {
+                ["name"] = "search_item",
+                ["description"] = "武器・コンポーネント検索",
+                ["input_schema"] = new Dictionary<string, object>
+                {
+                    ["type"] = "object",
+                    ["properties"] = new Dictionary<string, object>
+                    {
+                        ["query"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "アイテム名やキーワード" },
+                        ["category"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "カテゴリ: weapon/shield/cooler/power/quantum" }
+                    },
+                    ["required"] = new[] { "query" }
+                }
+            },
+            new()
+            {
+                ["name"] = "search_mission",
+                ["description"] = "ミッション・契約を検索",
+                ["input_schema"] = new Dictionary<string, object>
+                {
+                    ["type"] = "object",
+                    ["properties"] = new Dictionary<string, object>
+                    {
+                        ["query"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "ミッション名やキーワード" },
+                        ["system"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "星系名" }
+                    },
+                    ["required"] = new string[0]
+                }
+            },
+            new()
+            {
+                ["name"] = "search_price",
+                ["description"] = "アイテムの販売場所・価格",
+                ["input_schema"] = new Dictionary<string, object>
+                {
+                    ["type"] = "object",
+                    ["properties"] = new Dictionary<string, object>
+                    {
+                        ["item_name"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "アイテム名" },
+                        ["system"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "星系名" }
+                    },
+                    ["required"] = new[] { "item_name" }
+                }
+            },
+            new()
+            {
+                ["name"] = "search_wiki",
+                ["description"] = "Wiki から詳細情報取得",
+                ["input_schema"] = new Dictionary<string, object>
+                {
+                    ["type"] = "object",
+                    ["properties"] = new Dictionary<string, object>
+                    {
+                        ["page_title"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "Wikiページタイトル（船名など）" }
+                    },
+                    ["required"] = new[] { "page_title" }
+                }
+            },
+            new()
+            {
+                ["name"] = "search_pledge",
+                ["description"] = "RSI プレッジ価格・Warbond 割引情報を検索。販売状況は時期により変動するため、結果には公式サイト確認の注意を含みます。",
+                ["input_schema"] = new Dictionary<string, object>
+                {
+                    ["type"] = "object",
+                    ["properties"] = new Dictionary<string, object>
+                    {
+                        ["ship_name"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "船名" }
+                    },
+                    ["required"] = new[] { "ship_name" }
+                }
+            }
+        };
+    }
+
+    private static List<Dictionary<string, object>> GetGeminiFunctionDeclarations()
+    {
+        var tools = GetToolDefinitions();
+        var declarations = new List<Dictionary<string, object>>();
+        foreach (var tool in tools)
+        {
+            var schema = (Dictionary<string, object>)tool["input_schema"];
+            declarations.Add(new Dictionary<string, object>
+            {
+                ["name"] = tool["name"],
+                ["description"] = (string)tool["description"],
+                ["parameters"] = schema
+            });
+        }
+        return declarations;
+    }
+
+    public static async Task<string> ExecuteToolAsync(string toolName, JsonElement args)
+    {
+        try
+        {
+            return toolName switch
+            {
+                "search_ship" => await ExecuteSearchShipAsync(args),
+                "search_commodity" => await ExecuteSearchCommodityAsync(args),
+                "search_item" => await ExecuteSearchItemAsync(args),
+                "search_mission" => await ExecuteSearchMissionAsync(args),
+                "search_price" => await ExecuteSearchPriceAsync(args),
+                "search_wiki" => await ExecuteSearchWikiAsync(args),
+                "search_pledge" => await FetchPledgeInfoAsync(args),
+                _ => $"[不明なツール: {toolName}]"
+            };
+        }
+        catch (Exception ex)
+        {
+            return $"[ツール実行エラー ({toolName}): {ex.Message}]";
+        }
+    }
+
+    private static async Task<string> ExecuteSearchShipAsync(JsonElement args)
+    {
+        var query = args.TryGetProperty("query", out var q) ? q.GetString() ?? "" : "";
+        var exact = args.TryGetProperty("exact", out var e) && e.GetBoolean();
+
+        var results = new List<string>();
+
+        var resp = await Http.GetStringAsync("https://api.uexcorp.space/2.0/vehicles");
+        using var doc = JsonDocument.Parse(resp);
+        if (!doc.RootElement.TryGetProperty("data", out var data)) return "[データ取得失敗]";
+
+        var resolvedName = ExtractShipName(query);
+
+        foreach (var v in data.EnumerateArray())
+        {
+            var name = v.GetProperty("name").GetString() ?? "";
+            var manufacturer = v.TryGetProperty("manufacturer_name", out var mfr) ? mfr.GetString() ?? "" : "";
+            var focus = v.TryGetProperty("focus", out var f) ? f.GetString() ?? "" : "";
+            var crew = v.TryGetProperty("crew", out var c) ? c.ToString() : "";
+            var cargo = v.TryGetProperty("scu", out var cg) ? cg.ToString() : "";
+            var price = v.TryGetProperty("price", out var p) ? p.ToString() : "";
+            var size = v.TryGetProperty("size", out var sz) ? sz.GetString() ?? "" : "";
+
+            bool match;
+            if (exact)
+                match = name.Equals(query, StringComparison.OrdinalIgnoreCase) ||
+                        (!string.IsNullOrEmpty(resolvedName) && name.Equals(resolvedName, StringComparison.OrdinalIgnoreCase));
+            else
+                match = name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                        (!string.IsNullOrEmpty(resolvedName) && name.Contains(resolvedName, StringComparison.OrdinalIgnoreCase));
+
+            if (match)
+                results.Add($"- {manufacturer} {name} | 役割: {focus} | 乗員: {crew} | カーゴ: {cargo} SCU | サイズ: {size} | 価格: {price} aUEC");
+        }
+
+        if (results.Count == 0) return $"'{query}' に該当する機体は見つかりませんでした。";
+        if (results.Count > 10)
+        {
+            var sb = new StringBuilder($"検索結果: {results.Count}件\n");
+            for (int i = 0; i < Math.Min(20, results.Count); i++)
+                sb.AppendLine($"{i + 1}. {results[i]}");
+            if (results.Count > 20) sb.AppendLine($"... 他{results.Count - 20}件");
+            return sb.ToString();
+        }
+
+        return string.Join("\n", results);
+    }
+
+    private static async Task<string> ExecuteSearchCommodityAsync(JsonElement args)
+    {
+        var name = args.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+        var system = args.TryGetProperty("system", out var s) ? s.GetString() : null;
+
+        var commResp = await Http.GetStringAsync("https://api.uexcorp.space/2.0/commodities");
+        using var commDoc = JsonDocument.Parse(commResp);
+        if (!commDoc.RootElement.TryGetProperty("data", out var commData)) return "[データ取得失敗]";
+
+        var resolvedName = name;
+        if (CommodityNameMap.TryGetValue(name, out var mapped)) resolvedName = mapped;
+
+        int? commodityId = null;
+        string commodityName = "";
+        foreach (var c in commData.EnumerateArray())
+        {
+            var cName = c.GetProperty("name").GetString() ?? "";
+            if (cName.Contains(resolvedName, StringComparison.OrdinalIgnoreCase))
+            {
+                commodityId = c.GetProperty("id").GetInt32();
+                commodityName = cName;
+                break;
+            }
+        }
+        if (commodityId == null) return $"'{name}' に該当する商品が見つかりませんでした。";
+
+        var priceResp = await Http.GetStringAsync($"https://api.uexcorp.space/2.0/commodities_prices?id_commodity={commodityId}");
+        using var priceDoc = JsonDocument.Parse(priceResp);
+        if (!priceDoc.RootElement.TryGetProperty("data", out var priceData)) return $"'{commodityName}' の価格データが見つかりませんでした。";
+
+        var sb = new StringBuilder($"商品: {commodityName}\n場所別価格:\n");
+        int count = 0;
+        foreach (var item in priceData.EnumerateArray())
+        {
+            var terminal = item.TryGetProperty("terminal_name", out var tn) ? tn.GetString() ?? "" : "";
+            var city = item.TryGetProperty("city_name", out var cn) ? cn.GetString() ?? "" : "";
+            var planet = item.TryGetProperty("planet_name", out var pn) ? pn.GetString() ?? "" : "";
+            var star = item.TryGetProperty("star_system_name", out var sn) ? sn.GetString() ?? "" : "";
+            var buy = item.TryGetProperty("price_buy", out var pb) && pb.ValueKind == JsonValueKind.Number ? pb.GetDouble() : 0;
+            var sell = item.TryGetProperty("price_sell", out var ps) && ps.ValueKind == JsonValueKind.Number ? ps.GetDouble() : 0;
+
+            if (!string.IsNullOrEmpty(system) && !star.Contains(system, StringComparison.OrdinalIgnoreCase)) continue;
+
+            if (buy > 0 || sell > 0)
+            {
+                var location = string.Join(" > ", new[] { star, planet, city, terminal }.Where(x => !string.IsNullOrEmpty(x)));
+                var priceInfo = new List<string>();
+                if (buy > 0) priceInfo.Add($"買値: {buy:0.##}");
+                if (sell > 0) priceInfo.Add($"売値: {sell:0.##}");
+                sb.AppendLine($"- {location} | {string.Join(" | ", priceInfo)} aUEC");
+                count++;
+            }
+        }
+
+        return count > 0 ? sb.ToString() : $"'{commodityName}' の価格データが見つかりませんでした。";
+    }
+
+    private static async Task<string> ExecuteSearchItemAsync(JsonElement args)
+    {
+        var query = args.TryGetProperty("query", out var q) ? q.GetString() ?? "" : "";
+        var category = args.TryGetProperty("category", out var c) ? c.GetString() : null;
+
+        int[] categoryIds;
+        if (!string.IsNullOrEmpty(category) && ItemCategoryMap.TryGetValue(category, out var ids))
+            categoryIds = ids;
+        else
+            categoryIds = new[] { 32, 33, 34, 35, 19, 21, 22, 23, 70, 79 };
+
+        var sb = new StringBuilder();
+        int total = 0;
+        foreach (var catId in categoryIds)
+        {
+            var resp = await Http.GetStringAsync($"https://api.uexcorp.space/2.0/items?id_category={catId}");
+            using var doc = JsonDocument.Parse(resp);
+            if (!doc.RootElement.TryGetProperty("data", out var data)) continue;
+            foreach (var item in data.EnumerateArray())
+            {
+                var name = item.GetProperty("name").GetString() ?? "";
+                if (!name.Contains(query, StringComparison.OrdinalIgnoreCase)) continue;
+                var cat = item.TryGetProperty("category", out var catProp) ? catProp.GetString() ?? "" : "";
+                var section = item.TryGetProperty("section", out var sec) ? sec.GetString() ?? "" : "";
+                var company = item.TryGetProperty("company_name", out var co) ? co.GetString() ?? "" : "";
+                var sz = item.TryGetProperty("size", out var szProp) ? szProp.GetString() ?? "" : "";
+                var grade = item.TryGetProperty("quality", out var qProp) ? qProp.ToString() : "";
+                sb.AppendLine($"- {name} | メーカー: {company} | カテゴリ: {section}/{cat} | サイズ: {sz} | グレード: {grade}");
+                if (++total >= 30) break;
+            }
+            if (total >= 30) break;
+        }
+
+        if (total == 0)
+        {
+            var scResult = await FetchScTradeItemAsync(query);
+            if (!string.IsNullOrEmpty(scResult)) return scResult;
+            return $"'{query}' に該当するアイテムが見つかりませんでした。";
+        }
+
+        return sb.ToString();
+    }
+
+    private static async Task<string> ExecuteSearchMissionAsync(JsonElement args)
+    {
+        var query = args.TryGetProperty("query", out var q) ? q.GetString() : null;
+        var system = args.TryGetProperty("system", out var s) ? s.GetString() : null;
+        return await FetchMissionsAsync(query, system);
+    }
+
+    private static async Task<string> ExecuteSearchPriceAsync(JsonElement args)
+    {
+        var itemName = args.TryGetProperty("item_name", out var n) ? n.GetString() ?? "" : "";
+        var system = args.TryGetProperty("system", out var s) ? s.GetString() : null;
+
+        int[] allCategoryIds = { 32, 33, 34, 35, 19, 21, 22, 23, 70, 79, 74 };
+        var matchedItems = new List<(int id, string name)>();
+
+        foreach (var catId in allCategoryIds)
+        {
+            var resp = await Http.GetStringAsync($"https://api.uexcorp.space/2.0/items?id_category={catId}");
+            using var doc = JsonDocument.Parse(resp);
+            if (!doc.RootElement.TryGetProperty("data", out var data)) continue;
+            foreach (var item in data.EnumerateArray())
+            {
+                var name = item.GetProperty("name").GetString() ?? "";
+                var id = item.GetProperty("id").GetInt32();
+                if (name.Contains(itemName, StringComparison.OrdinalIgnoreCase))
+                    matchedItems.Add((id, name));
+            }
+        }
+
+        if (matchedItems.Count == 0) return $"'{itemName}' に該当するアイテムが見つかりませんでした。";
+
+        var sb = new StringBuilder();
+        int count = 0;
+        foreach (var (itemId, iName) in matchedItems.Take(5))
+        {
+            var priceResp = await Http.GetStringAsync($"https://api.uexcorp.space/2.0/items_prices?id_item={itemId}");
+            using var priceDoc = JsonDocument.Parse(priceResp);
+            if (!priceDoc.RootElement.TryGetProperty("data", out var priceData)) continue;
+
+            sb.AppendLine($"【{iName}】");
+            foreach (var p in priceData.EnumerateArray())
+            {
+                var terminal = p.TryGetProperty("terminal_name", out var tn) ? tn.GetString() ?? "" : "";
+                var city = p.TryGetProperty("city_name", out var cn) ? cn.GetString() ?? "" : "";
+                var planet = p.TryGetProperty("planet_name", out var pn) ? pn.GetString() ?? "" : "";
+                var star = p.TryGetProperty("star_system_name", out var sn) ? sn.GetString() ?? "" : "";
+                var buy = p.TryGetProperty("price_buy", out var pb) && pb.ValueKind == JsonValueKind.Number ? pb.GetDouble() : 0;
+
+                if (!string.IsNullOrEmpty(system) && !star.Contains(system, StringComparison.OrdinalIgnoreCase)) continue;
+
+                if (buy > 0)
+                {
+                    var location = string.Join(" > ", new[] { star, planet, city, terminal }.Where(x => !string.IsNullOrEmpty(x)));
+                    sb.AppendLine($"  - {location} | 価格: {buy:0.##} aUEC");
+                    count++;
+                }
+            }
+        }
+
+        return count > 0 ? sb.ToString() : $"'{itemName}' の販売場所が見つかりませんでした。";
+    }
+
+    private static async Task<string> ExecuteSearchWikiAsync(JsonElement args)
+    {
+        var pageTitle = args.TryGetProperty("page_title", out var p) ? p.GetString() ?? "" : "";
+        var result = await FetchWikiShipDataAsync(pageTitle);
+        return result ?? $"Wiki ページ '{pageTitle}' が見つからないか、データがありませんでした。";
+    }
+
+    private static async Task<string> FetchPledgeInfoAsync(JsonElement args)
+    {
+        var shipName = args.TryGetProperty("ship_name", out var s) ? s.GetString() ?? "" : "";
+        return await FetchPledgeInfoAsync(shipName);
+    }
+
+    private static async Task<string> FetchPledgeInfoAsync(string shipName)
+    {
+        try
+        {
+            var sb = new StringBuilder();
+
+            var listUrl = "https://starcitizen.tools/api.php?action=parse&page=List_of_pledge_vehicles&prop=text&format=json";
+            var listResp = await Http.GetAsync(listUrl);
+            if (listResp.IsSuccessStatusCode)
+            {
+                var listJson = await listResp.Content.ReadAsStringAsync();
+                using var listDoc = JsonDocument.Parse(listJson);
+                if (listDoc.RootElement.TryGetProperty("parse", out var parse))
+                {
+                    var html = parse.GetProperty("text").GetProperty("*").GetString() ?? "";
+                    var rows = System.Text.RegularExpressions.Regex.Matches(html, @"<tr>(.*?)</tr>",
+                        System.Text.RegularExpressions.RegexOptions.Singleline);
+                    foreach (System.Text.RegularExpressions.Match row in rows)
+                    {
+                        var rowText = StripHtml(row.Groups[1].Value);
+                        if (rowText.Contains(shipName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            var cells = System.Text.RegularExpressions.Regex.Matches(row.Groups[1].Value, @"<td[^>]*>(.*?)</td>",
+                                System.Text.RegularExpressions.RegexOptions.Singleline);
+                            var cellValues = new List<string>();
+                            foreach (System.Text.RegularExpressions.Match cell in cells)
+                                cellValues.Add(StripHtml(cell.Groups[1].Value).Trim());
+                            if (cellValues.Count >= 3)
+                                sb.AppendLine($"プレッジ情報: {string.Join(" | ", cellValues)}");
+                        }
+                    }
+                }
+            }
+
+            var wikiTitle = shipName.Replace(" ", "_");
+            var escapedTitle = Uri.EscapeDataString(wikiTitle);
+            var pageUrl = $"https://starcitizen.tools/api.php?action=parse&page={escapedTitle}&prop=text&format=json";
+            var pageResp = await Http.GetAsync(pageUrl);
+            if (pageResp.IsSuccessStatusCode)
+            {
+                var pageJson = await pageResp.Content.ReadAsStringAsync();
+                using var pageDoc = JsonDocument.Parse(pageJson);
+                if (pageDoc.RootElement.TryGetProperty("parse", out var parse))
+                {
+                    var html = parse.GetProperty("text").GetProperty("*").GetString() ?? "";
+                    var plainText = StripHtml(html);
+                    var pledgePatterns = new[] { "pledge", "warbond", "standalone", "price", "USD", "$" };
+                    var lines = plainText.Split('\n');
+                    foreach (var line in lines)
+                    {
+                        var trimmed = line.Trim();
+                        if (trimmed.Length < 5) continue;
+                        foreach (var pat in pledgePatterns)
+                        {
+                            if (trimmed.Contains(pat, StringComparison.OrdinalIgnoreCase))
+                            {
+                                sb.AppendLine(trimmed);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            var disclaimer = "\n⚠️ Warbond の有無や船の販売状況は時期により変動します。最新の販売・割引情報は必ず RSI 公式サイト (https://robertsspaceindustries.com/pledge) でご確認ください。";
+            if (sb.Length == 0) return $"'{shipName}' のプレッジ情報が見つかりませんでした。{disclaimer}";
+            return $"=== {shipName} プレッジ情報 ===\n{sb}{disclaimer}";
+        }
+        catch (Exception ex)
+        {
+            return $"[プレッジ情報取得エラー: {ex.Message}]";
+        }
+    }
+
+    private static async Task<string> FetchMissionsAsync(string? query, string? system = null)
+    {
+        var sb = new StringBuilder();
+
+        try
+        {
+            var resp = await Http.GetStringAsync("https://api.uexcorp.space/2.0/contracts");
+            using var doc = JsonDocument.Parse(resp);
+            if (doc.RootElement.TryGetProperty("data", out var data))
+            {
+                int count = 0;
+                foreach (var item in data.EnumerateArray())
+                {
+                    var name = item.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                    var desc = item.TryGetProperty("description", out var d) ? d.GetString() ?? "" : "";
+                    var payout = item.TryGetProperty("payout", out var p) ? p.ToString() : "";
+                    var location = item.TryGetProperty("location", out var l) ? l.GetString() ?? "" : "";
+                    var contact = item.TryGetProperty("contact", out var c) ? c.GetString() ?? "" : "";
+
+                    if (!string.IsNullOrEmpty(query) &&
+                        !name.Contains(query, StringComparison.OrdinalIgnoreCase) &&
+                        !desc.Contains(query, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    if (!string.IsNullOrEmpty(system) &&
+                        !location.Contains(system, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    var truncDesc = desc.Length > 100 ? desc[..100] + "..." : desc;
+                    sb.AppendLine($"- {name} | 報酬: {payout} aUEC | 場所: {location} | 連絡先: {contact}");
+                    if (!string.IsNullOrEmpty(truncDesc)) sb.AppendLine($"  概要: {truncDesc}");
+                    if (++count >= 20) break;
+                }
+            }
+        }
+        catch { }
+
+        if (_gameDataExtractor?.IsReady == true)
+        {
+            try
+            {
+                var missionData = await _gameDataExtractor.QueryMissionsAsync(query ?? "");
+                if (!string.IsNullOrEmpty(missionData)) sb.AppendLine(missionData);
+            }
+            catch { }
+        }
+
+        if (sb.Length == 0) return "ミッション情報が見つかりませんでした。";
+        return sb.ToString();
     }
 
     public static async Task<string> FetchScDataAsync(string query)
@@ -872,15 +1379,11 @@ public class ChatService
 
     public static async Task<string> SendChatAsync(BackendConfig backend, List<ChatMessage> history, string scData)
     {
-        var systemMsg = ChatSystemPrompt;
-        if (!string.IsNullOrEmpty(scData))
-            systemMsg += $"\n\n--- Star Citizen データ ---\n{scData}";
-
         return backend.Type.ToLowerInvariant() switch
         {
-            "claude" => await SendClaudeChatAsync(backend, systemMsg, history),
-            "gemini" => await SendGeminiChatAsync(backend, systemMsg, history),
-            "ollama" => await SendOllamaChatAsync(backend, systemMsg, history),
+            "claude" => await SendClaudeChatAsync(backend, ChatSystemPrompt, history),
+            "gemini" => await SendGeminiChatAsync(backend, ChatSystemPrompt, history),
+            "ollama" => await SendOllamaChatAsync(backend, ChatSystemPrompt + (string.IsNullOrEmpty(scData) ? "" : $"\n\n--- Star Citizen データ ---\n{scData}"), history),
             _ => throw new ArgumentException($"Unknown backend: {backend.Type}")
         };
     }
@@ -891,43 +1394,119 @@ public class ChatService
         http.DefaultRequestHeaders.Add("x-api-key", config.ApiKey);
         http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
 
-        var messages = history.Select(m => new { role = m.Role, content = m.Content }).ToArray();
-
-        var body = new
+        var tools = GetToolDefinitions().Select(t => new Dictionary<string, object>
         {
-            model = config.Model,
-            max_tokens = 4096,
-            temperature = 0.7,
-            system,
-            messages
-        };
+            ["name"] = t["name"],
+            ["description"] = t["description"],
+            ["input_schema"] = t["input_schema"]
+        }).ToList();
 
-        var json = JsonSerializer.Serialize(body, new JsonSerializerOptions
+        var conversationMessages = new List<object>();
+        foreach (var m in history)
+            conversationMessages.Add(new Dictionary<string, object> { ["role"] = m.Role, ["content"] = m.Content });
+
+        for (int iteration = 0; iteration < 5; iteration++)
         {
-            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-        });
-
-        var resp = await http.PostAsync("https://api.anthropic.com/v1/messages",
-            new StringContent(json, Encoding.UTF8, "application/json"));
-
-        if (!resp.IsSuccessStatusCode)
-        {
-            var err = await resp.Content.ReadAsStringAsync();
-            var code = (int)resp.StatusCode;
-            if (code == 429 || code == 402 || code == 529 ||
-                err.Contains("rate_limit", StringComparison.OrdinalIgnoreCase) ||
-                err.Contains("credit", StringComparison.OrdinalIgnoreCase) ||
-                err.Contains("billing", StringComparison.OrdinalIgnoreCase) ||
-                err.Contains("overloaded", StringComparison.OrdinalIgnoreCase))
+            var body = new Dictionary<string, object>
             {
-                return "⚠️ Claude API のクレジットが不足しているか、レート制限に達しました。Anthropic コンソール (console.anthropic.com) でプランと残高を確認してください。";
+                ["model"] = config.Model,
+                ["max_tokens"] = 4096,
+                ["temperature"] = 0.7,
+                ["system"] = system,
+                ["messages"] = conversationMessages,
+                ["tools"] = tools
+            };
+
+            var json = JsonSerializer.Serialize(body, JsonOpts);
+            var resp = await http.PostAsync("https://api.anthropic.com/v1/messages",
+                new StringContent(json, Encoding.UTF8, "application/json"));
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                var err = await resp.Content.ReadAsStringAsync();
+                var code = (int)resp.StatusCode;
+                if (code == 429 || code == 402 || code == 529 ||
+                    err.Contains("rate_limit", StringComparison.OrdinalIgnoreCase) ||
+                    err.Contains("credit", StringComparison.OrdinalIgnoreCase) ||
+                    err.Contains("billing", StringComparison.OrdinalIgnoreCase) ||
+                    err.Contains("overloaded", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "⚠️ Claude API のクレジットが不足しているか、レート制限に達しました。Anthropic コンソール (console.anthropic.com) でプランと残高を確認してください。";
+                }
+                throw new HttpRequestException($"{code} - {err}");
             }
-            throw new HttpRequestException($"{code} - {err}");
+
+            var respJson = await resp.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(respJson);
+            var root = doc.RootElement;
+
+            var stopReason = root.TryGetProperty("stop_reason", out var sr) ? sr.GetString() ?? "" : "";
+            var contentArray = root.GetProperty("content");
+
+            if (stopReason == "tool_use")
+            {
+                var assistantContentBlocks = new List<object>();
+                var toolResults = new List<object>();
+
+                foreach (var block in contentArray.EnumerateArray())
+                {
+                    var blockType = block.GetProperty("type").GetString() ?? "";
+                    if (blockType == "text")
+                    {
+                        assistantContentBlocks.Add(new Dictionary<string, object>
+                        {
+                            ["type"] = "text",
+                            ["text"] = block.GetProperty("text").GetString() ?? ""
+                        });
+                    }
+                    else if (blockType == "tool_use")
+                    {
+                        var toolId = block.GetProperty("id").GetString() ?? "";
+                        var toolName = block.GetProperty("name").GetString() ?? "";
+                        var toolInput = block.GetProperty("input");
+
+                        assistantContentBlocks.Add(new Dictionary<string, object>
+                        {
+                            ["type"] = "tool_use",
+                            ["id"] = toolId,
+                            ["name"] = toolName,
+                            ["input"] = JsonSerializer.Deserialize<object>(toolInput.GetRawText())!
+                        });
+
+                        var toolResult = await ExecuteToolAsync(toolName, toolInput);
+                        toolResults.Add(new Dictionary<string, object>
+                        {
+                            ["type"] = "tool_result",
+                            ["tool_use_id"] = toolId,
+                            ["content"] = toolResult
+                        });
+                    }
+                }
+
+                conversationMessages.Add(new Dictionary<string, object>
+                {
+                    ["role"] = "assistant",
+                    ["content"] = assistantContentBlocks
+                });
+                conversationMessages.Add(new Dictionary<string, object>
+                {
+                    ["role"] = "user",
+                    ["content"] = toolResults
+                });
+
+                continue;
+            }
+
+            foreach (var block in contentArray.EnumerateArray())
+            {
+                if (block.GetProperty("type").GetString() == "text")
+                    return block.GetProperty("text").GetString() ?? "";
+            }
+
+            return "";
         }
 
-        var respJson = await resp.Content.ReadAsStringAsync();
-        using var doc = JsonDocument.Parse(respJson);
-        return doc.RootElement.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
+        return "[ツール呼び出し回数の上限に達しました]";
     }
 
     private static async Task<string> SendGeminiChatAsync(BackendConfig config, string system, List<ChatMessage> history)
@@ -935,48 +1514,123 @@ public class ChatService
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(300) };
         var url = $"https://generativelanguage.googleapis.com/v1beta/models/{config.Model}:generateContent?key={config.ApiKey}";
 
-        var contents = history.Select(m => new
-        {
-            role = m.Role == "assistant" ? "model" : "user",
-            parts = new[] { new { text = m.Content } }
-        }).ToArray();
+        var functionDeclarations = GetGeminiFunctionDeclarations();
 
-        var body = new
+        var conversationContents = new List<object>();
+        foreach (var m in history)
         {
-            systemInstruction = new { parts = new[] { new { text = system } } },
-            contents,
-            generationConfig = new { temperature = 0.7, maxOutputTokens = 4096 }
-        };
-
-        var json = JsonSerializer.Serialize(body, new JsonSerializerOptions
-        {
-            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-        });
-
-        var resp = await http.PostAsync(url, new StringContent(json, Encoding.UTF8, "application/json"));
-
-        if (!resp.IsSuccessStatusCode)
-        {
-            var err = await resp.Content.ReadAsStringAsync();
-            var code = (int)resp.StatusCode;
-            if (code == 429 || code == 403 ||
-                err.Contains("RESOURCE_EXHAUSTED", StringComparison.OrdinalIgnoreCase) ||
-                err.Contains("quota", StringComparison.OrdinalIgnoreCase) ||
-                err.Contains("billing", StringComparison.OrdinalIgnoreCase) ||
-                err.Contains("rate limit", StringComparison.OrdinalIgnoreCase))
+            conversationContents.Add(new Dictionary<string, object>
             {
-                return "⚠️ Gemini API のクレジットまたはクォータが不足しています。Google AI Studio (aistudio.google.com) でプランと使用量を確認してください。";
-            }
-            throw new HttpRequestException($"{code} - {err}");
+                ["role"] = m.Role == "assistant" ? "model" : "user",
+                ["parts"] = new[] { new Dictionary<string, object> { ["text"] = m.Content } }
+            });
         }
 
-        var respJson = await resp.Content.ReadAsStringAsync();
-        using var doc = JsonDocument.Parse(respJson);
-        return doc.RootElement
-            .GetProperty("candidates")[0]
-            .GetProperty("content")
-            .GetProperty("parts")[0]
-            .GetProperty("text").GetString() ?? "";
+        for (int iteration = 0; iteration < 5; iteration++)
+        {
+            var body = new Dictionary<string, object>
+            {
+                ["systemInstruction"] = new Dictionary<string, object>
+                {
+                    ["parts"] = new[] { new Dictionary<string, object> { ["text"] = system } }
+                },
+                ["contents"] = conversationContents,
+                ["generationConfig"] = new Dictionary<string, object>
+                {
+                    ["temperature"] = 0.7,
+                    ["maxOutputTokens"] = 4096
+                },
+                ["tools"] = new[] { new Dictionary<string, object> { ["function_declarations"] = functionDeclarations } }
+            };
+
+            var json = JsonSerializer.Serialize(body, JsonOpts);
+            var resp = await http.PostAsync(url, new StringContent(json, Encoding.UTF8, "application/json"));
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                var err = await resp.Content.ReadAsStringAsync();
+                var code = (int)resp.StatusCode;
+                if (code == 429 || code == 403 ||
+                    err.Contains("RESOURCE_EXHAUSTED", StringComparison.OrdinalIgnoreCase) ||
+                    err.Contains("quota", StringComparison.OrdinalIgnoreCase) ||
+                    err.Contains("billing", StringComparison.OrdinalIgnoreCase) ||
+                    err.Contains("rate limit", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "⚠️ Gemini API のクレジットまたはクォータが不足しています。Google AI Studio (aistudio.google.com) でプランと使用量を確認してください。";
+                }
+                throw new HttpRequestException($"{code} - {err}");
+            }
+
+            var respJson = await resp.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(respJson);
+            var candidate = doc.RootElement.GetProperty("candidates")[0];
+            var parts = candidate.GetProperty("content").GetProperty("parts");
+
+            var hasFunctionCall = false;
+            var modelParts = new List<object>();
+            var functionResponseParts = new List<object>();
+
+            foreach (var part in parts.EnumerateArray())
+            {
+                if (part.TryGetProperty("functionCall", out var fc))
+                {
+                    hasFunctionCall = true;
+                    var funcName = fc.GetProperty("name").GetString() ?? "";
+                    var funcArgs = fc.GetProperty("args");
+
+                    modelParts.Add(new Dictionary<string, object>
+                    {
+                        ["functionCall"] = new Dictionary<string, object>
+                        {
+                            ["name"] = funcName,
+                            ["args"] = JsonSerializer.Deserialize<object>(funcArgs.GetRawText())!
+                        }
+                    });
+
+                    var result = await ExecuteToolAsync(funcName, funcArgs);
+                    functionResponseParts.Add(new Dictionary<string, object>
+                    {
+                        ["functionResponse"] = new Dictionary<string, object>
+                        {
+                            ["name"] = funcName,
+                            ["response"] = new Dictionary<string, object>
+                            {
+                                ["content"] = result
+                            }
+                        }
+                    });
+                }
+                else if (part.TryGetProperty("text", out var textProp))
+                {
+                    modelParts.Add(new Dictionary<string, object> { ["text"] = textProp.GetString() ?? "" });
+                }
+            }
+
+            if (hasFunctionCall)
+            {
+                conversationContents.Add(new Dictionary<string, object>
+                {
+                    ["role"] = "model",
+                    ["parts"] = modelParts
+                });
+                conversationContents.Add(new Dictionary<string, object>
+                {
+                    ["role"] = "user",
+                    ["parts"] = functionResponseParts
+                });
+                continue;
+            }
+
+            foreach (var part in parts.EnumerateArray())
+            {
+                if (part.TryGetProperty("text", out var textProp))
+                    return textProp.GetString() ?? "";
+            }
+
+            return "";
+        }
+
+        return "[ツール呼び出し回数の上限に達しました]";
     }
 
     private static async Task<string> SendOllamaChatAsync(BackendConfig config, string system, List<ChatMessage> history)
