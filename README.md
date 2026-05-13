@@ -152,7 +152,25 @@ ollama pull gemma4:2b
 
 ## チャットタブ
 
-AI バックエンドを使って Star Citizen について日本語で質問できます。複数の外部データソースとローカルゲームファイルからリアルタイムに情報を取得し、AI のコンテキストとして提供します。
+AI バックエンドを使って Star Citizen について日本語で質問できます。Claude / Gemini では **AI Tool Use (Skills)** により、AI が質問内容を判断して必要なデータを自動取得します。Ollama は従来方式（事前データ取得）で動作します。
+
+### AI 検索スキル (Tool Use)
+
+Claude / Gemini 利用時、AI は以下のスキルを自動的に使い分けてデータを取得します。
+
+| スキル | 検索できる内容 | 質問例 |
+|---|---|---|
+| **search_ship** | 船・機体の検索（部分一致→番号付き候補リスト） | 「ホーネットについて教えて」「F7C mk2 のスペックは？」 |
+| **search_commodity** | 商品・資源の検索＋場所別価格 | 「Stanton でアルミが一番安いのは？」「ラナイトの売値は？」 |
+| **search_item** | 武器・シールド・QD・パワープラント等のコンポーネント検索 | 「S3 のリピーターを比較して」「最強のシールドは？」 |
+| **search_mission** | ミッション・契約の検索（UEX + Data.p4k DCB） | 「賞金稼ぎのミッション一覧」「報酬が高い契約は？」 |
+| **search_price** | アイテムの販売場所・価格 | 「M5A Cannon はどこで買える？」 |
+| **search_wiki** | Wiki からの船・アイテム詳細情報 | 「Carrack のハードポイント構成は？」 |
+| **search_pledge** | RSI プレッジ価格・Warbond 割引情報 | 「Corsair の値段は？」「Warbond ある？」 |
+
+> **候補提示**: 検索結果が複数ある場合、AI が番号付きリストで候補を提示します。番号で選択するか、別の名前を直接入力できます。
+
+> **⚠️ Warbond・販売情報について**: Warbond の有無や船の販売状況は時期により変動します。search_pledge の結果には公式サイト確認の注意が自動付与されますが、最新の販売・割引情報は必ず [RSI 公式サイト](https://robertsspaceindustries.com/pledge) でご確認ください。
 
 ### データソース
 
@@ -173,6 +191,21 @@ AI バックエンドを使って Star Citizen について日本語で質問で
 - チャットで質問すると、該当するエンティティの詳細をオンデマンドで Data.p4k から直接取得します（1〜2 秒）
 - 取得済みデータは SQLite にキャッシュされるため、同じ質問は即応答します
 - **ディスク消費は最小限** — 全データ抽出は行わず、必要な情報だけを都度取得します
+
+#### DCB クエリ対応レコードタイプ
+
+| レコードタイプ | 取得できる情報 |
+|---|---|
+| `EntityClassDefinition` | 船・車両・武器・全エンティティの基本定義 |
+| `SCItemShieldGeneratorParams` | シールドの最大HP・リジェネ速度 |
+| `SCItemQuantumDriveParams` | QD の燃料消費・ジャンプ距離・スプールアップ |
+| `SCItemWeaponComponentParams` | 武器の発射速度 |
+| `SAmmoContainerComponentParams` | 弾薬数・ダメージ種別（物理/エネルギー/ディストーション） |
+| `SCItemPowerPlantParams` | パワープラントのパラメータ |
+| `SCItemCoolerParams` | クーラーのパラメータ |
+| `MissionBrokerEntry` | ミッション定義（タイトル・難易度・報酬・依頼者） |
+| `ContractManager` | 契約管理画面の定義 |
+| `CommoditySubtype` | 商品・資源（名前・シンボル・揮発性） |
 
 ### StarCitizen API について
 
