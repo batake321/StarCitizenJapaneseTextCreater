@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ProjectDir = $PSScriptRoot
 $ProjectName = "StarCitizenJapaneseTextCreater"
-$PublishDir = Join-Path $ProjectDir "publish"
+$PublishDir = "$ProjectDir\publish"
 $ZipName = "$ProjectName-v$Version-win-x64.zip"
 $ZipPath = Join-Path $ProjectDir $ZipName
 $Repo = "batake321/StarCitizenJapaneseTextCreater"

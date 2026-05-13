@@ -2,6 +2,7 @@ bin/
 obj/
 work/
 publish/
+*publish/
 *.user
 *.zip
 .vs/
