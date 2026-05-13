@@ -13,21 +13,3 @@ public class TranslationEntry
     [JsonPropertyName("ja")]
     public string? Japanese { get; set; }
 }
-
-public class BatchInputItem
-{
-    [JsonPropertyName("k")]
-    public string Key { get; set; } = "";
-
-    [JsonPropertyName("e")]
-    public string English { get; set; } = "";
-}
-
-public class BatchOutputItem
-{
-    [JsonPropertyName("k")]
-    public string Key { get; set; } = "";
-
-    [JsonPropertyName("j")]
-    public string Japanese { get; set; } = "";
-}

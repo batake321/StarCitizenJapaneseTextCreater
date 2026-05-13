@@ -1,16 +1,19 @@
-using System.Text.Json;
-using System.Text.RegularExpressions;
+using System.Text;
 
 namespace StarCitizenJapaneseTextCreater;
 
 public abstract class TranslationBackend
 {
     public string Name { get; }
+    public string ModelName { get; }
     public int BatchSize { get; }
+    public string TranslatorLabel => $"{Name}/{ModelName}";
     protected readonly HttpClient Http;
 
-    protected static readonly string SystemPrompt =
+    private static readonly string BaseSystemPrompt =
         "あなたはゲーム「Star Citizen」のローカライズ翻訳者です。英語テキストを日本語に翻訳してください。\n\n" +
+        "重要：ゲームの雰囲気を損なわないように、原文の英語のニュアンスを活かした自然な日本語に訳してください。\n" +
+        "SFゲームにふさわしい語調を保ち、直訳ではなく、プレイヤーが没入できる翻訳を心がけてください。\n\n" +
         "ルール：\n" +
         "1. 地名（惑星名、星系名、都市名、ステーション名）は英語のまま\n" +
         "2. 船の名前・メーカー名は英語のまま\n" +
@@ -19,83 +22,95 @@ public abstract class TranslationBackend
         "5. %ls %s ~action(xxx) @xxx ~mission(xxx) <EM4> </EM4> 等のタグやプレースホルダーはそのまま保持\n" +
         "6. 空文字・数字のみ・記号のみはそのまま返す\n" +
         "7. \\nは改行として保持\n\n" +
-        "入力: JSON配列 [{\"k\":\"キー\",\"e\":\"英語\"},...]\n" +
-        "出力: JSON配列 [{\"k\":\"キー\",\"j\":\"日本語\"},...]\n" +
-        "必ずJSON配列のみ出力。説明不要。";
+        "入力: 1行1エントリ、タブ区切り「キー<TAB>英語テキスト」\n" +
+        "出力: 1行1エントリ、タブ区切り「キー<TAB>日本語テキスト」\n" +
+        "入力と同じ行数・同じキーで、タブ区切りの翻訳結果のみ出力。説明や装飾は不要。";
 
-    protected TranslationBackend(string name, int batchSize)
+    private static List<(string English, string Japanese)>? _glossary;
+
+    public static void SetGlossary(List<(string English, string Japanese)>? glossary)
+    {
+        _glossary = glossary;
+    }
+
+    protected static string SystemPrompt
+    {
+        get
+        {
+            if (_glossary == null || _glossary.Count == 0)
+                return BaseSystemPrompt;
+
+            var sb = new StringBuilder(BaseSystemPrompt);
+            sb.Append("\n\n用語集（以下の英語は必ず指定の日本語に翻訳すること）：\n");
+            foreach (var (en, ja) in _glossary)
+                sb.Append($"・{en} → {ja}\n");
+            return sb.ToString();
+        }
+    }
+
+    protected TranslationBackend(string name, string modelName, int batchSize)
     {
         Name = name;
+        ModelName = modelName;
         BatchSize = batchSize;
         Http = new HttpClient { Timeout = TimeSpan.FromSeconds(300) };
     }
 
     public abstract Task<Dictionary<string, string>?> TranslateAsync(List<TranslationEntry> batch);
 
-    protected static Dictionary<string, string>? ParseResponse(string text)
+    protected static Dictionary<string, string>? ParseResponse(string text, string backendName = "")
     {
-        var arr = ExtractJsonArray(text);
-        if (arr == null) return null;
-
         var result = new Dictionary<string, string>();
-        foreach (var item in arr)
-        {
-            if (item.Key.Length > 0 && item.Japanese.Length > 0)
-                result[item.Key] = item.Japanese;
-        }
-        return result.Count > 0 ? result : null;
-    }
-
-    protected static List<BatchOutputItem>? ExtractJsonArray(string text)
-    {
-        text = text.Trim();
 
         // Strip markdown code fences
-        if (text.StartsWith("```"))
+        text = StripCodeFences(text).Trim();
+
+        foreach (var line in text.Split('\n'))
         {
-            var lines = text.Split('\n');
-            var inner = new List<string>();
-            bool started = false;
-            foreach (var line in lines)
-            {
-                if (line.StartsWith("```") && !started) { started = true; continue; }
-                if (line.StartsWith("```") && started) break;
-                if (started) inner.Add(line);
-            }
-            text = string.Join("\n", inner);
+            var trimmed = line.TrimEnd('\r').Trim();
+            if (string.IsNullOrEmpty(trimmed)) continue;
+
+            var tabIdx = trimmed.IndexOf('\t');
+            if (tabIdx <= 0) continue;
+
+            var key = trimmed[..tabIdx].Trim();
+            var ja = trimmed[(tabIdx + 1)..].Trim();
+            if (key.Length > 0 && ja.Length > 0)
+                result[key] = ja;
         }
 
-        var start = text.IndexOf('[');
-        var end = text.LastIndexOf(']') + 1;
-        if (start < 0 || end <= start) return null;
-
-        var candidate = text[start..end];
-
-        // Try direct parse
-        try { return JsonSerializer.Deserialize<List<BatchOutputItem>>(candidate); }
-        catch (JsonException) { }
-
-        // Fix trailing comma
-        var fixed_ = Regex.Replace(candidate, @",\s*\]", "]");
-        try { return JsonSerializer.Deserialize<List<BatchOutputItem>>(fixed_); }
-        catch (JsonException) { }
-
-        // Truncate to last complete object
-        var lastBrace = candidate.LastIndexOf('}');
-        if (lastBrace > 0)
+        if (result.Count == 0)
         {
-            var truncated = candidate[..(lastBrace + 1)] + "]";
-            try { return JsonSerializer.Deserialize<List<BatchOutputItem>>(truncated); }
-            catch (JsonException) { }
+            var preview = text.Length > 300 ? text[..300] + "..." : text;
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [{backendName}] パース失敗 (0行): {preview}");
+            return null;
         }
 
-        return null;
+        return result;
+    }
+
+    private static string StripCodeFences(string text)
+    {
+        if (!text.TrimStart().StartsWith("```")) return text;
+
+        var lines = text.Split('\n');
+        var inner = new List<string>();
+        bool started = false;
+        foreach (var line in lines)
+        {
+            if (line.TrimStart().StartsWith("```") && !started) { started = true; continue; }
+            if (line.TrimStart().StartsWith("```") && started) break;
+            if (started) inner.Add(line);
+        }
+        return string.Join("\n", inner);
     }
 
     protected static string BuildUserMessage(List<TranslationEntry> batch)
     {
-        var items = batch.Select(e => new BatchInputItem { Key = e.Key, English = e.English }).ToList();
-        return JsonSerializer.Serialize(items, new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+        var sb = new StringBuilder();
+        foreach (var e in batch)
+            sb.AppendLine($"{e.Key}\t{e.English}");
+        return sb.ToString();
     }
 
     public static TranslationBackend Create(BackendConfig config)

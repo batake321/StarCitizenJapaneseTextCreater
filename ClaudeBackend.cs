@@ -8,7 +8,7 @@ public class ClaudeBackend : TranslationBackend
     private readonly string _apiKey;
     private readonly string _model;
 
-    public ClaudeBackend(BackendConfig config) : base(config.Name, config.BatchSize)
+    public ClaudeBackend(BackendConfig config) : base(config.Name, config.Model, config.BatchSize)
     {
         _apiKey = config.ApiKey;
         _model = config.Model;
@@ -35,13 +35,18 @@ public class ClaudeBackend : TranslationBackend
         });
         var content = new StringContent(json, Encoding.UTF8, "application/json");
 
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [{Name}] POST api.anthropic.com (model={_model}, batch={batch.Count})");
         var resp = await Http.PostAsync("https://api.anthropic.com/v1/messages", content);
-        resp.EnsureSuccessStatusCode();
+        if (!resp.IsSuccessStatusCode)
+        {
+            var errBody = await resp.Content.ReadAsStringAsync();
+            throw new HttpRequestException($"{(int)resp.StatusCode} {resp.ReasonPhrase} - {errBody}");
+        }
 
         var respJson = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(respJson);
         var text = doc.RootElement.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
 
-        return ParseResponse(text);
+        return ParseResponse(text, Name);
     }
 }

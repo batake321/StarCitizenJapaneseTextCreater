@@ -8,7 +8,7 @@ public class OllamaBackend : TranslationBackend
     private readonly string _baseUrl;
     private readonly string _model;
 
-    public OllamaBackend(BackendConfig config) : base(config.Name, config.BatchSize)
+    public OllamaBackend(BackendConfig config) : base(config.Name, config.Model, config.BatchSize)
     {
         _baseUrl = config.BaseUrl.TrimEnd('/');
         _model = config.Model;
@@ -37,15 +37,25 @@ public class OllamaBackend : TranslationBackend
         });
         var content = new StringContent(json, Encoding.UTF8, "application/json");
 
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [{Name}] POST {url} (model={_model}, batch={batch.Count})");
         var resp = await Http.PostAsync(url, content);
-        resp.EnsureSuccessStatusCode();
+        if (!resp.IsSuccessStatusCode)
+        {
+            var errBody = await resp.Content.ReadAsStringAsync();
+            throw new HttpRequestException($"{(int)resp.StatusCode} {resp.ReasonPhrase} - URL: {url} - {errBody}");
+        }
 
         var respJson = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(respJson);
-        var text = doc.RootElement
-            .GetProperty("message")
-            .GetProperty("content").GetString() ?? "";
 
-        return ParseResponse(text);
+        var msg = doc.RootElement.GetProperty("message");
+        var text = msg.GetProperty("content").GetString() ?? "";
+
+        if (msg.TryGetProperty("thinking", out _) && string.IsNullOrWhiteSpace(text))
+        {
+            text = "[]";
+        }
+
+        return ParseResponse(text, Name);
     }
 }

@@ -8,7 +8,7 @@ public class GeminiBackend : TranslationBackend
     private readonly string _apiKey;
     private readonly string _model;
 
-    public GeminiBackend(BackendConfig config) : base(config.Name, config.BatchSize)
+    public GeminiBackend(BackendConfig config) : base(config.Name, config.Model, config.BatchSize)
     {
         _apiKey = config.ApiKey;
         _model = config.Model;
@@ -57,6 +57,6 @@ public class GeminiBackend : TranslationBackend
             .GetProperty("parts")[0]
             .GetProperty("text").GetString() ?? "";
 
-        return ParseResponse(text);
+        return ParseResponse(text, Name);
     }
 }
