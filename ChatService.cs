@@ -28,6 +28,10 @@ public class ChatService
         "- 検索結果が複数ある場合は、番号付きリストで候補を提示してください\n" +
         "- ユーザーが番号で選択したら、その候補の詳細を取得してください\n" +
         "- 「その他」で直接入力も可能にしてください\n\n" +
+        "【価格データのルール】\n" +
+        "- ツールから取得した価格は正確な数値です。絶対に独自の数値を作らず、ツールが返した数値をそのまま使ってください\n" +
+        "- 「購入場所」はプレイヤーが商品を買える場所（price_sell）、「売却場所」はプレイヤーが商品を売れる場所（price_buy）です\n" +
+        "- 前の質問の続きでも、必ずツールを再呼出しして最新データを取得してください\n\n" +
         "回答は簡潔で分かりやすい日本語でお願いします。\n" +
         "憶測で回答しないでください。データに記載がなく、確信が持てない場合は「わかりません」と正直に答えてください。";
 
@@ -306,30 +310,44 @@ public class ChatService
         using var priceDoc = JsonDocument.Parse(priceResp);
         if (!priceDoc.RootElement.TryGetProperty("data", out var priceData)) return $"'{commodityName}' の価格データが見つかりませんでした。";
 
-        var sb = new StringBuilder($"商品: {commodityName}\n場所別価格:\n");
-        int count = 0;
+        var buyLocations = new List<(string location, double price)>();
+        var sellLocations = new List<(string location, double price)>();
+
         foreach (var item in priceData.EnumerateArray())
         {
             var terminal = item.TryGetProperty("terminal_name", out var tn) ? tn.GetString() ?? "" : "";
             var city = item.TryGetProperty("city_name", out var cn) ? cn.GetString() ?? "" : "";
             var planet = item.TryGetProperty("planet_name", out var pn) ? pn.GetString() ?? "" : "";
             var star = item.TryGetProperty("star_system_name", out var sn) ? sn.GetString() ?? "" : "";
-            var buy = item.TryGetProperty("price_buy", out var pb) && pb.ValueKind == JsonValueKind.Number ? pb.GetDouble() : 0;
-            var sell = item.TryGetProperty("price_sell", out var ps) && ps.ValueKind == JsonValueKind.Number ? ps.GetDouble() : 0;
+            var priceBuy = item.TryGetProperty("price_buy", out var pb) && pb.ValueKind == JsonValueKind.Number ? pb.GetDouble() : 0;
+            var priceSell = item.TryGetProperty("price_sell", out var ps) && ps.ValueKind == JsonValueKind.Number ? ps.GetDouble() : 0;
 
             if (!string.IsNullOrEmpty(system) && !star.Contains(system, StringComparison.OrdinalIgnoreCase)) continue;
 
-            if (buy > 0 || sell > 0)
-            {
-                var location = string.Join(" > ", new[] { star, planet, city, terminal }.Where(x => !string.IsNullOrEmpty(x)));
-                var priceInfo = new List<string>();
-                if (buy > 0) priceInfo.Add($"買値: {buy:0.##}");
-                if (sell > 0) priceInfo.Add($"売値: {sell:0.##}");
-                sb.AppendLine($"- {location} | {string.Join(" | ", priceInfo)} aUEC");
-                count++;
-            }
+            var location = string.Join(" > ", new[] { star, planet, city, terminal }.Where(x => !string.IsNullOrEmpty(x)));
+            if (priceSell > 0) buyLocations.Add((location, priceSell));
+            if (priceBuy > 0) sellLocations.Add((location, priceBuy));
         }
 
+        var sb = new StringBuilder($"商品: {commodityName}");
+        if (!string.IsNullOrEmpty(system)) sb.Append($" (フィルタ: {system}星系)");
+        sb.AppendLine();
+
+        if (buyLocations.Count > 0)
+        {
+            sb.AppendLine($"\n【購入場所】(安い順 — プレイヤーが買える場所)");
+            foreach (var (loc, price) in buyLocations.OrderBy(x => x.price))
+                sb.AppendLine($"- {loc} | {price:0} aUEC");
+        }
+
+        if (sellLocations.Count > 0)
+        {
+            sb.AppendLine($"\n【売却場所】(高い順 — プレイヤーが売れる場所)");
+            foreach (var (loc, price) in sellLocations.OrderByDescending(x => x.price))
+                sb.AppendLine($"- {loc} | {price:0} aUEC");
+        }
+
+        int count = buyLocations.Count + sellLocations.Count;
         var uexResult = count > 0 ? sb.ToString() : $"'{commodityName}' の価格データが見つかりませんでした。";
         if (!string.IsNullOrEmpty(dcbCommodityResult))
             return dcbCommodityResult + "\n" + uexResult;
@@ -1101,31 +1119,40 @@ public class ChatService
                 }
             }
 
-            var sb = new StringBuilder($"=== UEX 場所別価格: {commodityName}{(systemFilter != null ? $" ({systemFilter}系のみ)" : "")} ===\n");
-            int count = 0;
+            var buyLocs = new List<(string loc, double price)>();
+            var sellLocs = new List<(string loc, double price)>();
+
             foreach (var item in priceData.EnumerateArray())
             {
                 var terminal = item.TryGetProperty("terminal_name", out var tn) ? tn.GetString() ?? "" : "";
                 var city = item.TryGetProperty("city_name", out var cn) ? cn.GetString() ?? "" : "";
                 var planet = item.TryGetProperty("planet_name", out var pn) ? pn.GetString() ?? "" : "";
                 var star = item.TryGetProperty("star_system_name", out var sn) ? sn.GetString() ?? "" : "";
-                var buy = item.TryGetProperty("price_buy", out var pb) && pb.ValueKind == JsonValueKind.Number ? pb.GetDouble() : 0;
-                var sell = item.TryGetProperty("price_sell", out var ps) && ps.ValueKind == JsonValueKind.Number ? ps.GetDouble() : 0;
+                var priceBuy = item.TryGetProperty("price_buy", out var pb) && pb.ValueKind == JsonValueKind.Number ? pb.GetDouble() : 0;
+                var priceSell = item.TryGetProperty("price_sell", out var ps) && ps.ValueKind == JsonValueKind.Number ? ps.GetDouble() : 0;
 
                 if (systemFilter != null && !star.Contains(systemFilter, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                if (buy > 0 || sell > 0)
-                {
-                    var location = string.Join(" > ", new[] { star, planet, city, terminal }.Where(s => !string.IsNullOrEmpty(s)));
-                    var priceInfo = new List<string>();
-                    if (buy > 0) priceInfo.Add($"買値: {buy:0.##}");
-                    if (sell > 0) priceInfo.Add($"売値: {sell:0.##}");
-                    sb.AppendLine($"- {location} | {string.Join(" | ", priceInfo)} aUEC");
-                    count++;
-                }
+                var location = string.Join(" > ", new[] { star, planet, city, terminal }.Where(s => !string.IsNullOrEmpty(s)));
+                if (priceSell > 0) buyLocs.Add((location, priceSell));
+                if (priceBuy > 0) sellLocs.Add((location, priceBuy));
             }
 
+            var sb = new StringBuilder($"=== UEX 場所別価格: {commodityName}{(systemFilter != null ? $" ({systemFilter}星系のみ)" : "")} ===\n");
+            if (buyLocs.Count > 0)
+            {
+                sb.AppendLine("\n【購入場所】(安い順 — プレイヤーが買える場所)");
+                foreach (var (loc, price) in buyLocs.OrderBy(x => x.price))
+                    sb.AppendLine($"- {loc} | {price:0} aUEC");
+            }
+            if (sellLocs.Count > 0)
+            {
+                sb.AppendLine("\n【売却場所】(高い順 — プレイヤーが売れる場所)");
+                foreach (var (loc, price) in sellLocs.OrderByDescending(x => x.price))
+                    sb.AppendLine($"- {loc} | {price:0} aUEC");
+            }
+            int count = buyLocs.Count + sellLocs.Count;
             return count > 0 ? sb.ToString() : $"[UEX: '{commodityName}' の場所別価格データは見つかりませんでした]";
         }
         catch (Exception ex)
