@@ -5,5 +5,6 @@ publish/
 *publish/
 *.user
 *.zip
+!db_backup/*.zip
 .vs/
 tools/
