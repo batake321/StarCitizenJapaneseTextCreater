@@ -13,6 +13,13 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        if (e.Args.Length >= 2 && e.Args[0] == "--export-backup")
+        {
+            RunBackupExport(e.Args[1]);
+            Shutdown(0);
+            return;
+        }
+
         var appDataDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "StarCitizenJapaneseTextCreater");
@@ -58,6 +65,60 @@ public partial class App : Application
         return Directory.GetDirectories(parent)
             .Where(d => File.Exists(Path.Combine(d, "Data.p4k")))
             .ToList();
+    }
+
+    private void RunBackupExport(string outputDir)
+    {
+        var appDataDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "StarCitizenJapaneseTextCreater");
+        var configPath = Path.Combine(appDataDir, "appsettings.json");
+        var exeLocalConfig = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+
+        var configBuilder = new ConfigurationBuilder()
+            .SetBasePath(AppContext.BaseDirectory)
+            .AddJsonFile("appsettings.json", optional: false)
+            .AddJsonFile(configPath, optional: true, reloadOnChange: false);
+        var config = configBuilder.Build().Get<AppConfig>() ?? new AppConfig();
+
+        var workDir = string.IsNullOrEmpty(config.WorkingDirectory) ? @"C:\temp" : config.WorkingDirectory;
+        var translationDb = Path.Combine(workDir, "translations.db");
+        var indexDb = Path.Combine(workDir, "gamedata_cache.db");
+
+        Directory.CreateDirectory(outputDir);
+
+        var categories = new[] { BackupCategory.Translations, BackupCategory.Glossary, BackupCategory.Index };
+        var names = new Dictionary<BackupCategory, string>
+        {
+            [BackupCategory.Translations] = "translations",
+            [BackupCategory.Glossary] = "glossary",
+            [BackupCategory.Index] = "index"
+        };
+
+        foreach (var cat in categories)
+        {
+            var catDir = Path.Combine(outputDir, names[cat]);
+            Directory.CreateDirectory(catDir);
+            var outPath = Path.Combine(catDir, $"{names[cat]}.sql.gz");
+            DatabaseBackupService.ExportAsync(translationDb, indexDb, outPath, [cat],
+                s => Console.WriteLine($"  {s}")).Wait();
+
+            if (File.Exists(outPath) && new FileInfo(outPath).Length > 30)
+                Console.WriteLine($"{names[cat]}: {new FileInfo(outPath).Length / 1024.0:N0} KB -> {outPath}");
+            else
+            {
+                if (File.Exists(outPath)) File.Delete(outPath);
+                Console.WriteLine($"{names[cat]}: no data");
+            }
+        }
+
+        var allPath = Path.Combine(outputDir, "all.sql.gz");
+        DatabaseBackupService.ExportAsync(translationDb, indexDb, allPath, categories,
+            s => Console.WriteLine($"  {s}")).Wait();
+        if (File.Exists(allPath) && new FileInfo(allPath).Length > 30)
+            Console.WriteLine($"all: {new FileInfo(allPath).Length / 1024.0:N0} KB -> {allPath}");
+
+        Console.WriteLine("Export complete.");
     }
 
     private static List<string> DetectFromLauncherLog()

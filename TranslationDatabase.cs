@@ -6,6 +6,7 @@ namespace StarCitizenJapaneseTextCreater;
 public class TranslationDatabase : IDisposable
 {
     private readonly SqliteConnection _conn;
+    public SqliteConnection Connection => _conn;
 
     public TranslationDatabase(string dbPath)
     {
@@ -129,7 +130,16 @@ public class TranslationDatabase : IDisposable
             VALUES ($key, $en, $ja, $src, $tr)
             ON CONFLICT(key) DO UPDATE SET
                 english = excluded.english,
-                japanese = CASE WHEN excluded.japanese IS NOT NULL AND excluded.japanese != '' THEN excluded.japanese ELSE translations.japanese END,
+                japanese = CASE
+                    WHEN excluded.japanese IS NOT NULL AND excluded.japanese != '' THEN excluded.japanese
+                    WHEN translations.english != excluded.english THEN NULL
+                    ELSE translations.japanese
+                END,
+                source = CASE
+                    WHEN excluded.japanese IS NOT NULL AND excluded.japanese != '' THEN excluded.source
+                    WHEN translations.english != excluded.english AND translations.japanese IS NOT NULL AND translations.japanese != '' THEN 'stale'
+                    ELSE translations.source
+                END,
                 modified_at = datetime('now', 'localtime')
             """;
         var pKey = cmd.Parameters.Add("$key", SqliteType.Text);

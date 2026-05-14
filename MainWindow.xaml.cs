@@ -215,7 +215,23 @@ public partial class MainWindow : Window
             App.Config.Translation.Backends = dlg.Result;
             SaveConfigToFile();
             UpdateBackendSummary();
+            RefreshChatBackends();
         }
+    }
+
+    private void RefreshChatBackends()
+    {
+        var prevSelected = cmbChatBackend.SelectedItem as string;
+        cmbChatBackend.Items.Clear();
+        foreach (var b in App.Config.Translation.Backends)
+        {
+            if (b.Enabled)
+                cmbChatBackend.Items.Add($"{b.Name} ({b.Model})");
+        }
+        if (prevSelected != null && cmbChatBackend.Items.Contains(prevSelected))
+            cmbChatBackend.SelectedItem = prevSelected;
+        else if (cmbChatBackend.Items.Count > 0)
+            cmbChatBackend.SelectedIndex = 0;
     }
 
     private void UpdateBackendSummary()
@@ -321,6 +337,15 @@ public partial class MainWindow : Window
 
                     english ??= GlobalIniParser.Parse(EnPath);
                     japanese ??= GlobalIniParser.Parse(JaPath);
+
+                    // 前回中断分の翻訳結果をDBに取り込む
+                    if (File.Exists(TranslatedPath))
+                    {
+                        Log("前回の未保存翻訳をDBに取り込み中...");
+                        using var importDb = new TranslationDatabase(DbPath);
+                        importDb.ImportAiTranslations(TranslatedPath);
+                        File.Delete(TranslatedPath);
+                    }
 
                     // Always rebuild from DB to pick up previously failed entries
                     if (File.Exists(ProgressPath)) File.Delete(ProgressPath);
@@ -1130,6 +1155,85 @@ public partial class MainWindow : Window
         }
     }
 
+    private string IndexDbPath => _gameDataExtractor?.DbPath ?? Path.Combine(WorkDir, "gamedata_cache.db");
+
+    private async void ExportDb_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "データベースのエクスポート先",
+            Filter = "バックアップファイル (*.sql.gz)|*.sql.gz",
+            FileName = $"sc_japanese_backup_{DateTime.Now:yyyyMMdd_HHmmss}.sql.gz"
+        };
+        if (dlg.ShowDialog() != true) return;
+
+        try
+        {
+            txtBackupStatus.Text = "エクスポート中...";
+            var categories = new[] { BackupCategory.Translations, BackupCategory.Glossary, BackupCategory.Index };
+            await DatabaseBackupService.ExportAsync(DbPath, IndexDbPath, dlg.FileName, categories,
+                s => Dispatcher.Invoke(() => txtBackupStatus.Text = s));
+            var size = new FileInfo(dlg.FileName).Length;
+            txtBackupStatus.Text = $"エクスポート完了 ({size / 1024.0:N0} KB)";
+            MessageBox.Show($"バックアップを保存しました。\n{dlg.FileName}\n({size / 1024.0:N0} KB)", "エクスポート完了");
+        }
+        catch (Exception ex)
+        {
+            txtBackupStatus.Text = "";
+            MessageBox.Show($"エクスポートに失敗しました: {ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void ImportDb_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "バックアップファイルの選択",
+            Filter = "バックアップファイル (*.sql.gz)|*.sql.gz|すべてのファイル (*.*)|*.*"
+        };
+        if (dlg.ShowDialog() != true) return;
+
+        try
+        {
+            txtBackupStatus.Text = "ファイルを解析中...";
+            var contents = await DatabaseBackupService.InspectAsync(dlg.FileName);
+            if (contents.Count == 0)
+            {
+                txtBackupStatus.Text = "";
+                MessageBox.Show("バックアップファイルにデータが見つかりませんでした。", "エラー", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var selectDlg = new ImportSelectionDialog { Owner = this };
+            selectDlg.SetFileInfo(Path.GetFileName(dlg.FileName), new FileInfo(dlg.FileName).Length, contents);
+            if (selectDlg.ShowDialog() != true)
+            {
+                txtBackupStatus.Text = "";
+                return;
+            }
+
+            txtBackupStatus.Text = "インポート中...";
+            await DatabaseBackupService.ImportAsync(dlg.FileName, DbPath, IndexDbPath,
+                selectDlg.SelectedCategories, selectDlg.Mode,
+                s => Dispatcher.Invoke(() => txtBackupStatus.Text = s));
+
+            txtBackupStatus.Text = "インポート完了";
+            UpdateDbPathDisplay();
+
+            if (selectDlg.SelectedCategories.Contains(BackupCategory.Translations))
+                RefreshEditor();
+            if (selectDlg.SelectedCategories.Contains(BackupCategory.Glossary))
+                LoadGlossary();
+
+            MessageBox.Show("インポートが完了しました。", "インポート完了");
+        }
+        catch (Exception ex)
+        {
+            txtBackupStatus.Text = "";
+            MessageBox.Show($"インポートに失敗しました: {ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private void ClearDb_Click(object sender, RoutedEventArgs e)
     {
         if (!File.Exists(DbPath))
@@ -1239,13 +1343,17 @@ public partial class MainWindow : Window
         if (cmbChatBackend.Items.Count > 0)
             cmbChatBackend.SelectedIndex = 0;
 
-        _chatBubbles.Add(new ChatBubble
-        {
-            Text = "Star Citizen について質問してください。\nUEX API・SC Trade Tools・Wiki・ゲームファイルから最新データを取得して回答します。",
-            IsUser = false
-        });
+        var welcomeLines = new List<string> { "Star Citizen について質問してください。\nUEX API・SC Trade Tools・Wiki・ゲームファイルから最新データを取得して回答します。" };
+
+        if (!App.Config.Translation.Backends.Any(b => b.Enabled))
+            welcomeLines.Add("\n⚠️ AI バックエンドが未設定です。設定タブの「AI 設定を開く」から Claude / Gemini / Ollama を設定してください。");
 
         InitGameDataExtractor();
+
+        if (_gameDataExtractor != null && !_gameDataExtractor.HasStructuredData())
+            welcomeLines.Add("\n💡 ミッション・契約の検索には、設定タブの「インデックス構築」の実行が必要です（約30秒）。");
+
+        _chatBubbles.Add(new ChatBubble { Text = string.Join("", welcomeLines), IsUser = false });
     }
 
     private void InitGameDataExtractor()
@@ -1256,10 +1364,21 @@ public partial class MainWindow : Window
         _gameDataExtractor = new GameDataExtractor(workDir);
         ChatService.SetGameDataExtractor(_gameDataExtractor);
         ChatService.LogDirectory = workDir;
+        ChatService.SetTranslationDbPath(DbPath);
+
+        try
+        {
+            var queryService = new GameDataQueryService(_gameDataExtractor.DbPath);
+            ChatService.SetGameDataQueryService(queryService);
+        }
+        catch { }
 
         var ver = _gameDataExtractor.GetCachedVersion();
         if (ver != null)
-            txtGameDataStatus.Text = $"インデックス済み ({ver})";
+        {
+            var updateNote = _gameDataExtractor.IsP4kUpdated() ? " ⚠パッチ更新あり" : "";
+            txtGameDataStatus.Text = $"インデックス済み ({ver}){updateNote}";
+        }
         else if (_gameDataExtractor.IsStarBreakerInstalled)
             txtGameDataStatus.Text = "未インデックス (インデックス構築で高速化)";
         else
@@ -1375,8 +1494,17 @@ public partial class MainWindow : Window
         var backend = GetSelectedChatBackend();
         if (backend == null)
         {
-            MessageBox.Show("AI バックエンドが選択されていません。\n設定画面でバックエンドを有効にしてください。",
-                "エラー", MessageBoxButton.OK, MessageBoxImage.Warning);
+            var enabledCount = App.Config.Translation.Backends.Count(b => b.Enabled);
+            if (enabledCount == 0)
+            {
+                MessageBox.Show("AI バックエンドが設定されていません。\n\n設定タブの「AI 設定を開く」から、Claude / Gemini / Ollama のいずれかを有効にして API キーを設定してください。",
+                    "AI 設定が必要です", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+            else
+            {
+                MessageBox.Show("AI バックエンドが選択されていません。\nチャットタブ上部のプルダウンからバックエンドを選択してください。",
+                    "バックエンド未選択", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
             return;
         }
 
@@ -1425,7 +1553,7 @@ public partial class MainWindow : Window
         _chatHistory.Clear();
         _chatBubbles.Add(new ChatBubble
         {
-            Text = "Star Citizen について質問してください。\nUEX API から最新データを取得して回答します。",
+            Text = "Star Citizen について質問してください。\nUEX API・SC Trade Tools・Wiki・ゲームファイルから最新データを取得して回答します。",
             IsUser = false
         });
     }

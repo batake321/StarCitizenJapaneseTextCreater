@@ -1,0 +1,312 @@
+using System.Text;
+using System.Text.Json;
+using Microsoft.Data.Sqlite;
+
+namespace StarCitizenJapaneseTextCreater;
+
+public class GameDataQueryService : IDisposable
+{
+    private readonly SqliteConnection _conn;
+
+    public GameDataQueryService(string gamedataCacheDbPath)
+    {
+        _conn = new SqliteConnection($"Data Source={gamedataCacheDbPath};Mode=ReadOnly");
+        _conn.Open();
+    }
+
+    public bool HasData()
+    {
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM missions";
+            return (long)(cmd.ExecuteScalar() ?? 0L) > 0;
+        }
+        catch { return false; }
+    }
+
+    public string SearchShips(string query)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT record_name, name, manufacturer, career, role, crew_size, size FROM ships WHERE record_name LIKE @q OR name LIKE @q ORDER BY name LIMIT 20";
+        cmd.Parameters.AddWithValue("@q", $"%{query}%");
+        using var reader = cmd.ExecuteReader();
+
+        var sb = new StringBuilder();
+        int count = 0;
+        while (reader.Read())
+        {
+            var rn = reader.GetString(0);
+            var name = reader.IsDBNull(1) ? "" : reader.GetString(1);
+            var mfr = reader.IsDBNull(2) ? "" : reader.GetString(2);
+            var career = reader.IsDBNull(3) ? "" : reader.GetString(3);
+            var role = reader.IsDBNull(4) ? "" : reader.GetString(4);
+            var crew = reader.IsDBNull(5) ? 0 : reader.GetInt32(5);
+            var size = reader.IsDBNull(6) ? 0 : reader.GetInt32(6);
+
+            sb.Append($"- {rn}");
+            if (!string.IsNullOrEmpty(name)) sb.Append($" | 名前: {name}");
+            if (!string.IsNullOrEmpty(mfr)) sb.Append($" | メーカー: {mfr}");
+            if (!string.IsNullOrEmpty(career)) sb.Append($" | 職業: {career}");
+            if (!string.IsNullOrEmpty(role)) sb.Append($" | 役割: {role}");
+            if (crew > 0) sb.Append($" | 乗員: {crew}");
+            if (size > 0) sb.Append($" | サイズ: {size}");
+            sb.AppendLine();
+
+            // ハードポイントも取得
+            var ports = GetShipPorts(rn);
+            if (!string.IsNullOrEmpty(ports)) sb.Append(ports);
+            count++;
+        }
+
+        return count > 0 ? $"=== ゲームデータ (DB): 船 ===\n{sb}" : "";
+    }
+
+    private string GetShipPorts(string shipRecordName)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT port_name, item_type, size FROM ship_ports WHERE ship_record_name = @srn ORDER BY size DESC, item_type";
+        cmd.Parameters.AddWithValue("@srn", shipRecordName);
+        using var reader = cmd.ExecuteReader();
+
+        var sb = new StringBuilder();
+        while (reader.Read())
+        {
+            var portName = reader.IsDBNull(0) ? "" : reader.GetString(0);
+            var itemType = reader.IsDBNull(1) ? "" : reader.GetString(1);
+            var size = reader.IsDBNull(2) ? 0 : reader.GetInt32(2);
+            sb.AppendLine($"    ポート: {portName} | {itemType} (S{size})");
+        }
+        return sb.ToString();
+    }
+
+    public string SearchItems(string query, string? componentType = null)
+    {
+        using var cmd = _conn.CreateCommand();
+        if (!string.IsNullOrEmpty(componentType))
+        {
+            cmd.CommandText = "SELECT record_name, name, item_type, size, grade, manufacturer, component_type, component_json FROM items WHERE (record_name LIKE @q OR name LIKE @q) AND component_type = @ct ORDER BY name LIMIT 30";
+            cmd.Parameters.AddWithValue("@ct", componentType);
+        }
+        else
+        {
+            cmd.CommandText = "SELECT record_name, name, item_type, size, grade, manufacturer, component_type, component_json FROM items WHERE record_name LIKE @q OR name LIKE @q ORDER BY name LIMIT 30";
+        }
+        cmd.Parameters.AddWithValue("@q", $"%{query}%");
+        using var reader = cmd.ExecuteReader();
+
+        var sb = new StringBuilder();
+        int count = 0;
+        while (reader.Read())
+        {
+            var name = reader.IsDBNull(1) ? reader.GetString(0) : reader.GetString(1);
+            var itemType = reader.IsDBNull(2) ? "" : reader.GetString(2);
+            var size = reader.IsDBNull(3) ? 0 : reader.GetInt32(3);
+            var grade = reader.IsDBNull(4) ? 0 : reader.GetInt32(4);
+            var mfr = reader.IsDBNull(5) ? "" : reader.GetString(5);
+            var compType = reader.IsDBNull(6) ? "" : reader.GetString(6);
+            var compJson = reader.IsDBNull(7) ? "" : reader.GetString(7);
+
+            sb.Append($"- {name} | タイプ: {itemType} | S{size} | Grade {grade}");
+            if (!string.IsNullOrEmpty(mfr)) sb.Append($" | {mfr}");
+
+            if (!string.IsNullOrEmpty(compJson))
+            {
+                var extras = ParseComponentExtras(compType, compJson);
+                if (!string.IsNullOrEmpty(extras)) sb.Append($" | {extras}");
+            }
+            sb.AppendLine();
+            count++;
+        }
+
+        return count > 0 ? $"=== ゲームデータ (DB): アイテム ===\n{sb}" : "";
+    }
+
+    private static string ParseComponentExtras(string compType, string compJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(compJson);
+            var el = doc.RootElement;
+            var parts = new List<string>();
+
+            switch (compType)
+            {
+                case "SCItemShieldGeneratorParams":
+                    if (el.TryGetProperty("MaxShieldHealth", out var mh)) parts.Add($"最大HP: {mh}");
+                    if (el.TryGetProperty("MaxShieldRegen", out var mr)) parts.Add($"再生: {mr}");
+                    break;
+                case "SCItemQuantumDriveParams":
+                    if (el.TryGetProperty("quantumFuelRequirement", out var qf)) parts.Add($"燃料: {qf}");
+                    if (el.TryGetProperty("jumpRange", out var jr)) parts.Add($"距離: {jr}");
+                    if (el.TryGetProperty("spoolUpTime", out var su)) parts.Add($"スプール: {su}");
+                    break;
+                case "SCItemWeaponComponentParams":
+                    if (el.TryGetProperty("fireRate", out var fr)) parts.Add($"発射速度: {fr}");
+                    break;
+                case "SCItemPowerPlantParams":
+                    if (el.TryGetProperty("PowerOutput", out var po)) parts.Add($"出力: {po}");
+                    break;
+                case "SCItemCoolerParams":
+                    if (el.TryGetProperty("CoolingRate", out var cr)) parts.Add($"冷却: {cr}");
+                    break;
+            }
+
+            return string.Join(" | ", parts);
+        }
+        catch { return ""; }
+    }
+
+    public string SearchMissions(string? keyword = null, string? missionType = null)
+    {
+        using var cmd = _conn.CreateCommand();
+        var conditions = new List<string>();
+        if (!string.IsNullOrEmpty(keyword))
+        {
+            conditions.Add("(record_name LIKE @q OR title LIKE @q OR title_hud LIKE @q OR mission_type LIKE @q OR mission_giver LIKE @q OR description LIKE @q)");
+            cmd.Parameters.AddWithValue("@q", $"%{keyword}%");
+        }
+        if (!string.IsNullOrEmpty(missionType))
+        {
+            conditions.Add("mission_type LIKE @mt");
+            cmd.Parameters.AddWithValue("@mt", $"%{missionType}%");
+        }
+
+        var where = conditions.Count > 0 ? $"WHERE {string.Join(" AND ", conditions)}" : "";
+        cmd.CommandText = $"SELECT record_name, title, title_hud, mission_type, difficulty, mission_giver, location_label, description, reward_min, reward_max, required_reputation, lawfulness_type FROM missions {where} ORDER BY reward_max DESC LIMIT 30";
+        using var reader = cmd.ExecuteReader();
+
+        var sb = new StringBuilder();
+        int count = 0;
+        while (reader.Read())
+        {
+            var rn = reader.GetString(0);
+            var title = CleanLocKey(reader.IsDBNull(1) ? "" : reader.GetString(1));
+            var titleHud = CleanLocKey(reader.IsDBNull(2) ? "" : reader.GetString(2));
+            var mType = reader.IsDBNull(3) ? "" : reader.GetString(3);
+            var diff = reader.IsDBNull(4) ? "" : reader.GetString(4);
+            var giver = CleanLocKey(reader.IsDBNull(5) ? "" : reader.GetString(5));
+            var loc = reader.IsDBNull(6) ? "" : reader.GetString(6);
+            var desc = CleanLocKey(reader.IsDBNull(7) ? "" : reader.GetString(7));
+            var rMin = reader.IsDBNull(8) ? 0.0 : reader.GetDouble(8);
+            var rMax = reader.IsDBNull(9) ? 0.0 : reader.GetDouble(9);
+            var rep = reader.IsDBNull(10) ? "" : reader.GetString(10);
+            var law = reader.IsDBNull(11) ? "" : reader.GetString(11);
+
+            var friendlyName = ExtractFriendlyName(rn);
+            var displayTitle = IsLocKey(title) ? "" : title;
+            sb.Append($"- {friendlyName}");
+            if (!string.IsNullOrEmpty(displayTitle)) sb.Append($" | タイトル: {displayTitle}");
+            if (!string.IsNullOrEmpty(mType)) sb.Append($" | 種別: {mType}");
+            if (!string.IsNullOrEmpty(diff)) sb.Append($" | 難易度: {diff}");
+            if (string.IsNullOrEmpty(diff))
+            {
+                var inferred = InferDifficultyFromName(rn);
+                if (!string.IsNullOrEmpty(inferred)) sb.Append($" | 難易度: {inferred}");
+            }
+            if (!string.IsNullOrEmpty(giver) && !IsLocKey(giver)) sb.Append($" | 依頼者: {giver}");
+            if (rMin > 0 || rMax > 0)
+            {
+                if (rMin > 0 && rMax > 0 && rMin != rMax) sb.Append($" | 報酬: {rMin:0}-{rMax:0} aUEC");
+                else sb.Append($" | 報酬: {Math.Max(rMin, rMax):0} aUEC");
+            }
+            if (!string.IsNullOrEmpty(rep)) sb.Append($" | 必要評判: {rep}");
+            if (!string.IsNullOrEmpty(law)) sb.Append($" | 合法性: {law}");
+            if (!string.IsNullOrEmpty(loc)) sb.Append($" | 場所: {loc}");
+            var inferredLoc = InferLocationFromName(rn);
+            if (!string.IsNullOrEmpty(inferredLoc) && string.IsNullOrEmpty(loc)) sb.Append($" | 場所: {inferredLoc}");
+            sb.AppendLine();
+
+            if (!string.IsNullOrEmpty(desc) && !IsLocKey(desc))
+            {
+                var truncDesc = desc.Length > 120 ? desc[..120] + "..." : desc;
+                sb.AppendLine($"  概要: {truncDesc}");
+            }
+            count++;
+        }
+
+        return count > 0 ? $"=== ゲームデータ (DB): ミッション/契約 ({count}件) ===\n{sb}" : "";
+    }
+
+    public string SearchCommodities(string? name = null)
+    {
+        using var cmd = _conn.CreateCommand();
+        if (!string.IsNullOrEmpty(name))
+        {
+            cmd.CommandText = "SELECT record_name, name, symbol, volatility FROM commodities WHERE record_name LIKE @q OR name LIKE @q ORDER BY name LIMIT 30";
+            cmd.Parameters.AddWithValue("@q", $"%{name}%");
+        }
+        else
+        {
+            cmd.CommandText = "SELECT record_name, name, symbol, volatility FROM commodities ORDER BY name LIMIT 50";
+        }
+        using var reader = cmd.ExecuteReader();
+
+        var sb = new StringBuilder();
+        int count = 0;
+        while (reader.Read())
+        {
+            var rn = reader.GetString(0);
+            var n = reader.IsDBNull(1) ? "" : reader.GetString(1);
+            var sym = reader.IsDBNull(2) ? "" : reader.GetString(2);
+            var vol = reader.IsDBNull(3) ? "" : reader.GetString(3);
+
+            sb.Append($"- {(!string.IsNullOrEmpty(n) ? n : rn)}");
+            if (!string.IsNullOrEmpty(sym)) sb.Append($" ({sym})");
+            if (!string.IsNullOrEmpty(vol)) sb.Append($" | 変動性: {vol}");
+            sb.AppendLine();
+            count++;
+        }
+
+        return count > 0 ? $"=== ゲームデータ (DB): コモディティ ({count}件) ===\n{sb}" : "";
+    }
+
+    private static string CleanLocKey(string val)
+    {
+        if (string.IsNullOrEmpty(val)) return val;
+        return val.StartsWith('@') ? val[1..] : val;
+    }
+
+    private static bool IsLocKey(string val)
+    {
+        if (string.IsNullOrEmpty(val)) return true;
+        if (val.StartsWith('@')) return true;
+        if (val.Contains('_') && !val.Contains(' ') && val.Length > 10) return true;
+        return false;
+    }
+
+    private static string ExtractFriendlyName(string recordName)
+    {
+        var name = recordName.Replace("MissionBrokerEntry.", "");
+        name = name.Replace("PU_", "");
+        name = name.Replace("_", " ");
+        return name;
+    }
+
+    private static string InferDifficultyFromName(string rn)
+    {
+        if (rn.Contains("_Intro", StringComparison.OrdinalIgnoreCase)) return "Intro";
+        if (rn.Contains("_VeryEasy", StringComparison.OrdinalIgnoreCase)) return "Very Easy";
+        if (rn.Contains("_Easy", StringComparison.OrdinalIgnoreCase)) return "Easy";
+        if (rn.Contains("_Medium", StringComparison.OrdinalIgnoreCase)) return "Medium";
+        if (rn.Contains("_Hard", StringComparison.OrdinalIgnoreCase)) return "Hard";
+        if (rn.Contains("_VeryHard", StringComparison.OrdinalIgnoreCase)) return "Very Hard";
+        return "";
+    }
+
+    private static string InferLocationFromName(string rn)
+    {
+        if (rn.Contains("Stanton1", StringComparison.OrdinalIgnoreCase)) return "Hurston";
+        if (rn.Contains("Stanton2", StringComparison.OrdinalIgnoreCase)) return "Crusader";
+        if (rn.Contains("Stanton3", StringComparison.OrdinalIgnoreCase)) return "ArcCorp";
+        if (rn.Contains("Stanton4", StringComparison.OrdinalIgnoreCase)) return "microTech";
+        if (rn.Contains("Pyro", StringComparison.OrdinalIgnoreCase)) return "Pyro";
+        return "";
+    }
+
+    public void Dispose()
+    {
+        _conn.Close();
+        _conn.Dispose();
+    }
+}

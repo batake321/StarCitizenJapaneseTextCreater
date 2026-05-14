@@ -89,14 +89,43 @@ public class TranslationOrchestrator
 
     private async Task ProcessBackendQueue(TranslationBackend backend, List<List<TranslationEntry>> batches, StreamWriter outFile, CancellationToken ct)
     {
+        int consecutiveFailures = 0;
+        var lastRequestTime = DateTime.MinValue;
+        var minInterval = backend is GeminiBackend ? 7000 : 0;
+
         for (int i = 0; i < batches.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
-            await ProcessBatch(backend, batches[i], outFile);
+
+            if (minInterval > 0)
+            {
+                var elapsed = (DateTime.UtcNow - lastRequestTime).TotalMilliseconds;
+                if (elapsed < minInterval)
+                {
+                    var wait = (int)(minInterval - elapsed);
+                    await Task.Delay(wait, ct);
+                }
+            }
+
+            lastRequestTime = DateTime.UtcNow;
+            bool success = await ProcessBatch(backend, batches[i], outFile);
+            if (success)
+            {
+                consecutiveFailures = 0;
+            }
+            else
+            {
+                consecutiveFailures++;
+                var cooldown = backend is GeminiBackend
+                    ? Math.Min(60 + consecutiveFailures * 30, 300)
+                    : Math.Min(consecutiveFailures * 10, 120);
+                Console.WriteLine($"[{Now}] [{backend.Name}] 連続{consecutiveFailures}回失敗 — {cooldown}秒クールダウン");
+                await Task.Delay(cooldown * 1000, ct);
+            }
         }
     }
 
-    private async Task ProcessBatch(TranslationBackend backend, List<TranslationEntry> batch, StreamWriter outFile)
+    private async Task<bool> ProcessBatch(TranslationBackend backend, List<TranslationEntry> batch, StreamWriter outFile)
     {
         Dictionary<string, string>? resultMap = null;
 
@@ -106,6 +135,17 @@ public class TranslationOrchestrator
             {
                 resultMap = await backend.TranslateAsync(batch);
                 break;
+            }
+            catch (HttpRequestException ex) when (ex.Message.Contains("429"))
+            {
+                var jitter = Random.Shared.Next(0, 5);
+                int delay;
+                if (backend is GeminiBackend)
+                    delay = (int)Math.Min(Math.Pow(2, attempt + 1) * 30, 300) + jitter;
+                else
+                    delay = (int)Math.Min(Math.Pow(2, attempt) * 15, 120) + jitter;
+                Console.WriteLine($"[{Now}] [{backend.Name}] ERR attempt {attempt + 1}: 429 Rate Limited — {delay}秒待機");
+                await Task.Delay(delay * 1000);
             }
             catch (Exception ex)
             {
@@ -154,6 +194,8 @@ public class TranslationOrchestrator
 
         if (translatedItems.Count > 0)
             BatchTranslated?.Invoke(translatedItems);
+
+        return ok > 0;
     }
 
     private static string Now => DateTime.Now.ToString("HH:mm:ss");

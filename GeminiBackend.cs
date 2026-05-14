@@ -8,7 +8,7 @@ public class GeminiBackend : TranslationBackend
     private readonly string _apiKey;
     private readonly string _model;
 
-    public GeminiBackend(BackendConfig config) : base(config.Name, config.Model, config.BatchSize)
+    public GeminiBackend(BackendConfig config) : base(config.Name, config.Model, Math.Max(config.BatchSize, 50))
     {
         _apiKey = config.ApiKey;
         _model = config.Model;

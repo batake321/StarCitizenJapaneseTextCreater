@@ -78,10 +78,90 @@ public class ChatService
     };
 
     private static GameDataExtractor? _gameDataExtractor;
+    private static GameDataQueryService? _queryService;
+    private static string? _translationDbPath;
 
     public static void SetGameDataExtractor(GameDataExtractor extractor)
     {
         _gameDataExtractor = extractor;
+    }
+
+    public static void SetGameDataQueryService(GameDataQueryService service)
+    {
+        _queryService = service;
+    }
+
+    public static void SetTranslationDbPath(string dbPath)
+    {
+        _translationDbPath = dbPath;
+    }
+
+    private static List<string> LookupEnglishKeywords(string japaneseQuery)
+    {
+        if (string.IsNullOrEmpty(_translationDbPath) || !File.Exists(_translationDbPath))
+            return new List<string>();
+
+        var results = new List<string>();
+        try
+        {
+            using var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_translationDbPath};Mode=ReadOnly");
+            conn.Open();
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT DISTINCT english FROM translations WHERE japanese LIKE $q AND english != '' LIMIT 20";
+            cmd.Parameters.AddWithValue("$q", $"%{japaneseQuery}%");
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                results.Add(reader.GetString(0));
+
+            if (results.Count == 0)
+            {
+                using var gCmd = conn.CreateCommand();
+                gCmd.CommandText = "SELECT english FROM glossary WHERE japanese LIKE $q LIMIT 10";
+                gCmd.Parameters.AddWithValue("$q", $"%{japaneseQuery}%");
+                using var gReader = gCmd.ExecuteReader();
+                while (gReader.Read())
+                    results.Add(gReader.GetString(0));
+            }
+        }
+        catch { }
+        return results;
+    }
+
+    private static string ExtractEnglishKeyword(string query)
+    {
+        // 1. ハードコードマップ（高速・確実）
+        var jaKeywords = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            {"サルベージ", "salvage"}, {"賞金首", "bounty"}, {"賞金稼ぎ", "bounty"},
+            {"救助", "rescue"}, {"配達", "delivery"}, {"調査", "investigation"},
+            {"戦闘", "combat"}, {"採掘", "mining"}, {"偵察", "recon"},
+            {"暗殺", "assassination"}, {"護衛", "escort"}, {"輸送", "cargo"},
+            {"密輸", "smuggling"}, {"回収", "retrieval"}, {"哨戒", "patrol"},
+            {"契約", "contract"}, {"ミッション", "mission"}, {"傭兵", "mercenary"},
+            {"海賊", "pirate"}, {"探索", "exploration"}, {"清掃", "cleanup"},
+        };
+
+        foreach (var (ja, en) in jaKeywords)
+            if (query.Contains(ja, StringComparison.OrdinalIgnoreCase))
+                return en;
+
+        // 2. 既にASCII英語ならそのまま返す
+        if (query.All(c => c < 128)) return query;
+
+        // 3. 翻訳DB逆引き（japanese→english）
+        var dbResults = LookupEnglishKeywords(query);
+        if (dbResults.Count > 0)
+        {
+            var words = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var eng in dbResults)
+                foreach (var w in eng.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                    if (w.Length > 3) words.Add(w);
+            if (words.Count > 0) return words.First();
+        }
+
+        // 4. フォールバック
+        return query;
     }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -141,16 +221,16 @@ public class ChatService
             new()
             {
                 ["name"] = "search_mission",
-                ["description"] = "ミッション・契約を検索",
+                ["description"] = "ミッション・契約を検索。ゲーム内データは英語なので、queryには英語キーワードを使用してください（例: salvage, bounty, rescue, delivery, investigation）",
                 ["input_schema"] = new Dictionary<string, object>
                 {
                     ["type"] = "object",
                     ["properties"] = new Dictionary<string, object>
                     {
-                        ["query"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "ミッション名やキーワード" },
+                        ["query"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "英語のミッション名やキーワード（例: salvage, bounty, rescue）" },
                         ["system"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "星系名" }
                     },
-                    ["required"] = new string[0]
+                    ["required"] = new[] { "query" }
                 }
             },
             new()
@@ -458,9 +538,57 @@ public class ChatService
 
     private static async Task<string> ExecuteSearchMissionAsync(JsonElement args)
     {
-        var query = args.TryGetProperty("query", out var q) ? q.GetString() : null;
+        var query = args.TryGetProperty("query", out var q) ? q.GetString() ?? "" : "";
         var system = args.TryGetProperty("system", out var s) ? s.GetString() : null;
-        return await FetchMissionsAsync(query, system);
+        var englishQuery = ExtractEnglishKeyword(query);
+        Log($"MISSION SEARCH: input='{query}' -> english='{englishQuery}'");
+
+        // DB クエリ優先
+        if (_queryService?.HasData() == true)
+        {
+            var dbResult = _queryService.SearchMissions(englishQuery);
+            Log($"DB MISSION RESULT: {(string.IsNullOrEmpty(dbResult) ? "(empty)" : dbResult.Length + " chars")}");
+            if (!string.IsNullOrEmpty(dbResult))
+            {
+                var uexResult = await FetchMissionsAsync(englishQuery, system);
+                if (!string.IsNullOrEmpty(uexResult) && uexResult != "ミッション情報が見つかりませんでした。")
+                    return dbResult + "\n" + uexResult;
+                return dbResult;
+            }
+        }
+
+        // DB にデータがない場合、インデックス未構築を通知して自動構築を試みる
+        if (_queryService?.HasData() != true)
+        {
+            if (_gameDataExtractor != null && !_gameDataExtractor.IsStarBreakerInstalled)
+            {
+                Log("StarBreaker not installed, attempting auto-install...");
+                try { await _gameDataExtractor.EnsureStarBreakerAsync(); } catch { }
+            }
+            if (_gameDataExtractor?.IsReady == true && !(_queryService?.HasData() == true))
+            {
+                Log("Auto-building structured index...");
+                try
+                {
+                    var p4k = _gameDataExtractor.FindDataP4k();
+                    if (p4k != null)
+                    {
+                        await _gameDataExtractor.BuildStructuredIndexAsync(p4k);
+                        // QueryService を再接続
+                        _queryService?.Dispose();
+                        _queryService = new GameDataQueryService(_gameDataExtractor.DbPath);
+                        var dbResult = _queryService.SearchMissions(englishQuery);
+                        if (!string.IsNullOrEmpty(dbResult)) return dbResult;
+                    }
+                }
+                catch (Exception ex) { Log($"Auto-index error: {ex.Message}"); }
+            }
+
+            if (_queryService?.HasData() != true)
+                return $"ミッション情報が見つかりませんでした。\n⚠️ ゲームデータのインデックスが未構築です。設定タブの「インデックス構築」を実行すると、Data.p4k から契約・ミッションデータを検索できるようになります。";
+        }
+
+        return await FetchMissionsAsync(englishQuery, system);
     }
 
     private static async Task<string> ExecuteSearchPriceAsync(JsonElement args)
@@ -607,6 +735,7 @@ public class ChatService
 
     private static async Task<string> FetchMissionsAsync(string? query, string? system = null)
     {
+        Log($"FetchMissionsAsync: query='{query}', system='{system}'");
         var sb = new StringBuilder();
 
         try
@@ -636,18 +765,21 @@ public class ChatService
                     if (!string.IsNullOrEmpty(truncDesc)) sb.AppendLine($"  概要: {truncDesc}");
                     if (++count >= 20) break;
                 }
+                Log($"UEX contracts matched: {count}");
             }
         }
-        catch { }
+        catch (Exception ex) { Log($"UEX contracts error: {ex.Message}"); }
 
+        Log($"GameDataExtractor ready={_gameDataExtractor?.IsReady}, installed={_gameDataExtractor?.IsStarBreakerInstalled}");
         if (_gameDataExtractor?.IsReady == true)
         {
             try
             {
                 var missionData = await _gameDataExtractor.QueryMissionsAsync(query ?? "");
+                Log($"DCB mission result: {(string.IsNullOrEmpty(missionData) ? "(empty)" : missionData.Length + " chars")}");
                 if (!string.IsNullOrEmpty(missionData)) sb.AppendLine(missionData);
             }
-            catch { }
+            catch (Exception ex) { Log($"DCB mission error: {ex.Message}"); }
         }
 
         if (sb.Length == 0) return "ミッション情報が見つかりませんでした。";
