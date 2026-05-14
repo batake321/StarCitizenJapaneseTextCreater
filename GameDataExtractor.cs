@@ -330,11 +330,11 @@ public class GameDataExtractor
         return cmd.ExecuteScalar() as string;
     }
 
+    private static readonly string[] VehicleManufacturerPrefixes =
+        ["AEGS", "ANVL", "ARGO", "BANU", "CNOU", "CRUS", "DRAK", "GAMA", "GATA", "GRIN", "KRIG", "MISC", "MRAI", "ORIG", "RSI", "TMBL", "VNCL", "XIAN", "ESPR"];
+
     private async Task<int> ExtractShipsAsync(string p4kPath, string now, CancellationToken ct)
     {
-        var rawJson = await RunDcbQueryWithTimerAsync(p4kPath, "EntityClassDefinition", "*_Vehicle*", "[1/6] 船・車両データ", ct);
-        if (string.IsNullOrEmpty(rawJson)) return 0;
-
         int count = 0;
         using var tx = _db!.BeginTransaction();
         using var shipCmd = _db.CreateCommand();
@@ -356,6 +356,29 @@ public class GameDataExtractor
         var ppIt = portCmd.Parameters.Add("@it", SqliteType.Text);
         var ppSz = portCmd.Parameters.Add("@sz", SqliteType.Integer);
 
+        for (int pi = 0; pi < VehicleManufacturerPrefixes.Length; pi++)
+        {
+            var prefix = VehicleManufacturerPrefixes[pi];
+            StatusChanged?.Invoke($"[1/6] 船・車両データ ({prefix}, {pi + 1}/{VehicleManufacturerPrefixes.Length})");
+            var filter = $"EntityClassDefinition.{prefix}_*";
+            var rawJson = await RunDcbQueryAsync(p4kPath, "EntityClassDefinition", filter, ct);
+            if (string.IsNullOrEmpty(rawJson)) continue;
+
+            count += ParseAndInsertShips(rawJson, now, shipCmd, pRn, pNm, pMf, pCa, pRo, pCr, pSz, pRj, pEa,
+                portCmd, ppSrn, ppPn, ppIt, ppSz);
+        }
+
+        tx.Commit();
+        return count;
+    }
+
+    private static int ParseAndInsertShips(string rawJson, string now,
+        SqliteCommand shipCmd, SqliteParameter pRn, SqliteParameter pNm, SqliteParameter pMf,
+        SqliteParameter pCa, SqliteParameter pRo, SqliteParameter pCr, SqliteParameter pSz,
+        SqliteParameter pRj, SqliteParameter pEa,
+        SqliteCommand portCmd, SqliteParameter ppSrn, SqliteParameter ppPn, SqliteParameter ppIt, SqliteParameter ppSz)
+    {
+        int count = 0;
         foreach (var block in SplitJsonBlocks(rawJson))
         {
             try
@@ -368,6 +391,7 @@ public class GameDataExtractor
 
                 string name = "", manufacturer = "", career = "", role = "";
                 int crewSize = 0, size = 0;
+                bool hasVehicleComponent = false;
 
                 foreach (var comp in components.EnumerateArray())
                 {
@@ -381,11 +405,14 @@ public class GameDataExtractor
                     }
                     if (type == "SVehicleComponentParams")
                     {
+                        hasVehicleComponent = true;
                         career = comp.TryGetProperty("vehicleCareer", out var c) ? c.GetString() ?? "" : "";
                         role = comp.TryGetProperty("vehicleRole", out var r) ? r.GetString() ?? "" : "";
                         crewSize = comp.TryGetProperty("crewSize", out var cr) && cr.ValueKind == JsonValueKind.Number ? cr.GetInt32() : 0;
                     }
                 }
+
+                if (!hasVehicleComponent) continue;
 
                 pRn.Value = recordName; pNm.Value = name; pMf.Value = manufacturer;
                 pCa.Value = career; pRo.Value = role; pCr.Value = crewSize;
@@ -411,7 +438,6 @@ public class GameDataExtractor
             }
             catch { }
         }
-        tx.Commit();
         return count;
     }
 
