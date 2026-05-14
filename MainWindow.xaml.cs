@@ -1162,16 +1162,15 @@ public partial class MainWindow : Window
         var dlg = new Microsoft.Win32.SaveFileDialog
         {
             Title = "データベースのエクスポート先",
-            Filter = "バックアップファイル (*.sql.gz)|*.sql.gz",
-            FileName = $"sc_japanese_backup_{DateTime.Now:yyyyMMdd_HHmmss}.sql.gz"
+            Filter = "ZIP バックアップ (*.zip)|*.zip",
+            FileName = $"sc_japanese_backup_{DateTime.Now:yyyyMMdd_HHmmss}.zip"
         };
         if (dlg.ShowDialog() != true) return;
 
         try
         {
             txtBackupStatus.Text = "エクスポート中...";
-            var categories = new[] { BackupCategory.Translations, BackupCategory.Glossary, BackupCategory.Index };
-            await DatabaseBackupService.ExportAsync(DbPath, IndexDbPath, dlg.FileName, categories,
+            await DatabaseBackupService.ExportAsync(DbPath, IndexDbPath, dlg.FileName,
                 s => Dispatcher.Invoke(() => txtBackupStatus.Text = s));
             var size = new FileInfo(dlg.FileName).Length;
             txtBackupStatus.Text = $"エクスポート完了 ({size / 1024.0:N0} KB)";
@@ -1189,14 +1188,15 @@ public partial class MainWindow : Window
         var dlg = new Microsoft.Win32.OpenFileDialog
         {
             Title = "バックアップファイルの選択",
-            Filter = "バックアップファイル (*.sql.gz)|*.sql.gz|すべてのファイル (*.*)|*.*"
+            Filter = "ZIP バックアップ (*.zip)|*.zip"
         };
         if (dlg.ShowDialog() != true) return;
 
         try
         {
             txtBackupStatus.Text = "ファイルを解析中...";
-            var contents = await DatabaseBackupService.InspectAsync(dlg.FileName);
+            var contents = await DatabaseBackupService.InspectZipAsync(dlg.FileName);
+
             if (contents.Count == 0)
             {
                 txtBackupStatus.Text = "";
@@ -1213,7 +1213,7 @@ public partial class MainWindow : Window
             }
 
             txtBackupStatus.Text = "インポート中...";
-            await DatabaseBackupService.ImportAsync(dlg.FileName, DbPath, IndexDbPath,
+            await DatabaseBackupService.ImportFromZipAsync(dlg.FileName, DbPath, IndexDbPath,
                 selectDlg.SelectedCategories, selectDlg.Mode,
                 s => Dispatcher.Invoke(() => txtBackupStatus.Text = s));
 

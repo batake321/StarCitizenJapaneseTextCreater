@@ -87,36 +87,12 @@ public partial class App : Application
 
         Directory.CreateDirectory(outputDir);
 
-        var categories = new[] { BackupCategory.Translations, BackupCategory.Glossary, BackupCategory.Index };
-        var names = new Dictionary<BackupCategory, string>
-        {
-            [BackupCategory.Translations] = "translations",
-            [BackupCategory.Glossary] = "glossary",
-            [BackupCategory.Index] = "index"
-        };
-
-        foreach (var cat in categories)
-        {
-            var catDir = Path.Combine(outputDir, names[cat]);
-            Directory.CreateDirectory(catDir);
-            var outPath = Path.Combine(catDir, $"{names[cat]}.sql.gz");
-            DatabaseBackupService.ExportAsync(translationDb, indexDb, outPath, [cat],
-                s => Console.WriteLine($"  {s}")).Wait();
-
-            if (File.Exists(outPath) && new FileInfo(outPath).Length > 30)
-                Console.WriteLine($"{names[cat]}: {new FileInfo(outPath).Length / 1024.0:N0} KB -> {outPath}");
-            else
-            {
-                if (File.Exists(outPath)) File.Delete(outPath);
-                Console.WriteLine($"{names[cat]}: no data");
-            }
-        }
-
-        var allPath = Path.Combine(outputDir, "all.sql.gz");
-        DatabaseBackupService.ExportAsync(translationDb, indexDb, allPath, categories,
+        var outPath = Path.Combine(outputDir, "sc_japanese_backup.zip");
+        DatabaseBackupService.ExportAsync(translationDb, indexDb, outPath,
             s => Console.WriteLine($"  {s}")).Wait();
-        if (File.Exists(allPath) && new FileInfo(allPath).Length > 30)
-            Console.WriteLine($"all: {new FileInfo(allPath).Length / 1024.0:N0} KB -> {allPath}");
+
+        if (File.Exists(outPath))
+            Console.WriteLine($"Backup: {new FileInfo(outPath).Length / 1024.0:N0} KB -> {outPath}");
 
         Console.WriteLine("Export complete.");
     }

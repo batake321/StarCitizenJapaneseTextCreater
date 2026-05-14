@@ -26,49 +26,31 @@ public static class DatabaseBackupService
     };
 
     public static async Task ExportAsync(string translationDbPath, string indexDbPath, string outputPath,
-        IEnumerable<BackupCategory> categories, Action<string>? onStatus = null)
+        Action<string>? onStatus = null)
     {
-        var cats = categories.ToHashSet();
-        var sb = new StringBuilder();
-        sb.AppendLine("-- StarCitizenJapaneseTextCreater Database Backup");
-        sb.AppendLine($"-- Created: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-        sb.AppendLine();
-
-        if (cats.Contains(BackupCategory.Translations) || cats.Contains(BackupCategory.Glossary))
+        var tempDir = Path.Combine(Path.GetTempPath(), $"sc_export_{Guid.NewGuid():N}");
+        try
         {
-            if (File.Exists(translationDbPath))
+            Directory.CreateDirectory(tempDir);
+            await Task.Run(() =>
             {
-                using var conn = new SqliteConnection($"Data Source={translationDbPath};Mode=ReadOnly");
-                conn.Open();
-                if (cats.Contains(BackupCategory.Translations))
+                if (File.Exists(translationDbPath))
                 {
-                    onStatus?.Invoke("翻訳データをエクスポート中...");
-                    DumpTables(conn, TranslationTables, sb);
+                    onStatus?.Invoke("translations.db をコピー中...");
+                    File.Copy(translationDbPath, Path.Combine(tempDir, "translations.db"), true);
                 }
-                if (cats.Contains(BackupCategory.Glossary))
+                if (File.Exists(indexDbPath))
                 {
-                    onStatus?.Invoke("用語集をエクスポート中...");
-                    DumpTables(conn, GlossaryTables, sb);
+                    onStatus?.Invoke("gamedata_cache.db をコピー中...");
+                    File.Copy(indexDbPath, Path.Combine(tempDir, "gamedata_cache.db"), true);
                 }
-            }
-        }
 
-        if (cats.Contains(BackupCategory.Index))
-        {
-            if (File.Exists(indexDbPath))
-            {
-                onStatus?.Invoke("インデックスデータをエクスポート中...");
-                using var conn = new SqliteConnection($"Data Source={indexDbPath};Mode=ReadOnly");
-                conn.Open();
-                DumpTables(conn, IndexTables, sb);
-            }
+                onStatus?.Invoke("ZIP を作成中...");
+                if (File.Exists(outputPath)) File.Delete(outputPath);
+                ZipFile.CreateFromDirectory(tempDir, outputPath, CompressionLevel.Optimal, false);
+            });
         }
-
-        onStatus?.Invoke("圧縮中...");
-        var sql = sb.ToString();
-        await using var fs = File.Create(outputPath);
-        await using var gz = new GZipStream(fs, CompressionLevel.Optimal);
-        await gz.WriteAsync(Encoding.UTF8.GetBytes(sql));
+        finally { try { Directory.Delete(tempDir, true); } catch { } }
 
         onStatus?.Invoke("エクスポート完了");
     }
@@ -91,6 +73,161 @@ public static class DatabaseBackupService
                 result[cat] = count;
         }
         return result;
+    }
+
+    public static async Task<Dictionary<BackupCategory, int>> InspectDbFileAsync(string dbPath)
+    {
+        var result = new Dictionary<BackupCategory, int>();
+        await Task.Run(() =>
+        {
+            using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
+            conn.Open();
+            foreach (BackupCategory cat in Enum.GetValues<BackupCategory>())
+            {
+                int count = 0;
+                foreach (var table in GetTables(cat))
+                {
+                    if (!TableExists(conn, table)) continue;
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = $"SELECT COUNT(*) FROM {table}";
+                    count += (int)(long)(cmd.ExecuteScalar() ?? 0L);
+                }
+                if (count > 0) result[cat] = count;
+            }
+        });
+        return result;
+    }
+
+    public static async Task<Dictionary<BackupCategory, int>> InspectZipAsync(string zipPath)
+    {
+        var result = new Dictionary<BackupCategory, int>();
+        var tempDir = Path.Combine(Path.GetTempPath(), $"sc_backup_{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(tempDir);
+            await Task.Run(() => ZipFile.ExtractToDirectory(zipPath, tempDir));
+            foreach (var dbFile in Directory.GetFiles(tempDir, "*.db"))
+            {
+                var partial = await InspectDbFileAsync(dbFile);
+                foreach (var kv in partial)
+                {
+                    if (result.ContainsKey(kv.Key))
+                        result[kv.Key] += kv.Value;
+                    else
+                        result[kv.Key] = kv.Value;
+                }
+            }
+        }
+        finally { try { Directory.Delete(tempDir, true); } catch { } }
+        return result;
+    }
+
+    public static async Task ImportFromZipAsync(string zipPath, string translationDbPath, string indexDbPath,
+        IEnumerable<BackupCategory> categories, ImportMode mode, Action<string>? onStatus = null)
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"sc_backup_{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(tempDir);
+            onStatus?.Invoke("ZIP を展開中...");
+            await Task.Run(() => ZipFile.ExtractToDirectory(zipPath, tempDir));
+
+            foreach (var dbFile in Directory.GetFiles(tempDir, "*.db"))
+            {
+                onStatus?.Invoke($"{Path.GetFileName(dbFile)} をインポート中...");
+                await ImportFromDbAsync(dbFile, translationDbPath, indexDbPath, categories, mode, onStatus);
+            }
+        }
+        finally { try { Directory.Delete(tempDir, true); } catch { } }
+
+        onStatus?.Invoke("インポート完了");
+    }
+
+    public static async Task ImportFromDbAsync(string sourceDbPath, string translationDbPath, string indexDbPath,
+        IEnumerable<BackupCategory> categories, ImportMode mode, Action<string>? onStatus = null)
+    {
+        var cats = categories.ToHashSet();
+        var allowedTables = new HashSet<string>();
+        foreach (var cat in cats)
+            foreach (var t in GetTables(cat))
+                allowedTables.Add(t);
+
+        await Task.Run(() =>
+        {
+            using var srcConn = new SqliteConnection($"Data Source={sourceDbPath};Mode=ReadOnly");
+            srcConn.Open();
+
+            var translationTables = allowedTables.Intersect(TranslationTables.Concat(GlossaryTables)).ToHashSet();
+            var indexTables = allowedTables.Intersect(IndexTables).ToHashSet();
+
+            if (translationTables.Count > 0)
+            {
+                onStatus?.Invoke("翻訳DBにインポート中...");
+                using var db = new TranslationDatabase(translationDbPath);
+                CopyTables(srcConn, db.Connection, translationTables, mode, onStatus);
+            }
+
+            if (indexTables.Count > 0)
+            {
+                onStatus?.Invoke("インデックスDBにインポート中...");
+                using var destConn = new SqliteConnection($"Data Source={indexDbPath}");
+                destConn.Open();
+                EnsureIndexSchema(destConn);
+                CopyTables(srcConn, destConn, indexTables, mode, onStatus);
+            }
+        });
+
+        onStatus?.Invoke("インポート完了");
+    }
+
+    private static void CopyTables(SqliteConnection src, SqliteConnection dest,
+        HashSet<string> tables, ImportMode mode, Action<string>? onStatus)
+    {
+        using (var fk = dest.CreateCommand()) { fk.CommandText = "PRAGMA foreign_keys = OFF"; fk.ExecuteNonQuery(); }
+        using var tx = dest.BeginTransaction();
+        foreach (var table in tables)
+        {
+            if (!TableExists(src, table)) continue;
+
+            if (mode == ImportMode.Drop)
+            {
+                using var delCmd = dest.CreateCommand();
+                delCmd.CommandText = $"DELETE FROM {table}";
+                delCmd.Transaction = tx;
+                delCmd.ExecuteNonQuery();
+            }
+
+            using var readCmd = src.CreateCommand();
+            readCmd.CommandText = $"SELECT * FROM {table}";
+            using var reader = readCmd.ExecuteReader();
+
+            var colCount = reader.FieldCount;
+            var colNames = new string[colCount];
+            for (int i = 0; i < colCount; i++)
+                colNames[i] = reader.GetName(i);
+
+            var colList = string.Join(", ", colNames);
+            var paramList = string.Join(", ", colNames.Select((_, i) => $"@p{i}"));
+            var insertVerb = mode == ImportMode.Add ? "INSERT OR IGNORE" : "INSERT OR REPLACE";
+            var insertSql = $"{insertVerb} INTO {table} ({colList}) VALUES ({paramList})";
+
+            int count = 0;
+            while (reader.Read())
+            {
+                using var insertCmd = dest.CreateCommand();
+                insertCmd.CommandText = insertSql;
+                insertCmd.Transaction = tx;
+                for (int i = 0; i < colCount; i++)
+                    insertCmd.Parameters.AddWithValue($"@p{i}", reader.GetValue(i));
+                insertCmd.ExecuteNonQuery();
+                count++;
+
+                if (count % 5000 == 0)
+                    onStatus?.Invoke($"{table}: {count} 件処理中...");
+            }
+            onStatus?.Invoke($"{table}: {count} 件完了");
+        }
+        tx.Commit();
     }
 
     public static async Task ImportAsync(string backupPath, string translationDbPath, string indexDbPath,
@@ -226,13 +363,56 @@ public static class DatabaseBackupService
     private static List<string> ParseStatements(string sql)
     {
         var result = new List<string>();
-        foreach (var line in sql.Split('\n'))
+        var sb = new StringBuilder();
+        bool inString = false;
+
+        for (int i = 0; i < sql.Length; i++)
         {
-            var trimmed = line.Trim();
-            if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith("--"))
-                continue;
-            result.Add(trimmed);
+            var c = sql[i];
+
+            if (c == '\'' && !inString)
+            {
+                inString = true;
+                sb.Append(c);
+            }
+            else if (c == '\'' && inString)
+            {
+                sb.Append(c);
+                if (i + 1 < sql.Length && sql[i + 1] == '\'')
+                {
+                    sb.Append('\'');
+                    i++;
+                }
+                else
+                {
+                    inString = false;
+                }
+            }
+            else if (c == ';' && !inString)
+            {
+                var stmt = sb.ToString().Trim();
+                if (!string.IsNullOrEmpty(stmt) && !stmt.StartsWith("--"))
+                    result.Add(stmt);
+                sb.Clear();
+            }
+            else if (c == '\n' && !inString)
+            {
+                var current = sb.ToString().TrimStart();
+                if (current.StartsWith("--"))
+                    sb.Clear();
+                else
+                    sb.Append(' ');
+            }
+            else
+            {
+                sb.Append(c);
+            }
         }
+
+        var last = sb.ToString().Trim();
+        if (!string.IsNullOrEmpty(last) && !last.StartsWith("--"))
+            result.Add(last);
+
         return result;
     }
 
