@@ -14,6 +14,23 @@ public class ChatService
 {
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(120) };
 
+    private static readonly List<string> _debugLog = new();
+    public static IReadOnlyList<string> DebugLog => _debugLog;
+    public static void ClearDebugLog() => _debugLog.Clear();
+    public static string? LogDirectory { get; set; }
+
+    private static void Log(string message)
+    {
+        var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
+        _debugLog.Add(line);
+        try
+        {
+            var logDir = LogDirectory ?? _gameDataExtractor?.ToolsDir ?? System.IO.Path.GetTempPath();
+            System.IO.File.AppendAllText(System.IO.Path.Combine(logDir, "chat_debug.log"), line + "\n");
+        }
+        catch { }
+    }
+
     private static readonly string ChatSystemPrompt =
         "あなたはゲーム「Star Citizen」の情報アシスタントです。プレイヤーからの質問に日本語で回答してください。\n\n" +
         "【重要】以下のツール（スキル）を使って最新のゲームデータを取得できます。質問に答えるために必要なデータは必ずツールを使って取得してください。\n" +
@@ -30,7 +47,8 @@ public class ChatService
         "- 「その他」で直接入力も可能にしてください\n\n" +
         "【価格データのルール】\n" +
         "- ツールから取得した価格は正確な数値です。絶対に独自の数値を作らず、ツールが返した数値をそのまま使ってください\n" +
-        "- 「購入場所」はプレイヤーが商品を買える場所（price_sell）、「売却場所」はプレイヤーが商品を売れる場所（price_buy）です\n" +
+        "- 「購入場所」はプレイヤーが商品を買える場所（price_buy）、「売却場所」はプレイヤーが商品を売れる場所（price_sell）です\n" +
+        "- 購入場所を聞かれた場合は、どこで高く売れるかも併せて紹介してください\n" +
         "- 前の質問の続きでも、必ずツールを再呼出しして最新データを取得してください\n\n" +
         "回答は簡潔で分かりやすい日本語でお願いします。\n" +
         "憶測で回答しないでください。データに記載がなく、確信が持てない場合は「わかりません」と正直に答えてください。";
@@ -200,9 +218,10 @@ public class ChatService
 
     public static async Task<string> ExecuteToolAsync(string toolName, JsonElement args)
     {
+        Log($"TOOL CALL: {toolName}({args})");
         try
         {
-            return toolName switch
+            var result = toolName switch
             {
                 "search_ship" => await ExecuteSearchShipAsync(args),
                 "search_commodity" => await ExecuteSearchCommodityAsync(args),
@@ -213,9 +232,12 @@ public class ChatService
                 "search_pledge" => await FetchPledgeInfoAsync(args),
                 _ => $"[不明なツール: {toolName}]"
             };
+            Log($"TOOL RESULT ({toolName}): {result[..Math.Min(500, result.Length)]}{(result.Length > 500 ? "..." : "")}");
+            return result;
         }
         catch (Exception ex)
         {
+            Log($"TOOL ERROR ({toolName}): {ex.Message}");
             return $"[ツール実行エラー ({toolName}): {ex.Message}]";
         }
     }
@@ -268,6 +290,15 @@ public class ChatService
         return string.Join("\n", results);
     }
 
+    private static string GetDistanceCategory(string buyPlanet, string buyMoon, string sellPlanet, string sellMoon)
+    {
+        if (!string.IsNullOrEmpty(buyMoon) && buyMoon == sellMoon)
+            return "近距離（同じ衛星上）";
+        if (buyPlanet == sellPlanet)
+            return "短距離（同じ惑星圏 / QT数分）";
+        return "長距離（別惑星間 / QT 5-10分+）";
+    }
+
     private static async Task<string> ExecuteSearchCommodityAsync(JsonElement args)
     {
         var name = args.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
@@ -310,13 +341,15 @@ public class ChatService
         using var priceDoc = JsonDocument.Parse(priceResp);
         if (!priceDoc.RootElement.TryGetProperty("data", out var priceData)) return $"'{commodityName}' の価格データが見つかりませんでした。";
 
-        var buyLocations = new List<(string location, double price)>();
-        var sellLocations = new List<(string location, double price)>();
+        var buyLocations = new List<(string location, double price, string planet, string moon)>();
+        var sellLocations = new List<(string location, double price, string planet, string moon)>();
 
         foreach (var item in priceData.EnumerateArray())
         {
             var terminal = item.TryGetProperty("terminal_name", out var tn) ? tn.GetString() ?? "" : "";
             var city = item.TryGetProperty("city_name", out var cn) ? cn.GetString() ?? "" : "";
+            var outpost = item.TryGetProperty("outpost_name", out var on) ? on.GetString() ?? "" : "";
+            var moon = item.TryGetProperty("moon_name", out var mn) ? mn.GetString() ?? "" : "";
             var planet = item.TryGetProperty("planet_name", out var pn) ? pn.GetString() ?? "" : "";
             var star = item.TryGetProperty("star_system_name", out var sn) ? sn.GetString() ?? "" : "";
             var priceBuy = item.TryGetProperty("price_buy", out var pb) && pb.ValueKind == JsonValueKind.Number ? pb.GetDouble() : 0;
@@ -324,9 +357,10 @@ public class ChatService
 
             if (!string.IsNullOrEmpty(system) && !star.Contains(system, StringComparison.OrdinalIgnoreCase)) continue;
 
-            var location = string.Join(" > ", new[] { star, planet, city, terminal }.Where(x => !string.IsNullOrEmpty(x)));
-            if (priceSell > 0) buyLocations.Add((location, priceSell));
-            if (priceBuy > 0) sellLocations.Add((location, priceBuy));
+            var locParts = new[] { star, planet, moon, city, outpost, terminal }.Where(x => !string.IsNullOrEmpty(x)).Distinct();
+            var location = string.Join(" > ", locParts);
+            if (priceBuy > 0) buyLocations.Add((location, priceBuy, planet, moon));
+            if (priceSell > 0) sellLocations.Add((location, priceSell, planet, moon));
         }
 
         var sb = new StringBuilder($"商品: {commodityName}");
@@ -336,14 +370,26 @@ public class ChatService
         if (buyLocations.Count > 0)
         {
             sb.AppendLine($"\n【購入場所】(安い順 — プレイヤーが買える場所)");
-            foreach (var (loc, price) in buyLocations.OrderBy(x => x.price))
+            foreach (var (loc, price, _, _) in buyLocations.OrderBy(x => x.price))
                 sb.AppendLine($"- {loc} | {price:0} aUEC");
+        }
+
+        if (buyLocations.Count > 0 && sellLocations.Count > 0)
+        {
+            var bestBuy = buyLocations.OrderBy(x => x.price).First();
+            var bestSell = sellLocations.OrderByDescending(x => x.price).First();
+            var dist = GetDistanceCategory(bestBuy.planet, bestBuy.moon, bestSell.planet, bestSell.moon);
+            var profit = bestSell.price - bestBuy.price;
+            sb.AppendLine($"\n【おすすめルート】");
+            sb.AppendLine($"  購入: {bestBuy.location} ({bestBuy.price:0} aUEC)");
+            sb.AppendLine($"  売却: {bestSell.location} ({bestSell.price:0} aUEC)");
+            sb.AppendLine($"  利益: +{profit:0} aUEC/単位 | 距離: {dist}");
         }
 
         if (sellLocations.Count > 0)
         {
             sb.AppendLine($"\n【売却場所】(高い順 — プレイヤーが売れる場所)");
-            foreach (var (loc, price) in sellLocations.OrderByDescending(x => x.price))
+            foreach (var (loc, price, _, _) in sellLocations.OrderByDescending(x => x.price))
                 sb.AppendLine($"- {loc} | {price:0} aUEC");
         }
 
@@ -1421,11 +1467,12 @@ public class ChatService
 
     public static async Task<string> SendChatAsync(BackendConfig backend, List<ChatMessage> history, string scData)
     {
+        Log($"SendChatAsync: backend={backend.Type}, model={backend.Model}");
         return backend.Type.ToLowerInvariant() switch
         {
             "claude" => await SendClaudeChatAsync(backend, ChatSystemPrompt, history),
             "gemini" => await SendGeminiChatAsync(backend, ChatSystemPrompt, history),
-            "ollama" => await SendOllamaChatAsync(backend, ChatSystemPrompt + (string.IsNullOrEmpty(scData) ? "" : $"\n\n--- Star Citizen データ ---\n{scData}"), history),
+            "ollama" => await SendOllamaChatAsync(backend, ChatSystemPrompt, history),
             _ => throw new ArgumentException($"Unknown backend: {backend.Type}")
         };
     }
@@ -1447,6 +1494,7 @@ public class ChatService
         foreach (var m in history)
             conversationMessages.Add(new Dictionary<string, object> { ["role"] = m.Role, ["content"] = m.Content });
 
+        Log($"CLAUDE: model={config.Model}, messages={conversationMessages.Count}, tools={tools.Count}");
         for (int iteration = 0; iteration < 5; iteration++)
         {
             var body = new Dictionary<string, object>
@@ -1456,10 +1504,12 @@ public class ChatService
                 ["temperature"] = 0.7,
                 ["system"] = system,
                 ["messages"] = conversationMessages,
-                ["tools"] = tools
+                ["tools"] = tools,
+                ["tool_choice"] = new Dictionary<string, object> { ["type"] = iteration == 0 ? "any" : "auto" }
             };
 
             var json = JsonSerializer.Serialize(body, JsonOpts);
+            Log($"CLAUDE REQUEST (iter={iteration}): {json[..Math.Min(300, json.Length)]}...");
             var resp = await http.PostAsync("https://api.anthropic.com/v1/messages",
                 new StringContent(json, Encoding.UTF8, "application/json"));
 
@@ -1484,6 +1534,7 @@ public class ChatService
 
             var stopReason = root.TryGetProperty("stop_reason", out var sr) ? sr.GetString() ?? "" : "";
             var contentArray = root.GetProperty("content");
+            Log($"CLAUDE RESPONSE: stop_reason={stopReason}, content_blocks={contentArray.GetArrayLength()}");
 
             if (stopReason == "tool_use")
             {
@@ -1568,6 +1619,7 @@ public class ChatService
             });
         }
 
+        Log($"GEMINI: model={config.Model}, messages={conversationContents.Count}");
         for (int iteration = 0; iteration < 5; iteration++)
         {
             var body = new Dictionary<string, object>
@@ -1582,10 +1634,15 @@ public class ChatService
                     ["temperature"] = 0.7,
                     ["maxOutputTokens"] = 4096
                 },
-                ["tools"] = new[] { new Dictionary<string, object> { ["function_declarations"] = functionDeclarations } }
+                ["tools"] = new[] { new Dictionary<string, object> { ["function_declarations"] = functionDeclarations } },
+                ["toolConfig"] = new Dictionary<string, object>
+                {
+                    ["functionCallingConfig"] = new Dictionary<string, object> { ["mode"] = iteration == 0 ? "ANY" : "AUTO" }
+                }
             };
 
             var json = JsonSerializer.Serialize(body, JsonOpts);
+            Log($"GEMINI REQUEST (iter={iteration})");
             var resp = await http.PostAsync(url, new StringContent(json, Encoding.UTF8, "application/json"));
 
             if (!resp.IsSuccessStatusCode)
@@ -1680,34 +1737,81 @@ public class ChatService
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(300) };
         var url = $"{config.BaseUrl.TrimEnd('/')}/api/chat";
 
-        var messages = new List<object>
+        var ollamaTools = GetToolDefinitions().Select(t => new Dictionary<string, object>
         {
-            new { role = "system", content = system }
+            ["type"] = "function",
+            ["function"] = new Dictionary<string, object>
+            {
+                ["name"] = t["name"],
+                ["description"] = t["description"],
+                ["parameters"] = t["input_schema"]
+            }
+        }).ToList();
+
+        var conversationMessages = new List<Dictionary<string, object>>
+        {
+            new() { ["role"] = "system", ["content"] = system }
         };
-        messages.AddRange(history.Select(m => (object)new { role = m.Role, content = m.Content }));
+        foreach (var m in history)
+            conversationMessages.Add(new Dictionary<string, object> { ["role"] = m.Role, ["content"] = m.Content });
 
-        var body = new
-        {
-            model = config.Model,
-            messages,
-            stream = false,
-            options = new { temperature = 0.7, num_predict = 4096 }
-        };
+        Log($"OLLAMA: model={config.Model}, url={url}, messages={conversationMessages.Count}");
 
-        var json = JsonSerializer.Serialize(body, new JsonSerializerOptions
+        for (int iteration = 0; iteration < 5; iteration++)
         {
-            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-        });
+            var body = new Dictionary<string, object>
+            {
+                ["model"] = config.Model,
+                ["messages"] = conversationMessages,
+                ["stream"] = false,
+                ["options"] = new Dictionary<string, object> { ["temperature"] = 0.7, ["num_predict"] = 4096 },
+                ["tools"] = ollamaTools
+            };
 
-        var resp = await http.PostAsync(url, new StringContent(json, Encoding.UTF8, "application/json"));
-        if (!resp.IsSuccessStatusCode)
-        {
-            var err = await resp.Content.ReadAsStringAsync();
-            throw new HttpRequestException($"{(int)resp.StatusCode} - URL: {url} - {err}");
+            var json = JsonSerializer.Serialize(body, JsonOpts);
+            Log($"OLLAMA REQUEST (iter={iteration})");
+            var resp = await http.PostAsync(url, new StringContent(json, Encoding.UTF8, "application/json"));
+            if (!resp.IsSuccessStatusCode)
+            {
+                var err = await resp.Content.ReadAsStringAsync();
+                throw new HttpRequestException($"{(int)resp.StatusCode} - URL: {url} - {err}");
+            }
+
+            var respJson = await resp.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(respJson);
+            var message = doc.RootElement.GetProperty("message");
+            var content = message.TryGetProperty("content", out var c) ? c.GetString() ?? "" : "";
+
+            if (message.TryGetProperty("tool_calls", out var toolCalls) && toolCalls.GetArrayLength() > 0)
+            {
+                Log($"OLLAMA: tool_calls detected, count={toolCalls.GetArrayLength()}");
+                conversationMessages.Add(new Dictionary<string, object>
+                {
+                    ["role"] = "assistant",
+                    ["content"] = content,
+                    ["tool_calls"] = JsonSerializer.Deserialize<object>(toolCalls.GetRawText())!
+                });
+
+                foreach (var tc in toolCalls.EnumerateArray())
+                {
+                    var func = tc.GetProperty("function");
+                    var funcName = func.GetProperty("name").GetString() ?? "";
+                    var funcArgs = func.GetProperty("arguments");
+
+                    var result = await ExecuteToolAsync(funcName, funcArgs);
+                    conversationMessages.Add(new Dictionary<string, object>
+                    {
+                        ["role"] = "tool",
+                        ["content"] = result
+                    });
+                }
+                continue;
+            }
+
+            Log($"OLLAMA: final response, content_len={content.Length}");
+            return content;
         }
 
-        var respJson = await resp.Content.ReadAsStringAsync();
-        using var doc = JsonDocument.Parse(respJson);
-        return doc.RootElement.GetProperty("message").GetProperty("content").GetString() ?? "";
+        return "[ツール呼び出し回数の上限に達しました]";
     }
 }

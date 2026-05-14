@@ -1255,6 +1255,7 @@ public partial class MainWindow : Window
 
         _gameDataExtractor = new GameDataExtractor(workDir);
         ChatService.SetGameDataExtractor(_gameDataExtractor);
+        ChatService.LogDirectory = workDir;
 
         var ver = _gameDataExtractor.GetCachedVersion();
         if (ver != null)
