@@ -38,7 +38,7 @@ Star Citizen のゲーム内テキストを AI で日本語に翻訳し、ゲー
 
 ### 1. 翻訳タブ — 抽出・翻訳・反映
 
-![翻訳タブ](image/Translate.png)
+![翻訳タブ](image/Translate2.png)
 
 1. **GamePath** が正しいことを確認（自動検出済み）。チャンネル (PTU/LIVE) を選択
 2. **[1. 抽出]** をクリック — Data.p4k から global.ini を抽出し DB に登録
@@ -130,7 +130,7 @@ Star Citizen のゲーム内テキストを AI で日本語に翻訳し、ゲー
 
 ### 7. キーバインドエディタ — キーボードタブ (New!)
 
-![キーバインド キーボード](image/Keybind_Keyboardpng.png)
+![キーバインド キーボード](image/Keybind_Keyboard2.png)
 
 1. **[キーボード]** タブをクリック
 2. **日本語 109 キー配列** がビジュアル表示されます（テンキー付き）
