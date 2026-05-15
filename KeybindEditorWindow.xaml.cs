@@ -40,6 +40,8 @@ public partial class KeybindEditorWindow : Window
 
         _allActions = _data.Categories.SelectMany(c => c.Actions).ToList();
 
+        ChatService.SetKeybindData(_data);
+
         if (_allActions.Count == 0)
         {
             MessageBox.Show(
@@ -70,6 +72,19 @@ public partial class KeybindEditorWindow : Window
             }).ToList();
 
         ApplyFilter();
+
+        keyboardPanel.SetData(_data, () =>
+        {
+            dgActions.Items.Refresh();
+            ApplyFilter();
+        });
+    }
+
+    private void TabMain_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.Source != tabMain) return;
+        if (tabMain.SelectedIndex == 1)
+            keyboardPanel.UpdateKeyColors();
     }
 
     private void ApplyFilter()

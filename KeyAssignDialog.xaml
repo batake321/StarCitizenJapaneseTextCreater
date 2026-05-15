@@ -1,0 +1,95 @@
+<Window x:Class="StarCitizenJapaneseTextCreater.KeyAssignDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="キー割り当て" Height="520" Width="650"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Key info -->
+        <Border Grid.Row="0" Background="#E3F2FD" Padding="12,8" CornerRadius="4" Margin="0,0,0,8">
+            <TextBlock x:Name="txtKeyName" FontSize="16" FontWeight="Bold"/>
+        </Border>
+
+        <!-- Current bindings for this key -->
+        <GroupBox Grid.Row="1" Header="現在の割り当て" Margin="0,0,0,8">
+            <ListBox x:Name="lstCurrentBindings" MaxHeight="120" BorderThickness="0">
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" VerticalAlignment="Center">
+                                <Run Text="{Binding DisplayName, Mode=OneWay}" FontWeight="Bold"/>
+                                <Run Text="  "/>
+                                <Run Text="{Binding CategoryDisplayName, Mode=OneWay}" Foreground="#888"/>
+                            </TextBlock>
+                            <Button Grid.Column="1" Content="編集" Tag="{Binding}" Click="EditBinding_Click"
+                                    Padding="8,2" Margin="4,0"/>
+                            <Button Grid.Column="2" Content="解除" Tag="{Binding}" Click="RemoveBinding_Click"
+                                    Padding="8,2" Foreground="#D32F2F"/>
+                        </Grid>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </GroupBox>
+
+        <!-- Action search & select -->
+        <GroupBox Grid.Row="2" Header="機能を割り当て">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0" Margin="0,0,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="160"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="検索:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                    <TextBox x:Name="txtActionSearch" Grid.Column="1" TextChanged="ActionSearch_Changed"/>
+                    <TextBlock Grid.Column="2" Text="  カテゴリ:" VerticalAlignment="Center" Margin="4,0,4,0"/>
+                    <ComboBox x:Name="cmbActionCategory" Grid.Column="3" SelectionChanged="ActionCategory_Changed"/>
+                </Grid>
+                <DataGrid x:Name="dgAvailableActions" Grid.Row="1" AutoGenerateColumns="False"
+                          CanUserAddRows="False" CanUserDeleteRows="False" IsReadOnly="True"
+                          SelectionMode="Single" GridLinesVisibility="Horizontal"
+                          FontSize="12" RowHeight="26"
+                          MouseDoubleClick="AvailableAction_DoubleClick">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="機能" Binding="{Binding DisplayName}" Width="200"/>
+                        <DataGridTextColumn Header="現在のキー" Binding="{Binding KeyboardDisplay}" Width="140">
+                            <DataGridTextColumn.ElementStyle>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground" Value="#888"/>
+                                </Style>
+                            </DataGridTextColumn.ElementStyle>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Header="カテゴリ" Binding="{Binding CategoryDisplayName}" Width="160">
+                            <DataGridTextColumn.ElementStyle>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground" Value="#888"/>
+                                </Style>
+                            </DataGridTextColumn.ElementStyle>
+                        </DataGridTextColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </GroupBox>
+
+        <!-- Buttons -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+            <Button Content="閉じる" Click="Close_Click" Padding="16,6" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+</Window>

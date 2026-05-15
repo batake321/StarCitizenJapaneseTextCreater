@@ -8,26 +8,69 @@ public class ActionMapData
 {
     public List<ActionCategory> Categories { get; set; } = new();
     public Dictionary<string, ActionBinding> AllBindings { get; set; } = new();
+    public Dictionary<string, string> Localization { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 public class ActionCategory
 {
     public string Name { get; set; } = "";
-    public string DisplayName => ActionMapNames.GetCategoryName(Name);
+    public string UILabel { get; set; } = "";
+    public ActionMapData? Owner { get; set; }
+    public string DisplayName
+    {
+        get
+        {
+            var loc = ResolveLocLabel(UILabel, Owner?.Localization);
+            if (!string.IsNullOrEmpty(loc)) return loc;
+            return ActionMapNames.GetCategoryName(Name);
+        }
+    }
     public List<ActionBinding> Actions { get; set; } = new();
+
+    internal static string ResolveLocLabel(string uiLabel, Dictionary<string, string>? localization)
+    {
+        if (string.IsNullOrEmpty(uiLabel) || localization == null || localization.Count == 0) return "";
+        var key = uiLabel.TrimStart('@');
+        return localization.TryGetValue(key, out var val) ? val : "";
+    }
 }
 
 public class ActionBinding : INotifyPropertyChanged
 {
     public string CategoryName { get; set; } = "";
     public string ActionName { get; set; } = "";
-    public string DisplayName => ActionMapNames.GetActionName(ActionName);
+    public string UILabel { get; set; } = "";
+    public ActionMapData? Owner { get; set; }
+    public string DisplayName
+    {
+        get
+        {
+            var loc = ActionCategory.ResolveLocLabel(UILabel, Owner?.Localization);
+            if (!string.IsNullOrEmpty(loc)) return loc;
+            return ActionMapNames.GetActionName(ActionName);
+        }
+    }
 
     private string _keyboard = "";
     private string _mouse = "";
     private string _gamepad = "";
     private string _joystick = "";
     private bool _isLongPress;
+
+    public string ActivationMode { get; set; } = "";
+    public string KeyboardActivationMode { get; set; } = "";
+    public string MouseActivationMode { get; set; } = "";
+    public string GamepadActivationMode { get; set; } = "";
+    public string JoystickActivationMode { get; set; } = "";
+
+    public string EffectiveKeyboardActivationMode =>
+        !string.IsNullOrEmpty(KeyboardActivationMode) ? KeyboardActivationMode : ActivationMode;
+    public string EffectiveMouseActivationMode =>
+        !string.IsNullOrEmpty(MouseActivationMode) ? MouseActivationMode : ActivationMode;
+    public string EffectiveGamepadActivationMode =>
+        !string.IsNullOrEmpty(GamepadActivationMode) ? GamepadActivationMode : ActivationMode;
+    public string EffectiveJoystickActivationMode =>
+        !string.IsNullOrEmpty(JoystickActivationMode) ? JoystickActivationMode : ActivationMode;
 
     public string Keyboard { get => _keyboard; set { _keyboard = value; OnPropertyChanged(); OnPropertyChanged(nameof(KeyboardDisplay)); } }
     public string Mouse { get => _mouse; set { _mouse = value; OnPropertyChanged(); OnPropertyChanged(nameof(MouseDisplay)); } }
@@ -55,7 +98,22 @@ public class ActionBinding : INotifyPropertyChanged
     public bool IsMouseModified => Mouse != DefaultMouse;
     public bool IsGamepadModified => Gamepad != DefaultGamepad;
     public bool IsJoystickModified => Joystick != DefaultJoystick;
-    public string CategoryDisplayName => ActionMapNames.GetCategoryName(CategoryName);
+    public string CategoryDisplayName
+    {
+        get
+        {
+            if (Owner != null)
+            {
+                var cat = Owner.Categories.FirstOrDefault(c => c.Name == CategoryName);
+                if (cat != null)
+                {
+                    var loc = ActionCategory.ResolveLocLabel(cat.UILabel, Owner.Localization);
+                    if (!string.IsNullOrEmpty(loc)) return loc;
+                }
+            }
+            return ActionMapNames.GetCategoryName(CategoryName);
+        }
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged([CallerMemberName] string? name = null) =>
@@ -129,6 +187,33 @@ public static class ActionMapParser
     public static ActionMapData LoadFromGameAndSave(string gamePath, string savePath)
     {
         var data = new ActionMapData();
+
+        // Load Japanese localization for display names
+        if (!string.IsNullOrEmpty(gamePath))
+        {
+            var jaIniPath = Path.Combine(gamePath, "data", "Localization", "japanese_(japan)", "global.ini");
+            if (!File.Exists(jaIniPath))
+            {
+                var p4kPath = Path.Combine(gamePath, "Data.p4k");
+                if (File.Exists(p4kPath))
+                {
+                    try
+                    {
+                        var extractDir = Path.Combine(Path.GetTempPath(), "SCJPKeybind");
+                        jaIniPath = Path.Combine(extractDir, "japanese_global.ini");
+                        if (!File.Exists(jaIniPath))
+                            P4kExtractor.Extract(p4kPath, "Data/Localization/japanese_(japan)/global.ini", jaIniPath);
+                    }
+                    catch { }
+                }
+            }
+            if (File.Exists(jaIniPath))
+            {
+                try { data.Localization = GlobalIniParser.Parse(jaIniPath); }
+                catch { }
+            }
+        }
+
         if (!string.IsNullOrEmpty(gamePath))
         {
             var defaultProfilePath = Path.Combine(gamePath, "data", "Libs", "Config", "defaultProfile.xml");
@@ -223,7 +308,8 @@ public static class ActionMapParser
             var category = data.Categories.FirstOrDefault(c => c.Name == catName);
             if (category == null)
             {
-                category = new ActionCategory { Name = catName };
+                var catLabel = am.Attribute("UILabel")?.Value ?? am.Attribute("UICategory")?.Value ?? "";
+                category = new ActionCategory { Name = catName, UILabel = catLabel, Owner = data };
                 data.Categories.Add(category);
             }
 
@@ -232,11 +318,21 @@ public static class ActionMapParser
                 var actionName = action.Attribute("name")?.Value ?? "";
                 if (string.IsNullOrEmpty(actionName)) continue;
 
+                var uiLabel = action.Attribute("UILabel")?.Value ?? "";
                 var binding = new ActionBinding
                 {
                     CategoryName = catName,
                     ActionName = actionName,
+                    UILabel = uiLabel,
+                    Owner = data,
                 };
+
+                // Activation mode
+                var actMode = action.Attribute("activationMode")?.Value?.Trim()
+                           ?? action.Attribute("ActivationMode")?.Value?.Trim()
+                           ?? action.Attribute("activationmode")?.Value?.Trim()
+                           ?? "";
+                binding.ActivationMode = actMode;
 
                 // Attribute-based bindings (defaultProfile format)
                 var kb = action.Attribute("keyboard")?.Value?.Trim();
@@ -247,6 +343,36 @@ public static class ActionMapParser
                 if (!string.IsNullOrEmpty(mo)) { binding.Mouse = mo; binding.DefaultMouse = mo; }
                 if (!string.IsNullOrEmpty(gp)) { binding.Gamepad = gp; binding.DefaultGamepad = gp; }
                 if (!string.IsNullOrEmpty(js)) { binding.Joystick = js; binding.DefaultJoystick = js; }
+
+                // Per-device child elements with their own activationMode and input
+                foreach (var deviceEl in action.Elements())
+                {
+                    var elName = deviceEl.Name.LocalName.ToLower();
+                    var devActMode = deviceEl.Attribute("activationMode")?.Value?.Trim() ?? "";
+                    var devInput = deviceEl.Attribute("input")?.Value?.Trim() ?? "";
+                    var devOnHold = deviceEl.Attribute("onHold")?.Value?.Trim() ?? "";
+
+                    switch (elName)
+                    {
+                        case "keyboard":
+                            if (!string.IsNullOrEmpty(devActMode)) binding.KeyboardActivationMode = devActMode;
+                            if (!string.IsNullOrEmpty(devInput)) { binding.Keyboard = devInput; binding.DefaultKeyboard = devInput; }
+                            break;
+                        case "mouse":
+                            if (!string.IsNullOrEmpty(devActMode)) binding.MouseActivationMode = devActMode;
+                            if (!string.IsNullOrEmpty(devInput)) { binding.Mouse = devInput; binding.DefaultMouse = devInput; }
+                            break;
+                        case "gamepad":
+                            if (!string.IsNullOrEmpty(devActMode)) binding.GamepadActivationMode = devActMode;
+                            if (!string.IsNullOrEmpty(devInput)) { binding.Gamepad = devInput; binding.DefaultGamepad = devInput; }
+                            if (devOnHold == "1" && string.IsNullOrEmpty(devActMode)) binding.GamepadActivationMode = "hold";
+                            break;
+                        case "joystick":
+                            if (!string.IsNullOrEmpty(devActMode)) binding.JoystickActivationMode = devActMode;
+                            if (!string.IsNullOrEmpty(devInput)) { binding.Joystick = devInput; binding.DefaultJoystick = devInput; }
+                            break;
+                    }
+                }
 
                 // Also check rebind child elements
                 foreach (var rebind in action.Elements("rebind"))
@@ -280,7 +406,7 @@ public static class ActionMapParser
             var category = data.Categories.FirstOrDefault(c => c.Name == catName);
             if (category == null)
             {
-                category = new ActionCategory { Name = catName };
+                category = new ActionCategory { Name = catName, Owner = data };
                 data.Categories.Add(category);
             }
 
@@ -292,7 +418,7 @@ public static class ActionMapParser
                 var key = $"{catName}.{actionName}";
                 if (!data.AllBindings.TryGetValue(key, out var binding))
                 {
-                    binding = new ActionBinding { CategoryName = catName, ActionName = actionName };
+                    binding = new ActionBinding { CategoryName = catName, ActionName = actionName, Owner = data };
                     data.AllBindings[key] = binding;
                     category.Actions.Add(binding);
                 }
@@ -385,6 +511,40 @@ public static class ActionMapParser
         root.Add(profiles);
         new XDocument(root).Save(outputPath);
     }
+}
+
+public static class ActivationModeHelper
+{
+    public static string GetDisplayName(string mode) => mode.ToLowerInvariant() switch
+    {
+        "tap" => "タップ",
+        "press" => "押下中",
+        "hold" => "長押し",
+        "hold_no_retrigger" => "長押し(1回)",
+        "hold_toggle" => "長押しトグル",
+        "smart_toggle" => "スマートトグル",
+        "double_tap" => "二度押し",
+        "double_tap_nonblocking" => "二度押し(非ブロック)",
+        "delayed_press" => "遅延押し",
+        "delayed_press_quicker" => "遅延押し(短)",
+        "delayed_press_medium" => "遅延押し(中)",
+        "delayed_press_long" => "遅延押し(長)",
+        "delayed_hold" => "遅延長押し",
+        "delayed_hold_long" => "遅延長押し(長)",
+        "delayed_hold_no_retrigger" => "遅延長押し(1回)",
+        _ => string.IsNullOrEmpty(mode) ? "" : mode,
+    };
+
+    public static string GetCategory(string mode) => mode.ToLowerInvariant() switch
+    {
+        "tap" or "" => "tap",
+        "press" => "press",
+        "hold" or "hold_no_retrigger" or "hold_toggle" or "smart_toggle" => "hold",
+        "double_tap" or "double_tap_nonblocking" => "double_tap",
+        _ when mode.Contains("hold") => "hold",
+        _ when mode.Contains("delayed") => "hold",
+        _ => "tap",
+    };
 }
 
 public static class InputDisplayHelper

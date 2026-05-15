@@ -1373,6 +1373,19 @@ public partial class MainWindow : Window
         }
         catch { }
 
+        // Load keybind data for chat tool
+        try
+        {
+            var gamePath = App.Config.GamePath;
+            if (!string.IsNullOrEmpty(gamePath))
+            {
+                var kbData = ActionMapParser.LoadFromGameAndSave(gamePath, "");
+                if (kbData.Categories.Count > 0)
+                    ChatService.SetKeybindData(kbData);
+            }
+        }
+        catch { }
+
         var ver = _gameDataExtractor.GetCachedVersion();
         if (ver != null)
         {

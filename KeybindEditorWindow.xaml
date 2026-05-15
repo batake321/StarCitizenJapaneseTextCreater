@@ -1,6 +1,7 @@
 <Window x:Class="StarCitizenJapaneseTextCreater.KeybindEditorWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:StarCitizenJapaneseTextCreater"
         Title="キーバインド エディタ" Height="780" Width="1200"
         WindowStartupLocation="CenterOwner" ResizeMode="CanResizeWithGrip">
     <Window.Resources>
@@ -31,166 +32,194 @@
     </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- Toolbar -->
-        <Border Grid.Row="0" Background="#F5F5F5" Padding="8,6" BorderBrush="#DDD" BorderThickness="0,0,0,1">
-            <WrapPanel>
-                <TextBlock Text="検索:" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                <TextBox x:Name="txtSearch" Width="200" VerticalAlignment="Center" Margin="0,0,8,0"
-                         TextChanged="Search_Changed"/>
-                <ComboBox x:Name="cmbCategory" Width="220" VerticalAlignment="Center" Margin="0,0,8,0"
-                          SelectionChanged="Category_Changed"/>
-                <ComboBox x:Name="cmbInputFilter" Width="130" VerticalAlignment="Center" Margin="0,0,8,0"
-                          SelectionChanged="InputFilter_Changed">
-                    <ComboBoxItem Content="全入力" IsSelected="True"/>
-                    <ComboBoxItem Content="キーボード"/>
-                    <ComboBoxItem Content="マウス"/>
-                    <ComboBoxItem Content="ゲームパッド"/>
-                    <ComboBoxItem Content="ジョイスティック"/>
-                    <ComboBoxItem Content="未割当のみ"/>
-                    <ComboBoxItem Content="変更済みのみ"/>
-                </ComboBox>
-                <Button Content="印刷" Click="Print_Click" Padding="12,4" Margin="0,0,4,0"/>
-                <Button Content="エクスポート" Click="Export_Click" Padding="12,4" Margin="0,0,4,0"/>
-                <Button Content="インポート" Click="Import_Click" Padding="12,4"/>
-            </WrapPanel>
-        </Border>
-
-        <!-- Main content -->
-        <Grid Grid.Row="1">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="260"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-
-            <!-- Category tree -->
-            <Border Grid.Column="0" BorderBrush="#DDD" BorderThickness="0,0,1,0">
+        <TabControl Grid.Row="0" x:Name="tabMain" SelectionChanged="TabMain_Changed">
+            <!-- 機能別タブ (existing functionality) -->
+            <TabItem Header="  機能別  ">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
-                    <TextBlock Text="カテゴリ" FontWeight="Bold" Padding="8,6" Background="#FAFAFA"/>
-                    <ListBox x:Name="lstCategories" Grid.Row="1" BorderThickness="0"
-                             SelectionChanged="CategoryList_Changed">
-                        <ListBox.ItemTemplate>
-                            <DataTemplate>
-                                <StackPanel Orientation="Horizontal" Margin="2">
-                                    <TextBlock Text="{Binding DisplayName}" VerticalAlignment="Center"/>
-                                    <TextBlock Text="{Binding ActionCount}" Foreground="#888" Margin="6,0,0,0"
-                                               VerticalAlignment="Center" FontSize="11"/>
-                                </StackPanel>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
-                </Grid>
-            </Border>
 
-            <!-- Action list -->
-            <DataGrid x:Name="dgActions" Grid.Column="1" AutoGenerateColumns="False"
-                      CanUserAddRows="False" CanUserDeleteRows="False" IsReadOnly="True"
-                      SelectionMode="Single" GridLinesVisibility="Horizontal"
-                      AlternatingRowBackground="#FAFAFA" FontSize="13"
-                      MouseDoubleClick="DgActions_DoubleClick"
-                      RowHeight="32">
-                <DataGrid.RowStyle>
-                    <Style TargetType="DataGridRow">
-                        <Style.Triggers>
-                            <DataTrigger Binding="{Binding IsModified}" Value="True">
-                                <Setter Property="Background" Value="#FFF8E1"/>
-                                <Setter Property="FontWeight" Value="SemiBold"/>
-                            </DataTrigger>
-                        </Style.Triggers>
-                    </Style>
-                </DataGrid.RowStyle>
-                <DataGrid.Columns>
-                    <DataGridTextColumn Header="機能" Binding="{Binding DisplayName}" Width="200"
-                                        SortMemberPath="ActionName">
-                        <DataGridTextColumn.ElementStyle>
-                            <Style TargetType="TextBlock">
-                                <Setter Property="VerticalAlignment" Value="Center"/>
-                                <Setter Property="Padding" Value="4,0"/>
-                            </Style>
-                        </DataGridTextColumn.ElementStyle>
-                    </DataGridTextColumn>
-                    <DataGridTextColumn Header="キーボード" Binding="{Binding KeyboardDisplay}" Width="150">
-                        <DataGridTextColumn.ElementStyle>
-                            <Style TargetType="TextBlock">
-                                <Setter Property="VerticalAlignment" Value="Center"/>
-                                <Setter Property="FontFamily" Value="Consolas"/>
-                                <Setter Property="Foreground" Value="#999"/>
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding IsKeyboardModified}" Value="True">
-                                        <Setter Property="Foreground" Value="#E65100"/>
-                                        <Setter Property="FontWeight" Value="Bold"/>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </DataGridTextColumn.ElementStyle>
-                    </DataGridTextColumn>
-                    <DataGridTextColumn Header="マウス" Binding="{Binding MouseDisplay}" Width="120">
-                        <DataGridTextColumn.ElementStyle>
-                            <Style TargetType="TextBlock">
-                                <Setter Property="VerticalAlignment" Value="Center"/>
-                                <Setter Property="FontFamily" Value="Consolas"/>
-                                <Setter Property="Foreground" Value="#999"/>
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding IsMouseModified}" Value="True">
-                                        <Setter Property="Foreground" Value="#E65100"/>
-                                        <Setter Property="FontWeight" Value="Bold"/>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </DataGridTextColumn.ElementStyle>
-                    </DataGridTextColumn>
-                    <DataGridTextColumn Header="ゲームパッド" Binding="{Binding GamepadDisplay}" Width="160">
-                        <DataGridTextColumn.ElementStyle>
-                            <Style TargetType="TextBlock">
-                                <Setter Property="VerticalAlignment" Value="Center"/>
-                                <Setter Property="FontFamily" Value="Consolas"/>
-                                <Setter Property="Foreground" Value="#90CAF9"/>
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding IsGamepadModified}" Value="True">
-                                        <Setter Property="Foreground" Value="#1565C0"/>
-                                        <Setter Property="FontWeight" Value="Bold"/>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </DataGridTextColumn.ElementStyle>
-                    </DataGridTextColumn>
-                    <DataGridTextColumn Header="ジョイスティック" Binding="{Binding JoystickDisplay}" Width="140">
-                        <DataGridTextColumn.ElementStyle>
-                            <Style TargetType="TextBlock">
-                                <Setter Property="VerticalAlignment" Value="Center"/>
-                                <Setter Property="FontFamily" Value="Consolas"/>
-                                <Setter Property="Foreground" Value="#999"/>
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding IsJoystickModified}" Value="True">
-                                        <Setter Property="Foreground" Value="#E65100"/>
-                                        <Setter Property="FontWeight" Value="Bold"/>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </DataGridTextColumn.ElementStyle>
-                    </DataGridTextColumn>
-                    <DataGridTextColumn Header="カテゴリ" Binding="{Binding CategoryDisplayName}" Width="160">
-                        <DataGridTextColumn.ElementStyle>
-                            <Style TargetType="TextBlock">
-                                <Setter Property="VerticalAlignment" Value="Center"/>
-                                <Setter Property="Foreground" Value="#888"/>
-                            </Style>
-                        </DataGridTextColumn.ElementStyle>
-                    </DataGridTextColumn>
-                </DataGrid.Columns>
-            </DataGrid>
-        </Grid>
+                    <!-- Toolbar -->
+                    <Border Grid.Row="0" Background="#F5F5F5" Padding="8,6" BorderBrush="#DDD" BorderThickness="0,0,0,1">
+                        <WrapPanel>
+                            <TextBlock Text="検索:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <TextBox x:Name="txtSearch" Width="200" VerticalAlignment="Center" Margin="0,0,8,0"
+                                     TextChanged="Search_Changed"/>
+                            <ComboBox x:Name="cmbCategory" Width="220" VerticalAlignment="Center" Margin="0,0,8,0"
+                                      SelectionChanged="Category_Changed"/>
+                            <ComboBox x:Name="cmbInputFilter" Width="130" VerticalAlignment="Center" Margin="0,0,8,0"
+                                      SelectionChanged="InputFilter_Changed">
+                                <ComboBoxItem Content="全入力" IsSelected="True"/>
+                                <ComboBoxItem Content="キーボード"/>
+                                <ComboBoxItem Content="マウス"/>
+                                <ComboBoxItem Content="ゲームパッド"/>
+                                <ComboBoxItem Content="ジョイスティック"/>
+                                <ComboBoxItem Content="未割当のみ"/>
+                                <ComboBoxItem Content="変更済みのみ"/>
+                            </ComboBox>
+                            <Button Content="印刷" Click="Print_Click" Padding="12,4" Margin="0,0,4,0"/>
+                            <Button Content="エクスポート" Click="Export_Click" Padding="12,4" Margin="0,0,4,0"/>
+                            <Button Content="インポート" Click="Import_Click" Padding="12,4"/>
+                        </WrapPanel>
+                    </Border>
+
+                    <!-- Main content -->
+                    <Grid Grid.Row="1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="260"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Category tree -->
+                        <Border Grid.Column="0" BorderBrush="#DDD" BorderThickness="0,0,1,0">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Text="カテゴリ" FontWeight="Bold" Padding="8,6" Background="#FAFAFA"/>
+                                <ListBox x:Name="lstCategories" Grid.Row="1" BorderThickness="0"
+                                         SelectionChanged="CategoryList_Changed">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal" Margin="2">
+                                                <TextBlock Text="{Binding DisplayName}" VerticalAlignment="Center"/>
+                                                <TextBlock Text="{Binding ActionCount}" Foreground="#888" Margin="6,0,0,0"
+                                                           VerticalAlignment="Center" FontSize="11"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                            </Grid>
+                        </Border>
+
+                        <!-- Action list -->
+                        <DataGrid x:Name="dgActions" Grid.Column="1" AutoGenerateColumns="False"
+                                  CanUserAddRows="False" CanUserDeleteRows="False" IsReadOnly="True"
+                                  SelectionMode="Single" GridLinesVisibility="Horizontal"
+                                  AlternatingRowBackground="#FAFAFA" FontSize="13"
+                                  MouseDoubleClick="DgActions_DoubleClick"
+                                  RowHeight="32">
+                            <DataGrid.RowStyle>
+                                <Style TargetType="DataGridRow">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsModified}" Value="True">
+                                            <Setter Property="Background" Value="#FFF8E1"/>
+                                            <Setter Property="FontWeight" Value="SemiBold"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </DataGrid.RowStyle>
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="機能" Binding="{Binding DisplayName}" Width="200"
+                                                    SortMemberPath="ActionName">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="VerticalAlignment" Value="Center"/>
+                                            <Setter Property="Padding" Value="4,0"/>
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="キーボード" Binding="{Binding KeyboardDisplay}" Width="150">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="VerticalAlignment" Value="Center"/>
+                                            <Setter Property="FontFamily" Value="Consolas"/>
+                                            <Setter Property="Foreground" Value="#999"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsKeyboardModified}" Value="True">
+                                                    <Setter Property="Foreground" Value="#E65100"/>
+                                                    <Setter Property="FontWeight" Value="Bold"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="マウス" Binding="{Binding MouseDisplay}" Width="120">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="VerticalAlignment" Value="Center"/>
+                                            <Setter Property="FontFamily" Value="Consolas"/>
+                                            <Setter Property="Foreground" Value="#999"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsMouseModified}" Value="True">
+                                                    <Setter Property="Foreground" Value="#E65100"/>
+                                                    <Setter Property="FontWeight" Value="Bold"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="ゲームパッド" Binding="{Binding GamepadDisplay}" Width="160">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="VerticalAlignment" Value="Center"/>
+                                            <Setter Property="FontFamily" Value="Consolas"/>
+                                            <Setter Property="Foreground" Value="#90CAF9"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsGamepadModified}" Value="True">
+                                                    <Setter Property="Foreground" Value="#1565C0"/>
+                                                    <Setter Property="FontWeight" Value="Bold"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="ジョイスティック" Binding="{Binding JoystickDisplay}" Width="140">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="VerticalAlignment" Value="Center"/>
+                                            <Setter Property="FontFamily" Value="Consolas"/>
+                                            <Setter Property="Foreground" Value="#999"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsJoystickModified}" Value="True">
+                                                    <Setter Property="Foreground" Value="#E65100"/>
+                                                    <Setter Property="FontWeight" Value="Bold"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="カテゴリ" Binding="{Binding CategoryDisplayName}" Width="160">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="VerticalAlignment" Value="Center"/>
+                                            <Setter Property="Foreground" Value="#888"/>
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
+            <!-- キーボードタブ -->
+            <TabItem Header="  キーボード  ">
+                <local:KeyboardLayoutPanel x:Name="keyboardPanel"/>
+            </TabItem>
+
+            <!-- マウスタブ (placeholder) -->
+            <TabItem Header="  マウス  ">
+                <TextBlock Text="マウスレイアウト（今後実装予定）" HorizontalAlignment="Center" VerticalAlignment="Center"
+                           FontSize="16" Foreground="#999"/>
+            </TabItem>
+
+            <!-- コントローラータブ (placeholder) -->
+            <TabItem Header="  コントローラー  ">
+                <TextBlock Text="コントローラーレイアウト（今後実装予定）" HorizontalAlignment="Center" VerticalAlignment="Center"
+                           FontSize="16" Foreground="#999"/>
+            </TabItem>
+        </TabControl>
 
         <!-- Status bar -->
-        <Border Grid.Row="2" Background="#F5F5F5" Padding="8,4" BorderBrush="#DDD" BorderThickness="0,1,0,0">
+        <Border Grid.Row="1" Background="#F5F5F5" Padding="8,4" BorderBrush="#DDD" BorderThickness="0,1,0,0">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -198,7 +227,7 @@
                 </Grid.ColumnDefinitions>
                 <TextBlock x:Name="txtStatus" VerticalAlignment="Center" Foreground="#666"/>
                 <StackPanel Grid.Column="1" Orientation="Horizontal">
-                    <Button Content="セーブに保存" Click="SaveApply_Click" Padding="16,4" Margin="0,0,4,0"
+                    <Button Content="保存" Click="SaveApply_Click" Padding="16,4" Margin="0,0,4,0"
                             FontWeight="Bold" Background="#4CAF50" Foreground="White"/>
                     <Button Content="閉じる" Click="Close_Click" Padding="16,4" IsCancel="True"/>
                 </StackPanel>

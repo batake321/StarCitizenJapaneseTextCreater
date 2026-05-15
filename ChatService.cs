@@ -40,7 +40,8 @@ public class ChatService
         "- search_mission: ミッション・契約の検索\n" +
         "- search_price: アイテムの販売場所・価格の検索\n" +
         "- search_wiki: Wiki からの詳細情報取得\n" +
-        "- search_pledge: RSI プレッジ価格・Warbond 割引情報（販売状況は変動するため公式確認を案内）\n\n" +
+        "- search_pledge: RSI プレッジ価格・Warbond 割引情報（販売状況は変動するため公式確認を案内）\n" +
+        "- search_keybind: キーバインド検索（機能名・カテゴリ名・キー名で検索、未割当キー一覧、特定キーの割り当て確認）\n\n" +
         "【候補提示ルール】\n" +
         "- 検索結果が複数ある場合は、番号付きリストで候補を提示してください\n" +
         "- ユーザーが番号で選択したら、その候補の詳細を取得してください\n" +
@@ -95,6 +96,9 @@ public class ChatService
     {
         _translationDbPath = dbPath;
     }
+
+    private static ActionMapData? _keybindData;
+    public static void SetKeybindData(ActionMapData data) => _keybindData = data;
 
     private static List<string> LookupEnglishKeywords(string japaneseQuery)
     {
@@ -275,6 +279,21 @@ public class ChatService
                     },
                     ["required"] = new[] { "ship_name" }
                 }
+            },
+            new()
+            {
+                ["name"] = "search_keybind",
+                ["description"] = "キーバインド検索。機能名・カテゴリ名・キー名で検索。mode: 'search'=キーワード検索, 'unbound'=未割当キー一覧, 'key'=特定キーの割り当て確認",
+                ["input_schema"] = new Dictionary<string, object>
+                {
+                    ["type"] = "object",
+                    ["properties"] = new Dictionary<string, object>
+                    {
+                        ["query"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "検索キーワード（機能名、カテゴリ名、キー名など）" },
+                        ["mode"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "検索モード: search(デフォルト), unbound(未割当キー), key(キーの割り当て)" }
+                    },
+                    ["required"] = new[] { "query" }
+                }
             }
         };
     }
@@ -310,6 +329,7 @@ public class ChatService
                 "search_price" => await ExecuteSearchPriceAsync(args),
                 "search_wiki" => await ExecuteSearchWikiAsync(args),
                 "search_pledge" => await FetchPledgeInfoAsync(args),
+                "search_keybind" => ExecuteSearchKeybind(args),
                 _ => $"[不明なツール: {toolName}]"
             };
             Log($"TOOL RESULT ({toolName}): {result[..Math.Min(500, result.Length)]}{(result.Length > 500 ? "..." : "")}");
@@ -651,6 +671,132 @@ public class ChatService
         var pageTitle = args.TryGetProperty("page_title", out var p) ? p.GetString() ?? "" : "";
         var result = await FetchWikiShipDataAsync(pageTitle);
         return result ?? $"Wiki ページ '{pageTitle}' が見つからないか、データがありませんでした。";
+    }
+
+    private static string ExecuteSearchKeybind(JsonElement args)
+    {
+        if (_keybindData == null || _keybindData.Categories.Count == 0)
+            return "[キーバインドデータが読み込まれていません。キーバインドエディタを一度開いてください。]";
+
+        var query = args.TryGetProperty("query", out var q) ? q.GetString() ?? "" : "";
+        var mode = args.TryGetProperty("mode", out var m) ? m.GetString() ?? "search" : "search";
+
+        var allActions = _keybindData.Categories.SelectMany(c => c.Actions).ToList();
+        var sb = new StringBuilder();
+
+        switch (mode.ToLower())
+        {
+            case "unbound":
+                sb.AppendLine("=== 未割当キー一覧 ===");
+                var knownKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var a in allActions)
+                {
+                    if (!string.IsNullOrEmpty(a.Keyboard)) knownKeys.Add(NormalizeKeyForChat(a.Keyboard));
+                }
+                string[] commonKeys = [
+                    "1","2","3","4","5","6","7","8","9","0",
+                    "q","w","e","r","t","y","u","i","o","p",
+                    "a","s","d","f","g","h","j","k","l",
+                    "z","x","c","v","b","n","m",
+                    "f1","f2","f3","f4","f5","f6","f7","f8","f9","f10","f11","f12",
+                    "space","tab","enter","backspace","escape",
+                    "up","down","left","right",
+                    "insert","delete","home","end","pgup","pgdn",
+                    "np_0","np_1","np_2","np_3","np_4","np_5","np_6","np_7","np_8","np_9",
+                    "np_add","np_subtract","np_multiply","np_divide","np_enter","np_period"
+                ];
+                var unboundKeys = commonKeys.Where(k => !knownKeys.Contains(k)).ToList();
+                if (unboundKeys.Count == 0)
+                    sb.AppendLine("全ての主要キーに割り当てがあります。");
+                else
+                {
+                    sb.AppendLine($"未割当キー ({unboundKeys.Count}個):");
+                    sb.AppendLine(string.Join(", ", unboundKeys.Select(k => InputDisplayHelper.FormatInput(k))));
+                }
+                // Also check modifier combos if query hints at it
+                if (!string.IsNullOrEmpty(query))
+                {
+                    sb.AppendLine($"\n修飾キー '{query}' との組み合わせは別途お問い合わせください。");
+                }
+                break;
+
+            case "key":
+                sb.AppendLine($"=== キー '{query}' の割り当て ===");
+                var keyBindings = allActions.Where(a =>
+                    !string.IsNullOrEmpty(a.Keyboard) &&
+                    KeyMatchesQuery(a.Keyboard, query)).ToList();
+                if (keyBindings.Count == 0)
+                    sb.AppendLine($"キー '{query}' には割り当てがありません。");
+                else
+                {
+                    foreach (var b in keyBindings)
+                    {
+                        var actMode = ActivationModeHelper.GetDisplayName(b.EffectiveKeyboardActivationMode);
+                        var modeStr = string.IsNullOrEmpty(actMode) ? "" : $" [{actMode}]";
+                        sb.AppendLine($"- {b.DisplayName} ({b.CategoryDisplayName}) キー: {b.KeyboardDisplay}{modeStr}");
+                    }
+                }
+                break;
+
+            default: // search
+                sb.AppendLine($"=== キーバインド検索: '{query}' ===");
+                var results = allActions.Where(a =>
+                    a.DisplayName.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    a.ActionName.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    a.CategoryDisplayName.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    a.CategoryName.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    a.KeyboardDisplay.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    a.MouseDisplay.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    a.GamepadDisplay.Contains(query, StringComparison.OrdinalIgnoreCase)
+                ).ToList();
+
+                if (results.Count == 0)
+                    sb.AppendLine("該当するキーバインドが見つかりませんでした。");
+                else
+                {
+                    sb.AppendLine($"{results.Count}件見つかりました:\n");
+                    foreach (var r in results.Take(30))
+                    {
+                        var parts = new List<string>();
+                        if (!string.IsNullOrEmpty(r.Keyboard))
+                            parts.Add($"KB: {r.KeyboardDisplay}");
+                        if (!string.IsNullOrEmpty(r.Mouse))
+                            parts.Add($"Mouse: {r.MouseDisplay}");
+                        if (!string.IsNullOrEmpty(r.Gamepad))
+                            parts.Add($"GP: {r.GamepadDisplay}");
+                        if (!string.IsNullOrEmpty(r.Joystick))
+                            parts.Add($"JS: {r.JoystickDisplay}");
+                        var bindStr = parts.Count > 0 ? string.Join(" / ", parts) : "(未割当)";
+
+                        var actMode = ActivationModeHelper.GetDisplayName(r.EffectiveKeyboardActivationMode);
+                        var modeStr = string.IsNullOrEmpty(actMode) ? "" : $" [{actMode}]";
+                        sb.AppendLine($"- {r.DisplayName} [{r.CategoryDisplayName}] → {bindStr}{modeStr}");
+                    }
+                    if (results.Count > 30)
+                        sb.AppendLine($"... 他 {results.Count - 30}件");
+                }
+                break;
+        }
+
+        return sb.ToString();
+    }
+
+    private static string NormalizeKeyForChat(string input)
+    {
+        var parts = input.Split('+');
+        var last = parts[^1].Trim();
+        if (last.StartsWith("kb1_", StringComparison.OrdinalIgnoreCase)) last = last[4..];
+        return last.ToLowerInvariant();
+    }
+
+    private static bool KeyMatchesQuery(string binding, string query)
+    {
+        var normalized = NormalizeKeyForChat(binding);
+        var q = query.Trim().ToLowerInvariant().Replace("kb1_", "").Replace(" ", "");
+        if (normalized == q) return true;
+        // Also match display name
+        var display = InputDisplayHelper.FormatInput(binding).ToLowerInvariant();
+        return display.Contains(q, StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task<string> FetchPledgeInfoAsync(JsonElement args)
