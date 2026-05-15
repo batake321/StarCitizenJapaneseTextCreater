@@ -41,6 +41,13 @@
                 </StackPanel>
             </CheckBox>
 
+            <CheckBox x:Name="chkKnowledge" Margin="0,6" FontSize="13">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="記憶データ" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="txtKnowledgeCount" Foreground="#666" Margin="8,0,0,0"/>
+                </StackPanel>
+            </CheckBox>
+
             <CheckBox x:Name="chkAll" Content="すべて選択" FontSize="13" Margin="0,6"
                       Checked="ChkAll_Changed" Unchecked="ChkAll_Changed"/>
         </StackPanel>

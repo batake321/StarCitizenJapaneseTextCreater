@@ -8,7 +8,8 @@ public enum BackupCategory
 {
     Translations,
     Glossary,
-    Index
+    Index,
+    Knowledge
 }
 
 public static class DatabaseBackupService
@@ -16,12 +17,14 @@ public static class DatabaseBackupService
     private static readonly string[] TranslationTables = ["translations"];
     private static readonly string[] GlossaryTables = ["glossary"];
     private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache"];
+    private static readonly string[] KnowledgeTables = ["knowledge"];
 
     public static string[] GetTables(BackupCategory category) => category switch
     {
         BackupCategory.Translations => TranslationTables,
         BackupCategory.Glossary => GlossaryTables,
         BackupCategory.Index => IndexTables,
+        BackupCategory.Knowledge => KnowledgeTables,
         _ => []
     };
 
@@ -158,7 +161,7 @@ public static class DatabaseBackupService
             srcConn.Open();
 
             var translationTables = allowedTables.Intersect(TranslationTables.Concat(GlossaryTables)).ToHashSet();
-            var indexTables = allowedTables.Intersect(IndexTables).ToHashSet();
+            var indexTables = allowedTables.Intersect(IndexTables.Concat(KnowledgeTables)).ToHashSet();
 
             if (translationTables.Count > 0)
             {
@@ -238,7 +241,7 @@ public static class DatabaseBackupService
         var statements = ParseStatements(sql);
 
         var translationNeeded = cats.Contains(BackupCategory.Translations) || cats.Contains(BackupCategory.Glossary);
-        var indexNeeded = cats.Contains(BackupCategory.Index);
+        var indexNeeded = cats.Contains(BackupCategory.Index) || cats.Contains(BackupCategory.Knowledge);
 
         var allowedTables = new HashSet<string>();
         foreach (var cat in cats)
@@ -559,6 +562,12 @@ public static class DatabaseBackupService
                 volatility TEXT,
                 raw_json TEXT NOT NULL,
                 extracted_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS knowledge (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL DEFAULT 'general',
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
             );
         """;
         cmd.ExecuteNonQuery();

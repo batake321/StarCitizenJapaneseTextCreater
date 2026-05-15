@@ -52,7 +52,7 @@ public class ChatService
         "- search_mission: ミッション・契約の検索\n" +
         "- search_commodity: 商品・資源の購入/売却場所と価格\n" +
         "- search_keybind: キーバインド検索\n" +
-        "- search_location: ステーション・都市・拠点のショップ・施設検索\n" +
+        "- search_location: ステーション・都市・拠点のショップ・施設検索（精錬所、ハンガー、ランディングパッド、フレイトエレベーター等も検索可能）\n" +
         "- search_wiki: Wiki から詳細情報取得\n\n" +
         "【候補提示ルール】\n" +
         "- 検索結果が複数ある場合は、番号付きリストで候補を提示してください\n" +
@@ -284,7 +284,7 @@ public class ChatService
             new()
             {
                 ["name"] = "search_location",
-                ["description"] = "ステーション・都市・拠点を名前で検索し、ショップ・施設一覧を返す。例: Seraphim Station, Port Tressler, Lorville, GrimHEX, Orison",
+                ["description"] = "ステーション・都市・拠点を名前で検索し、ショップ・施設一覧を返す。精錬所・ハンガー・ランディングパッド・エレベーター等の施設情報も含む。例: Seraphim Station, Port Tressler, Lorville, GrimHEX, Orison, Everus Harbor",
                 ["input_schema"] = new Dictionary<string, object>
                 {
                     ["type"] = "object",
@@ -1453,9 +1453,6 @@ public class ChatService
                 }
             }
 
-            if (matchedStations.Count == 0 && matchedCities.Count == 0)
-                return $"['{query}' に一致するステーション・都市は見つかりませんでした]";
-
             var sb = new StringBuilder();
 
             // Fetch terminals for matched stations
@@ -1463,6 +1460,7 @@ public class ChatService
             {
                 sb.AppendLine($"=== {name} ({planet}, {system}) ===");
                 await AppendTerminalsAsync(sb, $"id_space_station={id}");
+                await AppendWikiAmenitiesAsync(sb, name);
             }
 
             // Fetch terminals for matched cities
@@ -1470,9 +1468,17 @@ public class ChatService
             {
                 sb.AppendLine($"=== {name} ({planet}, {system}) ===");
                 await AppendTerminalsAsync(sb, $"id_city={id}");
+                await AppendWikiAmenitiesAsync(sb, name);
             }
 
-            return sb.ToString();
+            if (matchedStations.Count == 0 && matchedCities.Count == 0)
+            {
+                sb.AppendLine($"=== {query} (Wiki検索) ===");
+                await AppendWikiAmenitiesAsync(sb, query);
+            }
+
+            var result = sb.ToString().Trim();
+            return string.IsNullOrEmpty(result) ? $"['{query}' に一致するステーション・都市は見つかりませんでした]" : result;
         }
         catch (Exception ex)
         {
@@ -1529,6 +1535,57 @@ public class ChatService
             }
         }
         catch { sb.AppendLine("  [ターミナル取得エラー]"); }
+    }
+
+    private static async Task AppendWikiAmenitiesAsync(StringBuilder sb, string locationName)
+    {
+        try
+        {
+            var encoded = Uri.EscapeDataString(locationName);
+            var resp = await Http.GetStringAsync($"https://api.star-citizen.wiki/api/v2/locations?filter[name]={encoded}&include=amenities");
+            using var doc = JsonDocument.Parse(resp);
+            if (!doc.RootElement.TryGetProperty("data", out var data)) return;
+
+            foreach (var loc in data.EnumerateArray())
+            {
+                if (!loc.TryGetProperty("amenities", out var amenities)) continue;
+
+                var facilities = new List<string>();
+                foreach (var a in amenities.EnumerateArray())
+                {
+                    var name = a.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                    if (string.IsNullOrEmpty(name)) continue;
+
+                    var jpLabel = name switch
+                    {
+                        "Refinery" => "精錬所 (Refinery)",
+                        "Clinic" => "クリニック (Clinic)",
+                        "Hospital" => "病院 (Hospital)",
+                        "Docking" => "ドッキング (Docking)",
+                        "Food Court" => "フードコート (Food Court)",
+                        "Buy Armor" => "アーマー販売 (Buy Armor)",
+                        "Buy Clothing" => "衣料品販売 (Buy Clothing)",
+                        "Buy Weapons" => "武器販売 (Buy Weapons)",
+                        "Rent Vehicles" => "船舶レンタル (Rent Vehicles)",
+                        "Vehicle Services" => "車両サービス (Vehicle Services)",
+                        var x when x.StartsWith("Hangar") => $"ハンガー{x.Replace("Hangar", "").Trim().Trim('(', ')')} ({x})",
+                        var x when x.StartsWith("Landing Pad") => $"ランディングパッド{x.Replace("Landing Pad", "").Trim().Trim('(', ')')} ({x})",
+                        var x when x.Contains("Freight Elevator") => $"フレイトエレベーター ({x})",
+                        var x when x.Contains("Loading Dock") => $"ローディングドック ({x})",
+                        var x when x.Contains("Cargo Center") => $"カーゴセンター ({x})",
+                        _ => name
+                    };
+                    facilities.Add($"  - {jpLabel}");
+                }
+
+                if (facilities.Count > 0)
+                {
+                    sb.AppendLine($"  施設・アメニティ ({facilities.Count}件):");
+                    foreach (var f in facilities) sb.AppendLine(f);
+                }
+            }
+        }
+        catch { }
     }
 
     private static async Task<string> FetchPledgeInfoAsync(JsonElement args)
