@@ -119,6 +119,7 @@ public abstract class TranslationBackend
         {
             "claude" => new ClaudeBackend(config),
             "gemini" => new GeminiBackend(config),
+            "openai" => new OpenAiBackend(config),
             "ollama" => new OllamaBackend(config),
             _ => throw new ArgumentException($"Unknown backend type: {config.Type}")
         };

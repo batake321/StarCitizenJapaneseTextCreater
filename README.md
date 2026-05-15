@@ -29,6 +29,7 @@ Star Citizen のゲーム内テキストを AI で日本語に翻訳し、ゲー
 - AI 翻訳を利用する場合 (いずれか1つ以上):
   - [Claude API キー](docs/API_Key_取得_Claude.md)
   - [Gemini API キー](docs/API_Key_取得_Gemini.md)
+  - [OpenAI (ChatGPT) API キー](docs/API_Key_取得_OpenAI.md)
   - [Ollama](docs/Ollama_Install.md) + [Gemma e4b](docs/Gemma4_e4b_Install.md) or [e2b](docs/Gemma4_e2b_Install.md) (ローカル・無料)
 
 ---
@@ -109,6 +110,7 @@ Star Citizen のゲーム内テキストを AI で日本語に翻訳し、ゲー
 |---|---|---|
 | **Claude** (Anthropic) | 高品質な翻訳 | API キー ([取得方法](docs/API_Key_取得_Claude.md)) |
 | **Gemini** (Google) | 高速・大量処理向き | API キー ([取得方法](docs/API_Key_取得_Gemini.md)) |
+| **OpenAI** (ChatGPT) | 高品質・バランス型 | API キー ([取得方法](docs/API_Key_取得_OpenAI.md)) |
 | **Ollama** (ローカル) | 無料・オフライン対応 | [Ollama](docs/Ollama_Install.md) + モデル |
 
 複数バックエンドを有効にすると、バッチを分散して**並列翻訳**します。
@@ -366,6 +368,7 @@ AI は以下のルールに基づいて翻訳します:
 |---|---|---|
 | **Claude** (Anthropic) | [API_Key_取得_Claude.md](docs/API_Key_取得_Claude.md) | Anthropic Console でのアカウント作成・課金設定・APIキー発行 |
 | **Gemini** (Google) | [API_Key_取得_Gemini.md](docs/API_Key_取得_Gemini.md) | Google AI Studio でのAPIキー取得（無料枠あり） |
+| **OpenAI** (ChatGPT) | [API_Key_取得_OpenAI.md](docs/API_Key_取得_OpenAI.md) | OpenAI Platform でのアカウント作成・課金設定・APIキー発行 |
 
 ### ローカル LLM (Ollama)
 
@@ -412,6 +415,7 @@ dotnet build -c Release
 |---|---|---|
 | **Anthropic Claude API** | AI 翻訳・チャット | [anthropic.com](https://www.anthropic.com/) |
 | **Google Gemini API** | AI 翻訳・チャット | [ai.google.dev](https://ai.google.dev/) |
+| **OpenAI API** | AI 翻訳・チャット | [platform.openai.com](https://platform.openai.com/) |
 | **Ollama** | ローカル LLM 翻訳・チャット | [ollama.com](https://ollama.com/) |
 
 ### 注意事項

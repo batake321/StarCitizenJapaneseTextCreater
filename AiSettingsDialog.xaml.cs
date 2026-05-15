@@ -25,6 +25,16 @@ public partial class AiSettingsDialog : Window
         ("gemini-1.5-flash", "1.5 Flash"),
     };
 
+    private static readonly (string Id, string Display)[] OpenAiModels =
+    {
+        ("gpt-4.1", "GPT-4.1"),
+        ("gpt-4.1-mini", "GPT-4.1 Mini"),
+        ("gpt-4.1-nano", "GPT-4.1 Nano"),
+        ("gpt-4o", "GPT-4o"),
+        ("gpt-4o-mini", "GPT-4o Mini"),
+        ("o3-mini", "o3-mini"),
+    };
+
     private readonly List<BackendPanel> _panels = new();
 
     public List<BackendConfig>? Result { get; private set; }
@@ -93,6 +103,7 @@ public partial class AiSettingsDialog : Window
             _cmbType = new ComboBox { Width = 100, IsEditable = true, Margin = new Thickness(4, 0, 0, 0) };
             _cmbType.Items.Add("Claude");
             _cmbType.Items.Add("Gemini");
+            _cmbType.Items.Add("OpenAI");
             _cmbType.Items.Add("Ollama");
             _cmbType.Text = config.Type;
             _cmbType.SelectionChanged += (_, _) => OnTypeChanged();
@@ -186,7 +197,8 @@ public partial class AiSettingsDialog : Window
         {
             var isOllama = type.Equals("Ollama", StringComparison.OrdinalIgnoreCase);
             var isApi = type.Equals("Claude", StringComparison.OrdinalIgnoreCase)
-                     || type.Equals("Gemini", StringComparison.OrdinalIgnoreCase);
+                     || type.Equals("Gemini", StringComparison.OrdinalIgnoreCase)
+                     || type.Equals("OpenAI", StringComparison.OrdinalIgnoreCase);
 
             // API Key: show for Claude/Gemini, hide for Ollama
             _lblApiKey.Visibility = isOllama ? Visibility.Collapsed : Visibility.Visible;
@@ -222,6 +234,7 @@ public partial class AiSettingsDialog : Window
             {
                 "claude" => ClaudeModels,
                 "gemini" => GeminiModels,
+                "openai" => OpenAiModels,
                 _ => Array.Empty<(string, string)>()
             };
             foreach (var (id, display) in models)
@@ -231,7 +244,7 @@ public partial class AiSettingsDialog : Window
         private string GetSelectedModelId()
         {
             var type = _cmbType.Text?.ToLowerInvariant() ?? "";
-            if (type is "claude" or "gemini")
+            if (type is "claude" or "gemini" or "openai")
             {
                 if (_cmbModel.SelectedItem is ModelItem item)
                     return item.Id;

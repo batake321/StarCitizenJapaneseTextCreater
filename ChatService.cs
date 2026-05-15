@@ -1604,6 +1604,7 @@ public class ChatService
         {
             "claude" => await SendClaudeChatAsync(backend, ChatSystemPrompt, history),
             "gemini" => await SendGeminiChatAsync(backend, ChatSystemPrompt, history),
+            "openai" => await SendOpenAiChatAsync(backend, ChatSystemPrompt, history),
             "ollama" => await SendOllamaChatAsync(backend, ChatSystemPrompt, history),
             _ => throw new ArgumentException($"Unknown backend: {backend.Type}")
         };
@@ -1859,6 +1860,105 @@ public class ChatService
             }
 
             return "";
+        }
+
+        return "[ツール呼び出し回数の上限に達しました]";
+    }
+
+    private static async Task<string> SendOpenAiChatAsync(BackendConfig config, string system, List<ChatMessage> history)
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(300) };
+        http.DefaultRequestHeaders.Add("Authorization", $"Bearer {config.ApiKey}");
+
+        var openAiTools = GetToolDefinitions().Select(t => new Dictionary<string, object>
+        {
+            ["type"] = "function",
+            ["function"] = new Dictionary<string, object>
+            {
+                ["name"] = t["name"],
+                ["description"] = t["description"],
+                ["parameters"] = t["input_schema"]
+            }
+        }).ToList();
+
+        var conversationMessages = new List<Dictionary<string, object>>
+        {
+            new() { ["role"] = "system", ["content"] = system }
+        };
+        foreach (var m in history)
+            conversationMessages.Add(new Dictionary<string, object> { ["role"] = m.Role, ["content"] = m.Content });
+
+        Log($"OPENAI: model={config.Model}, messages={conversationMessages.Count}");
+
+        for (int iteration = 0; iteration < 5; iteration++)
+        {
+            var body = new Dictionary<string, object>
+            {
+                ["model"] = config.Model,
+                ["messages"] = conversationMessages,
+                ["temperature"] = 0.7,
+                ["max_completion_tokens"] = 4096,
+                ["tools"] = openAiTools,
+                ["tool_choice"] = iteration == 0 ? "required" : "auto"
+            };
+
+            var json = JsonSerializer.Serialize(body, JsonOpts);
+            Log($"OPENAI REQUEST (iter={iteration})");
+            var resp = await http.PostAsync("https://api.openai.com/v1/chat/completions",
+                new StringContent(json, Encoding.UTF8, "application/json"));
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                var err = await resp.Content.ReadAsStringAsync();
+                var code = (int)resp.StatusCode;
+                if (code == 429 || code == 402 ||
+                    err.Contains("rate_limit", StringComparison.OrdinalIgnoreCase) ||
+                    err.Contains("insufficient_quota", StringComparison.OrdinalIgnoreCase) ||
+                    err.Contains("billing", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "⚠️ OpenAI API のクレジットが不足しているか、レート制限に達しました。OpenAI Platform (platform.openai.com) で残高と使用量を確認してください。";
+                }
+                throw new HttpRequestException($"{code} - {err}");
+            }
+
+            var respJson = await resp.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(respJson);
+            var choice = doc.RootElement.GetProperty("choices")[0];
+            var message = choice.GetProperty("message");
+            var finishReason = choice.TryGetProperty("finish_reason", out var fr) ? fr.GetString() ?? "" : "";
+            var content = message.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString() ?? "" : "";
+
+            if (finishReason == "tool_calls" && message.TryGetProperty("tool_calls", out var toolCalls))
+            {
+                Log($"OPENAI: tool_calls detected, count={toolCalls.GetArrayLength()}");
+                conversationMessages.Add(new Dictionary<string, object>
+                {
+                    ["role"] = "assistant",
+                    ["content"] = content,
+                    ["tool_calls"] = JsonSerializer.Deserialize<object>(toolCalls.GetRawText())!
+                });
+
+                foreach (var tc in toolCalls.EnumerateArray())
+                {
+                    var toolCallId = tc.GetProperty("id").GetString() ?? "";
+                    var func = tc.GetProperty("function");
+                    var funcName = func.GetProperty("name").GetString() ?? "";
+                    var funcArgsStr = func.GetProperty("arguments").GetString() ?? "{}";
+                    using var argsDoc = JsonDocument.Parse(funcArgsStr);
+
+                    var result = await ExecuteToolAsync(funcName, argsDoc.RootElement);
+                    conversationMessages.Add(new Dictionary<string, object>
+                    {
+                        ["role"] = "tool",
+                        ["tool_call_id"] = toolCallId,
+                        ["content"] = result
+                    });
+                }
+                continue;
+            }
+
+            Log($"OPENAI: final response, content_len={content.Length}");
+            return content;
         }
 
         return "[ツール呼び出し回数の上限に達しました]";
