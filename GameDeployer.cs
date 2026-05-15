@@ -24,11 +24,11 @@ public static class GameDeployer
                 lines[idx] = cfgLine;
             else
                 lines.Add(cfgLine);
-            File.WriteAllLines(userCfgPath, lines, Encoding.UTF8);
+            File.WriteAllLines(userCfgPath, lines, new UTF8Encoding(false));
         }
         else
         {
-            File.WriteAllText(userCfgPath, cfgLine + "\n", Encoding.UTF8);
+            File.WriteAllText(userCfgPath, cfgLine + "\n", new UTF8Encoding(false));
         }
 
         Console.WriteLine($"Updated: {userCfgPath}");
