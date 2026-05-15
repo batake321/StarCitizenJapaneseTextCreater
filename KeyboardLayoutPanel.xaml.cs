@@ -35,6 +35,9 @@ public partial class KeyboardLayoutPanel : UserControl
         var keys = new List<KeyDef>();
         double x, y;
 
+        // Nav cluster X origin (aligned with Ins key in number row)
+        var navX0 = 14 * (U + Gap) + U * 1.5 + Gap + U * 0.3;
+
         // Row 0: Function keys
         y = 0;
         keys.Add(new(0, y, U, KeyH, "Esc", "escape"));
@@ -75,7 +78,7 @@ public partial class KeyboardLayoutPanel : UserControl
         keys.Add(new(x, y, U, KeyH, "[", "rbracket")); x += U + Gap;
         // Enter key (tall, spans 2 rows) - draw as single key in row 2
         keys.Add(new(x, y, U * 1.2, KeyH * 2 + Gap, "Enter", "enter")); // tall enter
-        x = U * 1.4 + Gap + 12 * (U + Gap) + U * 1.2 + Gap + U * 0.3;
+        x = navX0;
         keys.Add(new(x, y, U, KeyH, "Del", "delete")); x += U + Gap;
         keys.Add(new(x, y, U, KeyH, "End", "end")); x += U + Gap;
         keys.Add(new(x, y, U, KeyH, "PgDn", "pgdn"));
@@ -102,7 +105,7 @@ public partial class KeyboardLayoutPanel : UserControl
         keys.Add(new(x, y, U, KeyH, "\\_", "backslash3")); x += U + Gap;
         keys.Add(new(x, y, U * 1.7, KeyH, "R-Shift", "rshift"));
         // Arrow up
-        x = U * 1.4 + Gap + 12 * (U + Gap) + U * 1.2 + Gap + U * 0.3 + U + Gap;
+        x = navX0 + U + Gap;
         keys.Add(new(x, y, U, KeyH, "↑", "up"));
 
         // Row 5: Bottom row
@@ -120,13 +123,13 @@ public partial class KeyboardLayoutPanel : UserControl
         keys.Add(new(x, y, U, KeyH, "App", "apps")); x += U + Gap;
         keys.Add(new(x, y, U * 1.3, KeyH, "R-Ctrl", "rctrl"));
         // Arrow keys
-        x = U * 1.4 + Gap + 12 * (U + Gap) + U * 1.2 + Gap + U * 0.3;
+        x = navX0;
         keys.Add(new(x, y, U, KeyH, "←", "left")); x += U + Gap;
         keys.Add(new(x, y, U, KeyH, "↓", "down")); x += U + Gap;
         keys.Add(new(x, y, U, KeyH, "→", "right"));
 
         // Numpad - positioned to the right of nav cluster
-        var npX0 = U * 1.4 + Gap + 12 * (U + Gap) + U * 1.2 + Gap + U * 0.3 + 3 * (U + Gap) + U * 0.5;
+        var npX0 = navX0 + 3 * (U + Gap) + U * 1.2;
 
         // Numpad Row 1: NumLk / * -
         y = KeyH + Gap + 8;

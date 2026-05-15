@@ -55,7 +55,7 @@
 
         <!-- Keyboard canvas -->
         <ScrollViewer Grid.Row="2" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Padding="10">
-            <Canvas x:Name="canvas" Width="1180" Height="330" Background="White"/>
+            <Canvas x:Name="canvas" Width="1220" Height="330" Background="White"/>
         </ScrollViewer>
     </Grid>
 </UserControl>

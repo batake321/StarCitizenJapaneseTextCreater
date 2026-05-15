@@ -44,6 +44,16 @@ Star Citizen の UI 翻訳程度であれば、まずは **Free Tier** で動作
 
 https://ai.google.dev/pricing
 
+### 料金目安（1M トークンあたり・Pay-as-you-go）
+
+| モデル | 入力 | 出力 |
+|---|---|---|
+| `gemini-2.5-flash` | $0.15 | $0.60 |
+| `gemini-2.5-flash-lite` | $0.075 | $0.30 |
+| `gemini-2.5-pro` | $1.25 | $10.00 |
+
+> Star Citizen の全テキスト（約 10 万行）を翻訳する場合、Flash で $0.5〜2 程度が目安です。Free Tier でも低レートで利用可能です。
+
 ---
 
 ## 4\. 利用モデルの選定（翻訳用途）
@@ -94,7 +104,22 @@ print(resp.text)
 
 ---
 
-## 7\. セキュリティ上の注意
+## 7\. レート制限と Usage Tier
+
+Gemini API は Free Tier と Pay-as-you-go で利用可能なレート上限が異なります。
+
+| プラン | RPM 上限 | TPM 上限 | 日次リクエスト上限 |
+|---|---|---|---|
+| **Free Tier** | 10 RPM | 250,000 TPM | 1,500 リクエスト/日 |
+| **Pay-as-you-go** | 2,000 RPM | 4,000,000 TPM | 無制限 |
+
+- Free Tier は開発・テスト用途に十分ですが、大量翻訳バッチには Pay-as-you-go が必要です
+- Pay-as-you-go への切替は Google Cloud Console で課金を有効化するだけで完了します
+- 使用量は Google AI Studio の **「API activity」** から確認できます
+
+---
+
+## 8\. セキュリティ上の注意
 
 - API キーをソースコードに直書きしない  
 - 公開リポジトリにキーを含む `.env` をコミットしない  
