@@ -10,7 +10,8 @@ public static class IniMerger
         Dictionary<string, string> japanese,
         string translatedJsonlPath,
         List<string> forceEnglishPatterns,
-        string? dbPath = null)
+        string? dbPath = null,
+        List<(string English, string Japanese)>? glossary = null)
     {
         var forceRegex = forceEnglishPatterns.Select(p => new Regex(p)).ToList();
 
@@ -79,11 +80,50 @@ public static class IniMerger
                 merged[key] = val;
         }
 
+        // Clean up "TRANSLATION NOT FOUND" errors from official Japanese file
+        int cleaned = 0;
+        var keysToFix = merged.Where(kv =>
+            kv.Value.Contains("TRANSLATION NOT FOUND FOR LOCID:", StringComparison.OrdinalIgnoreCase))
+            .Select(kv => kv.Key).ToList();
+        foreach (var key in keysToFix)
+        {
+            if (key.Equals("blank_space", StringComparison.OrdinalIgnoreCase))
+                merged[key] = " ";
+            else if (english.TryGetValue(key, out var enFallbackVal))
+                merged[key] = enFallbackVal;
+            else
+                merged[key] = " ";
+            cleaned++;
+        }
+
+        // Apply glossary replacements to all merged values
+        int glossaryFixed = 0;
+        if (glossary != null && glossary.Count > 0)
+        {
+            var keys = merged.Keys.ToList();
+            foreach (var key in keys)
+            {
+                var val = merged[key];
+                var newVal = val;
+                foreach (var (en, ja) in glossary)
+                    newVal = newVal.Replace(en, ja, StringComparison.OrdinalIgnoreCase);
+                if (newVal != val)
+                {
+                    merged[key] = newVal;
+                    glossaryFixed++;
+                }
+            }
+        }
+
         Console.WriteLine($"  Merged: {merged.Count} entries");
         Console.WriteLine($"    English forced (ship/location): {enForced}");
         Console.WriteLine($"    Translated (AI/manual/CSV): {jaTranslated}");
         Console.WriteLine($"    Official Japanese: {jaOfficial}");
         Console.WriteLine($"    English fallback: {enFallback}");
+        if (cleaned > 0)
+            Console.WriteLine($"    TRANSLATION NOT FOUND cleaned: {cleaned}");
+        if (glossaryFixed > 0)
+            Console.WriteLine($"    Glossary applied: {glossaryFixed}");
 
         return merged;
     }

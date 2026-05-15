@@ -280,10 +280,13 @@
                     <!-- Header: backend selector + data fetch toggle -->
                     <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="0,0,0,8">
                         <TextBlock Text="AI バックエンド:" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                        <ComboBox x:Name="cmbChatBackend" Width="200" VerticalAlignment="Center" Margin="0,0,16,0"/>
-                        <CheckBox x:Name="chkFetchScData" Content="Star Citizen データを自動取得 (UEX API)"
+                        <ComboBox x:Name="cmbChatBackend" Width="200" VerticalAlignment="Center" Margin="0,0,16,0"
+                                  SelectionChanged="CmbChatBackend_SelectionChanged"/>
+                        <CheckBox x:Name="chkFetchScData" Content="スキル使用 (API/DB検索)"
                                   IsChecked="True" VerticalAlignment="Center" Margin="0,0,16,0"/>
                         <Button Content="履歴クリア" Click="ChatClear_Click" Padding="10,4" VerticalAlignment="Center"/>
+                        <Button Content="全体コピー" Click="ChatCopyAll_Click" Padding="10,4" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                        <Button Content="記憶管理" Click="KnowledgeManage_Click" Padding="10,4" VerticalAlignment="Center" Margin="8,0,0,0"/>
                     </StackPanel>
 
                     <!-- Chat messages area -->
@@ -299,10 +302,7 @@
                                                 <Binding Path="ActualWidth" RelativeSource="{RelativeSource AncestorType=ScrollViewer}"
                                                          Converter="{x:Static local:ChatWidthConverter.Instance}"/>
                                             </Border.MaxWidth>
-                                            <TextBox Text="{Binding Text, Mode=OneWay}" TextWrapping="Wrap"
-                                                    Foreground="{Binding Foreground}" FontSize="13"
-                                                    IsReadOnly="True" BorderThickness="0" Background="Transparent"
-                                                    IsTabStop="False"/>
+                                            <ContentPresenter Content="{Binding}" ContentTemplateSelector="{x:Static local:ChatTemplateSelector.Instance}"/>
                                         </Border>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
@@ -380,15 +380,20 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
 
                                 <TextBlock Grid.Row="0" TextWrapping="Wrap" Margin="0,0,0,8" Foreground="#666"
-                                           Text="StarBreaker CLI で Data.p4k からゲーム内データ（船・武器・コンポーネント・契約）を抽出しDBに格納します。インデックス構築（約30秒）でパッチ毎のデータをキャッシュし、チャット時にDB検索します。"/>
+                                           Text="StarBreaker CLI で Data.p4k からゲーム内データ（船・武器・コンポーネント・契約）を抽出しDBに格納します。インデックス構築（約2分半）でパッチ毎のデータをキャッシュし、FTS5 全文検索で日本語・あいまい検索が可能になります。ベクトル検索構築は「AI 設定」のバックエンド（Ollama優先）を使用し約2分15秒（合計約5分）。"/>
 
                                 <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
                                     <Button x:Name="btnExtractGameData" Content="インデックス構築"
                                             Click="ExtractGameData_Click" Padding="14,6"
                                             FontWeight="Bold" Background="#4CAF50" Foreground="White"/>
+                                    <Button x:Name="btnBuildVectorIndex" Content="ベクトル検索構築"
+                                            Click="BuildVectorIndex_Click" Padding="14,6" Margin="8,0,0,0"
+                                            FontWeight="Bold" Background="#9C27B0" Foreground="White"
+                                            ToolTip="Ollama/OpenAI/Gemini のエンベディングモデルでセマンティック検索を有効化（バックグラウンド実行）"/>
                                     <TextBlock x:Name="txtGameDataStatus" VerticalAlignment="Center"
                                                Margin="12,0,0,0" Foreground="#666"/>
                                 </StackPanel>
@@ -405,6 +410,43 @@
 
                                 <TextBlock x:Name="txtGameDataDetail" Grid.Row="3" Foreground="#444"
                                            FontFamily="Consolas" FontSize="12"/>
+
+                                <TextBlock x:Name="txtSearchIndexStatus" Grid.Row="4" Margin="0,4,0,0" Foreground="#666"
+                                           FontFamily="Consolas" FontSize="11"/>
+                            </Grid>
+                        </GroupBox>
+
+                        <GroupBox Header="Web チャットサーバー" Margin="0,0,0,8">
+                            <Grid Margin="8">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+
+                                <TextBlock Text="ポート:" Grid.Row="0" VerticalAlignment="Center" Margin="0,4"/>
+                                <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,4">
+                                    <TextBox x:Name="txtWebPort" Width="80" VerticalAlignment="Center"/>
+                                    <Button x:Name="btnWebServer" Content="サーバー起動" Click="WebServer_Click"
+                                            Padding="14,4" Margin="8,0,0,0" FontWeight="Bold"
+                                            Background="#4A90D9" Foreground="White"/>
+                                    <CheckBox x:Name="chkWebAutoStart" Content="自動起動" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                                </StackPanel>
+
+                                <TextBlock Text="VoiceVox URL:" Grid.Row="1" VerticalAlignment="Center" Margin="0,4"/>
+                                <TextBox x:Name="txtVoiceVoxUrl" Grid.Row="1" Grid.Column="1" Margin="0,4"/>
+
+                                <TextBlock Text="VoiceVox 話者ID:" Grid.Row="2" VerticalAlignment="Center" Margin="0,4"/>
+                                <TextBox x:Name="txtVoiceVoxSpeaker" Grid.Row="2" Grid.Column="1" Width="60"
+                                         HorizontalAlignment="Left" Margin="0,4"/>
+
+                                <TextBlock x:Name="txtWebServerInfo" Grid.Row="3" Grid.ColumnSpan="2"
+                                           TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontFamily="Consolas" FontSize="12"/>
                             </Grid>
                         </GroupBox>
 

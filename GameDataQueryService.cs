@@ -10,8 +10,11 @@ public class GameDataQueryService : IDisposable
 
     public GameDataQueryService(string gamedataCacheDbPath)
     {
-        _conn = new SqliteConnection($"Data Source={gamedataCacheDbPath};Mode=ReadOnly");
+        _conn = new SqliteConnection($"Data Source={gamedataCacheDbPath}");
         _conn.Open();
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "CREATE TABLE IF NOT EXISTS knowledge (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT NOT NULL DEFAULT 'general', content TEXT NOT NULL, created_at TEXT NOT NULL)";
+        cmd.ExecuteNonQuery();
     }
 
     public bool HasData()
@@ -120,6 +123,236 @@ public class GameDataQueryService : IDisposable
         }
 
         return count > 0 ? $"=== ゲームデータ (DB): アイテム ===\n{sb}" : "";
+    }
+
+    public List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer)> SearchItemIndex(string query)
+    {
+        var results = LikeSearch(query);
+        if (results.Count > 0) return results;
+
+        var segments = SplitOnParticles(query);
+        foreach (var seg in segments)
+        {
+            if (seg.Length < 2) continue;
+            results = LikeSearch(seg);
+            if (results.Count > 0) return results;
+        }
+
+        var ascii = StripToAlphaNum(query);
+        if (ascii.Length >= 2)
+            return SearchItemIndexStripped(ascii);
+
+        return results;
+    }
+
+    private List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer)> LikeSearch(string query)
+    {
+        var results = new List<(string, string, string, string, string, string)>();
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT uuid, record_name, name, item_type, sub_type, manufacturer FROM item_index WHERE name LIKE @q OR name_ja LIKE @q OR record_name LIKE @q ORDER BY name LIMIT 30";
+        cmd.Parameters.AddWithValue("@q", $"%{query}%");
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            results.Add((
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? "" : reader.GetString(2),
+                reader.IsDBNull(3) ? "" : reader.GetString(3),
+                reader.IsDBNull(4) ? "" : reader.GetString(4),
+                reader.IsDBNull(5) ? "" : reader.GetString(5)
+            ));
+        }
+        return results;
+    }
+
+    private static string[] SplitOnParticles(string query)
+    {
+        return System.Text.RegularExpressions.Regex.Split(query,
+                "について|での|とは|では|から|まで|です|ます|って|いくら|[のはがをにでともか？?！!]")
+            .Select(s => s.Trim())
+            .Where(s => s.Length >= 2)
+            .OrderByDescending(s => s.Length)
+            .ToArray();
+    }
+
+
+    private List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer)> SearchItemIndexStripped(string strippedQuery)
+    {
+        var results = new List<(string, string, string, string, string, string)>();
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT uuid, record_name, name, item_type, sub_type, manufacturer FROM item_index";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var name = reader.IsDBNull(2) ? "" : reader.GetString(2);
+            var recordName = reader.GetString(1);
+            if (StripToAlphaNum(name).Contains(strippedQuery, StringComparison.OrdinalIgnoreCase)
+                || StripToAlphaNum(recordName).Contains(strippedQuery, StringComparison.OrdinalIgnoreCase))
+            {
+                results.Add((
+                    reader.GetString(0), recordName, name,
+                    reader.IsDBNull(3) ? "" : reader.GetString(3),
+                    reader.IsDBNull(4) ? "" : reader.GetString(4),
+                    reader.IsDBNull(5) ? "" : reader.GetString(5)
+                ));
+                if (results.Count >= 30) break;
+            }
+        }
+        return results;
+    }
+
+    public string? GetUuidByName(string name)
+    {
+        var results = SearchItemIndex(name);
+        return results.Count > 0 ? results[0].uuid : null;
+    }
+
+    public int GetItemIndexCount()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM item_index";
+        try { return (int)(long)(cmd.ExecuteScalar() ?? 0L); }
+        catch { return 0; }
+    }
+
+    public bool HasFts5()
+    {
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE name='item_index_fts'";
+            return (long)(cmd.ExecuteScalar() ?? 0L) > 0;
+        }
+        catch { return false; }
+    }
+
+    public bool HasVectorIndex()
+    {
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM item_vectors";
+            return (long)(cmd.ExecuteScalar() ?? 0L) > 0;
+        }
+        catch { return false; }
+    }
+
+    public List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double score)> FuzzySearch(string query, int limit = 20)
+    {
+        var results = new List<(string, string, string, string, string, string, double)>();
+
+        if (HasFts5())
+        {
+            try
+            {
+                using var cmd = _conn.CreateCommand();
+                var ftsQuery = EscapeFts5Query(query);
+                cmd.CommandText = @"SELECT i.uuid, i.record_name, i.name, i.item_type, i.sub_type, i.manufacturer, rank
+                    FROM item_index_fts f JOIN item_index i ON f.uuid = i.uuid
+                    WHERE item_index_fts MATCH @q
+                    ORDER BY rank LIMIT @lim";
+                cmd.Parameters.AddWithValue("@q", ftsQuery);
+                cmd.Parameters.AddWithValue("@lim", limit);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    results.Add((
+                        reader.GetString(0),
+                        reader.GetString(1),
+                        reader.IsDBNull(2) ? "" : reader.GetString(2),
+                        reader.IsDBNull(3) ? "" : reader.GetString(3),
+                        reader.IsDBNull(4) ? "" : reader.GetString(4),
+                        reader.IsDBNull(5) ? "" : reader.GetString(5),
+                        reader.IsDBNull(6) ? 0.0 : reader.GetDouble(6)
+                    ));
+                }
+                if (results.Count > 0) return results;
+            }
+            catch { }
+        }
+
+        var likeResults = SearchItemIndex(query);
+        return likeResults.Select(r => (r.uuid, r.recordName, r.name, r.itemType, r.subType, r.manufacturer, 0.0)).ToList();
+    }
+
+    public List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double similarity)> SemanticSearch(float[] queryEmbedding, int limit = 10)
+    {
+        var results = new List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double similarity)>();
+        if (!HasVectorIndex()) return results;
+
+        var candidates = new List<(string uuid, float[] embedding)>();
+        using (var cmd = _conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT uuid, embedding FROM item_vectors";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var uuid = reader.GetString(0);
+                var blob = (byte[])reader[1];
+                candidates.Add((uuid, GameDataExtractor.BytesToFloats(blob)));
+            }
+        }
+
+        var scored = candidates
+            .Select(c => (c.uuid, similarity: CosineSimilarity(queryEmbedding, c.embedding)))
+            .OrderByDescending(c => c.similarity)
+            .Take(limit)
+            .ToList();
+
+        foreach (var (uuid, sim) in scored)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT record_name, name, item_type, sub_type, manufacturer FROM item_index WHERE uuid = @u";
+            cmd.Parameters.AddWithValue("@u", uuid);
+            using var reader = cmd.ExecuteReader();
+            if (reader.Read())
+            {
+                results.Add((
+                    uuid,
+                    reader.IsDBNull(0) ? "" : reader.GetString(0),
+                    reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    reader.IsDBNull(3) ? "" : reader.GetString(3),
+                    reader.IsDBNull(4) ? "" : reader.GetString(4),
+                    sim
+                ));
+            }
+        }
+        return results;
+    }
+
+    private static double CosineSimilarity(float[] a, float[] b)
+    {
+        if (a.Length != b.Length) return 0;
+        double dot = 0, magA = 0, magB = 0;
+        for (int i = 0; i < a.Length; i++)
+        {
+            dot += a[i] * b[i];
+            magA += a[i] * a[i];
+            magB += b[i] * b[i];
+        }
+        var denom = Math.Sqrt(magA) * Math.Sqrt(magB);
+        return denom > 0 ? dot / denom : 0;
+    }
+
+    private static string StripToAlphaNum(string input)
+    {
+        var sb = new StringBuilder(input.Length);
+        foreach (var c in input)
+        {
+            var ch = c;
+            if (ch >= '！' && ch <= '～') ch = (char)(ch - 0xFEE0);
+            if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'))
+                sb.Append(char.ToUpperInvariant(ch));
+        }
+        return sb.ToString();
+    }
+
+    private static string EscapeFts5Query(string query)
+    {
+        var escaped = query.Replace("\"", "\"\"");
+        return $"\"{escaped}\"";
     }
 
     private static string ParseComponentExtras(string compType, string compJson)
@@ -302,6 +535,53 @@ public class GameDataQueryService : IDisposable
         if (rn.Contains("Stanton4", StringComparison.OrdinalIgnoreCase)) return "microTech";
         if (rn.Contains("Pyro", StringComparison.OrdinalIgnoreCase)) return "Pyro";
         return "";
+    }
+
+    // === Knowledge (memory) ===
+
+    public int AddKnowledge(string content, string category = "general")
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "INSERT INTO knowledge(category, content, created_at) VALUES(@cat, @content, @at)";
+        cmd.Parameters.AddWithValue("@cat", category);
+        cmd.Parameters.AddWithValue("@content", content);
+        cmd.Parameters.AddWithValue("@at", DateTime.UtcNow.ToString("o"));
+        cmd.ExecuteNonQuery();
+
+        cmd.CommandText = "SELECT last_insert_rowid()";
+        return (int)(long)cmd.ExecuteScalar()!;
+    }
+
+    public int DeleteKnowledge(string query)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM knowledge WHERE content LIKE @q";
+        cmd.Parameters.AddWithValue("@q", $"%{query}%");
+        return cmd.ExecuteNonQuery();
+    }
+
+    public List<(int id, string category, string content, DateTime createdAt)> GetAllKnowledge()
+    {
+        var results = new List<(int, string, string, DateTime)>();
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT id, category, content, created_at FROM knowledge ORDER BY created_at DESC";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var dt = DateTime.TryParse(reader.GetString(3), null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed)
+                ? parsed.ToLocalTime() : DateTime.Now;
+            results.Add((reader.GetInt32(0), reader.GetString(1), reader.GetString(2), dt));
+        }
+        return results;
+    }
+
+    public int DeleteKnowledgeByIds(IEnumerable<int> ids)
+    {
+        var idList = string.Join(",", ids);
+        if (string.IsNullOrEmpty(idList)) return 0;
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = $"DELETE FROM knowledge WHERE id IN ({idList})";
+        return cmd.ExecuteNonQuery();
     }
 
     public void Dispose()

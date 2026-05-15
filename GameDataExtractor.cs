@@ -152,6 +152,32 @@ public class GameDataExtractor
                 extracted_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_commodities_name ON commodities(name COLLATE NOCASE);
+
+            CREATE TABLE IF NOT EXISTS item_index (
+                uuid TEXT PRIMARY KEY,
+                record_name TEXT NOT NULL,
+                name TEXT,
+                item_type TEXT,
+                sub_type TEXT,
+                manufacturer TEXT,
+                name_ja TEXT,
+                extracted_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_item_index_name ON item_index(name COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_item_index_type ON item_index(item_type);
+            CREATE INDEX IF NOT EXISTS idx_item_index_record ON item_index(record_name);
+
+            CREATE TABLE IF NOT EXISTS item_vectors (
+                uuid TEXT PRIMARY KEY,
+                embedding BLOB NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS knowledge (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL DEFAULT 'general',
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
         """;
         cmd.ExecuteNonQuery();
     }
@@ -249,48 +275,43 @@ public class GameDataExtractor
         StatusChanged?.Invoke("ゲームデータの構造化インデックスを構築中...");
         var sw = Stopwatch.StartNew();
         int step = 0;
-        int totalSteps = 6;
+        int totalSteps = 4;
         var now = DateTime.UtcNow.ToString("o");
 
         // クリア
         using (var cmd = _db!.CreateCommand())
         {
-            cmd.CommandText = "DELETE FROM ship_ports; DELETE FROM ships; DELETE FROM items; DELETE FROM missions; DELETE FROM commodities; DELETE FROM gamedata_cache; DELETE FROM gamedata_meta;";
+            cmd.CommandText = "DELETE FROM item_index; DELETE FROM ship_ports; DELETE FROM ships; DELETE FROM items; DELETE FROM missions; DELETE FROM commodities; DELETE FROM gamedata_cache; DELETE FROM gamedata_meta;";
             cmd.ExecuteNonQuery();
         }
 
-        // Step 1: 船・車両
+        // Step 1: アイテムインデックス（全メーカー＋船）
+        step++;
+        ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] アイテムインデックスを構築中...");
+        int indexCount = await ExtractItemIndexAsync(dataP4kPath, now, ct);
+
+        // Step 1b: FTS5 全文検索インデックス
+        StatusChanged?.Invoke($"FTS5 全文検索インデックスを構築中...");
+        RebuildFts5Index();
+
+        // Step 2: 船・車両（詳細データ）
         step++;
         ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] 船・車両データを抽出中...");
         int shipCount = await ExtractShipsAsync(dataP4kPath, now, ct);
 
-        // Step 2: 武器
-        step++;
-        ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] 武器データを抽出中...");
-        int weaponCount = await ExtractItemsAsync(dataP4kPath, "*WeaponGun*", "SCItemWeaponComponentParams", now, ct);
-
-        // Step 3: シールド・QD・パワープラント・クーラー
-        step++;
-        ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] コンポーネントデータを抽出中...");
-        int compCount = 0;
-        compCount += await ExtractItemsAsync(dataP4kPath, "*SCItem_Shield*", "SCItemShieldGeneratorParams", now, ct);
-        compCount += await ExtractItemsAsync(dataP4kPath, "*SCItem_QuantumDrive*", "SCItemQuantumDriveParams", now, ct);
-        compCount += await ExtractItemsAsync(dataP4kPath, "*SCItem_PowerPlant*", "SCItemPowerPlantParams", now, ct);
-        compCount += await ExtractItemsAsync(dataP4kPath, "*SCItem_Cooler*", "SCItemCoolerParams", now, ct);
-
-        // Step 4: ミッション・契約（最も時間がかかる）
+        // Step 3: ミッション・契約
         step++;
         ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] ミッション・契約を抽出中...");
         int missionCount = await ExtractMissionsAsync(dataP4kPath, now, ct);
 
-        // Step 5: コモディティ
+        // Step 4: コモディティ
         step++;
         ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] コモディティを抽出中...");
         int commodityCount = await ExtractCommoditiesAsync(dataP4kPath, now, ct);
 
         // Step 6: メタ情報
         step++;
-        ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] メタ情報を保存中...");
+        // メタ情報
         var p4kModified = File.GetLastWriteTimeUtc(dataP4kPath);
         SetMeta("game_version", p4kModified.ToString("yyyy-MM-dd HH:mm"));
         SetMeta("p4k_last_modified", p4kModified.ToString("o"));
@@ -299,7 +320,7 @@ public class GameDataExtractor
 
         sw.Stop();
         ProgressChanged?.Invoke(100, $"完了！ ({sw.Elapsed.TotalSeconds:F1}秒)");
-        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - 船: {shipCount}, 武器: {weaponCount}, コンポーネント: {compCount}, 契約: {missionCount}, 商品: {commodityCount}");
+        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}, 契約: {missionCount}, 商品: {commodityCount}");
     }
 
     public bool IsP4kUpdated()
@@ -332,6 +353,121 @@ public class GameDataExtractor
 
     private static readonly string[] VehicleManufacturerPrefixes =
         ["AEGS", "ANVL", "ARGO", "BANU", "CNOU", "CRUS", "DRAK", "GAMA", "GATA", "GRIN", "KRIG", "MISC", "MRAI", "ORIG", "RSI", "TMBL", "VNCL", "XIAN", "ESPR"];
+
+    private static readonly string[] ItemPrefixes =
+        ["behr", "klwe", "ksar", "lbco", "gmni", "hdso", "jofl", "grin", "apar", "crus", "aegs", "anvl", "argo", "cnou", "drak", "krig", "misc", "mrai", "orig", "rsi", "tmbl", "xian", "espr"];
+
+    private async Task<int> ExtractItemIndexAsync(string p4kPath, string now, CancellationToken ct)
+    {
+        var gamePath = App.Config.GamePath;
+        var enDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var jaDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var enIniPath = Path.Combine(gamePath, "data", "Localization", "english", "global.ini");
+        if (!File.Exists(enIniPath))
+            enIniPath = Path.Combine(Path.GetDirectoryName(gamePath) ?? "", "data", "Localization", "english", "global.ini");
+        var jaIniPath = Path.Combine(gamePath, "data", "Localization", "japanese_(japan)", "global.ini");
+        if (!File.Exists(jaIniPath))
+            jaIniPath = Path.Combine(Path.GetDirectoryName(gamePath) ?? "", "data", "Localization", "japanese_(japan)", "global.ini");
+        if (File.Exists(enIniPath))
+        {
+            StatusChanged?.Invoke("[1/4] ローカライズデータ（英語）を読み込み中...");
+            enDict = GlobalIniParser.Parse(enIniPath);
+        }
+        if (File.Exists(jaIniPath))
+        {
+            StatusChanged?.Invoke("[1/4] ローカライズデータ（日本語）を読み込み中...");
+            jaDict = GlobalIniParser.Parse(jaIniPath);
+        }
+        int resolved = 0;
+
+        int count = 0;
+        using var tx = _db!.BeginTransaction();
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = "INSERT OR IGNORE INTO item_index(uuid, record_name, name, name_ja, item_type, sub_type, manufacturer, extracted_at) VALUES(@uuid, @rn, @nm, @ja, @it, @st, @mf, @ea)";
+        var pUuid = cmd.Parameters.Add("@uuid", SqliteType.Text);
+        var pRn = cmd.Parameters.Add("@rn", SqliteType.Text);
+        var pNm = cmd.Parameters.Add("@nm", SqliteType.Text);
+        var pJa = cmd.Parameters.Add("@ja", SqliteType.Text);
+        var pIt = cmd.Parameters.Add("@it", SqliteType.Text);
+        var pSt = cmd.Parameters.Add("@st", SqliteType.Text);
+        var pMf = cmd.Parameters.Add("@mf", SqliteType.Text);
+        var pEa = cmd.Parameters.Add("@ea", SqliteType.Text);
+
+        var allPrefixes = VehicleManufacturerPrefixes.Select(p => $"EntityClassDefinition.{p}_*")
+            .Concat(ItemPrefixes.Select(p => $"EntityClassDefinition.{p}_*"))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        for (int i = 0; i < allPrefixes.Count; i++)
+        {
+            var filter = allPrefixes[i];
+            var prefix = filter.Split('.')[1].TrimEnd('*').TrimEnd('_');
+            StatusChanged?.Invoke($"[1/{4}] インデックス構築 ({prefix}, {i + 1}/{allPrefixes.Count})");
+
+            string rawJson;
+            try { rawJson = await RunDcbQueryAsync(p4kPath, "EntityClassDefinition", filter, ct); }
+            catch { continue; }
+            if (string.IsNullOrEmpty(rawJson)) continue;
+
+            foreach (var block in SplitJsonBlocks(rawJson))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(block);
+                    var root = doc.RootElement;
+                    var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+                    var uuid = root.TryGetProperty("_RecordId_", out var rid) ? rid.GetString() ?? "" : "";
+                    if (string.IsNullOrEmpty(recordName) || string.IsNullOrEmpty(uuid)) continue;
+                    if (!root.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("Components", out var components)) continue;
+
+                    string name = "", itemType = "", subType = "", manufacturer = "";
+                    foreach (var comp in components.EnumerateArray())
+                    {
+                        var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
+                        if (type == "SAttachableComponentParams" && comp.TryGetProperty("AttachDef", out var ad))
+                        {
+                            itemType = ad.TryGetProperty("Type", out var it2) ? it2.GetString() ?? "" : "";
+                            subType = ad.TryGetProperty("SubType", out var st2) ? st2.GetString() ?? "" : "";
+                            manufacturer = ad.TryGetProperty("Manufacturer", out var mf2) ? mf2.GetString() ?? "" : "";
+                            if (ad.TryGetProperty("Localization", out var loc))
+                                name = loc.TryGetProperty("Name", out var n) ? n.GetString() ?? "" : "";
+                            break;
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(itemType) || itemType == "UNDEFINED") continue;
+
+                    string nameJa = "";
+                    if (name.StartsWith("@") && name.Length > 1)
+                    {
+                        var locKey = name[1..];
+                        if (enDict.TryGetValue(locKey, out var enName) && !enName.StartsWith("!"))
+                        {
+                            name = enName;
+                            resolved++;
+                        }
+                        else if (jaDict.TryGetValue(locKey, out var jaName) && !jaName.StartsWith("!"))
+                        {
+                            name = jaName;
+                            resolved++;
+                        }
+                        if (jaDict.TryGetValue(locKey, out var jaVal) && !jaVal.StartsWith("!"))
+                            nameJa = jaVal;
+                    }
+
+                    pUuid.Value = uuid; pRn.Value = recordName; pNm.Value = name;
+                    pJa.Value = string.IsNullOrEmpty(nameJa) ? DBNull.Value : nameJa;
+                    pIt.Value = itemType; pSt.Value = subType; pMf.Value = manufacturer; pEa.Value = now;
+                    cmd.ExecuteNonQuery();
+                    count++;
+                }
+                catch { }
+            }
+        }
+        tx.Commit();
+        StatusChanged?.Invoke($"[1/4] インデックス構築完了: {count} 件 (名前解決: {resolved} 件)");
+        return count;
+    }
 
     private async Task<int> ExtractShipsAsync(string p4kPath, string now, CancellationToken ct)
     {
@@ -403,7 +539,7 @@ public class GameDataExtractor
                             name = loc.TryGetProperty("Name", out var n) ? n.GetString() ?? "" : "";
                         manufacturer = ad.TryGetProperty("Manufacturer", out var mf) ? mf.GetString() ?? "" : "";
                     }
-                    if (type == "SVehicleComponentParams")
+                    if (type == "VehicleComponentParams")
                     {
                         hasVehicleComponent = true;
                         career = comp.TryGetProperty("vehicleCareer", out var c) ? c.GetString() ?? "" : "";
@@ -995,7 +1131,7 @@ public class GameDataExtractor
                             parts.Add($"  - {itemType} (Size {size}): {locName}");
                     }
 
-                    if (type == "SVehicleComponentParams")
+                    if (type == "VehicleComponentParams")
                     {
                         var career = comp.TryGetProperty("vehicleCareer", out var c) ? c.GetString() : "";
                         var role = comp.TryGetProperty("vehicleRole", out var r) ? r.GetString() : "";
@@ -1281,6 +1417,248 @@ public class GameDataExtractor
         return await RunDcbQueryRawAsync(p4kPath, path, filter, ct);
     }
 
+    public void RebuildFts5Index()
+    {
+        EnsureDb();
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "DROP TABLE IF EXISTS item_index_fts";
+        cmd.ExecuteNonQuery();
+
+        cmd.CommandText = "CREATE VIRTUAL TABLE item_index_fts USING fts5(uuid UNINDEXED, name, name_ja, record_name, item_type, sub_type, manufacturer, tokenize='trigram')";
+        cmd.ExecuteNonQuery();
+
+        cmd.CommandText = "INSERT INTO item_index_fts(uuid, name, name_ja, record_name, item_type, sub_type, manufacturer) SELECT uuid, name, COALESCE(name_ja,''), record_name, item_type, sub_type, manufacturer FROM item_index";
+        cmd.ExecuteNonQuery();
+    }
+
+    public void PopulateJapaneseNames(string translationDbPath)
+    {
+        EnsureDb();
+        if (!File.Exists(translationDbPath)) return;
+
+        using var transConn = new SqliteConnection($"Data Source={translationDbPath};Mode=ReadOnly");
+        transConn.Open();
+
+        using var readCmd = transConn.CreateCommand();
+        readCmd.CommandText = "SELECT key, japanese FROM translations WHERE key LIKE 'item_Name%' AND japanese IS NOT NULL AND japanese != ''";
+        using var reader = readCmd.ExecuteReader();
+
+        using var tx = _db!.BeginTransaction();
+        using var updateCmd = _db.CreateCommand();
+        updateCmd.CommandText = "UPDATE item_index SET name_ja = @ja WHERE name LIKE @en";
+        var pJa = updateCmd.Parameters.Add("@ja", SqliteType.Text);
+        var pEn = updateCmd.Parameters.Add("@en", SqliteType.Text);
+
+        int updated = 0;
+        while (reader.Read())
+        {
+            var key = reader.GetString(0);
+            var ja = reader.GetString(1);
+            var enName = key.Replace("item_Name", "").Replace("item_name", "");
+
+            using var enCmd = transConn.CreateCommand();
+            enCmd.CommandText = "SELECT english FROM translations WHERE key = @k";
+            enCmd.Parameters.AddWithValue("@k", key);
+            var english = enCmd.ExecuteScalar() as string;
+            if (string.IsNullOrEmpty(english)) continue;
+
+            pJa.Value = ja;
+            pEn.Value = $"%{english}%";
+            updated += updateCmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        transConn.Close();
+
+        RebuildFts5Index();
+        StatusChanged?.Invoke($"日本語名を {updated} 件更新し、FTS5 インデックスを再構築しました");
+    }
+
+    public int GetItemIndexCount()
+    {
+        EnsureDb();
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM item_index";
+        try { return (int)(long)(cmd.ExecuteScalar() ?? 0L); }
+        catch { return 0; }
+    }
+
+    public bool HasVectorIndex()
+    {
+        EnsureDb();
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM item_vectors";
+        try { return (long)(cmd.ExecuteScalar() ?? 0L) > 0; }
+        catch { return false; }
+    }
+
+    public async Task BuildVectorIndexAsync(BackendConfig backend, CancellationToken ct = default)
+    {
+        EnsureDb();
+        var totalItems = GetItemIndexCount();
+        if (totalItems == 0) throw new InvalidOperationException("item_index が空です。先にインデックス構築を実行してください。");
+
+        StatusChanged?.Invoke("ベクトルインデックス構築中...");
+        ProgressChanged?.Invoke(0, "アイテム名を読み込み中...");
+
+        var items = new List<(string uuid, string text)>();
+        using (var cmd = _db!.CreateCommand())
+        {
+            cmd.CommandText = "SELECT uuid, COALESCE(name,'') || ' ' || COALESCE(name_ja,'') || ' ' || COALESCE(item_type,'') || ' ' || COALESCE(manufacturer,'') FROM item_index";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                items.Add((reader.GetString(0), reader.GetString(1).Trim()));
+        }
+
+        using (var cmd = _db.CreateCommand())
+        {
+            cmd.CommandText = "DELETE FROM item_vectors";
+            cmd.ExecuteNonQuery();
+        }
+
+        int batchSize = backend.Type.Equals("Ollama", StringComparison.OrdinalIgnoreCase) ? 50 : 200;
+        int processed = 0;
+        var sw = Stopwatch.StartNew();
+
+        using var tx = _db.BeginTransaction();
+        using var insertCmd = _db.CreateCommand();
+        insertCmd.CommandText = "INSERT OR REPLACE INTO item_vectors(uuid, embedding) VALUES(@uuid, @emb)";
+        var pUuid = insertCmd.Parameters.Add("@uuid", SqliteType.Text);
+        var pEmb = insertCmd.Parameters.Add("@emb", SqliteType.Blob);
+
+        for (int i = 0; i < items.Count; i += batchSize)
+        {
+            ct.ThrowIfCancellationRequested();
+            var batch = items.Skip(i).Take(batchSize).ToList();
+            var texts = batch.Select(b => b.text).ToList();
+
+            var embeddings = await GetEmbeddingsAsync(backend, texts, ct);
+            if (embeddings == null || embeddings.Count != texts.Count)
+            {
+                StatusChanged?.Invoke($"エンベディング取得エラー (batch {i / batchSize + 1})");
+                continue;
+            }
+
+            for (int j = 0; j < batch.Count; j++)
+            {
+                pUuid.Value = batch[j].uuid;
+                pEmb.Value = FloatsToBytes(embeddings[j]);
+                insertCmd.ExecuteNonQuery();
+            }
+
+            processed += batch.Count;
+            var pct = processed * 100 / items.Count;
+            var eta = sw.Elapsed.TotalSeconds / processed * (items.Count - processed);
+            ProgressChanged?.Invoke(pct, $"ベクトル化中... {processed}/{items.Count} (残り約{eta:F0}秒)");
+        }
+        tx.Commit();
+        SetMeta("vector_model", $"{backend.Type}:{backend.Model}");
+        SetMeta("vector_count", processed.ToString());
+        SetMeta("vector_built_at", DateTime.UtcNow.ToString("o"));
+
+        sw.Stop();
+        ProgressChanged?.Invoke(100, $"ベクトルインデックス完了 ({processed}件, {sw.Elapsed.TotalSeconds:F1}秒)");
+        StatusChanged?.Invoke($"ベクトルインデックス構築完了: {processed}件 ({sw.Elapsed.TotalSeconds:F1}秒)");
+    }
+
+    private static async Task<List<float[]>?> GetEmbeddingsAsync(BackendConfig backend, List<string> texts, CancellationToken ct)
+    {
+        var type = backend.Type.ToLowerInvariant();
+        if (type == "ollama") return await GetOllamaEmbeddingsAsync(backend, texts, ct);
+        if (type == "openai") return await GetOpenAiEmbeddingsAsync(backend, texts, ct);
+        if (type == "gemini") return await GetGeminiEmbeddingsAsync(backend, texts, ct);
+        return null;
+    }
+
+    private static async Task<List<float[]>?> GetOllamaEmbeddingsAsync(BackendConfig backend, List<string> texts, CancellationToken ct)
+    {
+        var baseUrl = string.IsNullOrEmpty(backend.BaseUrl) ? "http://localhost:11434" : backend.BaseUrl.TrimEnd('/');
+        var model = string.IsNullOrEmpty(backend.Model) ? "nomic-embed-text" : backend.Model;
+
+        var results = new List<float[]>();
+        foreach (var text in texts)
+        {
+            ct.ThrowIfCancellationRequested();
+            var body = JsonSerializer.Serialize(new { model, input = text });
+            var resp = await Http.PostAsync($"{baseUrl}/api/embed",
+                new StringContent(body, Encoding.UTF8, "application/json"), ct);
+            resp.EnsureSuccessStatusCode();
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("embeddings", out var embs) && embs.GetArrayLength() > 0)
+            {
+                var arr = embs[0].EnumerateArray().Select(e => e.GetSingle()).ToArray();
+                results.Add(arr);
+            }
+            else return null;
+        }
+        return results;
+    }
+
+    private static async Task<List<float[]>?> GetOpenAiEmbeddingsAsync(BackendConfig backend, List<string> texts, CancellationToken ct)
+    {
+        var model = string.IsNullOrEmpty(backend.Model) ? "text-embedding-3-small" : backend.Model;
+        var baseUrl = string.IsNullOrEmpty(backend.BaseUrl) ? "https://api.openai.com/v1" : backend.BaseUrl.TrimEnd('/');
+        var body = JsonSerializer.Serialize(new { model, input = texts });
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/embeddings");
+        req.Headers.Add("Authorization", $"Bearer {backend.ApiKey}");
+        req.Content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        var resp = await Http.SendAsync(req, ct);
+        resp.EnsureSuccessStatusCode();
+        var json = await resp.Content.ReadAsStringAsync(ct);
+        using var doc = JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("data", out var data)) return null;
+
+        return data.EnumerateArray()
+            .OrderBy(e => e.GetProperty("index").GetInt32())
+            .Select(e => e.GetProperty("embedding").EnumerateArray().Select(v => v.GetSingle()).ToArray())
+            .ToList();
+    }
+
+    private static async Task<List<float[]>?> GetGeminiEmbeddingsAsync(BackendConfig backend, List<string> texts, CancellationToken ct)
+    {
+        var model = string.IsNullOrEmpty(backend.Model) ? "text-embedding-004" : backend.Model;
+        var results = new List<float[]>();
+
+        foreach (var batch in texts.Chunk(100))
+        {
+            ct.ThrowIfCancellationRequested();
+            var requests = batch.Select(t => new { model = $"models/{model}", content = new { parts = new[] { new { text = t } } } }).ToArray();
+            var body = JsonSerializer.Serialize(new { requests });
+
+            using var req = new HttpRequestMessage(HttpMethod.Post,
+                $"https://generativelanguage.googleapis.com/v1beta/models/{model}:batchEmbedContents?key={backend.ApiKey}");
+            req.Content = new StringContent(body, Encoding.UTF8, "application/json");
+
+            var resp = await Http.SendAsync(req, ct);
+            resp.EnsureSuccessStatusCode();
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("embeddings", out var embs)) return null;
+            foreach (var emb in embs.EnumerateArray())
+            {
+                if (emb.TryGetProperty("values", out var vals))
+                    results.Add(vals.EnumerateArray().Select(v => v.GetSingle()).ToArray());
+            }
+        }
+        return results;
+    }
+
+    private static byte[] FloatsToBytes(float[] floats)
+    {
+        var bytes = new byte[floats.Length * 4];
+        Buffer.BlockCopy(floats, 0, bytes, 0, bytes.Length);
+        return bytes;
+    }
+
+    public static float[] BytesToFloats(byte[] bytes)
+    {
+        var floats = new float[bytes.Length / 4];
+        Buffer.BlockCopy(bytes, 0, floats, 0, bytes.Length);
+        return floats;
+    }
+
     private static string ExtractGameDataKeyword(string query)
     {
         var keywords = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -1291,11 +1669,16 @@ public class GameDataExtractor
             {"パワープラント", "powerplant"}, {"クーラー", "cooler"},
             {"シールドジェネレーター", "shield_generator"}, {"クォンタムドライブ", "quantum_drive"},
             {"ミサイル", "missile"}, {"タレット", "turret"},
+            {"ピストル", "pistol"}, {"ライフル", "rifle"}, {"ショットガン", "shotgun"},
+            {"スナイパー", "sniper"}, {"グレネード", "grenade"},
         };
 
         foreach (var (ja, en) in keywords)
             if (query.Contains(ja, StringComparison.OrdinalIgnoreCase))
                 return en;
+
+        if (query.Any(c => c < 128 && char.IsLetter(c)))
+            return query.Trim();
 
         return "";
     }

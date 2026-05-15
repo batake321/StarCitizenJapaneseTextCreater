@@ -16,6 +16,7 @@ public partial class MainWindow : Window
     private bool _running;
     private CancellationTokenSource? _cts;
     private DateTime _translationStartTime;
+    private ChatWebServer? _webServer;
 
     // Editor state
     private List<TranslationRow> _allRows = new();
@@ -40,12 +41,26 @@ public partial class MainWindow : Window
         txtOutputLang.Text = config.OutputLanguage;
         txtScApiKey.Text = config.ScApiKey;
 
+        txtWebPort.Text = config.WebServerPort.ToString();
+        txtVoiceVoxUrl.Text = config.VoiceVoxUrl;
+        txtVoiceVoxSpeaker.Text = config.VoiceVoxSpeakerId.ToString();
+        chkWebAutoStart.IsChecked = config.WebServerAutoStart;
+
+        ChatService.OnLog += msg => Dispatcher.BeginInvoke(() =>
+        {
+            txtLog.AppendText(msg + "\n");
+            txtLog.ScrollToEnd();
+        });
+
         PopulateChannels();
         UpdateBackendSummary();
         UpdateDbPathDisplay();
         RefreshProfileLists();
         LoadGlossary();
         InitChat();
+
+        if (config.WebServerAutoStart)
+            _ = StartWebServerAsync();
     }
 
     private void PopulateChannels()
@@ -219,13 +234,16 @@ public partial class MainWindow : Window
         }
     }
 
+    private static bool IsChatUsable(BackendConfig b) =>
+        !string.IsNullOrWhiteSpace(b.ApiKey) || b.Type == "Ollama";
+
     private void RefreshChatBackends()
     {
         var prevSelected = cmbChatBackend.SelectedItem as string;
         cmbChatBackend.Items.Clear();
         foreach (var b in App.Config.Translation.Backends)
         {
-            if (b.Enabled)
+            if (IsChatUsable(b))
                 cmbChatBackend.Items.Add($"{b.Name} ({b.Model})");
         }
         if (prevSelected != null && cmbChatBackend.Items.Contains(prevSelected))
@@ -300,6 +318,14 @@ public partial class MainWindow : Window
 
         var oldOut = Console.Out;
         Console.SetOut(new UiTextWriter(Log));
+
+        TranslationBackend.SetCacheDir(WorkDir);
+        if (command == "extract")
+            await TranslationBackend.FetchAndCacheProperNounsAsync();
+        else if (TranslationBackend.HasCachedProperNouns())
+            TranslationBackend.LoadProperNounsFromCache();
+        else
+            await TranslationBackend.FetchAndCacheProperNounsAsync();
 
         try
         {
@@ -402,7 +428,7 @@ public partial class MainWindow : Window
                     japanese ??= GlobalIniParser.Parse(JaPath);
 
                     var merged = IniMerger.Merge(english, japanese, TranslatedPath,
-                        App.Config.ForceEnglishPatterns, DbPath);
+                        App.Config.ForceEnglishPatterns, DbPath, glossary);
                     GlobalIniParser.Write(OutputPath, merged);
                     Log($"出力: {OutputPath} ({new FileInfo(OutputPath).Length:N0} bytes)");
 
@@ -1277,6 +1303,10 @@ public partial class MainWindow : Window
         App.Config.WorkingDirectory = txtWorkDir.Text.Trim();
         App.Config.OutputLanguage = txtOutputLang.Text.Trim();
         App.Config.ScApiKey = txtScApiKey.Text.Trim();
+        if (int.TryParse(txtWebPort.Text.Trim(), out var port)) App.Config.WebServerPort = port;
+        App.Config.VoiceVoxUrl = txtVoiceVoxUrl.Text.Trim();
+        if (int.TryParse(txtVoiceVoxSpeaker.Text.Trim(), out var spk)) App.Config.VoiceVoxSpeakerId = spk;
+        App.Config.WebServerAutoStart = chkWebAutoStart.IsChecked == true;
         txtGamePath.Text = App.Config.GamePath;
 
         SaveConfigToFile();
@@ -1299,7 +1329,12 @@ public partial class MainWindow : Window
                     App.Config.Translation.Backends
                 },
                 App.Config.ForceEnglishPatterns,
-                App.Config.ScApiKey
+                App.Config.ScApiKey,
+                App.Config.LastChatBackend,
+                App.Config.WebServerPort,
+                App.Config.WebServerAutoStart,
+                App.Config.VoiceVoxUrl,
+                App.Config.VoiceVoxSpeakerId
             };
 
             var json = JsonSerializer.Serialize(config, new JsonSerializerOptions
@@ -1337,21 +1372,25 @@ public partial class MainWindow : Window
         cmbChatBackend.Items.Clear();
         foreach (var b in App.Config.Translation.Backends)
         {
-            if (b.Enabled)
+            if (IsChatUsable(b))
                 cmbChatBackend.Items.Add($"{b.Name} ({b.Model})");
         }
         if (cmbChatBackend.Items.Count > 0)
-            cmbChatBackend.SelectedIndex = 0;
+        {
+            var last = App.Config.LastChatBackend;
+            var idx = string.IsNullOrEmpty(last) ? -1 : cmbChatBackend.Items.IndexOf(last);
+            cmbChatBackend.SelectedIndex = idx >= 0 ? idx : 0;
+        }
 
         var welcomeLines = new List<string> { "Star Citizen について質問してください。\nUEX API・SC Trade Tools・Wiki・ゲームファイルから最新データを取得して回答します。" };
 
-        if (!App.Config.Translation.Backends.Any(b => b.Enabled))
+        if (!App.Config.Translation.Backends.Any(b => IsChatUsable(b)))
             welcomeLines.Add("\n⚠️ AI バックエンドが未設定です。設定タブの「AI 設定を開く」から Claude / Gemini / Ollama を設定してください。");
 
         InitGameDataExtractor();
 
         if (_gameDataExtractor != null && !_gameDataExtractor.HasStructuredData())
-            welcomeLines.Add("\n💡 ミッション・契約の検索には、設定タブの「インデックス構築」の実行が必要です（約30秒）。");
+            welcomeLines.Add("\n💡 ミッション・契約の検索には、設定タブの「インデックス構築」の実行が必要です（約2分半）。");
 
         _chatBubbles.Add(new ChatBubble { Text = string.Join("", welcomeLines), IsUser = false });
     }
@@ -1438,8 +1477,17 @@ public partial class MainWindow : Window
         try
         {
             await _gameDataExtractor.BuildIndexAsync(p4kPath);
+            OnGameDataStatus("日本語名をマッピング中...");
+            var transDbPath = Path.Combine(WorkDir, "translations.db");
+            if (File.Exists(transDbPath))
+                _gameDataExtractor.PopulateJapaneseNames(transDbPath);
+            OnGameDataStatus("固有名詞キャッシュ取得中...");
+            TranslationBackend.SetCacheDir(WorkDir);
+            await TranslationBackend.FetchAndCacheProperNounsAsync();
+            OnGameDataStatus("固有名詞キャッシュ完了");
             var ver = _gameDataExtractor.GetCachedVersion();
             txtGameDataStatus.Text = $"インデックス済み ({ver})";
+            UpdateSearchIndexStatus();
         }
         catch (Exception ex)
         {
@@ -1461,19 +1509,295 @@ public partial class MainWindow : Window
             pbGameData.Value = pct;
             txtGameDataPct.Text = $"{pct}%";
             txtGameDataDetail.Text = detail;
+            Log($"[GameData] {pct}% {detail}");
         });
     }
 
     private void OnGameDataStatus(string status)
     {
-        Dispatcher.BeginInvoke(() => txtGameDataStatus.Text = status);
+        Dispatcher.BeginInvoke(() =>
+        {
+            txtGameDataStatus.Text = status;
+            Log($"[GameData] {status}");
+        });
+    }
+
+    private void UpdateSearchIndexStatus()
+    {
+        if (_gameDataExtractor == null) return;
+        var parts = new List<string>();
+        var count = _gameDataExtractor.GetItemIndexCount();
+        parts.Add($"アイテム: {count}件");
+        parts.Add("FTS5: 有効");
+        parts.Add(_gameDataExtractor.HasVectorIndex() ? "ベクトル検索: 有効" : "ベクトル検索: 未構築");
+        txtSearchIndexStatus.Text = string.Join(" | ", parts);
+    }
+
+    private async void BuildVectorIndex_Click(object sender, RoutedEventArgs e)
+    {
+        if (_gameDataExtractor == null)
+        {
+            MessageBox.Show("GameDataExtractor が初期化されていません。", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        if (_gameDataExtractor.GetItemIndexCount() == 0)
+        {
+            MessageBox.Show("先にインデックス構築を実行してください。", "エラー", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var backends = App.Config.Translation.Backends.Where(b => IsChatUsable(b)).ToList();
+        if (backends.Count == 0)
+        {
+            MessageBox.Show("AI バックエンドが設定されていません。", "エラー", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var ollamaBackend = backends.FirstOrDefault(b => b.Type.Equals("Ollama", StringComparison.OrdinalIgnoreCase));
+        var openaiBackend = backends.FirstOrDefault(b => b.Type.Equals("OpenAI", StringComparison.OrdinalIgnoreCase));
+        var geminiBackend = backends.FirstOrDefault(b => b.Type.Equals("Gemini", StringComparison.OrdinalIgnoreCase));
+        var embeddingBackend = ollamaBackend ?? openaiBackend ?? geminiBackend;
+
+        if (embeddingBackend == null)
+        {
+            MessageBox.Show("エンベディング対応のバックエンド (Ollama/OpenAI/Gemini) が必要です。", "エラー", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var modelName = embeddingBackend.Type.Equals("Ollama", StringComparison.OrdinalIgnoreCase)
+            ? "nomic-embed-text" : embeddingBackend.Model;
+
+        if (embeddingBackend.Type.Equals("Ollama", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                var baseUrl = (embeddingBackend.BaseUrl ?? "http://localhost:11434").TrimEnd('/');
+                var tagsJson = await http.GetStringAsync($"{baseUrl}/api/tags");
+                using var tagsDoc = System.Text.Json.JsonDocument.Parse(tagsJson);
+                var models = tagsDoc.RootElement.GetProperty("models");
+                bool found = false;
+                foreach (var m in models.EnumerateArray())
+                {
+                    var name = m.GetProperty("name").GetString() ?? "";
+                    if (name.StartsWith("nomic-embed-text", StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    MessageBox.Show(
+                        $"Ollama サーバー ({baseUrl}) に nomic-embed-text モデルが見つかりません。\n\n" +
+                        "以下のコマンドでインストールしてください:\n" +
+                        "  ollama pull nomic-embed-text\n\n" +
+                        "インストール後に再度お試しください。",
+                        "モデル未検出", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                var baseUrl = (embeddingBackend.BaseUrl ?? "http://localhost:11434").TrimEnd('/');
+                MessageBox.Show(
+                    $"Ollama サーバー ({baseUrl}) に接続できません。\n\n" +
+                    $"エラー: {ex.Message}\n\n" +
+                    "Ollama が起動しているか確認してください。",
+                    "接続エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+        }
+
+        var result = MessageBox.Show(
+            $"ベクトル検索インデックスを構築します。\n\n" +
+            $"バックエンド: {embeddingBackend.Name} ({embeddingBackend.Type})\n" +
+            $"モデル: {modelName}\n" +
+            $"対象: {_gameDataExtractor.GetItemIndexCount()} アイテム\n" +
+            $"予測時間: 約2分15秒\n\n" +
+            "バックグラウンドで実行します。続行しますか？",
+            "ベクトル検索構築", MessageBoxButton.YesNo, MessageBoxImage.Question);
+
+        if (result != MessageBoxResult.Yes) return;
+
+        var embConfig = new BackendConfig
+        {
+            Type = embeddingBackend.Type,
+            ApiKey = embeddingBackend.ApiKey,
+            BaseUrl = embeddingBackend.BaseUrl,
+            Model = modelName,
+            Name = embeddingBackend.Name
+        };
+
+        btnBuildVectorIndex.IsEnabled = false;
+        btnExtractGameData.IsEnabled = false;
+        _gameDataExtractor.ProgressChanged += OnGameDataProgress;
+        _gameDataExtractor.StatusChanged += OnGameDataStatus;
+
+        try
+        {
+            await Task.Run(() => _gameDataExtractor.BuildVectorIndexAsync(embConfig));
+            UpdateSearchIndexStatus();
+            MessageBox.Show("ベクトル検索インデックスの構築が完了しました。", "完了", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            txtGameDataStatus.Text = "ベクトル構築失敗";
+            MessageBox.Show($"ベクトルインデックス構築エラー:\n{ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            _gameDataExtractor.ProgressChanged -= OnGameDataProgress;
+            _gameDataExtractor.StatusChanged -= OnGameDataStatus;
+            btnBuildVectorIndex.IsEnabled = true;
+            btnExtractGameData.IsEnabled = true;
+        }
+    }
+
+    // === Web Server ===
+
+    private async void WebServer_Click(object sender, RoutedEventArgs e)
+    {
+        if (_webServer?.IsRunning == true)
+        {
+            _webServer.Stop();
+            btnWebServer.Content = "サーバー起動";
+            btnWebServer.Background = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(0x4A, 0x90, 0xD9));
+            txtWebServerInfo.Text = "停止中";
+            return;
+        }
+        await StartWebServerAsync();
+    }
+
+    private async Task StartWebServerAsync()
+    {
+        if (!int.TryParse(txtWebPort.Text.Trim(), out var port)) port = 8099;
+        App.Config.WebServerPort = port;
+
+        _webServer?.Dispose();
+        _webServer = new ChatWebServer();
+
+        _webServer.SetMessageHandler(async text =>
+        {
+            BackendConfig? backend = null;
+            List<ChatMessage> history = null!;
+
+            Dispatcher.Invoke(() =>
+            {
+                backend = GetSelectedChatBackend();
+                _chatHistory.Add(new ChatMessage { Role = "user", Content = text });
+                history = _chatHistory.ToList();
+            });
+
+            if (backend == null) return "バックエンドが選択されていません。アプリのチャットタブでバックエンドを選んでください。";
+
+            var useSkills = backend.SupportsSkills;
+            var response = await ChatService.SendChatAsync(backend, history, useSkills);
+
+            Dispatcher.Invoke(() =>
+            {
+                _chatHistory.Add(new ChatMessage { Role = "assistant", Content = response });
+            });
+
+            return response;
+        });
+
+        _webServer.MessageReceived += (text, isUser) =>
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                _chatBubbles.Add(new ChatBubble { Text = text, IsUser = isUser });
+                ScrollChatToBottom();
+            });
+        };
+
+        _webServer.HistoryCleared += () =>
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                _chatBubbles.Clear();
+                _chatHistory.Clear();
+                _chatBubbles.Add(new ChatBubble { Text = "履歴がクリアされました", IsUser = false });
+            });
+        };
+
+        try
+        {
+            await _webServer.StartAsync(port);
+            btnWebServer.Content = "サーバー停止";
+            btnWebServer.Background = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(0xD9, 0x4A, 0x4A));
+
+            var ips = ChatWebServer.GetLocalIpAddresses();
+            var sb = new StringBuilder();
+            sb.AppendLine($"PC: http://localhost:{port}/");
+            foreach (var ip in ips)
+                sb.AppendLine($"LAN: http://{ip}:{port}/");
+            sb.Append("スマホからアクセスする場合は同じ Wi-Fi に接続し、上記 LAN の URL を使用");
+            txtWebServerInfo.Text = sb.ToString();
+        }
+        catch (Exception ex)
+        {
+            txtWebServerInfo.Text = $"起動失敗: {ex.Message}";
+            MessageBox.Show($"Web サーバー起動エラー:\n{ex.Message}\n\nポート {port} が別のアプリで使われている可能性があります。",
+                "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private BackendConfig? GetSelectedChatBackend()
     {
         if (cmbChatBackend.SelectedIndex < 0) return null;
-        var enabled = App.Config.Translation.Backends.Where(b => b.Enabled).ToList();
-        return cmbChatBackend.SelectedIndex < enabled.Count ? enabled[cmbChatBackend.SelectedIndex] : null;
+        var usable = App.Config.Translation.Backends.Where(b => IsChatUsable(b)).ToList();
+        return cmbChatBackend.SelectedIndex < usable.Count ? usable[cmbChatBackend.SelectedIndex] : null;
+    }
+
+    private async void CmbChatBackend_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        var backend = GetSelectedChatBackend();
+        if (backend == null) return;
+
+        bool skillsAvailable = backend.SupportsSkills;
+
+        if (backend.Type.Equals("Ollama", StringComparison.OrdinalIgnoreCase))
+        {
+            skillsAvailable = await CheckOllamaSkillSupportAsync(backend);
+        }
+
+        if (skillsAvailable)
+        {
+            chkFetchScData.IsEnabled = true;
+            chkFetchScData.IsChecked = true;
+            chkFetchScData.Content = "スキル使用 (API/DB検索)";
+        }
+        else
+        {
+            chkFetchScData.IsChecked = false;
+            chkFetchScData.IsEnabled = false;
+            chkFetchScData.Content = "スキル非対応";
+        }
+    }
+
+    private static async Task<bool> CheckOllamaSkillSupportAsync(BackendConfig backend)
+    {
+        try
+        {
+            var baseUrl = string.IsNullOrWhiteSpace(backend.BaseUrl) ? "http://localhost:11434" : backend.BaseUrl.TrimEnd('/');
+            using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+            var resp = await http.GetStringAsync($"{baseUrl}/api/version");
+            using var doc = System.Text.Json.JsonDocument.Parse(resp);
+            var versionStr = doc.RootElement.GetProperty("version").GetString() ?? "";
+            Console.WriteLine($"[Chat] Ollama version: {versionStr}");
+            if (Version.TryParse(versionStr.Split('-')[0], out var ver))
+                return ver >= new Version(0, 3, 0);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Chat] Ollama version check failed: {ex.Message}");
+            return false;
+        }
     }
 
     private async void ChatSend_Click(object sender, RoutedEventArgs e) => await SendChatMessageAsync();
@@ -1521,6 +1845,9 @@ public partial class MainWindow : Window
             return;
         }
 
+        App.Config.LastChatBackend = cmbChatBackend.SelectedItem as string ?? "";
+        SaveConfigToFile();
+
         _chatSending = true;
         btnChatSend.IsEnabled = false;
         txtChatInput.Text = "";
@@ -1528,35 +1855,62 @@ public partial class MainWindow : Window
         _chatBubbles.Add(new ChatBubble { Text = text, IsUser = true });
         _chatHistory.Add(new ChatMessage { Role = "user", Content = text });
         ScrollChatToBottom();
+        if (_webServer?.IsRunning == true)
+            _ = _webServer.BroadcastMessageAsync(text, true);
 
         _chatBubbles.Add(new ChatBubble { Text = "考え中...", IsUser = false });
         ScrollChatToBottom();
 
         try
         {
-            string scData = "";
-            if (chkFetchScData.IsChecked == true)
+            var useSkills = chkFetchScData.IsChecked == true && backend.SupportsSkills;
+            ReplaceLast(new ChatBubble
             {
-                _chatBubbles[^1] = new ChatBubble { Text = "Star Citizen データを取得中...", IsUser = false };
-                scData = await ChatService.FetchScDataAsync(text);
-            }
+                Text = useSkills ? "AI がスキルを使って回答を生成中..." : "AI が回答を生成中...",
+                IsUser = false
+            });
+            if (_webServer?.IsRunning == true)
+                _ = _webServer.BroadcastTypingAsync("AI が回答を生成中...");
+            Log($"[Chat] AI 応答生成開始: backend={backend.Name}/{backend.Model}, skills={useSkills}");
+            var swAi = System.Diagnostics.Stopwatch.StartNew();
 
-            _chatBubbles[^1] = new ChatBubble { Text = "AI が回答を生成中...", IsUser = false };
+            var response = await ChatService.SendChatAsync(backend, _chatHistory, useSkills);
 
-            var response = await ChatService.SendChatAsync(backend, _chatHistory, scData);
-
-            _chatBubbles[^1] = new ChatBubble { Text = response, IsUser = false };
+            Log($"[Chat] AI 応答完了: {swAi.ElapsedMilliseconds}ms, {response.Length} chars");
+            ReplaceLast(new ChatBubble { Text = response, IsUser = false });
             _chatHistory.Add(new ChatMessage { Role = "assistant", Content = response });
+            if (_webServer?.IsRunning == true)
+            {
+                _ = _webServer.BroadcastMessageAsync(response, false);
+                _ = _webServer.BroadcastTypingAsync("");
+            }
         }
         catch (Exception ex)
         {
-            _chatBubbles[^1] = new ChatBubble { Text = $"エラー: {ex.Message}", IsUser = false, IsError = true };
+            Log($"[Chat] エラー: {ex.Message}");
+            ReplaceLast(new ChatBubble { Text = $"エラー: {ex.Message}", IsUser = false, IsError = true });
         }
         finally
         {
             _chatSending = false;
             btnChatSend.IsEnabled = true;
             ScrollChatToBottom();
+        }
+    }
+
+    private void ChatCopyAll_Click(object sender, RoutedEventArgs e)
+    {
+        var sb = new StringBuilder();
+        foreach (var bubble in _chatBubbles)
+        {
+            var label = bubble.IsUser ? "Q" : "A";
+            sb.AppendLine($"**{label}:** {bubble.Text}");
+            sb.AppendLine();
+        }
+        if (sb.Length > 0)
+        {
+            Clipboard.SetText(sb.ToString());
+            MessageBox.Show("チャット履歴をクリップボードにコピーしました。", "コピー完了");
         }
     }
 
@@ -1569,6 +1923,27 @@ public partial class MainWindow : Window
             Text = "Star Citizen について質問してください。\nUEX API・SC Trade Tools・Wiki・ゲームファイルから最新データを取得して回答します。",
             IsUser = false
         });
+        if (_webServer?.IsRunning == true)
+            _ = _webServer.BroadcastClearAsync();
+    }
+
+    private void KnowledgeManage_Click(object sender, RoutedEventArgs e)
+    {
+        if (_gameDataExtractor == null) { MessageBox.Show("先にゲームデータを読み込んでください。"); return; }
+        var qs = new GameDataQueryService(_gameDataExtractor.DbPath);
+        try
+        {
+            var win = new KnowledgeWindow(qs) { Owner = this };
+            win.ShowDialog();
+        }
+        finally { qs.Dispose(); }
+    }
+
+    private void ReplaceLast(ChatBubble bubble)
+    {
+        if (_chatBubbles.Count > 0)
+            _chatBubbles.RemoveAt(_chatBubbles.Count - 1);
+        _chatBubbles.Add(bubble);
     }
 
     private void ScrollChatToBottom()
@@ -1630,6 +2005,37 @@ public class ChatBubble
     public System.Windows.HorizontalAlignment Alignment => IsUser
         ? System.Windows.HorizontalAlignment.Right
         : System.Windows.HorizontalAlignment.Left;
+
+    private string? _htmlContent;
+    public string HtmlContent => _htmlContent ??= BuildHtml();
+
+    private string BuildHtml()
+    {
+        var bgColor = IsError ? "#FFEBEE" : "#F5F5F5";
+        var fgColor = IsError ? "#C62828" : "#212121";
+        var pipeline = new Markdig.MarkdownPipelineBuilder().Build();
+        var bodyHtml = IsUser ? System.Net.WebUtility.HtmlEncode(Text)
+            : Markdig.Markdown.ToHtml(Text, pipeline);
+        return $@"<!DOCTYPE html><html><head><meta charset=""utf-8"">
+<style>
+body {{ font-family: 'Segoe UI','Meiryo',sans-serif; font-size: 13px; color: {fgColor};
+       background: {bgColor}; margin: 4px 0; padding: 0; line-height: 1.5; word-wrap: break-word; }}
+h1,h2,h3 {{ margin: 0.4em 0 0.2em; }}
+h1 {{ font-size: 1.2em; }} h2 {{ font-size: 1.1em; }} h3 {{ font-size: 1em; }}
+p {{ margin: 0.3em 0; }}
+ul,ol {{ margin: 0.3em 0; padding-left: 1.5em; }}
+li {{ margin: 0.1em 0; }}
+code {{ background: #E8E8E8; padding: 1px 4px; border-radius: 3px; font-size: 12px; }}
+pre {{ background: #E8E8E8; padding: 8px; border-radius: 4px; overflow-x: auto; }}
+pre code {{ background: none; padding: 0; }}
+table {{ border-collapse: collapse; margin: 0.3em 0; }}
+th,td {{ border: 1px solid #CCC; padding: 4px 8px; font-size: 12px; }}
+th {{ background: #E0E0E0; }}
+hr {{ border: none; border-top: 1px solid #CCC; margin: 0.5em 0; }}
+strong {{ font-weight: 600; }}
+a {{ color: #1976D2; }}
+</style></head><body>{bodyHtml}</body></html>";
+    }
 }
 
 public class UiTextWriter : TextWriter

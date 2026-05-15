@@ -8,6 +8,11 @@ public class AppConfig
     public TranslationConfig Translation { get; set; } = new();
     public List<string> ForceEnglishPatterns { get; set; } = new();
     public string ScApiKey { get; set; } = "";
+    public string LastChatBackend { get; set; } = "";
+    public int WebServerPort { get; set; } = 8099;
+    public bool WebServerAutoStart { get; set; } = false;
+    public string VoiceVoxUrl { get; set; } = "http://localhost:50021";
+    public int VoiceVoxSpeakerId { get; set; } = 0;
 }
 
 public class TranslationConfig
@@ -25,4 +30,11 @@ public class BackendConfig
     public string BaseUrl { get; set; } = "";
     public int BatchSize { get; set; } = 20;
     public bool Enabled { get; set; } = false;
+
+    public bool SupportsSkills => Type.ToLowerInvariant() switch
+    {
+        "claude" or "gemini" or "openai" => true,
+        "ollama" => true,
+        _ => false
+    };
 }

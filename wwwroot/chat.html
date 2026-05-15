@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>SC Japanese - Chat</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+:root {
+  --bg: #1a1a2e; --surface: #16213e; --surface2: #0f3460;
+  --primary: #e94560; --primary-light: #ff6b6b;
+  --text: #eee; --text-dim: #999; --text-dark: #666;
+  --user-bg: #0f3460; --ai-bg: #1e2a47; --err-bg: #3a1520;
+  --border: #2a3a5c; --shadow: rgba(0,0,0,0.3);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI','Meiryo','Noto Sans JP',sans-serif; background: var(--bg);
+       color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+/* Header */
+.header { background: var(--surface); padding: 8px 16px; border-bottom: 1px solid var(--border);
+          display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 48px; }
+.header select, .header button { background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+          border-radius: 6px; padding: 6px 10px; font-size: 13px; cursor: pointer; }
+.header select:focus, .header button:focus { outline: 2px solid var(--primary); }
+.header button:hover { background: var(--primary); }
+.header .spacer { flex: 1; }
+.status { font-size: 11px; color: var(--text-dim); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+.dot.on { background: #4caf50; } .dot.off { background: #f44336; }
+#voicevoxStatus { margin-left: 8px; }
+.badge { background: var(--primary); color: #fff; border-radius: 10px; padding: 2px 8px; font-size: 10px; }
+
+/* Messages */
+.messages { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; line-height: 1.6; font-size: 14px;
+       word-wrap: break-word; overflow-wrap: anywhere; animation: fadeIn 0.2s ease; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.msg.user { background: var(--user-bg); align-self: flex-end; border-bottom-right-radius: 4px; }
+.msg.ai { background: var(--ai-bg); align-self: flex-start; border-bottom-left-radius: 4px; }
+.msg.err { background: var(--err-bg); align-self: flex-start; color: #ff6b6b; }
+.msg.system { background: transparent; align-self: center; color: var(--text-dim); font-size: 12px; }
+.msg.ai h1,.msg.ai h2,.msg.ai h3 { color: var(--primary-light); margin: 0.4em 0 0.2em; }
+.msg.ai h1 { font-size: 1.15em; } .msg.ai h2 { font-size: 1.08em; } .msg.ai h3 { font-size: 1em; }
+.msg.ai p { margin: 0.3em 0; } .msg.ai ul,.msg.ai ol { padding-left: 1.4em; margin: 0.3em 0; }
+.msg.ai code { background: rgba(255,255,255,0.1); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+.msg.ai pre { background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px; overflow-x: auto; margin: 0.4em 0; }
+.msg.ai pre code { background: none; padding: 0; }
+.msg.ai table { border-collapse: collapse; margin: 0.4em 0; font-size: 13px; }
+.msg.ai th,.msg.ai td { border: 1px solid var(--border); padding: 4px 8px; }
+.typing { color: var(--text-dim); font-style: italic; font-size: 13px; padding: 4px 14px; display: none; }
+
+/* Input bar */
+.input-bar { background: var(--surface); border-top: 1px solid var(--border); padding: 8px 12px;
+             display: flex; align-items: flex-end; gap: 8px; }
+#chatInput { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+             border-radius: 12px; padding: 10px 14px; font-size: 14px; resize: none; max-height: 120px;
+             min-height: 42px; line-height: 1.4; font-family: inherit; }
+#chatInput:focus { outline: none; border-color: var(--primary); }
+#chatInput::placeholder { color: var(--text-dark); }
+
+.btn-icon { width: 44px; height: 44px; border-radius: 50%; border: none; cursor: pointer;
+            display: flex; align-items: center; justify-content: center; transition: all 0.15s;
+            flex-shrink: 0; font-size: 20px; }
+#btnSend { background: var(--primary); color: #fff; }
+#btnSend:hover { background: var(--primary-light); }
+#btnSend:disabled { background: var(--text-dark); cursor: default; }
+
+#btnMic { background: var(--surface2); color: var(--text); border: 2px solid var(--border); }
+#btnMic:hover { border-color: var(--primary); }
+#btnMic.active { background: var(--primary); border-color: var(--primary); color: #fff; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(233,69,96,0.4); } 50% { box-shadow: 0 0 0 10px rgba(233,69,96,0); } }
+
+#btnVoice { background: var(--surface2); color: var(--text); border: 2px solid var(--border); font-size: 16px; }
+#btnVoice.on { background: #4caf50; border-color: #4caf50; color: #fff; }
+
+/* Settings panel */
+.settings-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; }
+.settings-overlay.show { display: flex; align-items: center; justify-content: center; }
+.settings-panel { background: var(--surface); border-radius: 12px; padding: 20px; width: 90%; max-width: 400px;
+                  border: 1px solid var(--border); }
+.settings-panel h3 { margin-bottom: 12px; color: var(--primary-light); }
+.settings-panel label { display: block; margin: 8px 0 4px; font-size: 13px; color: var(--text-dim); }
+.settings-panel input, .settings-panel select { width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 13px; }
+.settings-panel .btn-row { display: flex; gap: 8px; margin-top: 16px; }
+.settings-panel button { flex: 1; padding: 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface2); color: var(--text); cursor: pointer; font-size: 13px; }
+.settings-panel button.primary { background: var(--primary); border-color: var(--primary); }
+
+/* Knowledge panel */
+.knowledge-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; }
+.knowledge-overlay.show { display: flex; align-items: center; justify-content: center; }
+.knowledge-panel { background: var(--surface); border-radius: 12px; padding: 16px; width: 95%; max-width: 700px;
+    max-height: 85vh; display: flex; flex-direction: column; border: 1px solid var(--border); }
+.knowledge-panel h3 { margin-bottom: 8px; color: var(--primary-light); }
+.knowledge-toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.knowledge-toolbar button, .knowledge-toolbar select { background: var(--surface2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer; }
+.knowledge-toolbar button:hover { background: var(--primary); }
+.knowledge-list { flex: 1; overflow-y: auto; min-height: 150px; }
+.knowledge-item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--border);
+    font-size: 13px; }
+.knowledge-item:hover { background: rgba(255,255,255,0.04); }
+.knowledge-item input[type=checkbox] { margin-top: 3px; flex-shrink: 0; }
+.knowledge-item .ki-date { color: var(--text-dim); font-size: 11px; white-space: nowrap; }
+.knowledge-item .ki-cat { font-size: 11px; white-space: nowrap; }
+.knowledge-item .ki-text { flex: 1; word-break: break-all; }
+.knowledge-import { margin-top: 8px; }
+.knowledge-import textarea { width: 100%; height: 70px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px; font-size: 12px; resize: vertical; }
+.knowledge-import .import-row { display: flex; gap: 6px; margin-top: 6px; align-items: center; font-size: 12px; }
+.knowledge-status { font-size: 11px; color: var(--text-dim); margin-top: 6px; }
+
+/* Responsive */
+@media (max-width: 600px) {
+  .header { padding: 6px 10px; gap: 6px; }
+  .header select { font-size: 12px; padding: 4px 6px; max-width: 140px; }
+  .messages { padding: 8px; }
+  .msg { max-width: 92%; font-size: 13px; padding: 8px 12px; }
+  .input-bar { padding: 6px 8px; gap: 6px; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <select id="selBackend" title="AI バックエンド"></select>
+  <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer">
+    <input type="checkbox" id="chkSkills" checked> Skills
+  </label>
+  <span class="spacer"></span>
+  <span class="status"><span class="dot" id="wsDot"></span><span id="wsLabel">接続中...</span></span>
+  <span class="status" id="voicevoxStatus"></span>
+  <button onclick="showKnowledge()" title="記憶管理">&#128218;</button>
+  <button onclick="showSettings()" title="設定">&#9881;</button>
+  <button onclick="clearChat()" title="履歴クリア">&#128465;</button>
+</div>
+
+<div class="messages" id="messages">
+  <div class="msg system">Star Citizen について質問してください</div>
+</div>
+<div class="typing" id="typing"></div>
+
+<div class="input-bar">
+  <button class="btn-icon" id="btnMic" title="マイク (タップ: トグル / 長押し: PTT)">&#127908;</button>
+  <textarea id="chatInput" rows="1" placeholder="メッセージを入力..."></textarea>
+  <button class="btn-icon" id="btnVoice" title="VoiceVox 読み上げ ON/OFF">&#128264;</button>
+  <button class="btn-icon" id="btnSend" title="送信">&#9654;</button>
+</div>
+
+<!-- Knowledge overlay -->
+<div class="knowledge-overlay" id="knowledgeOverlay" onclick="if(event.target===this)hideKnowledge()">
+  <div class="knowledge-panel">
+    <h3>&#128218; 記憶管理</h3>
+    <div class="knowledge-toolbar">
+      <button onclick="knSelectAll()">全選択</button>
+      <button onclick="knDeselectAll()">選択解除</button>
+      <button onclick="knCopyDiscord()">Discord にコピー</button>
+      <button onclick="knDeleteSelected()" style="color:#ff6b6b">選択を削除</button>
+      <select id="knFilter" onchange="knApplyFilter()">
+        <option value="">すべて</option>
+        <option value="bug">バグ</option>
+        <option value="term">用語</option>
+        <option value="tip">Tips</option>
+        <option value="general">一般</option>
+      </select>
+    </div>
+    <div class="knowledge-list" id="knList"></div>
+    <details class="knowledge-import">
+      <summary style="cursor:pointer;font-size:13px;color:var(--text-dim)">Discord から取り込み</summary>
+      <p style="font-size:11px;color:var(--text-dim);margin:4px 0">1行1件。先頭の - / * は自動除去。[bug] [tip] 等でカテゴリ指定可。</p>
+      <textarea id="knImportText" placeholder="ここにテキストを貼り付け..."></textarea>
+      <div class="import-row">
+        <span>既定カテゴリ:</span>
+        <select id="knImportCat">
+          <option value="general">general</option>
+          <option value="bug">bug</option>
+          <option value="term">term</option>
+          <option value="tip">tip</option>
+        </select>
+        <button onclick="knImport()" style="background:var(--primary);font-weight:bold;padding:5px 16px">取り込み</button>
+      </div>
+    </details>
+    <div class="knowledge-status" id="knStatus"></div>
+  </div>
+</div>
+
+<!-- Settings overlay -->
+<div class="settings-overlay" id="settingsOverlay" onclick="if(event.target===this)hideSettings()">
+  <div class="settings-panel">
+    <h3>&#9881; 設定</h3>
+    <label>VoiceVox 話者</label>
+    <select id="setVoicevoxSpeaker"><option value="0">デフォルト (0)</option></select>
+    <label>音声認識 言語</label>
+    <select id="setRecogLang">
+      <option value="ja-JP">日本語</option>
+      <option value="en-US">English</option>
+    </select>
+    <div class="btn-row">
+      <button onclick="hideSettings()">キャンセル</button>
+      <button class="primary" onclick="saveSettings()">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const messagesEl = $('#messages'), typingEl = $('#typing'),
+      inputEl = $('#chatInput'), btnSend = $('#btnSend'),
+      btnMic = $('#btnMic'), btnVoice = $('#btnVoice'),
+      selBackend = $('#selBackend'), wsDot = $('#wsDot'), wsLabel = $('#wsLabel');
+
+let ws = null, voicevoxOn = localStorage.getItem('voicevoxOn') === 'true', micActive = false, holdMode = false;
+let recognition = null, holdTimer = null, sending = false;
+
+// --- WebSocket ---
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen = () => { wsDot.className = 'dot on'; wsLabel.textContent = '接続済み'; };
+  ws.onclose = () => { wsDot.className = 'dot off'; wsLabel.textContent = '切断'; setTimeout(connectWs, 3000); };
+  ws.onerror = () => { wsDot.className = 'dot off'; };
+  ws.onmessage = e => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.type === 'message') {
+        addMessage(data.text, data.isUser, true);
+        if (!data.isUser && voicevoxOn) {
+          const tts = extractTts(data.text);
+          speakVoicevox(tts ? 'お待たせしました。' + tts : stripForTts(data.text));
+        }
+      } else if (data.type === 'typing') {
+        typingEl.style.display = data.status ? 'block' : 'none';
+        typingEl.textContent = data.status || '';
+      } else if (data.type === 'clear') {
+        messagesEl.innerHTML = '<div class="msg system">履歴がクリアされました</div>';
+      }
+    } catch (err) { console.error('[WS] message error:', err); }
+  };
+}
+connectWs();
+
+// --- Chat ---
+function extractTts(text) {
+  const m = text.match(/<tts>([\s\S]*?)<\/tts>/);
+  return m ? m[1].trim() : null;
+}
+
+function stripTtsTag(text) {
+  return text.replace(/<tts>[\s\S]*?<\/tts>/g, '').trim();
+}
+
+function addMessage(text, isUser, fromWs = false) {
+  const div = document.createElement('div');
+  div.className = `msg ${isUser ? 'user' : 'ai'}`;
+  if (isUser) div.textContent = text;
+  else {
+    const display = stripTtsTag(text);
+    try { div.innerHTML = typeof marked !== 'undefined' ? marked.parse(display) : display.replace(/\n/g,'<br>'); }
+    catch { div.textContent = display; }
+  }
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text || sending) return;
+  inputEl.value = ''; autoResize();
+  sending = true; btnSend.disabled = true;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'chat', text }));
+  }
+  if (voicevoxOn) speakVoicevox('おまちください。');
+  setTimeout(() => { sending = false; btnSend.disabled = false; }, 500);
+}
+
+function clearChat() {
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({ type: 'clear' }));
+}
+
+// Send on Enter (Shift+Enter for newline)
+inputEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+btnSend.onclick = sendMessage;
+
+// Auto-resize textarea
+function autoResize() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+}
+inputEl.addEventListener('input', autoResize);
+
+// --- Backends ---
+fetch('/api/backends').then(r=>r.json()).then(data => {
+  data.backends.forEach((b,i) => {
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = `${b.Name} (${b.Model})`;
+    selBackend.appendChild(opt);
+  });
+  if (data.voicevoxSpeakerId != null) {
+    voicevoxSpeaker = data.voicevoxSpeakerId;
+    localStorage.setItem('voicevoxSpeaker', voicevoxSpeaker);
+    console.log(`[VoiceVox] speaker from server: ${voicevoxSpeaker}`);
+  }
+}).catch(()=>{});
+
+// --- Microphone (Web Speech API) ---
+function initSpeechRecognition() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { btnMic.title = '音声認識非対応'; btnMic.style.opacity = 0.3; return; }
+  recognition = new SR();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = localStorage.getItem('recogLang') || 'ja-JP';
+
+  let finalText = '', interim = '';
+  recognition.onresult = e => {
+    finalText = ''; interim = '';
+    for (let i = 0; i < e.results.length; i++) {
+      if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
+      else interim += e.results[i][0].transcript;
+    }
+    inputEl.value = finalText + interim;
+    autoResize();
+  };
+  recognition.onend = () => {
+    if (micActive && !holdMode) recognition.start();
+    else {
+      micActive = false; btnMic.classList.remove('active');
+      if (finalText.trim()) { inputEl.value = finalText.trim(); autoResize(); sendMessage(); }
+    }
+  };
+  recognition.onerror = e => {
+    if (e.error !== 'no-speech' && e.error !== 'aborted')
+      console.warn('Speech error:', e.error);
+  };
+}
+initSpeechRecognition();
+
+function startMic() {
+  if (!recognition) return;
+  micActive = true; btnMic.classList.add('active');
+  inputEl.value = ''; autoResize();
+  try { recognition.start(); } catch {}
+}
+function stopMic() {
+  if (!recognition) return;
+  micActive = false; btnMic.classList.remove('active');
+  try { recognition.stop(); } catch {}
+}
+
+// Tap = toggle, Hold (>300ms) = PTT
+let micDownTime = 0;
+btnMic.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  micDownTime = Date.now();
+  holdTimer = setTimeout(() => { holdMode = true; if (!micActive) startMic(); }, 300);
+});
+btnMic.addEventListener('pointerup', e => {
+  e.preventDefault();
+  clearTimeout(holdTimer);
+  if (holdMode) { holdMode = false; stopMic(); }
+  else if (Date.now() - micDownTime < 300) { micActive ? stopMic() : startMic(); }
+});
+btnMic.addEventListener('pointerleave', () => {
+  if (holdMode) { clearTimeout(holdTimer); holdMode = false; stopMic(); }
+});
+// Prevent context menu on long-press (mobile)
+btnMic.addEventListener('contextmenu', e => e.preventDefault());
+
+// --- VoiceVox TTS ---
+const voicevoxProxy = `${location.origin}/api/voicevox`;
+let voicevoxSpeaker = parseInt(localStorage.getItem('voicevoxSpeaker') || '0');
+let audioQueue = [], audioPlaying = false;
+let audioCtx = null;
+
+function ensureAudioCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function updateVoiceBtn() {
+  btnVoice.className = `btn-icon ${voicevoxOn ? 'on' : ''}`;
+  btnVoice.innerHTML = voicevoxOn ? '&#128266;' : '&#128264;';
+}
+updateVoiceBtn();
+
+btnVoice.onclick = () => {
+  voicevoxOn = !voicevoxOn;
+  localStorage.setItem('voicevoxOn', voicevoxOn);
+  updateVoiceBtn();
+  if (voicevoxOn) {
+    ensureAudioCtx();
+    checkVoicevox();
+  }
+};
+
+document.addEventListener('click', () => { if (voicevoxOn) ensureAudioCtx(); }, { once: true });
+
+async function checkVoicevox() {
+  const el = $('#voicevoxStatus');
+  try {
+    const r = await fetch(`${voicevoxProxy}/version`, { signal: AbortSignal.timeout(3000) });
+    const v = await r.text();
+    el.innerHTML = `<span class="dot on"></span>VoiceVox ${v}`;
+  } catch {
+    el.innerHTML = `<span class="dot off"></span>VoiceVox 未接続`;
+  }
+}
+
+function stripForTts(text) {
+  let lines = text.split('\n');
+  let kept = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^\d+[\.\)]\s/.test(trimmed)) continue;
+    if (/^[-*•·]\s/.test(trimmed)) continue;
+    if (/^\|/.test(trimmed)) continue;
+    kept.push(trimmed);
+  }
+  let result = kept.join('。');
+  result = result.replace(/[#*_`~\[\]()>|\\]/g, '').replace(/<[^>]+>/g, '');
+  result = result.replace(/。{2,}/g, '。').replace(/^。+/, '').trim();
+  return result;
+}
+
+let currentAudioSource = null;
+
+function stopCurrentPlayback() {
+  audioQueue.length = 0;
+  if (currentAudioSource) {
+    try { currentAudioSource.stop(); } catch {}
+    currentAudioSource = null;
+  }
+}
+
+async function speakVoicevox(text) {
+  stopCurrentPlayback();
+  const clean = stripForTts(text);
+  console.log(`[VoiceVox] speakVoicevox called: voicevoxOn=${voicevoxOn}, clean.length=${clean?.length}, speaker=${voicevoxSpeaker}`);
+  if (!clean) { console.log('[VoiceVox] empty text, skipping'); return; }
+  const chunks = [];
+  let remaining = clean;
+  while (remaining.length > 0) {
+    if (remaining.length <= 400) { chunks.push(remaining); break; }
+    let idx = remaining.lastIndexOf('。', 400);
+    if (idx < 50) idx = remaining.indexOf('。', 200);
+    if (idx < 0) idx = 400;
+    else idx += 1;
+    chunks.push(remaining.slice(0, idx));
+    remaining = remaining.slice(idx);
+  }
+  for (const c of chunks) audioQueue.push(c);
+  if (!audioPlaying) processAudioQueue();
+}
+
+async function processAudioQueue() {
+  audioPlaying = true;
+  const ctx = ensureAudioCtx();
+  while (audioQueue.length > 0) {
+    const text = audioQueue.shift();
+    try {
+      console.log(`[VoiceVox] audio_query: speaker=${voicevoxSpeaker}, text=${text.slice(0,50)}...`);
+      const qr = await fetch(`${voicevoxProxy}/audio_query?text=${encodeURIComponent(text)}&speaker=${voicevoxSpeaker}`, { method: 'POST' });
+      if (!qr.ok) { console.error(`[VoiceVox] audio_query failed: ${qr.status} ${await qr.text()}`); continue; }
+      const query = await qr.json();
+      console.log(`[VoiceVox] synthesis: speaker=${voicevoxSpeaker}`);
+      const sr = await fetch(`${voicevoxProxy}/synthesis?speaker=${voicevoxSpeaker}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(query)
+      });
+      if (!sr.ok) { console.error(`[VoiceVox] synthesis failed: ${sr.status} ${await sr.text()}`); continue; }
+      const arrayBuf = await sr.arrayBuffer();
+      console.log(`[VoiceVox] audio data: ${arrayBuf.byteLength} bytes`);
+      const audioBuf = await ctx.decodeAudioData(arrayBuf);
+      await new Promise(resolve => {
+        const source = ctx.createBufferSource();
+        source.buffer = audioBuf;
+        source.connect(ctx.destination);
+        currentAudioSource = source;
+        source.onended = () => { console.log('[VoiceVox] playback ended'); currentAudioSource = null; resolve(); };
+        source.start(0);
+        console.log('[VoiceVox] playback started via AudioContext');
+      });
+    } catch (e) { console.error('[VoiceVox] error:', e); }
+  }
+  audioPlaying = false;
+}
+
+// --- Settings ---
+function showSettings() {
+  $('#setRecogLang').value = localStorage.getItem('recogLang') || 'ja-JP';
+  loadVoicevoxSpeakers();
+  $('#settingsOverlay').classList.add('show');
+}
+function hideSettings() { $('#settingsOverlay').classList.remove('show'); }
+function saveSettings() {
+  voicevoxSpeaker = parseInt($('#setVoicevoxSpeaker').value);
+  localStorage.setItem('voicevoxSpeaker', voicevoxSpeaker);
+  fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ voicevoxSpeakerId: voicevoxSpeaker }) }).catch(()=>{});
+  const lang = $('#setRecogLang').value;
+  localStorage.setItem('recogLang', lang);
+  if (recognition) recognition.lang = lang;
+  hideSettings();
+  if (voicevoxOn) checkVoicevox();
+}
+
+async function loadVoicevoxSpeakers() {
+  const sel = $('#setVoicevoxSpeaker');
+  try {
+    const r = await fetch(`${voicevoxProxy}/speakers`, { signal: AbortSignal.timeout(3000) });
+    const speakers = await r.json();
+    sel.innerHTML = '';
+    speakers.forEach(s => {
+      s.styles.forEach(st => {
+        const opt = document.createElement('option');
+        opt.value = st.id; opt.textContent = `${s.name} - ${st.name} (${st.id})`;
+        if (st.id === voicevoxSpeaker) opt.selected = true;
+        sel.appendChild(opt);
+      });
+    });
+  } catch {
+    sel.innerHTML = '<option value="0">VoiceVox 未接続</option>';
+  }
+}
+
+// Init VoiceVox status
+checkVoicevox();
+
+// --- Knowledge Management ---
+let knData = [];
+const catEmoji = { bug: '\u{1f41b}', term: '\u{1f4d6}', tip: '\u{1f4a1}', general: '\u{1f4cb}' };
+const catLabel = { bug: 'バグ情報', term: '用語', tip: 'Tips', general: 'その他' };
+
+async function showKnowledge() {
+  await knLoad();
+  $('#knowledgeOverlay').classList.add('show');
+}
+function hideKnowledge() { $('#knowledgeOverlay').classList.remove('show'); }
+
+async function knLoad() {
+  try {
+    const r = await fetch('/api/knowledge');
+    const data = await r.json();
+    knData = data.entries || [];
+  } catch { knData = []; }
+  knRender();
+}
+
+function knRender() {
+  const filter = $('#knFilter').value;
+  const list = $('#knList');
+  const filtered = filter ? knData.filter(e => e.category === filter) : knData;
+  list.innerHTML = filtered.length === 0
+    ? '<div style="padding:20px;text-align:center;color:var(--text-dim)">記憶データなし</div>'
+    : filtered.map(e => `<div class="knowledge-item" data-id="${e.id}">
+        <input type="checkbox" class="kn-cb" data-id="${e.id}">
+        <span class="ki-date">${e.createdAt}</span>
+        <span class="ki-cat">${catEmoji[e.category]||''} ${e.category}</span>
+        <span class="ki-text">${escHtml(e.content)}</span>
+      </div>`).join('');
+  $('#knStatus').textContent = `${filtered.length} 件${filter ? ` (全 ${knData.length} 件)` : ''}`;
+}
+
+function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function knApplyFilter() { knRender(); }
+function knSelectAll() { document.querySelectorAll('.kn-cb').forEach(cb => cb.checked = true); }
+function knDeselectAll() { document.querySelectorAll('.kn-cb').forEach(cb => cb.checked = false); }
+function knSelectedIds() { return [...document.querySelectorAll('.kn-cb:checked')].map(cb => parseInt(cb.dataset.id)); }
+
+function knCopyDiscord() {
+  const ids = new Set(knSelectedIds());
+  if (ids.size === 0) { alert('項目を選択してください'); return; }
+  const selected = knData.filter(e => ids.has(e.id));
+  const grouped = {};
+  selected.forEach(e => { (grouped[e.category] = grouped[e.category] || []).push(e); });
+  let text = '';
+  for (const [cat, items] of Object.entries(grouped)) {
+    text += `## ${catEmoji[cat]||''} ${catLabel[cat]||cat}\n`;
+    items.forEach(e => { text += `- **[${e.createdAt.split(' ')[0]}]** ${e.content}\n`; });
+    text += '\n';
+  }
+  navigator.clipboard.writeText(text.trim());
+  $('#knStatus').textContent = `${ids.size} 件をクリップボードにコピーしました (Discord 形式)`;
+}
+
+async function knDeleteSelected() {
+  const ids = knSelectedIds();
+  if (ids.length === 0) { alert('項目を選択してください'); return; }
+  if (!confirm(`${ids.length} 件の記憶を削除しますか？`)) return;
+  try {
+    await fetch('/api/knowledge', { method: 'DELETE', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ ids }) });
+    await knLoad();
+  } catch (e) { alert('削除エラー: ' + e.message); }
+}
+
+async function knImport() {
+  const text = $('#knImportText').value.trim();
+  if (!text) { alert('テキストを貼り付けてください'); return; }
+  const defaultCat = $('#knImportCat').value;
+  const lines = text.split('\n').filter(l => l.trim());
+  let count = 0;
+  for (let line of lines) {
+    line = line.trim();
+    if (line.startsWith('##') || line.startsWith('__')) continue;
+    line = line.replace(/^[-*・•]\s*/, '');
+    line = line.replace(/^\*{0,2}\[[\d\-/]+\]\*{0,2}\s*/, '');
+    let cat = defaultCat;
+    const tagMatch = line.match(/^\[(\w+)\]\s*/);
+    if (tagMatch) { cat = tagMatch[1].toLowerCase(); line = line.slice(tagMatch[0].length); }
+    line = line.trim();
+    if (line.length < 2) continue;
+    try {
+      await fetch('/api/knowledge', { method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ content: line, category: cat }) });
+      count++;
+    } catch {}
+  }
+  $('#knImportText').value = '';
+  await knLoad();
+  $('#knStatus').textContent = `${count} 件を取り込みました`;
+}
+</script>
+</body>
+</html>
