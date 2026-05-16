@@ -47,7 +47,10 @@ public static class SslCertHelper
                 thumbprint = CreateCertFiles();
             }
 
-            if (!IsSslBound(httpsPort, thumbprint))
+            var needSsl = !IsSslBound(httpsPort, thumbprint);
+            var needFw = !IsFirewallRuleExists("SC Japanese Assistant HTTPS", httpsPort);
+
+            if (needSsl || needFw)
                 RunSetupScript(httpsPort, thumbprint);
 
             return thumbprint;
@@ -154,24 +157,29 @@ netsh advfirewall firewall add rule name=""SC Japanese Assistant HTTPS"" dir=in 
         }
     }
 
-    public static void EnsureFirewallRule(int httpPort)
+    private static bool IsFirewallRuleExists(string ruleName, int port)
     {
         try
         {
-            var check = new ProcessStartInfo
+            var psi = new ProcessStartInfo
             {
                 FileName = "netsh",
-                Arguments = "advfirewall firewall show rule name=\"SC Japanese Assistant HTTP\"",
+                Arguments = $"advfirewall firewall show rule name=\"{ruleName}\"",
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            var p = Process.Start(check)!;
+            var p = Process.Start(psi)!;
             var output = p.StandardOutput.ReadToEnd();
             p.WaitForExit(5000);
-            if (output.Contains(httpPort.ToString())) return;
+            return output.Contains(port.ToString());
         }
-        catch { }
+        catch { return false; }
+    }
+
+    public static void EnsureFirewallRule(int httpPort)
+    {
+        if (IsFirewallRuleExists("SC Japanese Assistant HTTP", httpPort)) return;
 
         var script = Path.Combine(Path.GetTempPath(), $"sc_fw_setup_{Guid.NewGuid():N}.ps1");
         var ps = $@"
