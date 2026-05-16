@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Text;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -47,11 +48,8 @@ public static class SslCertHelper
                 thumbprint = CreateCertFiles();
             }
 
-            var needSsl = !IsSslBound(httpsPort, thumbprint);
-            var needFw = !IsFirewallRuleExists("SC Japanese Assistant HTTPS", httpsPort);
-
-            if (needSsl || needFw)
-                RunSetupScript(httpsPort, thumbprint);
+            if (!IsSslBound(httpsPort, thumbprint))
+                RunSslSetupScript(httpsPort, thumbprint);
 
             return thumbprint;
         }
@@ -113,9 +111,8 @@ public static class SslCertHelper
         catch { return false; }
     }
 
-    private static void RunSetupScript(int port, string thumbprint)
+    private static void RunSslSetupScript(int port, string thumbprint)
     {
-        var script = Path.Combine(Path.GetTempPath(), $"sc_ssl_setup_{Guid.NewGuid():N}.ps1");
         var ps = $@"
 $pfx = '{PfxPath.Replace("'", "''")}'
 $pass = ConvertTo-SecureString '{PfxPassword}' -AsPlainText -Force
@@ -127,44 +124,73 @@ netsh http delete sslcert ipport=0.0.0.0:{port} 2>$null
 netsh http add sslcert ipport=0.0.0.0:{port} certhash={thumbprint} appid=""{{{AppId}}}""
 netsh http delete urlacl url=https://+:{port}/ 2>$null
 netsh http add urlacl url=https://+:{port}/ user=Everyone
-netsh advfirewall firewall delete rule name=""SC Japanese Assistant HTTPS"" 2>$null
-netsh advfirewall firewall add rule name=""SC Japanese Assistant HTTPS"" dir=in action=allow protocol=tcp localport={port}
 ";
-        File.WriteAllText(script, ps);
-
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "powershell.exe",
-                Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{script}\"",
-                Verb = "runas",
-                UseShellExecute = true,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden
-            };
-            var proc = Process.Start(psi);
-            proc?.WaitForExit(30000);
-            Debug.WriteLine($"[SSL] Setup script exit={proc?.ExitCode}");
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[SSL] Setup script failed: {ex.Message}");
-        }
-        finally
-        {
-            try { File.Delete(script); } catch { }
-        }
+        RunElevatedScript(ps, "SSL");
     }
 
-    private static bool IsFirewallRuleExists(string ruleName, int port)
+    /// <summary>
+    /// HTTP/HTTPS 両ポートのファイアウォールルールと urlacl を一括管理。
+    /// 既存ルールのポートと一致していれば何もしない (UAC なし)。
+    /// ポートが変更された場合、旧ルール削除→新ルール追加を 1 回の UAC で実行。
+    /// </summary>
+    public static void EnsureFirewallRules(int httpPort, int httpsPort)
+    {
+        const string httpRule = "SC Japanese Assistant HTTP";
+        const string httpsRule = "SC Japanese Assistant HTTPS";
+
+        var currentHttp = GetFirewallRulePort(httpRule);
+        var currentHttps = GetFirewallRulePort(httpsRule);
+
+        var httpOk = currentHttp == httpPort;
+        var httpsOk = currentHttps == httpsPort;
+
+        if (httpOk && httpsOk)
+        {
+            Debug.WriteLine($"[FW] Rules already correct: HTTP={httpPort}, HTTPS={httpsPort}");
+            return;
+        }
+
+        var sb = new StringBuilder();
+
+        // HTTP ファイアウォール + urlacl
+        if (!httpOk)
+        {
+            Debug.WriteLine($"[FW] HTTP rule change: {currentHttp} -> {httpPort}");
+            sb.AppendLine($"netsh advfirewall firewall delete rule name=\"{httpRule}\" 2>$null");
+            sb.AppendLine($"netsh advfirewall firewall add rule name=\"{httpRule}\" dir=in action=allow protocol=tcp localport={httpPort}");
+            if (currentHttp > 0)
+                sb.AppendLine($"netsh http delete urlacl url=http://+:{currentHttp}/ 2>$null");
+            sb.AppendLine($"netsh http delete urlacl url=http://+:{httpPort}/ 2>$null");
+            sb.AppendLine($"netsh http add urlacl url=http://+:{httpPort}/ user=Everyone");
+        }
+
+        // HTTPS ファイアウォール + urlacl
+        if (!httpsOk)
+        {
+            Debug.WriteLine($"[FW] HTTPS rule change: {currentHttps} -> {httpsPort}");
+            sb.AppendLine($"netsh advfirewall firewall delete rule name=\"{httpsRule}\" 2>$null");
+            sb.AppendLine($"netsh advfirewall firewall add rule name=\"{httpsRule}\" dir=in action=allow protocol=tcp localport={httpsPort}");
+            if (currentHttps > 0)
+                sb.AppendLine($"netsh http delete urlacl url=https://+:{currentHttps}/ 2>$null");
+            sb.AppendLine($"netsh http delete urlacl url=https://+:{httpsPort}/ 2>$null");
+            sb.AppendLine($"netsh http add urlacl url=https://+:{httpsPort}/ user=Everyone");
+        }
+
+        RunElevatedScript(sb.ToString(), "FW");
+    }
+
+    /// <summary>
+    /// ファイアウォールルールから現在登録されているポート番号を取得。
+    /// ルールが存在しない場合は 0 を返す。
+    /// </summary>
+    private static int GetFirewallRulePort(string ruleName)
     {
         try
         {
             var psi = new ProcessStartInfo
             {
                 FileName = "netsh",
-                Arguments = $"advfirewall firewall show rule name=\"{ruleName}\"",
+                Arguments = $"advfirewall firewall show rule name=\"{ruleName}\" verbose",
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
@@ -172,23 +198,27 @@ netsh advfirewall firewall add rule name=""SC Japanese Assistant HTTPS"" dir=in 
             var p = Process.Start(psi)!;
             var output = p.StandardOutput.ReadToEnd();
             p.WaitForExit(5000);
-            return output.Contains(port.ToString());
+
+            // "LocalPort:                            8099" のような行からポートを抽出
+            foreach (var line in output.Split('\n'))
+            {
+                var trimmed = line.Trim();
+                if (trimmed.StartsWith("LocalPort", StringComparison.OrdinalIgnoreCase))
+                {
+                    var parts = trimmed.Split(':');
+                    if (parts.Length >= 2 && int.TryParse(parts[^1].Trim(), out var port))
+                        return port;
+                }
+            }
         }
-        catch { return false; }
+        catch { }
+        return 0;
     }
 
-    public static void EnsureFirewallRule(int httpPort)
+    private static void RunElevatedScript(string psCommands, string tag)
     {
-        if (IsFirewallRuleExists("SC Japanese Assistant HTTP", httpPort)) return;
-
-        var script = Path.Combine(Path.GetTempPath(), $"sc_fw_setup_{Guid.NewGuid():N}.ps1");
-        var ps = $@"
-netsh advfirewall firewall delete rule name=""SC Japanese Assistant HTTP"" 2>$null
-netsh advfirewall firewall add rule name=""SC Japanese Assistant HTTP"" dir=in action=allow protocol=tcp localport={httpPort}
-netsh http delete urlacl url=http://+:{httpPort}/ 2>$null
-netsh http add urlacl url=http://+:{httpPort}/ user=Everyone
-";
-        File.WriteAllText(script, ps);
+        var script = Path.Combine(Path.GetTempPath(), $"sc_{tag.ToLower()}_{Guid.NewGuid():N}.ps1");
+        File.WriteAllText(script, psCommands);
         try
         {
             var psi = new ProcessStartInfo
@@ -202,11 +232,11 @@ netsh http add urlacl url=http://+:{httpPort}/ user=Everyone
             };
             var proc = Process.Start(psi);
             proc?.WaitForExit(30000);
-            Debug.WriteLine($"[FW] HTTP firewall rule exit={proc?.ExitCode}");
+            Debug.WriteLine($"[{tag}] Script exit={proc?.ExitCode}");
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[FW] HTTP firewall setup failed: {ex.Message}");
+            Debug.WriteLine($"[{tag}] Script failed: {ex.Message}");
         }
         finally
         {

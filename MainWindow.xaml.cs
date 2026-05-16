@@ -1730,7 +1730,7 @@ public partial class MainWindow : Window
 
         try
         {
-            await Task.Run(() => SslCertHelper.EnsureFirewallRule(port));
+            await Task.Run(() => SslCertHelper.EnsureFirewallRules(port, httpsPort));
             await _webServer.StartAsync(port, httpsPort);
             btnWebServer.Content = "サーバー停止";
             btnWebServer.Background = new System.Windows.Media.SolidColorBrush(
