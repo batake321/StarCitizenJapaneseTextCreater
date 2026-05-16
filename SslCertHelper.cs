@@ -124,6 +124,8 @@ netsh http delete sslcert ipport=0.0.0.0:{port} 2>$null
 netsh http add sslcert ipport=0.0.0.0:{port} certhash={thumbprint} appid=""{{{AppId}}}""
 netsh http delete urlacl url=https://+:{port}/ 2>$null
 netsh http add urlacl url=https://+:{port}/ user=Everyone
+netsh advfirewall firewall delete rule name=""SC Japanese Assistant HTTPS"" 2>$null
+netsh advfirewall firewall add rule name=""SC Japanese Assistant HTTPS"" dir=in action=allow protocol=tcp localport={port}
 ";
         File.WriteAllText(script, ps);
 
@@ -145,6 +147,58 @@ netsh http add urlacl url=https://+:{port}/ user=Everyone
         catch (Exception ex)
         {
             Debug.WriteLine($"[SSL] Setup script failed: {ex.Message}");
+        }
+        finally
+        {
+            try { File.Delete(script); } catch { }
+        }
+    }
+
+    public static void EnsureFirewallRule(int httpPort)
+    {
+        try
+        {
+            var check = new ProcessStartInfo
+            {
+                FileName = "netsh",
+                Arguments = "advfirewall firewall show rule name=\"SC Japanese Assistant HTTP\"",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            var p = Process.Start(check)!;
+            var output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(5000);
+            if (output.Contains(httpPort.ToString())) return;
+        }
+        catch { }
+
+        var script = Path.Combine(Path.GetTempPath(), $"sc_fw_setup_{Guid.NewGuid():N}.ps1");
+        var ps = $@"
+netsh advfirewall firewall delete rule name=""SC Japanese Assistant HTTP"" 2>$null
+netsh advfirewall firewall add rule name=""SC Japanese Assistant HTTP"" dir=in action=allow protocol=tcp localport={httpPort}
+netsh http delete urlacl url=http://+:{httpPort}/ 2>$null
+netsh http add urlacl url=http://+:{httpPort}/ user=Everyone
+";
+        File.WriteAllText(script, ps);
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{script}\"",
+                Verb = "runas",
+                UseShellExecute = true,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            var proc = Process.Start(psi);
+            proc?.WaitForExit(30000);
+            Debug.WriteLine($"[FW] HTTP firewall rule exit={proc?.ExitCode}");
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[FW] HTTP firewall setup failed: {ex.Message}");
         }
         finally
         {
