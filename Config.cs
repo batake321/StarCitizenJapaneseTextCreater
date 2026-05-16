@@ -10,6 +10,7 @@ public class AppConfig
     public string ScApiKey { get; set; } = "";
     public string LastChatBackend { get; set; } = "";
     public int WebServerPort { get; set; } = 8099;
+    public int WebServerHttpsPort { get; set; } = 8100;
     public bool WebServerAutoStart { get; set; } = false;
     public string VoiceVoxUrl { get; set; } = "http://localhost:50021";
     public int VoiceVoxSpeakerId { get; set; } = 0;

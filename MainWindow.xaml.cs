@@ -42,6 +42,7 @@ public partial class MainWindow : Window
         txtScApiKey.Text = config.ScApiKey;
 
         txtWebPort.Text = config.WebServerPort.ToString();
+        txtWebHttpsPort.Text = config.WebServerHttpsPort.ToString();
         txtVoiceVoxUrl.Text = config.VoiceVoxUrl;
         txtVoiceVoxSpeaker.Text = config.VoiceVoxSpeakerId.ToString();
         chkWebAutoStart.IsChecked = config.WebServerAutoStart;
@@ -1304,6 +1305,7 @@ public partial class MainWindow : Window
         App.Config.OutputLanguage = txtOutputLang.Text.Trim();
         App.Config.ScApiKey = txtScApiKey.Text.Trim();
         if (int.TryParse(txtWebPort.Text.Trim(), out var port)) App.Config.WebServerPort = port;
+        if (int.TryParse(txtWebHttpsPort.Text.Trim(), out var hp)) App.Config.WebServerHttpsPort = hp;
         App.Config.VoiceVoxUrl = txtVoiceVoxUrl.Text.Trim();
         if (int.TryParse(txtVoiceVoxSpeaker.Text.Trim(), out var spk)) App.Config.VoiceVoxSpeakerId = spk;
         App.Config.WebServerAutoStart = chkWebAutoStart.IsChecked == true;
@@ -1332,6 +1334,7 @@ public partial class MainWindow : Window
                 App.Config.ScApiKey,
                 App.Config.LastChatBackend,
                 App.Config.WebServerPort,
+                App.Config.WebServerHttpsPort,
                 App.Config.WebServerAutoStart,
                 App.Config.VoiceVoxUrl,
                 App.Config.VoiceVoxSpeakerId
@@ -1674,7 +1677,9 @@ public partial class MainWindow : Window
     private async Task StartWebServerAsync()
     {
         if (!int.TryParse(txtWebPort.Text.Trim(), out var port)) port = 8099;
+        if (!int.TryParse(txtWebHttpsPort.Text.Trim(), out var httpsPort)) httpsPort = 8100;
         App.Config.WebServerPort = port;
+        App.Config.WebServerHttpsPort = httpsPort;
 
         _webServer?.Dispose();
         _webServer = new ChatWebServer();
@@ -1725,18 +1730,17 @@ public partial class MainWindow : Window
 
         try
         {
-            await _webServer.StartAsync(port);
+            await _webServer.StartAsync(port, httpsPort);
             btnWebServer.Content = "サーバー停止";
             btnWebServer.Background = new System.Windows.Media.SolidColorBrush(
                 System.Windows.Media.Color.FromRgb(0xD9, 0x4A, 0x4A));
 
-            var ips = ChatWebServer.GetLocalIpAddresses();
-            var sb = new StringBuilder();
-            sb.AppendLine($"PC: http://localhost:{port}/");
-            foreach (var ip in ips)
-                sb.AppendLine($"LAN: http://{ip}:{port}/");
-            sb.Append("スマホからアクセスする場合は同じ Wi-Fi に接続し、上記 LAN の URL を使用");
-            txtWebServerInfo.Text = sb.ToString();
+            UpdateWebServerUrls(port);
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(3000);
+                Dispatcher.BeginInvoke(() => UpdateWebServerUrls(port));
+            });
         }
         catch (Exception ex)
         {
@@ -1744,6 +1748,23 @@ public partial class MainWindow : Window
             MessageBox.Show($"Web サーバー起動エラー:\n{ex.Message}\n\nポート {port} が別のアプリで使われている可能性があります。",
                 "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
         }
+    }
+
+    private void UpdateWebServerUrls(int port)
+    {
+        var ips = ChatWebServer.GetLocalIpAddresses();
+        var hp = _webServer?.HttpsPort > 0 ? _webServer.HttpsPort : App.Config.WebServerHttpsPort;
+        var httpsReady = _webServer?.HttpsPort > 0;
+        var sb = new StringBuilder();
+        sb.AppendLine($"PC: http://localhost:{port}/");
+        foreach (var ip in ips)
+            sb.AppendLine($"LAN: http://{ip}:{port}/");
+        sb.AppendLine($"HTTPS PC: https://localhost:{hp}/  {(httpsReady ? "(稼働中)" : "(起動中...)")}");
+        foreach (var ip in ips)
+            sb.AppendLine($"HTTPS LAN: https://{ip}:{hp}/");
+        sb.AppendLine($"証明書DL: http://{(ips.Length > 0 ? ips[0] : "localhost")}:{port}/cert");
+        sb.Append("スマホ/マイク利用は HTTPS の URL を使用してください");
+        txtWebServerInfo.Text = sb.ToString();
     }
 
     private BackendConfig? GetSelectedChatBackend()

@@ -1,0 +1,44 @@
+ステーション,システム,位置,タイプ,精錬所,カーゴ昇降機,修理/補給,医療,艦船購入,ASOP,備考
+ARC-L1 Wide Forest Station,Stanton,ArcCorp L1,Rest Stop (R&R),●,●,●,●,—,●,精錬特化:Beryl/Quartz
+ARC-L2 Lively Pathway Station,Stanton,ArcCorp L2,Rest Stop (R&R),●,●,●,●,—,●,精錬特化:Copper/Gold
+ARC-L4 Faint Glen Station,Stanton,ArcCorp L4,Rest Stop (R&R),●,●,●,●,—,●,精錬特化:Taranite
+CRU-L1 Ambitious Dream Station,Stanton,Crusader L1,Rest Stop (R&R),●,●,●,●,—,●,精錬特化:Beryl/Corundum
+CRU-L4 Shallow Fields Station,Stanton,Crusader L4,Rest Stop (R&R),—,●,●,●,—,●,R&R(精錬なし)
+CRU-L5 Beautiful Glen Station,Stanton,Crusader L5,Rest Stop (R&R),—,●,●,●,—,●,R&R(精錬なし)
+HUR-L1 Green Glade Station,Stanton,Hurston L1,Rest Stop (R&R),●,●,●,●,—,●,精錬特化:Copper
+HUR-L2 Faithful Dream Station,Stanton,Hurston L2,Rest Stop (R&R),●,●,●,●,—,●,精錬特化:Quantanium
+HUR-L3 Thundering Express Station,Stanton,Hurston L3,Rest Stop (R&R),—,●,●,●,—,●,R&R(精錬なし)
+HUR-L4 Melodic Fields Station,Stanton,Hurston L4,Rest Stop (R&R),—,●,●,●,—,●,R&R(精錬なし)
+HUR-L5 High Course Station,Stanton,Hurston L5,Rest Stop (R&R),—,●,●,●,—,●,R&R(精錬なし)
+MIC-L1 Shallow Frontier Station,Stanton,microTech L1,Rest Stop (R&R),●,●,●,●,—,●,精錬特化:Agricium/Aluminum
+MIC-L2 Long Forest Station,Stanton,microTech L2,Rest Stop (R&R),●,●,●,●,—,●,精錬特化:Bexalite/Gold
+MIC-L3 Endless Odyssey Station,Stanton,microTech L3,Rest Stop (R&R),—,●,●,●,—,●,R&R(精錬なし)
+MIC-L4 Red Crossroads Station,Stanton,microTech L4,Rest Stop (R&R),—,●,●,●,—,●,R&R(精錬なし)
+MIC-L5 Modern Express Station,Stanton,microTech L5,Rest Stop (R&R),●,●,●,●,—,●,精錬特化:Titanium/Bexalite
+Baijini Point,Stanton,ArcCorp軌道,Cargo Station,—,●,●,●,—,●,カーゴ取引拠点
+Everus Harbor,Stanton,Hurston軌道,Cargo Station,—,●,●,●,—,●,カーゴ取引拠点
+Port Tressler,Stanton,microTech軌道,Cargo Station,—,●,●,●,—,●,カーゴ取引拠点
+Seraphim Station,Stanton,Crusader軌道,Cargo Station,—,●,●,●,—,●,カーゴ取引拠点
+Grim HEX,Stanton,Yela(衛星),Outlaw Station,—,●,●,●,—,●,アウトロー拠点・賞金首あり
+Pyro Gateway (Stanton側),Stanton,Stanton-Pyro Jump,Gateway,●,●,●,●,—,●,Pyroへのジャンプポイント
+Nyx Gateway (Stanton側),Stanton,Stanton-Nyx Jump,Gateway,●,●,●,●,—,●,Nyxへのジャンプポイント
+Terra Gateway (Stanton側),Stanton,Stanton-Terra Jump,Gateway,●,●,●,●,—,●,Terraへのジャンプポイント(未実装側)
+Area18,Stanton,ArcCorp地表,Landing Zone,—,●,●,●,●,●,惑星都市・艦船購入
+Lorville,Stanton,Hurston地表,Landing Zone,—,●,●,●,●,●,惑星都市・艦船購入
+New Babbage,Stanton,microTech地表,Landing Zone,—,●,●,●,●,●,惑星都市・艦船購入
+Orison,Stanton,Crusader大気圏,Landing Zone,—,●,●,●,●,●,浮遊都市・艦船購入
+Ruin Station,Pyro,Pyro VI軌道,Outlaw Station,●,●,●,●,—,●,アウトロー拠点・精錬可
+Checkmate Station,Pyro,Pyro V軌道,Outlaw Station,●,●,●,●,—,●,アウトロー拠点・精錬可
+Orbituary Station,Pyro,Monox軌道,Outlaw Station,●,●,●,●,—,●,アウトロー拠点・精錬可
+Endgame Station,Pyro,Bloom軌道,Outlaw Station,—,●,●,●,—,●,小型ステーション
+Patch City,Pyro,Pyro IV軌道,Outlaw Station,—,●,●,●,—,●,Pyro IV(Terminus)周辺
+Dudley & Daughters,Pyro,Pyro I軌道,Outlaw Station,—,●,●,●,—,●,小型ステーション
+Stanton Gateway (Pyro側),Pyro,Stanton-Pyro Jump,Gateway,●,●,●,●,—,●,Stantonへのジャンプポイント
+Nyx Gateway (Pyro側),Pyro,Pyro-Nyx Jump,Gateway,●,●,●,●,—,●,Nyxへのジャンプポイント
+Pyro Executive Hangar,Pyro,Pyro V軌道,Event Location,—,●,—,—,—,—,PYAM-EXHANG-0-1イベント
+Levski,Nyx,Delamar(惑星),Landing Zone,●,●,●,●,●,●,4.4で復活・主要拠点
+QV Service Station Alpha,Nyx,Nyx Lagrange,Service Station,—,●,●,●,—,●,QV系サービスステーション
+QV Service Station Beta,Nyx,Nyx Lagrange,Service Station,—,●,●,●,—,●,QV系サービスステーション
+QV Service Station Gamma,Nyx,Nyx Lagrange,Service Station,—,●,●,●,—,●,QV系サービスステーション
+Pyro Gateway (Nyx側),Nyx,Pyro-Nyx Jump,Gateway,●,●,●,●,—,●,Pyroへのジャンプポイント
+Stanton Gateway (Nyx側),Nyx,Stanton-Nyx Jump,Gateway,●,●,●,●,—,●,Stantonへのジャンプポイント

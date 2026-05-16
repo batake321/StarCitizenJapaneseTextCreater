@@ -56,6 +56,7 @@ public partial class KnowledgeWindow : Window
 
     private void ApplyFilter()
     {
+        if (dgKnowledge == null || txtStatus == null) return;
         var filtered = string.IsNullOrEmpty(_filterCategory)
             ? _allEntries
             : new ObservableCollection<KnowledgeEntry>(_allEntries.Where(e => e.Category == _filterCategory));

@@ -10,6 +10,52 @@ public class ChatMessage
     public string Content { get; set; } = "";
 }
 
+public record StationFacility(
+    string Name, string System, string Location, string Type,
+    bool Refinery, bool CargoElevator, bool RepairResupply,
+    bool Medical, bool ShipPurchase, bool Asop, string Notes)
+{
+    private static List<StationFacility>? _cache;
+
+    public static List<StationFacility> LoadAll()
+    {
+        if (_cache != null) return _cache;
+        _cache = new List<StationFacility>();
+        var csvPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "sc48_stations_facilities.csv");
+        if (!File.Exists(csvPath)) return _cache;
+        foreach (var line in File.ReadLines(csvPath).Skip(1))
+        {
+            var cols = line.Split(',');
+            if (cols.Length < 11) continue;
+            _cache.Add(new StationFacility(
+                cols[0].Trim(), cols[1].Trim(), cols[2].Trim(), cols[3].Trim(),
+                cols[4].Trim() == "●", cols[5].Trim() == "●", cols[6].Trim() == "●",
+                cols[7].Trim() == "●", cols[8].Trim() == "●", cols[9].Trim() == "●",
+                cols[10].Trim()));
+        }
+        return _cache;
+    }
+
+    public static void ClearCache() => _cache = null;
+
+    public string ToSummary()
+    {
+        var parts = new List<string>();
+        if (Refinery) parts.Add("精錬所");
+        if (CargoElevator) parts.Add("カーゴ昇降機");
+        if (RepairResupply) parts.Add("修理/補給");
+        if (Medical) parts.Add("医療");
+        if (ShipPurchase) parts.Add("艦船購入");
+        if (Asop) parts.Add("ASOP");
+        var sb = new StringBuilder();
+        sb.AppendLine($"  タイプ: {Type}");
+        sb.AppendLine($"  位置: {Location}");
+        sb.AppendLine($"  施設: {string.Join(", ", parts)}");
+        if (!string.IsNullOrEmpty(Notes)) sb.AppendLine($"  備考: {Notes}");
+        return sb.ToString();
+    }
+}
+
 public class ChatService
 {
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(120) };
@@ -52,7 +98,7 @@ public class ChatService
         "- search_mission: ミッション・契約の検索\n" +
         "- search_commodity: 商品・資源の購入/売却場所と価格\n" +
         "- search_keybind: キーバインド検索\n" +
-        "- search_location: ステーション・都市・拠点のショップ・施設検索（精錬所、ハンガー、ランディングパッド、フレイトエレベーター等も検索可能）\n" +
+        "- search_location: ステーション・都市・拠点の施設検索。精錬所・カーゴ昇降機・修理/補給・医療・艦船購入等の有無を返す。スターシステム名(Stanton,Pyro,Nyx)で全ステーション一覧も可\n" +
         "- search_wiki: Wiki から詳細情報取得\n\n" +
         "【候補提示ルール】\n" +
         "- 検索結果が複数ある場合は、番号付きリストで候補を提示してください\n" +
@@ -284,13 +330,13 @@ public class ChatService
             new()
             {
                 ["name"] = "search_location",
-                ["description"] = "ステーション・都市・拠点を名前で検索し、ショップ・施設一覧を返す。精錬所・ハンガー・ランディングパッド・エレベーター等の施設情報も含む。例: Seraphim Station, Port Tressler, Lorville, GrimHEX, Orison, Everus Harbor",
+                ["description"] = "ステーション・都市・拠点を名前またはスターシステム名で検索し、施設一覧(精錬所・カーゴ昇降機・修理/補給・医療・艦船購入・ASOP)を返す。例: Seraphim Station, CRU-L1, Stanton, Pyro, Nyx, Lorville, GrimHEX",
                 ["input_schema"] = new Dictionary<string, object>
                 {
                     ["type"] = "object",
                     ["properties"] = new Dictionary<string, object>
                     {
-                        ["query"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "ステーション名・都市名・拠点名（部分一致可、英語）" }
+                        ["query"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "ステーション名・都市名・拠点名・スターシステム名（部分一致可、英語）" }
                     },
                     ["required"] = new[] { "query" }
                 }
@@ -1413,68 +1459,39 @@ public class ChatService
 
         try
         {
-            // 1. Search space_stations
-            var stationsResp = await Http.GetStringAsync("https://api.uexcorp.space/2.0/space_stations");
-            using var stationsDoc = JsonDocument.Parse(stationsResp);
-            var matchedStations = new List<(int id, string name, string planet, string system)>();
+            var facilities = StationFacility.LoadAll();
+            var matched = facilities.Where(f =>
+                f.Name.Contains(query, StringComparison.OrdinalIgnoreCase)
+                || f.System.Equals(query, StringComparison.OrdinalIgnoreCase)
+                || f.Location.Contains(query, StringComparison.OrdinalIgnoreCase)).ToList();
 
-            if (stationsDoc.RootElement.TryGetProperty("data", out var stationsData))
+            if (matched.Count == 0)
             {
-                foreach (var s in stationsData.EnumerateArray())
-                {
-                    var name = s.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
-                    if (name.Contains(query, StringComparison.OrdinalIgnoreCase))
-                    {
-                        var id = s.TryGetProperty("id", out var idv) ? idv.GetInt32() : 0;
-                        var planet = s.TryGetProperty("planet_name", out var p) ? p.GetString() ?? "" : "";
-                        var system = s.TryGetProperty("star_system_name", out var ss) ? ss.GetString() ?? "" : "";
-                        matchedStations.Add((id, name, planet, system));
-                    }
-                }
-            }
-
-            // 2. Search cities
-            var citiesResp = await Http.GetStringAsync("https://api.uexcorp.space/2.0/cities");
-            using var citiesDoc = JsonDocument.Parse(citiesResp);
-            var matchedCities = new List<(int id, string name, string planet, string system)>();
-
-            if (citiesDoc.RootElement.TryGetProperty("data", out var citiesData))
-            {
-                foreach (var c in citiesData.EnumerateArray())
-                {
-                    var name = c.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
-                    if (name.Contains(query, StringComparison.OrdinalIgnoreCase))
-                    {
-                        var id = c.TryGetProperty("id", out var idv) ? idv.GetInt32() : 0;
-                        var planet = c.TryGetProperty("planet_name", out var p) ? p.GetString() ?? "" : "";
-                        var system = c.TryGetProperty("star_system_name", out var ss) ? ss.GetString() ?? "" : "";
-                        matchedCities.Add((id, name, planet, system));
-                    }
-                }
+                var normalized = query.Replace(" ", "-").Replace("　", "-");
+                matched = facilities.Where(f =>
+                    f.Name.Replace(" ", "-").Contains(normalized, StringComparison.OrdinalIgnoreCase)).ToList();
             }
 
             var sb = new StringBuilder();
 
-            // Fetch terminals for matched stations
-            foreach (var (id, name, planet, system) in matchedStations)
+            if (matched.Count > 0)
             {
-                sb.AppendLine($"=== {name} ({planet}, {system}) ===");
-                await AppendTerminalsAsync(sb, $"id_space_station={id}");
-                await AppendWikiAmenitiesAsync(sb, name);
-            }
+                foreach (var f in matched)
+                {
+                    sb.AppendLine($"=== {f.Name} ({f.System}) ===");
+                    sb.Append(f.ToSummary());
+                }
 
-            // Fetch terminals for matched cities
-            foreach (var (id, name, planet, system) in matchedCities)
-            {
-                sb.AppendLine($"=== {name} ({planet}, {system}) ===");
-                await AppendTerminalsAsync(sb, $"id_city={id}");
-                await AppendWikiAmenitiesAsync(sb, name);
+                if (matched.Count <= 3)
+                {
+                    foreach (var f in matched)
+                        await AppendUexTerminalsAsync(sb, f.Name);
+                }
             }
-
-            if (matchedStations.Count == 0 && matchedCities.Count == 0)
+            else
             {
-                sb.AppendLine($"=== {query} (Wiki検索) ===");
-                await AppendWikiAmenitiesAsync(sb, query);
+                sb.AppendLine($"[施設データに '{query}' が見つかりません。UEX APIで検索します]");
+                await SearchUexLocationsAsync(sb, query);
             }
 
             var result = sb.ToString().Trim();
@@ -1484,6 +1501,61 @@ public class ChatService
         {
             return $"[ロケーション検索エラー: {ex.Message}]";
         }
+    }
+
+    private static async Task SearchUexLocationsAsync(StringBuilder sb, string query)
+    {
+        var stationsResp = await Http.GetStringAsync("https://api.uexcorp.space/2.0/space_stations");
+        using var stationsDoc = JsonDocument.Parse(stationsResp);
+        var citiesResp = await Http.GetStringAsync("https://api.uexcorp.space/2.0/cities");
+        using var citiesDoc = JsonDocument.Parse(citiesResp);
+
+        if (stationsDoc.RootElement.TryGetProperty("data", out var stationsData))
+        {
+            foreach (var s in stationsData.EnumerateArray())
+            {
+                var name = s.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                if (!name.Contains(query, StringComparison.OrdinalIgnoreCase)) continue;
+                var id = s.TryGetProperty("id", out var idv) ? idv.GetInt32() : 0;
+                var planet = s.TryGetProperty("planet_name", out var p) ? p.GetString() ?? "" : "";
+                var system = s.TryGetProperty("star_system_name", out var ss) ? ss.GetString() ?? "" : "";
+                sb.AppendLine($"=== {name} ({planet}, {system}) ===");
+                await AppendTerminalsAsync(sb, $"id_space_station={id}");
+            }
+        }
+
+        if (citiesDoc.RootElement.TryGetProperty("data", out var citiesData))
+        {
+            foreach (var c in citiesData.EnumerateArray())
+            {
+                var name = c.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                if (!name.Contains(query, StringComparison.OrdinalIgnoreCase)) continue;
+                var id = c.TryGetProperty("id", out var idv) ? idv.GetInt32() : 0;
+                var planet = c.TryGetProperty("planet_name", out var p) ? p.GetString() ?? "" : "";
+                var system = c.TryGetProperty("star_system_name", out var ss) ? ss.GetString() ?? "" : "";
+                sb.AppendLine($"=== {name} ({planet}, {system}) ===");
+                await AppendTerminalsAsync(sb, $"id_city={id}");
+            }
+        }
+    }
+
+    private static async Task AppendUexTerminalsAsync(StringBuilder sb, string stationName)
+    {
+        try
+        {
+            var stationsResp = await Http.GetStringAsync("https://api.uexcorp.space/2.0/space_stations");
+            using var doc = JsonDocument.Parse(stationsResp);
+            if (!doc.RootElement.TryGetProperty("data", out var data)) return;
+            foreach (var s in data.EnumerateArray())
+            {
+                var name = s.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                if (!name.Equals(stationName, StringComparison.OrdinalIgnoreCase)) continue;
+                var id = s.TryGetProperty("id", out var idv) ? idv.GetInt32() : 0;
+                await AppendTerminalsAsync(sb, $"id_space_station={id}");
+                return;
+            }
+        }
+        catch { }
     }
 
     private static async Task AppendTerminalsAsync(StringBuilder sb, string filter)
@@ -1535,57 +1607,6 @@ public class ChatService
             }
         }
         catch { sb.AppendLine("  [ターミナル取得エラー]"); }
-    }
-
-    private static async Task AppendWikiAmenitiesAsync(StringBuilder sb, string locationName)
-    {
-        try
-        {
-            var encoded = Uri.EscapeDataString(locationName);
-            var resp = await Http.GetStringAsync($"https://api.star-citizen.wiki/api/v2/locations?filter[name]={encoded}&include=amenities");
-            using var doc = JsonDocument.Parse(resp);
-            if (!doc.RootElement.TryGetProperty("data", out var data)) return;
-
-            foreach (var loc in data.EnumerateArray())
-            {
-                if (!loc.TryGetProperty("amenities", out var amenities)) continue;
-
-                var facilities = new List<string>();
-                foreach (var a in amenities.EnumerateArray())
-                {
-                    var name = a.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
-                    if (string.IsNullOrEmpty(name)) continue;
-
-                    var jpLabel = name switch
-                    {
-                        "Refinery" => "精錬所 (Refinery)",
-                        "Clinic" => "クリニック (Clinic)",
-                        "Hospital" => "病院 (Hospital)",
-                        "Docking" => "ドッキング (Docking)",
-                        "Food Court" => "フードコート (Food Court)",
-                        "Buy Armor" => "アーマー販売 (Buy Armor)",
-                        "Buy Clothing" => "衣料品販売 (Buy Clothing)",
-                        "Buy Weapons" => "武器販売 (Buy Weapons)",
-                        "Rent Vehicles" => "船舶レンタル (Rent Vehicles)",
-                        "Vehicle Services" => "車両サービス (Vehicle Services)",
-                        var x when x.StartsWith("Hangar") => $"ハンガー{x.Replace("Hangar", "").Trim().Trim('(', ')')} ({x})",
-                        var x when x.StartsWith("Landing Pad") => $"ランディングパッド{x.Replace("Landing Pad", "").Trim().Trim('(', ')')} ({x})",
-                        var x when x.Contains("Freight Elevator") => $"フレイトエレベーター ({x})",
-                        var x when x.Contains("Loading Dock") => $"ローディングドック ({x})",
-                        var x when x.Contains("Cargo Center") => $"カーゴセンター ({x})",
-                        _ => name
-                    };
-                    facilities.Add($"  - {jpLabel}");
-                }
-
-                if (facilities.Count > 0)
-                {
-                    sb.AppendLine($"  施設・アメニティ ({facilities.Count}件):");
-                    foreach (var f in facilities) sb.AppendLine(f);
-                }
-            }
-        }
-        catch { }
     }
 
     private static async Task<string> FetchPledgeInfoAsync(JsonElement args)

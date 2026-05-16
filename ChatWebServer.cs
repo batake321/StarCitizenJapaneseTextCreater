@@ -14,6 +14,7 @@ namespace StarCitizenJapaneseTextCreater;
 public class ChatWebServer : IDisposable
 {
     private HttpListener? _listener;
+    private HttpListener? _httpsListener;
     private CancellationTokenSource? _cts;
     private readonly ConcurrentDictionary<int, WebSocket> _wsClients = new();
     private int _wsIdCounter;
@@ -49,7 +50,9 @@ public class ChatWebServer : IDisposable
         _onSendMessage = handler;
     }
 
-    public async Task StartAsync(int port)
+    public int HttpsPort { get; private set; }
+
+    public async Task StartAsync(int port, int httpsPort = 0)
     {
         Stop();
         _cts = new CancellationTokenSource();
@@ -77,6 +80,34 @@ public class ChatWebServer : IDisposable
             }
         }
 
+        if (httpsPort <= 0) httpsPort = port + 1;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var thumbprint = SslCertHelper.EnsureCertificateAndBind(httpsPort);
+                if (thumbprint == null)
+                {
+                    System.Diagnostics.Debug.WriteLine("[HTTPS] Certificate setup failed");
+                    return;
+                }
+                System.Diagnostics.Debug.WriteLine($"[HTTPS] Cert ready: {thumbprint}");
+
+                await Task.Delay(1000);
+
+                _httpsListener = new HttpListener();
+                _httpsListener.Prefixes.Add($"https://+:{httpsPort}/");
+                _httpsListener.Start();
+                HttpsPort = httpsPort;
+                System.Diagnostics.Debug.WriteLine($"[HTTPS] Listening on port {httpsPort}");
+                await ListenLoop(_httpsListener, _cts!.Token);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[HTTPS] Failed to start: {ex.Message}\n{ex.StackTrace}");
+            }
+        });
+
         _ = Task.Run(() => ListenLoop(_cts.Token));
     }
 
@@ -86,6 +117,10 @@ public class ChatWebServer : IDisposable
         try { _listener?.Stop(); } catch { }
         try { _listener?.Close(); } catch { }
         _listener = null;
+        try { _httpsListener?.Stop(); } catch { }
+        try { _httpsListener?.Close(); } catch { }
+        _httpsListener = null;
+        HttpsPort = 0;
 
         foreach (var kv in _wsClients)
         {
@@ -136,13 +171,15 @@ public class ChatWebServer : IDisposable
         }
     }
 
-    private async Task ListenLoop(CancellationToken ct)
+    private Task ListenLoop(CancellationToken ct) => ListenLoop(_listener, ct);
+
+    private async Task ListenLoop(HttpListener? listener, CancellationToken ct)
     {
-        while (!ct.IsCancellationRequested && _listener?.IsListening == true)
+        while (!ct.IsCancellationRequested && listener?.IsListening == true)
         {
             try
             {
-                var ctx = await _listener.GetContextAsync().WaitAsync(ct);
+                var ctx = await listener.GetContextAsync().WaitAsync(ct);
                 _ = Task.Run(() => HandleRequestAsync(ctx, ct));
             }
             catch (OperationCanceledException) { break; }
@@ -202,6 +239,12 @@ public class ChatWebServer : IDisposable
                     break;
                 case "/api/knowledge" when method == "DELETE":
                     await HandleDeleteKnowledge(ctx, ct);
+                    break;
+                case "/cert":
+                    await ServeCertPage(ctx.Response);
+                    break;
+                case "/cert/download":
+                    await ServeCertDownload(ctx.Response);
                     break;
                 case var p when p.StartsWith("/api/voicevox/"):
                     await ProxyVoiceVox(ctx, ct);
@@ -471,6 +514,60 @@ public class ChatWebServer : IDisposable
         AddCorsHeaders(ctx.Response);
         await ctx.Response.OutputStream.WriteAsync(bytes, ct);
         ctx.Response.Close();
+    }
+
+    private async Task ServeCertPage(HttpListenerResponse response)
+    {
+        var ips = GetLocalIpAddresses();
+        var port = HttpsPort > 0 ? HttpsPort : 8100;
+        var ip = ips.Length > 0 ? ips[0] : "PC_IP";
+        var html = "<!DOCTYPE html><html lang=\"ja\"><head><meta charset=\"utf-8\">" +
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
+            "<title>証明書インストール</title><style>" +
+            "body{font-family:-apple-system,sans-serif;max-width:600px;margin:20px auto;padding:0 16px;line-height:1.6}" +
+            "h1{font-size:1.3em}.btn{display:inline-block;background:#4CAF50;color:#fff;padding:14px 28px;" +
+            "border-radius:8px;text-decoration:none;font-size:1.1em;margin:12px 0}" +
+            ".step{background:#f5f5f5;border-radius:8px;padding:12px 16px;margin:8px 0}" +
+            ".step b{color:#333}.warn{color:#c00;font-weight:bold}</style></head><body>" +
+            "<h1>SC 日本語アシスタント — HTTPS 証明書</h1>" +
+            "<p>スマホに証明書をインストールすると、HTTPS 経由でマイクが使えるようになります。</p>" +
+            "<p><a class=\"btn\" href=\"/cert/download\">証明書をダウンロード (.cer)</a></p>" +
+            "<h2>iPhone / iPad</h2>" +
+            "<div class=\"step\"><b>1.</b> 上のボタンをタップ →「プロファイルがダウンロードされました」</div>" +
+            "<div class=\"step\"><b>2.</b> 設定 → 一般 → VPN とデバイス管理 → ダウンロード済みプロファイル → インストール</div>" +
+            "<div class=\"step\"><b>3.</b> 設定 → 一般 → 情報 → 証明書信頼設定 →「SC Japanese Assistant」を<b>有効</b>にする</div>" +
+            $"<div class=\"step\"><b>4.</b> Safari で <b>https://{ip}:{port}/</b> にアクセス</div>" +
+            "<h2>Android</h2>" +
+            "<div class=\"step\"><b>1.</b> 上のボタンをタップ → ダウンロード完了</div>" +
+            "<div class=\"step\"><b>2.</b> 設定 → セキュリティ → 暗号化と認証情報 → 証明書のインストール → CA 証明書</div>" +
+            "<div class=\"step\"><b>3.</b> ダウンロードした <b>sc-assistant.cer</b> を選択してインストール</div>" +
+            $"<div class=\"step\"><b>4.</b> Chrome で <b>https://{ip}:{port}/</b> にアクセス</div>" +
+            "<p class=\"warn\">※ この証明書はこの PC のアシスタント専用です。不要になったらスマホから削除してください。</p>" +
+            "</body></html>";
+        var bytes = Encoding.UTF8.GetBytes(html);
+        response.ContentType = "text/html; charset=utf-8";
+        response.ContentLength64 = bytes.Length;
+        await response.OutputStream.WriteAsync(bytes);
+        response.Close();
+    }
+
+    private async Task ServeCertDownload(HttpListenerResponse response)
+    {
+        var certBytes = SslCertHelper.ExportPublicCertBytes();
+        if (certBytes == null)
+        {
+            response.StatusCode = 404;
+            var err = Encoding.UTF8.GetBytes("証明書が見つかりません。HTTPS サーバーを先に起動してください。");
+            response.ContentType = "text/plain; charset=utf-8";
+            await response.OutputStream.WriteAsync(err);
+            response.Close();
+            return;
+        }
+        response.ContentType = "application/x-x509-ca-cert";
+        response.Headers.Add("Content-Disposition", "attachment; filename=sc-assistant.cer");
+        response.ContentLength64 = certBytes.Length;
+        await response.OutputStream.WriteAsync(certBytes);
+        response.Close();
     }
 
     private static void AddCorsHeaders(HttpListenerResponse response)
