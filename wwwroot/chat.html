@@ -137,6 +137,18 @@ body { font-family: 'Segoe UI','Meiryo','Noto Sans JP',sans-serif; background: v
   <button onclick="clearChat()" title="履歴クリア">&#128465;</button>
 </div>
 
+<div id="consultPanel" style="display:none;padding:2px 12px;background:#f0f4ff;font-size:12px;border-bottom:1px solid #dde">
+  <span style="color:#666">📡 外部AI相談:</span>
+  <span id="consultChecks"></span>
+</div>
+<div id="verifyPanel" style="display:none;padding:2px 12px;background:#f5f0ff;font-size:12px;border-bottom:1px solid #dde">
+  <span style="color:#666">🔍 検証エージェント:</span>
+  <select id="selVerifyBackend" style="font-size:12px;margin-left:6px;padding:1px 4px;">
+    <option value="">なし</option>
+  </select>
+  <span style="color:#999;margin-left:8px">(答えが不十分 or「検証」で呼出)</span>
+</div>
+
 <div class="messages" id="messages">
   <div class="msg system">Star Citizen について質問してください</div>
 </div>
@@ -233,6 +245,7 @@ function connectWs() {
       } else if (data.type === 'typing') {
         typingEl.style.display = data.status ? 'block' : 'none';
         typingEl.textContent = data.status || '';
+        if (data.speak && voicevoxOn) speakVoicevox(data.speak);
       } else if (data.type === 'clear') {
         messagesEl.innerHTML = '<div class="msg system">履歴がクリアされました</div>';
       }
@@ -295,7 +308,9 @@ function autoResize() {
 inputEl.addEventListener('input', autoResize);
 
 // --- Backends ---
+let allBackends = [];
 fetch('/api/backends').then(r=>r.json()).then(data => {
+  allBackends = data.backends || [];
   data.backends.forEach((b,i) => {
     const opt = document.createElement('option');
     opt.value = i; opt.textContent = `${b.Name} (${b.Model})`;
@@ -306,7 +321,61 @@ fetch('/api/backends').then(r=>r.json()).then(data => {
     localStorage.setItem('voicevoxSpeaker', voicevoxSpeaker);
     console.log(`[VoiceVox] speaker from server: ${voicevoxSpeaker}`);
   }
+  updateConsultPanel();
+  updateVerifyPanel();
 }).catch(()=>{});
+
+selBackend.addEventListener('change', () => { updateConsultPanel(); updateVerifyPanel(); });
+
+function updateConsultPanel() {
+  const panel = $('#consultPanel');
+  const checks = $('#consultChecks');
+  const sel = parseInt(selBackend.value) || 0;
+  checks.innerHTML = '';
+  let count = 0;
+  allBackends.forEach((b, i) => {
+    if (i === sel) return;
+    const key = b.Name + '/' + b.Model;
+    const saved = JSON.parse(localStorage.getItem('consultChecked') || '[]');
+    const label = document.createElement('label');
+    label.style.cssText = 'display:inline-flex;align-items:center;gap:3px;margin:0 8px;cursor:pointer';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = saved.includes(key);
+    cb.onchange = () => {
+      const cur = JSON.parse(localStorage.getItem('consultChecked') || '[]');
+      if (cb.checked && !cur.includes(key)) cur.push(key);
+      else { const idx = cur.indexOf(key); if (idx >= 0) cur.splice(idx, 1); }
+      localStorage.setItem('consultChecked', JSON.stringify(cur));
+    };
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode('📡 ' + b.Name + ' (' + b.Model + ')'));
+    checks.appendChild(label);
+    count++;
+  });
+  panel.style.display = count > 0 ? 'block' : 'none';
+}
+
+function updateVerifyPanel() {
+  const panel = $('#verifyPanel');
+  const sel = parseInt(selBackend.value) || 0;
+  const selVerify = $('#selVerifyBackend');
+  const prevVal = localStorage.getItem('verifyBackend') || '';
+  selVerify.innerHTML = '<option value="">なし</option>';
+  let count = 0;
+  allBackends.forEach((b, i) => {
+    if (i === sel) return;
+    const key = b.Name + '/' + b.Model;
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = '🔍 ' + b.Name + ' (' + b.Model + ')';
+    if (key === prevVal) opt.selected = true;
+    selVerify.appendChild(opt);
+    count++;
+  });
+  selVerify.onchange = () => localStorage.setItem('verifyBackend', selVerify.value);
+  panel.style.display = count > 0 ? 'block' : 'none';
+}
 
 // --- Microphone (Web Speech API) ---
 function initSpeechRecognition() {

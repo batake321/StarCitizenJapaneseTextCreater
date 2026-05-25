@@ -71,7 +71,7 @@
                         <ComboBoxItem Content="term"/>
                         <ComboBoxItem Content="tip"/>
                     </ComboBox>
-                    <Button Content="取り込み" Click="Import_Click" Padding="16,4" FontWeight="Bold"/>
+                    <Button x:Name="btnImport" Content="取り込み" Click="Import_Click" Padding="16,4" FontWeight="Bold"/>
                 </StackPanel>
             </Grid>
         </Expander>

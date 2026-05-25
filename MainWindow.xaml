@@ -273,12 +273,13 @@
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
                     <!-- Header: backend selector + data fetch toggle -->
-                    <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="0,0,0,8">
+                    <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="0,0,0,4">
                         <TextBlock Text="AI バックエンド:" VerticalAlignment="Center" Margin="0,0,8,0"/>
                         <ComboBox x:Name="cmbChatBackend" Width="200" VerticalAlignment="Center" Margin="0,0,16,0"
                                   SelectionChanged="CmbChatBackend_SelectionChanged"/>
@@ -289,8 +290,15 @@
                         <Button Content="記憶管理" Click="KnowledgeManage_Click" Padding="10,4" VerticalAlignment="Center" Margin="8,0,0,0"/>
                     </StackPanel>
 
+                    <!-- External AI consultation + Verification agent (1 row) -->
+                    <WrapPanel x:Name="pnlConsultBackends" Grid.Row="1" Margin="0,0,0,2">
+                        <TextBlock Text="📡 外部AI相談:" VerticalAlignment="Center" Margin="0,0,8,0" FontSize="12" Foreground="#666"/>
+                        <!-- checkboxes inserted dynamically -->
+                        <!-- separator + verify agent appended dynamically -->
+                    </WrapPanel>
+
                     <!-- Chat messages area -->
-                    <Border Grid.Row="1" BorderBrush="#DDD" BorderThickness="1" CornerRadius="4" Background="#FAFAFA">
+                    <Border Grid.Row="2" BorderBrush="#DDD" BorderThickness="1" CornerRadius="4" Background="#FAFAFA" ClipToBounds="True">
                         <ScrollViewer x:Name="svChat" VerticalScrollBarVisibility="Auto">
                             <ItemsControl x:Name="icChatMessages">
                                 <ItemsControl.ItemTemplate>
@@ -311,12 +319,12 @@
                     </Border>
 
                     <!-- Input area -->
-                    <Grid Grid.Row="2" Margin="0,8,0,0">
+                    <Grid Grid.Row="3" Margin="0,8,0,0">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <TextBox x:Name="txtChatInput" Grid.Column="0" AcceptsReturn="False"
+                        <TextBox x:Name="txtChatInput" Grid.Column="0" AcceptsReturn="True"
                                  TextWrapping="Wrap" MaxHeight="100" VerticalScrollBarVisibility="Auto"
                                  FontSize="13" Padding="8,6"
                                  PreviewKeyDown="ChatInput_PreviewKeyDown"/>

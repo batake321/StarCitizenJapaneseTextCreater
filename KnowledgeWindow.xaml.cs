@@ -36,13 +36,15 @@ public class KnowledgeEntry : INotifyPropertyChanged
 public partial class KnowledgeWindow : Window
 {
     private readonly GameDataQueryService _queryService;
+    private readonly BackendConfig? _verifyBackend;
     private readonly ObservableCollection<KnowledgeEntry> _allEntries = new();
     private string _filterCategory = "";
 
-    public KnowledgeWindow(GameDataQueryService queryService)
+    public KnowledgeWindow(GameDataQueryService queryService, BackendConfig? verifyBackend = null)
     {
         InitializeComponent();
         _queryService = queryService;
+        _verifyBackend = verifyBackend;
         LoadEntries();
     }
 
@@ -129,10 +131,49 @@ public partial class KnowledgeWindow : Window
     private static readonly Regex BulletPattern = new(@"^[-*・•]\s*", RegexOptions.Compiled);
     private static readonly Regex DiscordDatePattern = new(@"^\*{0,2}\[[\d\-/]+\]\*{0,2}\s*", RegexOptions.Compiled);
 
-    private void Import_Click(object sender, RoutedEventArgs e)
+    private async void Import_Click(object sender, RoutedEventArgs e)
     {
         var text = txtImport.Text?.Trim();
         if (string.IsNullOrEmpty(text)) { MessageBox.Show("テキストを貼り付けてください。", "取り込み"); return; }
+
+        // Verify before importing
+        if (_verifyBackend == null)
+        {
+            var askResult = MessageBox.Show(
+                "検証エージェントが設定されていません。\n検証せずに取り込みますか？\n\n検証するにはチャットタブで検証エージェントを選択してください。",
+                "検証なし", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (askResult != MessageBoxResult.Yes) return;
+        }
+        else
+        {
+            btnImport.IsEnabled = false;
+            txtStatus.Text = "🔍 検証中...";
+            try
+            {
+                var verifyResult = await ChatService.VerifyWithExternalAIAsync(
+                    "以下の Star Citizen に関する情報は正しいですか？", text, _verifyBackend);
+
+                if (!verifyResult.Contains("検証OK"))
+                {
+                    var result = MessageBox.Show(
+                        $"検証エージェントからの指摘:\n\n{verifyResult}\n\nそれでも取り込みますか？",
+                        "検証結果", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                    if (result != MessageBoxResult.Yes)
+                    {
+                        txtStatus.Text = "取り込みをキャンセルしました。";
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                var result = MessageBox.Show(
+                    $"検証エラー: {ex.Message}\n\n検証なしで取り込みますか？",
+                    "検証エラー", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (result != MessageBoxResult.Yes) { txtStatus.Text = "取り込みをキャンセルしました。"; return; }
+            }
+            finally { btnImport.IsEnabled = true; }
+        }
 
         var defaultCategory = (cmbImportCategory.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "general";
         var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries);
@@ -158,12 +199,12 @@ public partial class KnowledgeWindow : Window
             line = line.Trim();
             if (line.Length < 2) continue;
 
-            _queryService.AddKnowledge(line, category);
-            count++;
+            var (_, isDup) = _queryService.AddKnowledgeSafe(line, category);
+            if (!isDup) count++;
         }
 
         txtImport.Text = "";
         LoadEntries();
-        txtStatus.Text = $"{count} 件を取り込みました";
+        txtStatus.Text = $"✅ {count} 件を検証済みで取り込みました";
     }
 }

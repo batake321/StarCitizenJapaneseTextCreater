@@ -110,6 +110,8 @@ public class ChatService
         "【記憶機能】\n" +
         "- ユーザーが「覚えて」「記憶して」と言ったら remember ツールで情報を保存してください\n" +
         "- ユーザーが「直った」「忘れて」「もう不要」と言ったら forget ツールで該当する記憶を削除してください\n" +
+        "- ユーザーが「それは間違い」「訂正」「違う」と言ったら、直前に保存した記憶や回答中の誤情報について forget で削除してから、ユーザーに正しい情報を聞いて remember で保存し直してください\n" +
+        "- 記憶データに誤りがあるとユーザーが指摘した場合、まず forget で誤った記憶を削除し、正しい情報を確認してから remember で保存してください\n" +
         "- バグ情報、用語の対応表、Tips、攻略情報などを記憶できます\n" +
         "- remember の category は bug/term/tip/general から適切なものを選んでください\n\n" +
         "【音声読み上げ】\n" +
@@ -1428,6 +1430,59 @@ public class ChatService
         return display.Contains(q, StringComparison.OrdinalIgnoreCase);
     }
 
+    private static BackendConfig? _verifyBackend;
+    private static List<BackendConfig> _verifyBackendCandidates = new();
+    private static (string content, string category, List<BackendConfig> backends)? _pendingRemember;
+    public static void SetVerifyBackend(BackendConfig? backend) => _verifyBackend = backend;
+    public static void SetVerifyBackendCandidates(List<BackendConfig> candidates) => _verifyBackendCandidates = candidates;
+
+    /// <summary>
+    /// Checks if there's a pending remember waiting for backend selection.
+    /// If user typed a number, verify and save. Returns null if not applicable.
+    /// </summary>
+    public static string? TryCompletePendingRemember(string userInput)
+    {
+        if (_pendingRemember == null) return null;
+        var pending = _pendingRemember.Value;
+        _pendingRemember = null;
+
+        var trimmed = userInput.Trim();
+        if (!int.TryParse(trimmed, out var idx) || idx < 1 || idx > pending.backends.Count)
+            return "無効な番号です。記憶をキャンセルしました。";
+
+        var chosen = pending.backends[idx - 1];
+        Log($"REMEMBER: ユーザーが {chosen.Name}/{chosen.Model} を選択");
+
+        try
+        {
+            var verifyResult = VerifyWithExternalAIAsync(
+                "以下の Star Citizen に関する情報は正しいですか？", pending.content, chosen).GetAwaiter().GetResult();
+            if (!verifyResult.Contains("検証OK"))
+                return $"検証エージェント ({chosen.Name}/{chosen.Model}) が以下の指摘をしました。保存しません:\n{verifyResult}";
+        }
+        catch (Exception ex)
+        {
+            return $"検証エラー: {ex.Message}\n保存しません。";
+        }
+
+        if (_queryService == null) return "データベースが未初期化です。";
+        var (id, isDup) = _queryService.AddKnowledgeSafe(pending.content, pending.category);
+        if (isDup)
+        {
+            Log($"REMEMBER(pending): duplicate found id={id}");
+            return $"類似する記憶が既にあります (ID:{id})。重複保存をスキップしました。";
+        }
+        Log($"REMEMBER(pending): id={id}, category={pending.category}");
+        return $"{chosen.Name}/{chosen.Model} で検証済み — 記憶しました (ID:{id})。\n内容: {pending.content}";
+    }
+
+    private static List<BackendConfig> GetUsableBackends()
+    {
+        return App.Config.Translation.Backends
+            .Where(b => b.Enabled && (!string.IsNullOrWhiteSpace(b.ApiKey) || b.Type.Equals("Ollama", StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+    }
+
     private static string ExecuteRemember(JsonElement args)
     {
         var content = args.TryGetProperty("content", out var c) ? c.GetString() ?? "" : "";
@@ -1435,9 +1490,61 @@ public class ChatService
         if (string.IsNullOrWhiteSpace(content)) return "記憶する内容が空です。";
         if (_queryService == null) return "データベースが未初期化です。";
 
-        var id = _queryService.AddKnowledge(content, category);
+        // Determine which backend to verify with
+        var vb = _verifyBackend;
+        if (vb == null && _verifyBackendCandidates.Count > 0)
+        {
+            // Auto-select the first available candidate
+            vb = _verifyBackendCandidates[0];
+            Log($"REMEMBER: 検証エージェント未設定 → {vb.Name}/{vb.Model} で自動検証");
+        }
+
+        if (vb != null)
+        {
+            try
+            {
+                Log($"REMEMBER: {vb.Name}/{vb.Model} で検証して覚えます");
+                var verifyResult = VerifyWithExternalAIAsync(
+                    "以下の Star Citizen に関する情報は正しいですか？", content, vb).GetAwaiter().GetResult();
+                if (verifyResult.Contains("検証OK"))
+                {
+                    Log($"REMEMBER: 検証OK");
+                }
+                else
+                {
+                    Log($"REMEMBER: 検証で指摘あり");
+                    return $"検証エージェント ({vb.Name}/{vb.Model}) が以下の指摘をしました。保存しません:\n{verifyResult}\n\nユーザーに正しい情報を確認してから再度「覚えて」と依頼してください。";
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"REMEMBER: 検証エラー: {ex.Message}");
+                return $"検証中にエラーが発生しました: {ex.Message}\n検証できなかったため保存しません。";
+            }
+        }
+        else
+        {
+            // No verify backend and no candidates — show numbered list
+            var allBackends = GetUsableBackends();
+            if (allBackends.Count == 0)
+                return "検証に使える AI バックエンドがありません。AI 設定でバックエンドを追加してください。";
+
+            _pendingRemember = (content, category, allBackends);
+            var sb = new StringBuilder("どの AI を検証に使いますか？\n");
+            for (int i = 0; i < allBackends.Count; i++)
+                sb.AppendLine($"{i + 1}. {allBackends[i].Name} ({allBackends[i].Model})");
+            return sb.ToString();
+        }
+
+        var (id, isDup) = _queryService.AddKnowledgeSafe(content, category);
+        if (isDup)
+        {
+            Log($"REMEMBER: duplicate found id={id}");
+            return $"類似する記憶が既にあります (ID:{id})。重複保存をスキップしました。";
+        }
         Log($"REMEMBER: id={id}, category={category}, content={content[..Math.Min(100, content.Length)]}");
-        return $"記憶しました (ID:{id}, カテゴリ:{category})。\n内容: {content}";
+        var verifiedBy = vb != null ? $"{vb.Name}/{vb.Model} で検証済み — " : "";
+        return $"{verifiedBy}記憶しました (ID:{id}, カテゴリ:{category})。\n内容: {content}";
     }
 
     private static string ExecuteForget(JsonElement args)
@@ -2575,20 +2682,13 @@ public class ChatService
         Log($"SendChatAsync: backend={backend.Type}, model={backend.Model}, tools={useTools}");
         var system = useTools ? ChatSystemPrompt : ChatSystemPrompt.Split("【重要】")[0] + "回答は簡潔で分かりやすい日本語でお願いします。";
 
-        if (_queryService != null)
+        // Extract the latest user question for domain-targeted knowledge injection
+        var latestQuestion = history.LastOrDefault(m => m.Role == "user")?.Content ?? "";
+        var knowledgeSnippet = GetKnowledgeSnippet(latestQuestion);
+        if (!string.IsNullOrEmpty(knowledgeSnippet))
         {
-            try
-            {
-                var knowledge = _queryService.GetAllKnowledge();
-                if (knowledge.Count > 0)
-                {
-                    var sb = new StringBuilder("\n\n【記憶データ】以下はユーザーが記憶させた情報です。質問に関連する場合は活用してください:\n");
-                    foreach (var (id, category, content, _) in knowledge)
-                        sb.Append($"- [{category}] {content}\n");
-                    system += sb.ToString();
-                }
-            }
-            catch (Exception ex) { Log($"Knowledge load error: {ex.Message}"); }
+            system += knowledgeSnippet;
+            Log($"Knowledge injected: {knowledgeSnippet.Split('\n').Length - 2} lines for question: {latestQuestion[..Math.Min(50, latestQuestion.Length)]}");
         }
 
         return backend.Type.ToLowerInvariant() switch
@@ -2599,6 +2699,242 @@ public class ChatService
             "ollama" => await SendOllamaChatAsync(backend, system, history, useTools),
             _ => throw new ArgumentException($"Unknown backend: {backend.Type}")
         };
+    }
+
+    /// <summary>
+    /// 外部 AI に相談して補足情報を取得する。
+    /// 主 AI の回答を見せて、補足・修正があれば返してもらう。
+    /// 複数バックエンドを並列で呼び出す。
+    /// </summary>
+    /// <summary>
+    /// Build a domain-structured knowledge snippet relevant to the given question.
+    /// If question is null/empty, returns all knowledge (for consult/verify contexts).
+    /// </summary>
+    private static string GetKnowledgeSnippet(string? question = null)
+    {
+        if (_queryService == null) return "";
+        try
+        {
+            List<(int id, string category, string content, DateTime createdAt)> knowledge;
+
+            if (!string.IsNullOrWhiteSpace(question))
+            {
+                // Extract domain keywords from the question and search
+                var domains = GameDataQueryService.ExtractDomains(question);
+                var searchTerms = new List<string>();
+
+                // Add domain-specific keywords that matched
+                foreach (var domain in domains)
+                    searchTerms.Add(domain);
+
+                // Also add raw question words (2+ chars) for direct content matching
+                var qWords = question.Split(' ', '　', '、', '。', '？', '?', '！', '!', '「', '」', '『', '』')
+                    .Where(w => w.Length >= 2).Take(8);
+                searchTerms.AddRange(qWords);
+
+                knowledge = searchTerms.Count > 0
+                    ? _queryService.SearchKnowledge(searchTerms)
+                    : _queryService.GetAllKnowledge();
+
+                // If domain search returned few results, also include bug/term entries (always useful)
+                if (knowledge.Count < 5)
+                {
+                    var bugTerms = _queryService.GetKnowledgeByCategory("bug")
+                        .Concat(_queryService.GetKnowledgeByCategory("term"))
+                        .Where(k => !knowledge.Any(e => e.id == k.id));
+                    knowledge = knowledge.Concat(bugTerms).ToList();
+                }
+            }
+            else
+            {
+                knowledge = _queryService.GetAllKnowledge();
+            }
+
+            if (knowledge.Count == 0) return "";
+
+            // Cap at 30 entries to prevent prompt bloat
+            if (knowledge.Count > 30)
+                knowledge = knowledge.Take(30).ToList();
+
+            // Group by category for structured output
+            var grouped = knowledge.GroupBy(k => k.category).OrderBy(g => g.Key);
+            var sb = new StringBuilder();
+            sb.AppendLine("\n\n【ナレッジDB — 検証済み情報】");
+            sb.AppendLine("以下は過去に検証済みの正確な情報です。回答時に該当するナレッジがあれば必ず参照・引用してください。");
+            sb.AppendLine("ナレッジの内容と矛盾する回答をしないでください。ナレッジを参照した場合は回答内で明示してください。");
+
+            foreach (var group in grouped)
+            {
+                var header = group.Key switch
+                {
+                    "bug" => "🐛 バグ情報",
+                    "term" => "📖 用語",
+                    "tip" => "💡 Tips",
+                    _ => "📋 一般"
+                };
+                sb.AppendLine($"\n[{header}]");
+                foreach (var (id, _, content, _) in group)
+                    sb.AppendLine($"  #{id}: {content}");
+            }
+
+            return sb.ToString();
+        }
+        catch { return ""; }
+    }
+
+    public static async Task<List<(string name, string response)>> ConsultExternalAIsAsync(
+        string userQuestion, string primaryAnswer, List<BackendConfig> consultBackends)
+    {
+        var consultSystem =
+            "あなたは Star Citizen（スターシチズン）というオンラインゲームに詳しい補助 AI です。\n" +
+            "ユーザーの質問と、別の AI が生成した回答が提示されます。\n" +
+            "質問は Star Citizen に関するものである前提で、その回答に対して補足情報・修正・別の視点があれば簡潔に日本語で回答してください。\n" +
+            "ゲーム内の用語・施設・ミッション・アイテム・船舶などについて、正確な情報を提供してください。\n" +
+            "重要: 現在のゲームバージョンは LIVE Alpha 4.8 です。Stanton, Pyro, Nyx の3星系が実装済みです。「Nyx は未実装」「Pyro は未実装」等の古い情報を回答しないでください。\n" +
+            "回答が既に十分であれば「補足はありません」と答えてください。\n" +
+            "回答は簡潔に、箇条書きを使ってください。" +
+            GetKnowledgeSnippet(userQuestion);
+
+        var consultHistory = new List<ChatMessage>
+        {
+            new() { Role = "user", Content =
+                $"【ユーザーの質問】\n{userQuestion}\n\n【別のAIの回答】\n{primaryAnswer}\n\n上記の回答に対して、補足・修正・追加情報があれば教えてください。" }
+        };
+
+        var tasks = consultBackends.Select(async backend =>
+        {
+            try
+            {
+                Log($"[Consult] {backend.Name}/{backend.Model} に相談開始");
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+                var response = await Task.Run(async () =>
+                {
+                    return backend.Type.ToLowerInvariant() switch
+                    {
+                        "claude" => await SendClaudeChatAsync(backend, consultSystem, consultHistory, useTools: false),
+                        "gemini" => await SendGeminiChatAsync(backend, consultSystem, consultHistory, useTools: false),
+                        "openai" => await SendOpenAiChatAsync(backend, consultSystem, consultHistory, useTools: false),
+                        "ollama" => await SendOllamaChatAsync(backend, consultSystem, consultHistory, useTools: false),
+                        _ => $"[未対応: {backend.Type}]"
+                    };
+                }, cts.Token);
+                Log($"[Consult] {backend.Name}/{backend.Model} 完了: {response.Length} chars");
+                return (name: $"{backend.Name} ({backend.Model})", response);
+            }
+            catch (Exception ex)
+            {
+                Log($"[Consult] {backend.Name}/{backend.Model} エラー: {ex.Message}");
+                return (name: $"{backend.Name} ({backend.Model})", response: $"[エラー: {ex.Message}]");
+            }
+        }).ToList();
+
+        var results = await Task.WhenAll(tasks);
+        return results.ToList();
+    }
+
+    /// <summary>
+    /// Extracts a concise knowledge summary from the user question and verification result.
+    /// </summary>
+    public static string ExtractKnowledgeSummary(string userQuestion, string verifyResult)
+    {
+        // Build a short, factual summary for knowledge storage
+        // Remove common prefixes and keep the core information
+        var lines = verifyResult.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var factLines = new List<string>();
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim().TrimStart('-', '*', '•', ' ');
+            // Skip meta lines (headers, evaluation comments, etc.)
+            if (trimmed.StartsWith("検証結果") || trimmed.StartsWith("検証OK") ||
+                trimmed.StartsWith("各回答") || trimmed.StartsWith("| ") ||
+                trimmed.StartsWith("---") || trimmed.Length < 5)
+                continue;
+            // Keep factual content lines
+            if (trimmed.Contains("は") || trimmed.Contains("です") || trimmed.Contains("である") ||
+                trimmed.Contains("略称") || trimmed.Contains("施設") || trimmed.Contains("星系") ||
+                trimmed.Contains("実装") || trimmed.Contains("という"))
+            {
+                factLines.Add(trimmed);
+                if (factLines.Count >= 5) break; // limit to 5 key facts
+            }
+        }
+
+        if (factLines.Count == 0) return "";
+
+        // Prepend the topic from the user question
+        var topic = userQuestion.Length > 50 ? userQuestion[..50] + "..." : userQuestion;
+        return $"Q: {topic}\n" + string.Join("\n", factLines.Select(l => $"→ {l}"));
+    }
+
+    /// <summary>
+    /// Checks whether the primary AI response indicates it couldn't answer the question.
+    /// </summary>
+    public static bool IsResponseInsufficient(string response)
+    {
+        if (string.IsNullOrWhiteSpace(response)) return true;
+        var lower = response.ToLowerInvariant();
+        var insufficientPatterns = new[]
+        {
+            "わかりません", "分かりません", "不明です", "情報が見つかりません",
+            "見つかりませんでした", "見つけることができません",
+            "確認できません", "答えられません", "お答えできません",
+            "i don't know", "i'm not sure", "i cannot", "i can't",
+            "情報がありません", "データがありません", "該当する情報",
+            "申し訳ありません", "sorry, i",
+            "もう少し詳しい情報", "詳しく教えていただけ",
+            "特定できません", "判断できません"
+        };
+        // Check if the response is very short (likely unhelpful)
+        if (response.Length < 30) return true;
+        return insufficientPatterns.Any(p => lower.Contains(p));
+    }
+
+    /// <summary>
+    /// Calls a single verification AI to cross-check the primary response.
+    /// </summary>
+    public static async Task<string> VerifyWithExternalAIAsync(
+        string userQuestion, string primaryAnswer, BackendConfig verifyBackend)
+    {
+        var verifySystem =
+            "あなたは Star Citizen（スターシチズン）というオンラインゲームに詳しい検証エージェントです。\n" +
+            "ユーザーの質問と、別の AI が生成した回答が提示されます。\n" +
+            "質問は Star Citizen に関するものである前提で、その回答の正確性を検証してください。\n" +
+            "ゲーム内の用語・施設・ミッション・アイテム・船舶などについて正確な知識に基づいて判断してください。\n" +
+            "重要: 現在のゲームバージョンは LIVE Alpha 4.8 です。Stanton, Pyro, Nyx の3星系が実装済みです。「Nyx は未実装」「Pyro は未実装」等の古い情報を回答しないでください。\n" +
+            "正確であれば「検証OK: 回答は正確です」と答えてください。\n" +
+            "誤りや不足があれば、正しい情報を簡潔に日本語で提供してください。" +
+            GetKnowledgeSnippet(userQuestion);
+
+        var verifyHistory = new List<ChatMessage>
+        {
+            new() { Role = "user", Content =
+                $"【ユーザーの質問】\n{userQuestion}\n\n【検証対象の回答】\n{primaryAnswer}\n\n上記の回答を検証してください。正確ですか？誤りや不足があれば指摘してください。" }
+        };
+
+        try
+        {
+            Log($"[Verify] {verifyBackend.Name}/{verifyBackend.Model} に検証依頼");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            var response = await Task.Run(async () =>
+            {
+                return verifyBackend.Type.ToLowerInvariant() switch
+                {
+                    "claude" => await SendClaudeChatAsync(verifyBackend, verifySystem, verifyHistory, useTools: false),
+                    "gemini" => await SendGeminiChatAsync(verifyBackend, verifySystem, verifyHistory, useTools: false),
+                    "openai" => await SendOpenAiChatAsync(verifyBackend, verifySystem, verifyHistory, useTools: false),
+                    "ollama" => await SendOllamaChatAsync(verifyBackend, verifySystem, verifyHistory, useTools: false),
+                    _ => $"[未対応: {verifyBackend.Type}]"
+                };
+            }, cts.Token);
+            Log($"[Verify] {verifyBackend.Name}/{verifyBackend.Model} 完了: {response.Length} chars");
+            return response;
+        }
+        catch (Exception ex)
+        {
+            Log($"[Verify] {verifyBackend.Name}/{verifyBackend.Model} エラー: {ex.Message}");
+            return $"[検証エラー: {ex.Message}]";
+        }
     }
 
     private static async Task<string> SendClaudeChatAsync(BackendConfig config, string system, List<ChatMessage> history, bool useTools = true)

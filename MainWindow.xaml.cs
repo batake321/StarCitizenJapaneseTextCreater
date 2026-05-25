@@ -1687,19 +1687,94 @@ public partial class MainWindow : Window
         _webServer.SetMessageHandler(async text =>
         {
             BackendConfig? backend = null;
+            BackendConfig? verifyBackend = null;
             List<ChatMessage> history = null!;
+            List<BackendConfig> consultBackends = null!;
 
             Dispatcher.Invoke(() =>
             {
                 backend = GetSelectedChatBackend();
+                consultBackends = GetCheckedConsultBackends();
+                verifyBackend = GetVerifyBackend();
                 _chatHistory.Add(new ChatMessage { Role = "user", Content = text });
                 history = _chatHistory.ToList();
             });
+
+            // Check for pending remember (user selecting a number)
+            var pendingResult = ChatService.TryCompletePendingRemember(text);
+            if (pendingResult != null)
+            {
+                Dispatcher.Invoke(() =>
+                    _chatHistory.Add(new ChatMessage { Role = "assistant", Content = pendingResult }));
+                return pendingResult;
+            }
 
             if (backend == null) return "バックエンドが選択されていません。アプリのチャットタブでバックエンドを選んでください。";
 
             var useSkills = backend.SupportsSkills;
             var response = await ChatService.SendChatAsync(backend, history, useSkills);
+            var primaryResponse = response;
+
+            if (consultBackends.Count > 0)
+            {
+                if (_webServer?.IsRunning == true)
+                    _ = _webServer.BroadcastTypingAsync("📡 外部 AI に相談中...", "わからなかったのでもう少し調べます。");
+
+                var supplements = await ChatService.ConsultExternalAIsAsync(text, response, consultBackends);
+                var sb = new System.Text.StringBuilder(response);
+                foreach (var (name, sup) in supplements)
+                {
+                    if (!string.IsNullOrWhiteSpace(sup) && !sup.Contains("補足はありません"))
+                        sb.Append($"\n\n---\n📡 **{name}** の補足:\n{sup}");
+                }
+                response = sb.ToString();
+            }
+
+            // Verification agent for web chat
+            if (verifyBackend != null)
+            {
+                bool userRequestedVerify = text.Contains("検証");
+                bool responseInsufficient = ChatService.IsResponseInsufficient(primaryResponse);
+                if (userRequestedVerify || responseInsufficient)
+                {
+                    var verifySpeak = responseInsufficient
+                        ? "回答が不十分なようなので検証エージェントに確認します。"
+                        : "結果が出たので検証してもらいます。";
+                    if (_webServer?.IsRunning == true)
+                        _ = _webServer.BroadcastTypingAsync("🔍 検証エージェントに確認中...", verifySpeak);
+
+                    var verifyResult = await ChatService.VerifyWithExternalAIAsync(text, response, verifyBackend);
+                    if (!string.IsNullOrWhiteSpace(verifyResult))
+                    {
+                        response += $"\n\n---\n🔍 **検証 ({verifyBackend.Name}/{verifyBackend.Model})**:\n{verifyResult}";
+
+                        // Auto-save knowledge from web chat verification (no dialog)
+                        if (!verifyResult.Contains("検証OK") && _gameDataExtractor != null)
+                        {
+                            var knowledgeText = ChatService.ExtractKnowledgeSummary(text, verifyResult);
+                            if (!string.IsNullOrWhiteSpace(knowledgeText))
+                            {
+                                try
+                                {
+                                    var qs = new GameDataQueryService(_gameDataExtractor.DbPath);
+                                    var (kid, kisDup) = qs.AddKnowledgeSafe(knowledgeText, "term");
+                                    qs.Dispose();
+                                    if (!kisDup)
+                                    {
+                                        Log($"[Knowledge] Web検証結果を自動保存: {knowledgeText.Length} chars");
+                                        response += "\n\n💾 検証結果をナレッジに自動保存しました。";
+                                    }
+                                    else
+                                    {
+                                        Log($"[Knowledge] Web検証結果: 類似ナレッジ既存 id={kid}");
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                }
+            }
 
             Dispatcher.Invoke(() =>
             {
@@ -1775,6 +1850,9 @@ public partial class MainWindow : Window
         return cmbChatBackend.SelectedIndex < usable.Count ? usable[cmbChatBackend.SelectedIndex] : null;
     }
 
+    private readonly HashSet<string> _consultChecked = new();
+    private ComboBox? _cmbVerifyBackend;
+
     private async void CmbChatBackend_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         var backend = GetSelectedChatBackend();
@@ -1799,6 +1877,108 @@ public partial class MainWindow : Window
             chkFetchScData.IsEnabled = false;
             chkFetchScData.Content = "スキル非対応";
         }
+
+        RefreshConsultCheckboxes(backend);
+    }
+
+    private void RefreshConsultCheckboxes(BackendConfig? primary)
+    {
+        if (pnlConsultBackends == null) return;
+        // Keep only the first label TextBlock ("📡 外部AI相談:")
+        while (pnlConsultBackends.Children.Count > 1)
+            pnlConsultBackends.Children.RemoveAt(pnlConsultBackends.Children.Count - 1);
+
+        var usableOthers = new List<BackendConfig>();
+        foreach (var b in App.Config.Translation.Backends)
+        {
+            if (!IsChatUsable(b)) continue;
+            if (primary != null && b.Name == primary.Name && b.Model == primary.Model) continue;
+            usableOthers.Add(b);
+        }
+
+        // Add consultation checkboxes
+        foreach (var b in usableOthers)
+        {
+            var key = $"{b.Name}/{b.Model}";
+            var cb = new System.Windows.Controls.CheckBox
+            {
+                Content = $"{b.Name} ({b.Model})",
+                Tag = b,
+                IsChecked = _consultChecked.Contains(key),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 10, 0),
+                FontSize = 12
+            };
+            cb.Checked += (_, _) => _consultChecked.Add(key);
+            cb.Unchecked += (_, _) => _consultChecked.Remove(key);
+            pnlConsultBackends.Children.Add(cb);
+        }
+
+        // Add separator + verify agent ComboBox in the same row
+        if (usableOthers.Count > 0)
+        {
+            pnlConsultBackends.Children.Add(new TextBlock
+            {
+                Text = "│",
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(4, 0, 4, 0),
+                FontSize = 12,
+                Foreground = new System.Windows.Media.SolidColorBrush(
+                    (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#CCC"))
+            });
+        }
+
+        pnlConsultBackends.Children.Add(new TextBlock
+        {
+            Text = "🔍 検証:",
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 4, 0),
+            FontSize = 12,
+            Foreground = new System.Windows.Media.SolidColorBrush(
+                (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#666"))
+        });
+
+        var prevVerify = _cmbVerifyBackend?.SelectedItem as BackendConfig;
+        _cmbVerifyBackend = new ComboBox
+        {
+            Width = 180,
+            VerticalAlignment = VerticalAlignment.Center,
+            FontSize = 11
+        };
+        _cmbVerifyBackend.Items.Add("なし");
+        foreach (var b in usableOthers)
+            _cmbVerifyBackend.Items.Add(b);
+
+        _cmbVerifyBackend.SelectionChanged += (_, _) =>
+            ChatService.SetVerifyBackend(_cmbVerifyBackend.SelectedItem as BackendConfig);
+
+        if (prevVerify != null && _cmbVerifyBackend.Items.Contains(prevVerify))
+            _cmbVerifyBackend.SelectedItem = prevVerify;
+        else
+            _cmbVerifyBackend.SelectedIndex = 0;
+
+        ChatService.SetVerifyBackend(_cmbVerifyBackend.SelectedItem as BackendConfig);
+        ChatService.SetVerifyBackendCandidates(usableOthers);
+        pnlConsultBackends.Children.Add(_cmbVerifyBackend);
+
+        pnlConsultBackends.Visibility = usableOthers.Count > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private List<BackendConfig> GetCheckedConsultBackends()
+    {
+        var result = new List<BackendConfig>();
+        for (int i = 1; i < pnlConsultBackends.Children.Count; i++)
+        {
+            if (pnlConsultBackends.Children[i] is System.Windows.Controls.CheckBox cb && cb.IsChecked == true && cb.Tag is BackendConfig b)
+                result.Add(b);
+        }
+        return result;
+    }
+
+    private BackendConfig? GetVerifyBackend()
+    {
+        return _cmbVerifyBackend?.SelectedItem as BackendConfig;
     }
 
     private static async Task<bool> CheckOllamaSkillSupportAsync(BackendConfig backend)
@@ -1850,6 +2030,24 @@ public partial class MainWindow : Window
         var text = txtChatInput.Text.Trim();
         if (string.IsNullOrEmpty(text)) return;
 
+        // Check for pending remember (user selecting a number)
+        var pendingResult = ChatService.TryCompletePendingRemember(text);
+        if (pendingResult != null)
+        {
+            txtChatInput.Text = "";
+            _chatBubbles.Add(new ChatBubble { Text = text, IsUser = true });
+            _chatBubbles.Add(new ChatBubble { Text = pendingResult, IsUser = false });
+            _chatHistory.Add(new ChatMessage { Role = "user", Content = text });
+            _chatHistory.Add(new ChatMessage { Role = "assistant", Content = pendingResult });
+            ScrollChatToBottom();
+            if (_webServer?.IsRunning == true)
+            {
+                _ = _webServer.BroadcastMessageAsync(text, true);
+                _ = _webServer.BroadcastMessageAsync(pendingResult, false);
+            }
+            return;
+        }
+
         var backend = GetSelectedChatBackend();
         if (backend == null)
         {
@@ -1897,8 +2095,58 @@ public partial class MainWindow : Window
             var swAi = System.Diagnostics.Stopwatch.StartNew();
 
             var response = await ChatService.SendChatAsync(backend, _chatHistory, useSkills);
-
+            var primaryResponse = response; // preserve for insufficient check
             Log($"[Chat] AI 応答完了: {swAi.ElapsedMilliseconds}ms, {response.Length} chars");
+
+            var consultBackends = GetCheckedConsultBackends();
+            if (consultBackends.Count > 0)
+            {
+                const string consultSpeak = "わからなかったのでもう少し調べます。";
+                ReplaceLast(new ChatBubble { Text = response + "\n\n📡 外部 AI に相談中...", IsUser = false });
+                if (_webServer?.IsRunning == true)
+                    _ = _webServer.BroadcastTypingAsync("📡 外部 AI に相談中...", consultSpeak);
+
+                var supplements = await ChatService.ConsultExternalAIsAsync(text, response, consultBackends);
+                var sb = new System.Text.StringBuilder(response);
+                foreach (var (name, sup) in supplements)
+                {
+                    if (!string.IsNullOrWhiteSpace(sup) && !sup.Contains("補足はありません"))
+                        sb.Append($"\n\n---\n📡 **{name}** の補足:\n{sup}");
+                }
+                response = sb.ToString();
+            }
+
+            // Verification agent: invoke when user says "検証" or response seems insufficient
+            var verifyBackend = GetVerifyBackend();
+            if (verifyBackend != null)
+            {
+                bool userRequestedVerify = text.Contains("検証");
+                bool responseInsufficient = ChatService.IsResponseInsufficient(primaryResponse);
+                if (userRequestedVerify || responseInsufficient)
+                {
+                    var verifySpeak = responseInsufficient
+                        ? "回答が不十分なようなので検証エージェントに確認します。"
+                        : "結果が出たので検証してもらいます。";
+                    ReplaceLast(new ChatBubble { Text = response + "\n\n🔍 検証エージェントに確認中...", IsUser = false });
+                    if (_webServer?.IsRunning == true)
+                        _ = _webServer.BroadcastTypingAsync("🔍 検証エージェントに確認中...", verifySpeak);
+
+                    var verifyResult = await ChatService.VerifyWithExternalAIAsync(text, response, verifyBackend);
+                    if (!string.IsNullOrWhiteSpace(verifyResult))
+                    {
+                        response += $"\n\n---\n🔍 **検証 ({verifyBackend.Name}/{verifyBackend.Model})**:\n{verifyResult}";
+
+                        // Offer to save knowledge if verification found corrections
+                        if (!verifyResult.Contains("検証OK") && _gameDataExtractor != null)
+                        {
+                            var knowledgeText = ChatService.ExtractKnowledgeSummary(text, verifyResult);
+                            if (!string.IsNullOrWhiteSpace(knowledgeText))
+                                OfferKnowledgeSave(knowledgeText);
+                        }
+                    }
+                }
+            }
+
             ReplaceLast(new ChatBubble { Text = response, IsUser = false });
             _chatHistory.Add(new ChatMessage { Role = "assistant", Content = response });
             if (_webServer?.IsRunning == true)
@@ -1955,10 +2203,57 @@ public partial class MainWindow : Window
         var qs = new GameDataQueryService(_gameDataExtractor.DbPath);
         try
         {
-            var win = new KnowledgeWindow(qs) { Owner = this };
+            var verifyBackend = GetVerifyBackend();
+            var win = new KnowledgeWindow(qs, verifyBackend) { Owner = this };
             win.ShowDialog();
         }
         finally { qs.Dispose(); }
+    }
+
+    private void OfferKnowledgeSave(string knowledgeText)
+    {
+        _chatBubbles.Add(new ChatBubble
+        {
+            Text = $"💾 検証で新しい情報が見つかりました。ナレッジに保存しますか？\n\n{knowledgeText}",
+            IsUser = false
+        });
+        ScrollChatToBottom();
+
+        var result = MessageBox.Show(
+            $"検証結果をナレッジに保存しますか？\n\n{knowledgeText}",
+            "ナレッジ保存", MessageBoxButton.YesNo, MessageBoxImage.Question);
+
+        if (result == MessageBoxResult.Yes && _gameDataExtractor != null)
+        {
+            try
+            {
+                var qs = new GameDataQueryService(_gameDataExtractor.DbPath);
+                var (kid2, kisDup2) = qs.AddKnowledgeSafe(knowledgeText, "term");
+                qs.Dispose();
+                if (!kisDup2)
+                {
+                    Log($"[Knowledge] 検証結果を保存: {knowledgeText.Length} chars");
+                    _chatBubbles.Add(new ChatBubble { Text = "✅ ナレッジに保存しました。次回から活用されます。", IsUser = false });
+                }
+                else
+                {
+                    Log($"[Knowledge] 類似ナレッジ既存 id={kid2}");
+                    _chatBubbles.Add(new ChatBubble { Text = $"ℹ️ 類似するナレッジが既にあります (ID:{kid2})。重複保存をスキップしました。", IsUser = false });
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"[Knowledge] 保存エラー: {ex.Message}");
+                _chatBubbles.Add(new ChatBubble { Text = $"❌ 保存エラー: {ex.Message}", IsUser = false, IsError = true });
+            }
+        }
+        else
+        {
+            // Remove the offer bubble
+            if (_chatBubbles.Count > 0 && _chatBubbles[^1].Text.StartsWith("💾"))
+                _chatBubbles.RemoveAt(_chatBubbles.Count - 1);
+        }
+        ScrollChatToBottom();
     }
 
     private void ReplaceLast(ChatBubble bubble)

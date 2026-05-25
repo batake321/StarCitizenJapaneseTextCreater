@@ -38,4 +38,6 @@ public class BackendConfig
         "ollama" => true,
         _ => false
     };
+
+    public override string ToString() => $"{Name} ({Model})";
 }

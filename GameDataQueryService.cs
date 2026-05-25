@@ -539,6 +539,83 @@ public class GameDataQueryService : IDisposable
 
     // === Knowledge (memory) ===
 
+    /// <summary>Domain keywords for structured knowledge retrieval.</summary>
+    private static readonly Dictionary<string, string[]> DomainKeywords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["ship"]      = new[] { "ship", "船", "艦", "vehicle", "fighter", "bomber", "hauler", "transport", "mining ship", "gunship",
+                                "constellation", "cutlass", "freelancer", "carrack", "reclaimer", "caterpillar", "hammerhead", "retaliator",
+                                "hornet", "gladius", "arrow", "sabre", "vanguard", "eclipse", "herald", "hull", "prospector", "mole",
+                                "aurora", "mustang", "avenger", "pisces", "spirit", "corsair", "scorpius", "redeemer", "starfarer",
+                                "merchantman", "perseus", "polaris", "idris", "javelin", "vulture", "expanse", "starlancer",
+                                "raft", "nomad", "100i", "300i", "400i", "600i", "890", "railen", "san'tok", "khartu" },
+        ["location"]  = new[] { "location", "station", "ステーション", "都市", "基地", "拠点", "ゲートウェイ", "gateway",
+                                "orison", "lorville", "area18", "babbage", "grimhex", "levski", "pyro", "nyx", "stanton",
+                                "hurston", "crusader", "arccorp", "microtech", "aberdeen", "daymar", "cellin", "yela",
+                                "delamar", "port", "seraphim", "everus", "baijini", "cru-l", "arc-l", "hur-l", "mic-l",
+                                "ruin", "checkmate", "bloom", "terra gate", "pyro gateway", "bloom" },
+        ["mission"]   = new[] { "mission", "ミッション", "contract", "契約", "bounty", "賞金", "delivery", "配送", "salvage", "サルベージ",
+                                "mining", "採掘", "cargo", "patrol", "bunker", "バンカー", "illegal", "smuggle", "rescue", "investigation" },
+        ["commodity"] = new[] { "commodity", "商品", "コモディティ", "trade", "貿易", "取引", "cargo", "資源", "鉱石", "ore",
+                                "laranite", "quantanium", "agricium", "titanium", "diamond", "corundum", "gold",
+                                "stims", "distilled", "medical", "scrap", "waste", "hydrogen", "astatine" },
+        ["combat"]    = new[] { "combat", "戦闘", "weapon", "武器", "gun", "銃", "missile", "ミサイル", "shield", "シールド",
+                                "armor", "アーマー", "fps", "pvp", "pve", "turret", "タレット", "ammo", "弾薬" },
+        ["equipment"] = new[] { "equipment", "装備", "component", "コンポーネント", "cooler", "クーラー", "quantum", "クォンタム",
+                                "power plant", "パワープラント", "module", "モジュール", "undersuit", "アンダースーツ",
+                                "backpack", "helmet", "ヘルメット", "thruster", "avionics", "radar", "scanner" },
+        ["system"]    = new[] { "system", "星系", "stanton", "pyro", "nyx", "sol", "terra", "version", "バージョン", "alpha", "patch",
+                                "wipe", "ワイプ", "update", "アップデート", "実装", "roadmap" },
+    };
+
+    /// <summary>Extract matching domain tags from user question.</summary>
+    public static List<string> ExtractDomains(string question)
+    {
+        var q = question.ToLowerInvariant();
+        var matched = new List<string>();
+        foreach (var (domain, keywords) in DomainKeywords)
+        {
+            if (keywords.Any(kw => q.Contains(kw, StringComparison.OrdinalIgnoreCase)))
+                matched.Add(domain);
+        }
+        return matched;
+    }
+
+    /// <summary>Add knowledge with duplicate prevention. Returns existing ID if duplicate found.</summary>
+    public (int id, bool isDuplicate) AddKnowledgeSafe(string content, string category = "general")
+    {
+        // Duplicate check: same category + content similarity (80%+ overlap)
+        using var checkCmd = _conn.CreateCommand();
+        checkCmd.CommandText = "SELECT id, content FROM knowledge WHERE category = @cat";
+        checkCmd.Parameters.AddWithValue("@cat", category);
+        using var reader = checkCmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var existingContent = reader.GetString(1);
+            if (IsSimilar(content, existingContent))
+                return (reader.GetInt32(0), true);
+        }
+        reader.Close();
+
+        var id = AddKnowledge(content, category);
+        return (id, false);
+    }
+
+    private static bool IsSimilar(string a, string b)
+    {
+        if (a == b) return true;
+        // Normalize and compare — if one contains the other, or >70% word overlap
+        var aNorm = a.Trim().ToLowerInvariant();
+        var bNorm = b.Trim().ToLowerInvariant();
+        if (aNorm.Contains(bNorm) || bNorm.Contains(aNorm)) return true;
+
+        var aWords = aNorm.Split(' ', '　', '、', '。', ',', '.', '/', '（', '）', '(', ')').Where(w => w.Length > 1).ToHashSet();
+        var bWords = bNorm.Split(' ', '　', '、', '。', ',', '.', '/', '（', '）', '(', ')').Where(w => w.Length > 1).ToHashSet();
+        if (aWords.Count == 0 || bWords.Count == 0) return false;
+        var overlap = aWords.Intersect(bWords).Count();
+        var maxLen = Math.Max(aWords.Count, bWords.Count);
+        return (double)overlap / maxLen >= 0.7;
+    }
+
     public int AddKnowledge(string content, string category = "general")
     {
         using var cmd = _conn.CreateCommand();
@@ -550,6 +627,48 @@ public class GameDataQueryService : IDisposable
 
         cmd.CommandText = "SELECT last_insert_rowid()";
         return (int)(long)cmd.ExecuteScalar()!;
+    }
+
+    /// <summary>Search knowledge by keywords (OR match). Returns entries where content matches any keyword.</summary>
+    public List<(int id, string category, string content, DateTime createdAt)> SearchKnowledge(IEnumerable<string> keywords)
+    {
+        var kwList = keywords.Where(k => k.Length >= 2).ToList();
+        if (kwList.Count == 0) return GetAllKnowledge();
+
+        var results = new List<(int, string, string, DateTime)>();
+        using var cmd = _conn.CreateCommand();
+        var conditions = new List<string>();
+        for (int i = 0; i < kwList.Count; i++)
+        {
+            conditions.Add($"content LIKE @kw{i}");
+            cmd.Parameters.AddWithValue($"@kw{i}", $"%{kwList[i]}%");
+        }
+        cmd.CommandText = $"SELECT id, category, content, created_at FROM knowledge WHERE {string.Join(" OR ", conditions)} ORDER BY created_at DESC";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var dt = DateTime.TryParse(reader.GetString(3), null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed)
+                ? parsed.ToLocalTime() : DateTime.Now;
+            results.Add((reader.GetInt32(0), reader.GetString(1), reader.GetString(2), dt));
+        }
+        return results;
+    }
+
+    /// <summary>Get knowledge filtered by category.</summary>
+    public List<(int id, string category, string content, DateTime createdAt)> GetKnowledgeByCategory(string category)
+    {
+        var results = new List<(int, string, string, DateTime)>();
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT id, category, content, created_at FROM knowledge WHERE category = @cat ORDER BY created_at DESC";
+        cmd.Parameters.AddWithValue("@cat", category);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var dt = DateTime.TryParse(reader.GetString(3), null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed)
+                ? parsed.ToLocalTime() : DateTime.Now;
+            results.Add((reader.GetInt32(0), reader.GetString(1), reader.GetString(2), dt));
+        }
+        return results;
     }
 
     public int DeleteKnowledge(string query)

@@ -141,9 +141,12 @@ public class ChatWebServer : IDisposable
         await BroadcastWsAsync(JsonSerializer.Serialize(new { type = "clear" }));
     }
 
-    public async Task BroadcastTypingAsync(string status)
+    public async Task BroadcastTypingAsync(string status, string? speak = null)
     {
-        await BroadcastWsAsync(JsonSerializer.Serialize(new { type = "typing", status }));
+        if (speak != null)
+            await BroadcastWsAsync(JsonSerializer.Serialize(new { type = "typing", status, speak }));
+        else
+            await BroadcastWsAsync(JsonSerializer.Serialize(new { type = "typing", status }));
     }
 
     private async Task BroadcastWsAsync(string message)
@@ -490,8 +493,8 @@ public class ChatWebServer : IDisposable
         using var doc = JsonDocument.Parse(body);
         var content = doc.RootElement.GetProperty("content").GetString() ?? "";
         var category = doc.RootElement.TryGetProperty("category", out var cat) ? cat.GetString() ?? "general" : "general";
-        var id = qs.AddKnowledge(content, category);
-        var json = JsonSerializer.Serialize(new { id });
+        var (id, isDup) = qs.AddKnowledgeSafe(content, category);
+        var json = JsonSerializer.Serialize(new { id, isDuplicate = isDup });
         var bytes = Encoding.UTF8.GetBytes(json);
         ctx.Response.ContentType = "application/json; charset=utf-8";
         AddCorsHeaders(ctx.Response);
