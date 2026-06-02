@@ -12,7 +12,8 @@ public partial class BindingEditDialog : Window
     private string _keyboard;
     private string _mouse;
     private string _gamepad;
-    private string _joystick;
+    private string _joystick1;
+    private string _joystick2;
     private bool _isLongPress;
 
     private static readonly List<InputItem> KeyboardKeys = new()
@@ -52,7 +53,7 @@ public partial class BindingEditDialog : Window
 
     private static readonly List<InputItem> GamepadKeys = new()
     {
-        new("A","gp1_btn_a"), new("B","gp1_btn_b"), new("X","gp1_btn_x"), new("Y","gp1_btn_y"),
+        new("A","gp1_a"), new("B","gp1_b"), new("X","gp1_x"), new("Y","gp1_y"),
         new("LB","gp1_shoulderl"), new("RB","gp1_shoulderr"),
         new("LT","gp1_triggerl_btn"), new("RT","gp1_triggerr_btn"),
         new("L Stick Press","gp1_thumbl"), new("R Stick Press","gp1_thumbr"),
@@ -63,16 +64,24 @@ public partial class BindingEditDialog : Window
         new("Start","gp1_start"), new("Back","gp1_back"),
     };
 
-    private static readonly List<InputItem> JoystickKeys = new()
+    // Logical joystick inputs (no js1_/js2_ prefix). Prefix is applied based on edit target.
+    private static readonly List<InputItem> JoystickKeysBase = new()
     {
-        new("Btn 1","js1_button1"), new("Btn 2","js1_button2"), new("Btn 3","js1_button3"),
-        new("Btn 4","js1_button4"), new("Btn 5","js1_button5"), new("Btn 6","js1_button6"),
-        new("Btn 7","js1_button7"), new("Btn 8","js1_button8"),
-        new("X Axis","js1_x"), new("Y Axis","js1_y"), new("Z Axis","js1_z"),
-        new("RX","js1_rotx"), new("RY","js1_roty"), new("RZ","js1_rotz"),
-        new("Slider 1","js1_slider1"), new("Slider 2","js1_slider2"),
-        new("Hat Up","js1_hat1_up"), new("Hat Down","js1_hat1_down"),
-        new("Hat Left","js1_hat1_left"), new("Hat Right","js1_hat1_right"),
+        new("Btn 1","button1"), new("Btn 2","button2"), new("Btn 3","button3"), new("Btn 4","button4"),
+        new("Btn 5","button5"), new("Btn 6","button6"), new("Btn 7","button7"), new("Btn 8","button8"),
+        new("Btn 9","button9"), new("Btn 10","button10"), new("Btn 11","button11"), new("Btn 12","button12"),
+        new("Btn 13","button13"), new("Btn 14","button14"), new("Btn 15","button15"), new("Btn 16","button16"),
+        new("Btn 17","button17"), new("Btn 18","button18"), new("Btn 19","button19"), new("Btn 20","button20"),
+        new("Btn 21","button21"), new("Btn 22","button22"), new("Btn 23","button23"), new("Btn 24","button24"),
+        new("Btn 25","button25"), new("Btn 26","button26"), new("Btn 27","button27"), new("Btn 28","button28"),
+        new("Btn 29","button29"), new("Btn 30","button30"), new("Btn 31","button31"), new("Btn 32","button32"),
+        new("X Axis","x"), new("Y Axis","y"), new("Z Axis","z"),
+        new("RX","rotx"), new("RY","roty"), new("RZ","rotz"),
+        new("Slider 1","slider1"), new("Slider 2","slider2"),
+        new("Hat1 Up","hat1_up"), new("Hat1 Down","hat1_down"),
+        new("Hat1 Left","hat1_left"), new("Hat1 Right","hat1_right"),
+        new("Hat2 Up","hat2_up"), new("Hat2 Down","hat2_down"),
+        new("Hat2 Left","hat2_left"), new("Hat2 Right","hat2_right"),
     };
 
     public BindingEditDialog(ActionBinding binding)
@@ -83,7 +92,8 @@ public partial class BindingEditDialog : Window
         _keyboard = binding.Keyboard;
         _mouse = binding.Mouse;
         _gamepad = binding.Gamepad;
-        _joystick = binding.Joystick;
+        _joystick1 = binding.Joystick1;
+        _joystick2 = binding.Joystick2;
         _isLongPress = binding.IsLongPress;
 
         txtActionName.Text = $"{binding.DisplayName} ({binding.ActionName})";
@@ -98,7 +108,8 @@ public partial class BindingEditDialog : Window
         txtKeyboard.Text = InputDisplayHelper.FormatInput(_keyboard);
         txtMouse.Text = InputDisplayHelper.FormatInput(_mouse);
         txtGamepad.Text = InputDisplayHelper.FormatInput(_gamepad);
-        txtJoystick.Text = InputDisplayHelper.FormatInput(_joystick);
+        txtJoystickR.Text = InputDisplayHelper.FormatInput(_joystick1);
+        txtJoystickL.Text = InputDisplayHelper.FormatInput(_joystick2);
         chkLongPress.IsChecked = _isLongPress;
     }
 
@@ -110,7 +121,8 @@ public partial class BindingEditDialog : Window
             "keyboard" => "キーボード入力を選択",
             "mouse" => "マウス入力を選択",
             "gamepad" => "ゲームパッド入力を選択",
-            "joystick" => "ジョイスティック入力を選択",
+            "joystick1" => "HOTAS R 入力を選択 (VKB Gladiator NXT R)",
+            "joystick2" => "HOTAS L 入力を選択 (VKB Gladiator NXT L)",
             _ => "入力を選択"
         };
 
@@ -119,7 +131,8 @@ public partial class BindingEditDialog : Window
             "keyboard" => KeyboardKeys,
             "mouse" => MouseKeys,
             "gamepad" => GamepadKeys,
-            "joystick" => JoystickKeys,
+            "joystick1" => JoystickKeysBase,
+            "joystick2" => JoystickKeysBase,
             _ => KeyboardKeys
         };
     }
@@ -127,7 +140,8 @@ public partial class BindingEditDialog : Window
     private void SetKeyboard_Click(object sender, RoutedEventArgs e) => ShowKeyList("keyboard");
     private void SetMouse_Click(object sender, RoutedEventArgs e) => ShowKeyList("mouse");
     private void SetGamepad_Click(object sender, RoutedEventArgs e) => ShowKeyList("gamepad");
-    private void SetJoystick_Click(object sender, RoutedEventArgs e) => ShowKeyList("joystick");
+    private void SetJoystickR_Click(object sender, RoutedEventArgs e) => ShowKeyList("joystick1");
+    private void SetJoystickL_Click(object sender, RoutedEventArgs e) => ShowKeyList("joystick2");
 
     private void Key_Selected(object sender, SelectionChangedEventArgs e)
     {
@@ -143,7 +157,13 @@ public partial class BindingEditDialog : Window
         if (chkGpLB.IsChecked == true) modifiers.Add("gp1_shoulderl");
         if (chkGpRB.IsChecked == true) modifiers.Add("gp1_shoulderr");
 
-        var inputValue = _editTarget == "keyboard" ? $"kb1_{item.Value}" : item.Value;
+        var inputValue = _editTarget switch
+        {
+            "keyboard" => $"kb1_{item.Value}",
+            "joystick1" => $"js1_{item.Value}",
+            "joystick2" => $"js2_{item.Value}",
+            _ => item.Value,
+        };
 
         if (modifiers.Count > 0)
             inputValue = string.Join("+", modifiers) + "+" + inputValue;
@@ -153,7 +173,8 @@ public partial class BindingEditDialog : Window
             case "keyboard": _keyboard = inputValue; break;
             case "mouse": _mouse = inputValue; break;
             case "gamepad": _gamepad = inputValue; break;
-            case "joystick": _joystick = inputValue; break;
+            case "joystick1": _joystick1 = inputValue; break;
+            case "joystick2": _joystick2 = inputValue; break;
         }
 
         UpdateFields();
@@ -165,7 +186,8 @@ public partial class BindingEditDialog : Window
         _keyboard = _original.DefaultKeyboard;
         _mouse = _original.DefaultMouse;
         _gamepad = _original.DefaultGamepad;
-        _joystick = _original.DefaultJoystick;
+        _joystick1 = _original.DefaultJoystick1;
+        _joystick2 = _original.DefaultJoystick2;
         UpdateFields();
     }
 
@@ -176,7 +198,8 @@ public partial class BindingEditDialog : Window
             case "keyboard": _keyboard = ""; break;
             case "mouse": _mouse = ""; break;
             case "gamepad": _gamepad = ""; break;
-            case "joystick": _joystick = ""; break;
+            case "joystick1": _joystick1 = ""; break;
+            case "joystick2": _joystick2 = ""; break;
         }
         UpdateFields();
     }
@@ -186,7 +209,8 @@ public partial class BindingEditDialog : Window
         _original.Keyboard = _keyboard;
         _original.Mouse = _mouse;
         _original.Gamepad = _gamepad;
-        _original.Joystick = _joystick;
+        _original.Joystick1 = _joystick1;
+        _original.Joystick2 = _joystick2;
         _original.IsLongPress = chkLongPress.IsChecked == true;
         DialogResult = true;
     }

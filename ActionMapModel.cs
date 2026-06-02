@@ -54,14 +54,16 @@ public class ActionBinding : INotifyPropertyChanged
     private string _keyboard = "";
     private string _mouse = "";
     private string _gamepad = "";
-    private string _joystick = "";
+    private string _joystick1 = "";
+    private string _joystick2 = "";
     private bool _isLongPress;
 
     public string ActivationMode { get; set; } = "";
     public string KeyboardActivationMode { get; set; } = "";
     public string MouseActivationMode { get; set; } = "";
     public string GamepadActivationMode { get; set; } = "";
-    public string JoystickActivationMode { get; set; } = "";
+    public string Joystick1ActivationMode { get; set; } = "";
+    public string Joystick2ActivationMode { get; set; } = "";
 
     public string EffectiveKeyboardActivationMode =>
         !string.IsNullOrEmpty(KeyboardActivationMode) ? KeyboardActivationMode : ActivationMode;
@@ -69,35 +71,59 @@ public class ActionBinding : INotifyPropertyChanged
         !string.IsNullOrEmpty(MouseActivationMode) ? MouseActivationMode : ActivationMode;
     public string EffectiveGamepadActivationMode =>
         !string.IsNullOrEmpty(GamepadActivationMode) ? GamepadActivationMode : ActivationMode;
-    public string EffectiveJoystickActivationMode =>
-        !string.IsNullOrEmpty(JoystickActivationMode) ? JoystickActivationMode : ActivationMode;
+    public string EffectiveJoystick1ActivationMode =>
+        !string.IsNullOrEmpty(Joystick1ActivationMode) ? Joystick1ActivationMode : ActivationMode;
+    public string EffectiveJoystick2ActivationMode =>
+        !string.IsNullOrEmpty(Joystick2ActivationMode) ? Joystick2ActivationMode : ActivationMode;
 
     public string Keyboard { get => _keyboard; set { _keyboard = value; OnPropertyChanged(); OnPropertyChanged(nameof(KeyboardDisplay)); } }
     public string Mouse { get => _mouse; set { _mouse = value; OnPropertyChanged(); OnPropertyChanged(nameof(MouseDisplay)); } }
     public string Gamepad { get => _gamepad; set { _gamepad = value; OnPropertyChanged(); OnPropertyChanged(nameof(GamepadDisplay)); } }
-    public string Joystick { get => _joystick; set { _joystick = value; OnPropertyChanged(); OnPropertyChanged(nameof(JoystickDisplay)); } }
+    public string Joystick1 { get => _joystick1; set { _joystick1 = value; OnPropertyChanged(); OnPropertyChanged(nameof(Joystick1Display)); OnPropertyChanged(nameof(HotasDisplay)); } }
+    public string Joystick2 { get => _joystick2; set { _joystick2 = value; OnPropertyChanged(); OnPropertyChanged(nameof(Joystick2Display)); OnPropertyChanged(nameof(HotasDisplay)); } }
     public bool IsLongPress { get => _isLongPress; set { _isLongPress = value; OnPropertyChanged(); } }
+
+    // Legacy alias (kept for searching/text matching from external services like ChatService).
+    public string Joystick => string.IsNullOrEmpty(_joystick1) ? _joystick2 : _joystick1;
+    public string JoystickDisplay => HotasDisplay;
 
     public string KeyboardDisplay => InputDisplayHelper.FormatInput(Keyboard);
     public string MouseDisplay => InputDisplayHelper.FormatInput(Mouse);
     public string GamepadDisplay => InputDisplayHelper.FormatInput(Gamepad);
-    public string JoystickDisplay => InputDisplayHelper.FormatInput(Joystick);
+    public string Joystick1Display => InputDisplayHelper.FormatInput(Joystick1);
+    public string Joystick2Display => InputDisplayHelper.FormatInput(Joystick2);
+    public string HotasDisplay
+    {
+        get
+        {
+            var r = Joystick1Display;
+            var l = Joystick2Display;
+            if (!string.IsNullOrEmpty(r) && !string.IsNullOrEmpty(l)) return $"R: {r}\nL: {l}";
+            if (!string.IsNullOrEmpty(r)) return $"R: {r}";
+            if (!string.IsNullOrEmpty(l)) return $"L: {l}";
+            return "";
+        }
+    }
 
     public bool HasAnyBinding => !string.IsNullOrEmpty(Keyboard) || !string.IsNullOrEmpty(Mouse) ||
-                                  !string.IsNullOrEmpty(Gamepad) || !string.IsNullOrEmpty(Joystick);
+                                  !string.IsNullOrEmpty(Gamepad) || !string.IsNullOrEmpty(Joystick1) || !string.IsNullOrEmpty(Joystick2);
 
     // Default bindings (from defaultProfile.xml) - stored separately for reset
     public string DefaultKeyboard { get; set; } = "";
     public string DefaultMouse { get; set; } = "";
     public string DefaultGamepad { get; set; } = "";
-    public string DefaultJoystick { get; set; } = "";
+    public string DefaultJoystick1 { get; set; } = "";
+    public string DefaultJoystick2 { get; set; } = "";
 
     public bool IsModified => Keyboard != DefaultKeyboard || Mouse != DefaultMouse ||
-                              Gamepad != DefaultGamepad || Joystick != DefaultJoystick;
+                              Gamepad != DefaultGamepad ||
+                              Joystick1 != DefaultJoystick1 || Joystick2 != DefaultJoystick2;
     public bool IsKeyboardModified => Keyboard != DefaultKeyboard;
     public bool IsMouseModified => Mouse != DefaultMouse;
     public bool IsGamepadModified => Gamepad != DefaultGamepad;
-    public bool IsJoystickModified => Joystick != DefaultJoystick;
+    public bool IsJoystick1Modified => Joystick1 != DefaultJoystick1;
+    public bool IsJoystick2Modified => Joystick2 != DefaultJoystick2;
+    public bool IsHotasModified => IsJoystick1Modified || IsJoystick2Modified;
     public string CategoryDisplayName
     {
         get
@@ -335,14 +361,18 @@ public static class ActionMapParser
                 binding.ActivationMode = actMode;
 
                 // Attribute-based bindings (defaultProfile format)
-                var kb = action.Attribute("keyboard")?.Value?.Trim();
-                var mo = action.Attribute("mouse")?.Value?.Trim();
-                var gp = action.Attribute("gamepad")?.Value?.Trim();
+                var kb = NormalizeInputPrefix(action.Attribute("keyboard")?.Value?.Trim(), "kb1_");
+                var mo = NormalizeInputPrefix(action.Attribute("mouse")?.Value?.Trim(), "mo1_");
+                var gp = NormalizeInputPrefix(action.Attribute("gamepad")?.Value?.Trim(), "gp1_");
                 var js = action.Attribute("joystick")?.Value?.Trim();
                 if (!string.IsNullOrEmpty(kb)) { binding.Keyboard = kb; binding.DefaultKeyboard = kb; }
                 if (!string.IsNullOrEmpty(mo)) { binding.Mouse = mo; binding.DefaultMouse = mo; }
                 if (!string.IsNullOrEmpty(gp)) { binding.Gamepad = gp; binding.DefaultGamepad = gp; }
-                if (!string.IsNullOrEmpty(js)) { binding.Joystick = js; binding.DefaultJoystick = js; }
+                if (!string.IsNullOrEmpty(js))
+                {
+                    if (js.StartsWith("js2_")) { binding.Joystick2 = js; binding.DefaultJoystick2 = js; }
+                    else { binding.Joystick1 = js; binding.DefaultJoystick1 = js; }
+                }
 
                 // Per-device child elements with their own activationMode and input
                 foreach (var deviceEl in action.Elements())
@@ -356,20 +386,35 @@ public static class ActionMapParser
                     {
                         case "keyboard":
                             if (!string.IsNullOrEmpty(devActMode)) binding.KeyboardActivationMode = devActMode;
-                            if (!string.IsNullOrEmpty(devInput)) { binding.Keyboard = devInput; binding.DefaultKeyboard = devInput; }
+                            if (!string.IsNullOrEmpty(devInput)) { var v = NormalizeInputPrefix(devInput, "kb1_"); binding.Keyboard = v; binding.DefaultKeyboard = v; }
                             break;
                         case "mouse":
                             if (!string.IsNullOrEmpty(devActMode)) binding.MouseActivationMode = devActMode;
-                            if (!string.IsNullOrEmpty(devInput)) { binding.Mouse = devInput; binding.DefaultMouse = devInput; }
+                            if (!string.IsNullOrEmpty(devInput)) { var v = NormalizeInputPrefix(devInput, "mo1_"); binding.Mouse = v; binding.DefaultMouse = v; }
                             break;
                         case "gamepad":
                             if (!string.IsNullOrEmpty(devActMode)) binding.GamepadActivationMode = devActMode;
-                            if (!string.IsNullOrEmpty(devInput)) { binding.Gamepad = devInput; binding.DefaultGamepad = devInput; }
+                            if (!string.IsNullOrEmpty(devInput)) { var v = NormalizeInputPrefix(devInput, "gp1_"); binding.Gamepad = v; binding.DefaultGamepad = v; }
                             if (devOnHold == "1" && string.IsNullOrEmpty(devActMode)) binding.GamepadActivationMode = "hold";
                             break;
                         case "joystick":
-                            if (!string.IsNullOrEmpty(devActMode)) binding.JoystickActivationMode = devActMode;
-                            if (!string.IsNullOrEmpty(devInput)) { binding.Joystick = devInput; binding.DefaultJoystick = devInput; }
+                            if (!string.IsNullOrEmpty(devInput))
+                            {
+                                if (devInput.StartsWith("js2_"))
+                                {
+                                    if (!string.IsNullOrEmpty(devActMode)) binding.Joystick2ActivationMode = devActMode;
+                                    binding.Joystick2 = devInput; binding.DefaultJoystick2 = devInput;
+                                }
+                                else
+                                {
+                                    if (!string.IsNullOrEmpty(devActMode)) binding.Joystick1ActivationMode = devActMode;
+                                    binding.Joystick1 = devInput; binding.DefaultJoystick1 = devInput;
+                                }
+                            }
+                            else if (!string.IsNullOrEmpty(devActMode))
+                            {
+                                binding.Joystick1ActivationMode = devActMode;
+                            }
                             break;
                     }
                 }
@@ -433,6 +478,29 @@ public static class ActionMapParser
         }
     }
 
+    private static string NormalizeInputPrefix(string? input, string requiredPrefix)
+    {
+        if (string.IsNullOrEmpty(input) || input.Trim() == " ") return "";
+        var parts = input.Split('+');
+        var result = new List<string>();
+        foreach (var part in parts)
+        {
+            var p = part.Trim();
+            if (string.IsNullOrEmpty(p)) continue;
+            // Already has any device prefix → keep as-is
+            if (p.StartsWith("kb1_") || p.StartsWith("mo1_") || p.StartsWith("gp1_") ||
+                p.StartsWith("js1_") || p.StartsWith("js2_"))
+            {
+                result.Add(p);
+            }
+            else
+            {
+                result.Add(requiredPrefix + p);
+            }
+        }
+        return result.Count > 0 ? string.Join("+", result) : "";
+    }
+
     private static void ClassifyInput(string input, ActionBinding binding, bool setDefault)
     {
         if (input.StartsWith("kb") || input.StartsWith("key_") ||
@@ -460,10 +528,15 @@ public static class ActionMapParser
             binding.Gamepad = input;
             if (setDefault) binding.DefaultGamepad = input;
         }
+        else if (input.StartsWith("js2_"))
+        {
+            binding.Joystick2 = input;
+            if (setDefault) binding.DefaultJoystick2 = input;
+        }
         else if (input.StartsWith("js"))
         {
-            binding.Joystick = input;
-            if (setDefault) binding.DefaultJoystick = input;
+            binding.Joystick1 = input;
+            if (setDefault) binding.DefaultJoystick1 = input;
         }
         else
         {
@@ -499,8 +572,10 @@ public static class ActionMapParser
                     el.Add(new XElement("rebind", new XAttribute("input", action.Mouse)));
                 if (!string.IsNullOrEmpty(action.Gamepad) && action.Gamepad != action.DefaultGamepad)
                     el.Add(new XElement("rebind", new XAttribute("input", action.Gamepad)));
-                if (!string.IsNullOrEmpty(action.Joystick) && action.Joystick != action.DefaultJoystick)
-                    el.Add(new XElement("rebind", new XAttribute("input", action.Joystick)));
+                if (action.Joystick1 != action.DefaultJoystick1)
+                    el.Add(new XElement("rebind", new XAttribute("input", action.Joystick1 ?? "")));
+                if (action.Joystick2 != action.DefaultJoystick2)
+                    el.Add(new XElement("rebind", new XAttribute("input", action.Joystick2 ?? "")));
                 if (el.HasElements)
                     am.Add(el);
             }
@@ -562,6 +637,32 @@ public static class InputDisplayHelper
         return string.Join(" + ", result);
     }
 
+    private static readonly Dictionary<string, string> GamepadNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["shoulderl"] = "LB", ["shoulderr"] = "RB",
+        ["triggerl_btn"] = "LT", ["triggerr_btn"] = "RT",
+        ["thumbl"] = "L Stick Press", ["thumbr"] = "R Stick Press",
+        ["thumblx"] = "L Stick X", ["thumbly"] = "L Stick Y",
+        ["thumbrx"] = "R Stick X", ["thumbry"] = "R Stick Y",
+        ["thumbl_up"] = "L Stick Up", ["thumbl_down"] = "L Stick Down",
+        ["thumbl_left"] = "L Stick Left", ["thumbl_right"] = "L Stick Right",
+        ["thumbr_up"] = "R Stick Up", ["thumbr_down"] = "R Stick Down",
+        ["thumbr_left"] = "R Stick Left", ["thumbr_right"] = "R Stick Right",
+        ["dpad_up"] = "D-Pad Up", ["dpad_down"] = "D-Pad Down",
+        ["dpad_left"] = "D-Pad Left", ["dpad_right"] = "D-Pad Right",
+        ["btn_a"] = "A", ["a"] = "A", ["btn_b"] = "B", ["b"] = "B",
+        ["btn_x"] = "X", ["x"] = "X", ["btn_y"] = "Y", ["y"] = "Y",
+        ["start"] = "Start", ["back"] = "Back",
+    };
+
+    private static readonly Dictionary<string, string> MouseNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["mouse1"] = "Left Click", ["mouse2"] = "Right Click", ["mouse3"] = "Middle Click",
+        ["mouse4"] = "Mouse4", ["mouse5"] = "Mouse5",
+        ["maxis_x"] = "Mouse X", ["maxis_y"] = "Mouse Y",
+        ["mwheel_up"] = "Wheel Up", ["mwheel_down"] = "Wheel Down",
+    };
+
     private static string FormatSingleInput(string input)
     {
         if (input.StartsWith("kb1_"))
@@ -570,52 +671,23 @@ public static class InputDisplayHelper
         if (input.StartsWith("mo1_") || input.StartsWith("mo_"))
         {
             var key = input.Contains("_") ? input[(input.IndexOf('_') + 1)..] : input;
-            return key switch
-            {
-                "mouse1" => "Left Click",
-                "mouse2" => "Right Click",
-                "mouse3" => "Middle Click",
-                "mouse4" => "Mouse4",
-                "mouse5" => "Mouse5",
-                "maxis_x" => "Mouse X",
-                "maxis_y" => "Mouse Y",
-                "mwheel_up" => "Wheel Up",
-                "mwheel_down" => "Wheel Down",
-                _ => key
-            };
+            return MouseNames.TryGetValue(key, out var mn) ? mn : key;
         }
 
         if (input.StartsWith("gp1_"))
         {
             var key = input[4..];
-            return key switch
-            {
-                "shoulderl" => "LB",
-                "shoulderr" => "RB",
-                "triggerl_btn" => "LT",
-                "triggerr_btn" => "RT",
-                "thumbl" => "L Stick Press",
-                "thumbr" => "R Stick Press",
-                "thumblx" => "L Stick X",
-                "thumbly" => "L Stick Y",
-                "thumbrx" => "R Stick X",
-                "thumbry" => "R Stick Y",
-                "dpad_up" => "D-Pad Up",
-                "dpad_down" => "D-Pad Down",
-                "dpad_left" => "D-Pad Left",
-                "dpad_right" => "D-Pad Right",
-                "btn_a" or "a" => "A",
-                "btn_b" or "b" => "B",
-                "btn_x" or "x" => "X",
-                "btn_y" or "y" => "Y",
-                "start" => "Start",
-                "back" => "Back",
-                _ => key
-            };
+            return GamepadNames.TryGetValue(key, out var gn) ? gn : key;
         }
 
         if (input.StartsWith("js"))
             return input;
+
+        // No prefix — try gamepad names first, then mouse names, then keyboard
+        if (GamepadNames.TryGetValue(input, out var gpName))
+            return gpName;
+        if (MouseNames.TryGetValue(input, out var moName))
+            return moName;
 
         return FormatKeyboard(input);
     }

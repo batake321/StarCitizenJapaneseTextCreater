@@ -1,0 +1,80 @@
+<UserControl x:Class="StarCitizenJapaneseTextCreater.HotasLayoutPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Background="#F5F5F5" Padding="8,6" BorderBrush="#DDD" BorderThickness="0,0,0,1">
+            <WrapPanel VerticalAlignment="Center">
+                <TextBlock Text="修飾キー:" VerticalAlignment="Center" Margin="0,0,8,0" FontWeight="Bold"/>
+                <CheckBox x:Name="chkRCtrl" Content="R-Ctrl" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
+                <CheckBox x:Name="chkLShift" Content="L-Shift" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
+                <CheckBox x:Name="chkRShift" Content="R-Shift" Margin="0,0,20,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
+                <TextBlock x:Name="txtInfo" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
+            </WrapPanel>
+        </Border>
+
+        <Border Grid.Row="1" Background="#FAFAFA" Padding="8,4" BorderBrush="#DDD" BorderThickness="0,0,0,1">
+            <WrapPanel VerticalAlignment="Center">
+                <TextBlock Text="色分け:" VerticalAlignment="Center" Margin="0,0,8,0" FontWeight="Bold" FontSize="11"/>
+                <Border Background="#42A5F5" CornerRadius="3" Padding="8,2" Margin="0,0,6,0">
+                    <TextBlock Text="バインド済み" Foreground="White" FontSize="11"/>
+                </Border>
+                <Border Background="#AB47BC" CornerRadius="3" Padding="8,2" Margin="0,0,6,0">
+                    <TextBlock Text="長押し" Foreground="White" FontSize="11"/>
+                </Border>
+                <Border Background="#F0F0F0" BorderBrush="#B4B4B4" BorderThickness="1" CornerRadius="3" Padding="8,2" Margin="0,0,6,0">
+                    <TextBlock Text="未割当" Foreground="#555" FontSize="11"/>
+                </Border>
+                <TextBlock Text="  |  ボタンをクリックして割り当て編集" VerticalAlignment="Center" Foreground="#888" FontSize="10.5"/>
+            </WrapPanel>
+        </Border>
+
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- HOTAS L (Joystick 2) - 左列 -->
+            <Border Grid.Column="0" BorderBrush="#DDD" BorderThickness="0,0,1,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Text="HOTAS L (VKB Gladiator NXT L)" FontWeight="Bold" Padding="8,6" Background="#E3F2FD"/>
+                    <Border Grid.Row="1" Background="#FEFEFE" Padding="4" MaxHeight="200" Cursor="Hand"
+                            MouseLeftButtonDown="ImageL_Click" ToolTip="クリックで拡大表示">
+                        <Image Source="/image/hotas/vkb_scg_L.png" Stretch="Uniform" VerticalAlignment="Top"/>
+                    </Border>
+                    <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Padding="4">
+                        <StackPanel x:Name="panelLeft" Margin="4"/>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+
+            <!-- HOTAS R (Joystick 1) - 右列 -->
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <TextBlock Text="HOTAS R (VKB Gladiator NXT R)" FontWeight="Bold" Padding="8,6" Background="#FFF3E0"/>
+                <Border Grid.Row="1" Background="#FEFEFE" Padding="4" MaxHeight="200" Cursor="Hand"
+                        MouseLeftButtonDown="ImageR_Click" ToolTip="クリックで拡大表示">
+                    <Image Source="/image/hotas/vkb_scg_R.png" Stretch="Uniform" VerticalAlignment="Top"/>
+                </Border>
+                <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Padding="4">
+                    <StackPanel x:Name="panelRight" Margin="4"/>
+                </ScrollViewer>
+            </Grid>
+        </Grid>
+    </Grid>
+</UserControl>

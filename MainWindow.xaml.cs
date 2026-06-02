@@ -580,7 +580,8 @@ public partial class MainWindow : Window
     {
         if (search.Contains('*') || search.Contains('?'))
         {
-            var pattern = "^" + Regex.Escape(search).Replace("\\*", ".*").Replace("\\?", ".") + "$";
+            var escaped = Regex.Escape(search).Replace("\\*", ".*").Replace("\\?", ".");
+            var pattern = partial ? escaped : "^" + escaped + "$";
             var regex = new Regex(pattern, RegexOptions.IgnoreCase);
             return value => regex.IsMatch(value);
         }
@@ -603,6 +604,8 @@ public partial class MainWindow : Window
     private void SearchBox_KeyDown(object sender, KeyEventArgs e) { if (e.Key == Key.Enter) ApplyFilter(); }
     private void SourceFilter_Changed(object sender, SelectionChangedEventArgs e) { if (_allRows.Count > 0) ApplyFilter(); }
     private void TranslatorFilter_Changed(object sender, SelectionChangedEventArgs e) { if (_allRows.Count > 0) ApplyFilter(); }
+    private void SearchField_Changed(object sender, SelectionChangedEventArgs e) { if (_allRows.Count > 0) ApplyFilter(); }
+    private void PartialMatch_Changed(object sender, RoutedEventArgs e) { if (_allRows.Count > 0) ApplyFilter(); }
     private void PrevPage_Click(object sender, RoutedEventArgs e) { if (_page > 0) { _page--; ShowPage(); } }
     private void NextPage_Click(object sender, RoutedEventArgs e)
     {
@@ -865,8 +868,7 @@ public partial class MainWindow : Window
             var count = db.BulkReplaceWithGlossary();
             MessageBox.Show($"一括置換完了: {count:N0}件のエントリを更新しました。", "完了");
 
-            if (_allRows.Count > 0)
-                RefreshEditor();
+            RefreshEditor();
         }
         catch (Exception ex)
         {

@@ -20,16 +20,18 @@ public class ClaudeBackend : TranslationBackend
     {
         var userMsg = BuildUserMessage(batch);
 
-        var body = new
+        var supportsTemperature = !_model.Contains("opus", StringComparison.OrdinalIgnoreCase);
+        var bodyDict = new Dictionary<string, object>
         {
-            model = _model,
-            max_tokens = 16384,
-            temperature = 0.2,
-            system = SystemPrompt,
-            messages = new[] { new { role = "user", content = userMsg } }
+            ["model"] = _model,
+            ["max_tokens"] = 16384,
+            ["system"] = SystemPrompt,
+            ["messages"] = new[] { new { role = "user", content = userMsg } }
         };
+        if (supportsTemperature)
+            bodyDict["temperature"] = 0.2;
 
-        var json = JsonSerializer.Serialize(body, new JsonSerializerOptions
+        var json = JsonSerializer.Serialize(bodyDict, new JsonSerializerOptions
         {
             Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
         });

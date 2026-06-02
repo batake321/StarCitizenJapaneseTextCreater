@@ -26,6 +26,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Resource Include="image\hotas\vkb_scg_R.png" />
+    <Resource Include="image\hotas\vkb_scg_L.png" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

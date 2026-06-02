@@ -59,7 +59,7 @@
                                 <ComboBoxItem Content="キーボード"/>
                                 <ComboBoxItem Content="マウス"/>
                                 <ComboBoxItem Content="ゲームパッド"/>
-                                <ComboBoxItem Content="ジョイスティック"/>
+                                <ComboBoxItem Content="HOTAS"/>
                                 <ComboBoxItem Content="未割当のみ"/>
                                 <ComboBoxItem Content="変更済みのみ"/>
                             </ComboBox>
@@ -171,14 +171,15 @@
                                         </Style>
                                     </DataGridTextColumn.ElementStyle>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Header="ジョイスティック" Binding="{Binding JoystickDisplay}" Width="140">
+                                <DataGridTextColumn Header="HOTAS" Binding="{Binding HotasDisplay}" Width="180">
                                     <DataGridTextColumn.ElementStyle>
                                         <Style TargetType="TextBlock">
                                             <Setter Property="VerticalAlignment" Value="Center"/>
                                             <Setter Property="FontFamily" Value="Consolas"/>
                                             <Setter Property="Foreground" Value="#999"/>
+                                            <Setter Property="TextWrapping" Value="Wrap"/>
                                             <Style.Triggers>
-                                                <DataTrigger Binding="{Binding IsJoystickModified}" Value="True">
+                                                <DataTrigger Binding="{Binding IsHotasModified}" Value="True">
                                                     <Setter Property="Foreground" Value="#E65100"/>
                                                     <Setter Property="FontWeight" Value="Bold"/>
                                                 </DataTrigger>
@@ -205,16 +206,19 @@
                 <local:KeyboardLayoutPanel x:Name="keyboardPanel"/>
             </TabItem>
 
-            <!-- マウスタブ (placeholder) -->
+            <!-- マウスタブ -->
             <TabItem Header="  マウス  ">
-                <TextBlock Text="マウスレイアウト（今後実装予定）" HorizontalAlignment="Center" VerticalAlignment="Center"
-                           FontSize="16" Foreground="#999"/>
+                <local:MouseLayoutPanel x:Name="mousePanel"/>
             </TabItem>
 
-            <!-- コントローラータブ (placeholder) -->
+            <!-- コントローラータブ -->
             <TabItem Header="  コントローラー  ">
-                <TextBlock Text="コントローラーレイアウト（今後実装予定）" HorizontalAlignment="Center" VerticalAlignment="Center"
-                           FontSize="16" Foreground="#999"/>
+                <local:GamepadLayoutPanel x:Name="gamepadPanel"/>
+            </TabItem>
+
+            <!-- HOTAS タブ -->
+            <TabItem Header="  HOTAS  ">
+                <local:HotasLayoutPanel x:Name="hotasPanel"/>
             </TabItem>
         </TabControl>
 

@@ -73,18 +73,28 @@ public partial class KeybindEditorWindow : Window
 
         ApplyFilter();
 
-        keyboardPanel.SetData(_data, () =>
+        Action onChanged = () =>
         {
             dgActions.Items.Refresh();
             ApplyFilter();
-        });
+        };
+
+        keyboardPanel.SetData(_data, onChanged);
+        mousePanel.SetData(_data, onChanged);
+        gamepadPanel.SetData(_data, onChanged);
+        hotasPanel.SetData(_data, onChanged);
     }
 
     private void TabMain_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (e.Source != tabMain) return;
-        if (tabMain.SelectedIndex == 1)
-            keyboardPanel.UpdateKeyColors();
+        switch (tabMain.SelectedIndex)
+        {
+            case 1: keyboardPanel.UpdateKeyColors(); break;
+            case 2: mousePanel.UpdateColors(); break;
+            case 3: gamepadPanel.UpdateColors(); break;
+            case 4: hotasPanel.UpdateBindingTables(); break;
+        }
     }
 
     private void ApplyFilter()
@@ -107,7 +117,8 @@ public partial class KeybindEditorWindow : Window
                 a.DisplayName.Contains(search, StringComparison.OrdinalIgnoreCase) ||
                 a.CategoryName.Contains(search, StringComparison.OrdinalIgnoreCase) ||
                 a.KeyboardDisplay.Contains(search, StringComparison.OrdinalIgnoreCase) ||
-                a.GamepadDisplay.Contains(search, StringComparison.OrdinalIgnoreCase)
+                a.GamepadDisplay.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+                a.HotasDisplay.Contains(search, StringComparison.OrdinalIgnoreCase)
             ).ToList();
 
         _filteredActions = inputFilter switch
@@ -115,7 +126,7 @@ public partial class KeybindEditorWindow : Window
             "キーボード" => _filteredActions.Where(a => !string.IsNullOrEmpty(a.Keyboard)).ToList(),
             "マウス" => _filteredActions.Where(a => !string.IsNullOrEmpty(a.Mouse)).ToList(),
             "ゲームパッド" => _filteredActions.Where(a => !string.IsNullOrEmpty(a.Gamepad)).ToList(),
-            "ジョイスティック" => _filteredActions.Where(a => !string.IsNullOrEmpty(a.Joystick)).ToList(),
+            "HOTAS" => _filteredActions.Where(a => !string.IsNullOrEmpty(a.Joystick1) || !string.IsNullOrEmpty(a.Joystick2)).ToList(),
             "未割当のみ" => _filteredActions.Where(a => !a.HasAnyBinding).ToList(),
             "変更済みのみ" => _filteredActions.Where(a => a.IsModified).ToList(),
             _ => _filteredActions
@@ -176,10 +187,11 @@ public partial class KeybindEditorWindow : Window
         });
 
         var table = new Table { CellSpacing = 0 };
-        table.Columns.Add(new TableColumn { Width = new GridLength(180) });
-        table.Columns.Add(new TableColumn { Width = new GridLength(120) });
-        table.Columns.Add(new TableColumn { Width = new GridLength(100) });
-        table.Columns.Add(new TableColumn { Width = new GridLength(120) });
+        table.Columns.Add(new TableColumn { Width = new GridLength(160) });
+        table.Columns.Add(new TableColumn { Width = new GridLength(110) });
+        table.Columns.Add(new TableColumn { Width = new GridLength(80) });
+        table.Columns.Add(new TableColumn { Width = new GridLength(110) });
+        table.Columns.Add(new TableColumn { Width = new GridLength(150) });
 
         var headerGroup = new TableRowGroup();
         var headerRow = new TableRow { Background = Brushes.LightGray };
@@ -187,6 +199,7 @@ public partial class KeybindEditorWindow : Window
         headerRow.Cells.Add(new TableCell(new Paragraph(new Run("キーボード")) { FontWeight = FontWeights.Bold }));
         headerRow.Cells.Add(new TableCell(new Paragraph(new Run("マウス")) { FontWeight = FontWeights.Bold }));
         headerRow.Cells.Add(new TableCell(new Paragraph(new Run("ゲームパッド")) { FontWeight = FontWeights.Bold }));
+        headerRow.Cells.Add(new TableCell(new Paragraph(new Run("HOTAS")) { FontWeight = FontWeights.Bold }));
         headerGroup.Rows.Add(headerRow);
         table.RowGroups.Add(headerGroup);
 
@@ -200,7 +213,7 @@ public partial class KeybindEditorWindow : Window
                 var catRow = new TableRow { Background = new SolidColorBrush(Color.FromRgb(230, 240, 250)) };
                 var catCell = new TableCell(new Paragraph(new Run(
                     ActionMapNames.GetCategoryName(currentCat))) { FontWeight = FontWeights.Bold })
-                { ColumnSpan = 4 };
+                { ColumnSpan = 5 };
                 catRow.Cells.Add(catCell);
                 bodyGroup.Rows.Add(catRow);
             }
@@ -210,6 +223,7 @@ public partial class KeybindEditorWindow : Window
             row.Cells.Add(new TableCell(new Paragraph(new Run(action.KeyboardDisplay))));
             row.Cells.Add(new TableCell(new Paragraph(new Run(action.MouseDisplay))));
             row.Cells.Add(new TableCell(new Paragraph(new Run(action.GamepadDisplay))));
+            row.Cells.Add(new TableCell(new Paragraph(new Run(action.HotasDisplay))));
             bodyGroup.Rows.Add(row);
         }
         table.RowGroups.Add(bodyGroup);
@@ -234,10 +248,10 @@ public partial class KeybindEditorWindow : Window
             if (dlg.FileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
             {
                 using var writer = new StreamWriter(dlg.FileName, false, new UTF8Encoding(true));
-                writer.WriteLine("Category,Action,Keyboard,Mouse,Gamepad,Joystick");
+                writer.WriteLine("Category,Action,Keyboard,Mouse,Gamepad,HotasR,HotasL");
                 foreach (var a in _filteredActions)
                 {
-                    writer.WriteLine($"{Csv(a.CategoryName)},{Csv(a.ActionName)},{Csv(a.KeyboardDisplay)},{Csv(a.MouseDisplay)},{Csv(a.GamepadDisplay)},{Csv(a.JoystickDisplay)}");
+                    writer.WriteLine($"{Csv(a.CategoryName)},{Csv(a.ActionName)},{Csv(a.KeyboardDisplay)},{Csv(a.MouseDisplay)},{Csv(a.GamepadDisplay)},{Csv(a.Joystick1Display)},{Csv(a.Joystick2Display)}");
                 }
             }
             else
@@ -271,7 +285,8 @@ public partial class KeybindEditorWindow : Window
                     if (!string.IsNullOrEmpty(binding.Keyboard)) existing.Keyboard = binding.Keyboard;
                     if (!string.IsNullOrEmpty(binding.Mouse)) existing.Mouse = binding.Mouse;
                     if (!string.IsNullOrEmpty(binding.Gamepad)) existing.Gamepad = binding.Gamepad;
-                    if (!string.IsNullOrEmpty(binding.Joystick)) existing.Joystick = binding.Joystick;
+                    if (!string.IsNullOrEmpty(binding.Joystick1)) existing.Joystick1 = binding.Joystick1;
+                    if (!string.IsNullOrEmpty(binding.Joystick2)) existing.Joystick2 = binding.Joystick2;
                 }
             }
             dgActions.Items.Refresh();

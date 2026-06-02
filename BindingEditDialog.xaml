@@ -1,7 +1,7 @@
 <Window x:Class="StarCitizenJapaneseTextCreater.BindingEditDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="バインディング編集" Height="500" Width="600"
+        Title="バインディング編集" Height="560" Width="600"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
     <Grid Margin="16">
         <Grid.RowDefinitions>
@@ -21,6 +21,7 @@
         <GroupBox Grid.Row="1" Header="現在のバインド" Margin="0,0,0,12">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
@@ -48,12 +49,17 @@
                          Background="#E3F2FD" FontFamily="Consolas"/>
                 <Button Content="設定" Grid.Row="2" Grid.Column="2" Margin="4,4,0,4" Click="SetGamepad_Click"/>
 
-                <TextBlock Text="ジョイスティック:" Grid.Row="3" VerticalAlignment="Center" FontWeight="Bold" Margin="0,4"/>
-                <TextBox x:Name="txtJoystick" Grid.Row="3" Grid.Column="1" Margin="0,4" IsReadOnly="True"
-                         Background="#F8F8F8" FontFamily="Consolas"/>
-                <Button Content="設定" Grid.Row="3" Grid.Column="2" Margin="4,4,0,4" Click="SetJoystick_Click"/>
+                <TextBlock Text="HOTAS R:" Grid.Row="3" VerticalAlignment="Center" FontWeight="Bold" Margin="0,4"/>
+                <TextBox x:Name="txtJoystickR" Grid.Row="3" Grid.Column="1" Margin="0,4" IsReadOnly="True"
+                         Background="#FFF3E0" FontFamily="Consolas"/>
+                <Button Content="設定" Grid.Row="3" Grid.Column="2" Margin="4,4,0,4" Click="SetJoystickR_Click"/>
 
-                <CheckBox x:Name="chkLongPress" Grid.Row="4" Grid.ColumnSpan="3" Content="長押し (Hold)" Margin="0,8,0,0"/>
+                <TextBlock Text="HOTAS L:" Grid.Row="4" VerticalAlignment="Center" FontWeight="Bold" Margin="0,4"/>
+                <TextBox x:Name="txtJoystickL" Grid.Row="4" Grid.Column="1" Margin="0,4" IsReadOnly="True"
+                         Background="#FFF3E0" FontFamily="Consolas"/>
+                <Button Content="設定" Grid.Row="4" Grid.Column="2" Margin="4,4,0,4" Click="SetJoystickL_Click"/>
+
+                <CheckBox x:Name="chkLongPress" Grid.Row="5" Grid.ColumnSpan="3" Content="長押し (Hold)" Margin="0,8,0,0"/>
             </Grid>
         </GroupBox>
 

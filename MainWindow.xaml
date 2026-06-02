@@ -85,8 +85,10 @@
                                  KeyDown="SearchBox_KeyDown"/>
                         <Button Content="検索" Click="Search_Click" Padding="10,4" Margin="0,0,8,0"/>
                         <CheckBox x:Name="chkPartialMatch" Content="部分一致" IsChecked="True"
-                                  VerticalAlignment="Center" Margin="0,0,8,0"/>
-                        <ComboBox x:Name="cmbSearchField" Width="110" VerticalAlignment="Center" Margin="0,0,8,0">
+                                  VerticalAlignment="Center" Margin="0,0,8,0"
+                                  Checked="PartialMatch_Changed" Unchecked="PartialMatch_Changed"/>
+                        <ComboBox x:Name="cmbSearchField" Width="110" VerticalAlignment="Center" Margin="0,0,8,0"
+                                  SelectionChanged="SearchField_Changed">
                             <ComboBoxItem Content="全フィールド" IsSelected="True"/>
                             <ComboBoxItem Content="Key"/>
                             <ComboBoxItem Content="English"/>

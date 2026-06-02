@@ -1378,7 +1378,9 @@ public class ChatService
                     a.CategoryName.Contains(query, StringComparison.OrdinalIgnoreCase) ||
                     a.KeyboardDisplay.Contains(query, StringComparison.OrdinalIgnoreCase) ||
                     a.MouseDisplay.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                    a.GamepadDisplay.Contains(query, StringComparison.OrdinalIgnoreCase)
+                    a.GamepadDisplay.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    a.Joystick1Display.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    a.Joystick2Display.Contains(query, StringComparison.OrdinalIgnoreCase)
                 ).ToList();
 
                 if (results.Count == 0)
@@ -1395,8 +1397,10 @@ public class ChatService
                             parts.Add($"Mouse: {r.MouseDisplay}");
                         if (!string.IsNullOrEmpty(r.Gamepad))
                             parts.Add($"GP: {r.GamepadDisplay}");
-                        if (!string.IsNullOrEmpty(r.Joystick))
-                            parts.Add($"JS: {r.JoystickDisplay}");
+                        if (!string.IsNullOrEmpty(r.Joystick1))
+                            parts.Add($"HOTAS R: {r.Joystick1Display}");
+                        if (!string.IsNullOrEmpty(r.Joystick2))
+                            parts.Add($"HOTAS L: {r.Joystick2Display}");
                         var bindStr = parts.Count > 0 ? string.Join(" / ", parts) : "(未割当)";
 
                         var actMode = ActivationModeHelper.GetDisplayName(r.EffectiveKeyboardActivationMode);
@@ -2962,10 +2966,11 @@ public class ChatService
             {
                 ["model"] = config.Model,
                 ["max_tokens"] = 4096,
-                ["temperature"] = 0.7,
                 ["system"] = system,
                 ["messages"] = conversationMessages,
             };
+            if (!config.Model.Contains("opus", StringComparison.OrdinalIgnoreCase))
+                body["temperature"] = 0.7;
             if (useTools && tools.Count > 0)
             {
                 body["tools"] = tools;
