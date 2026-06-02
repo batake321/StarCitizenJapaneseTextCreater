@@ -92,10 +92,14 @@ if ($BackupZip) {
     Invoke-RestMethod -Uri $uploadUrl2 -Method Post -Headers $uploadHeaders -InFile $BackupZip
     Write-Host "Backup asset uploaded" -ForegroundColor Green
 }
+
+$asset = Invoke-RestMethod -Uri $uploadUrl -Method Post -Headers $uploadHeaders -InFile $ZipPath
+
 Write-Host "Asset uploaded: $($asset.browser_download_url)" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "=== Done ===" -ForegroundColor Green
 Write-Host "Release: $($release.html_url)"
 Write-Host "Download: $($asset.browser_download_url)"
+
 
