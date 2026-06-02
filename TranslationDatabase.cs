@@ -68,6 +68,21 @@ public class TranslationDatabase : IDisposable
         cmd.ExecuteNonQuery();
     }
 
+    public void DeleteGlossaryBulk(List<string> englishKeys)
+    {
+        if (englishKeys.Count == 0) return;
+        using var tx = _conn.BeginTransaction();
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM glossary WHERE english = $en";
+        var pEn = cmd.Parameters.Add("$en", SqliteType.Text);
+        foreach (var en in englishKeys)
+        {
+            pEn.Value = en;
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+
     public List<(string English, string Japanese)> GetAllGlossary()
     {
         var result = new List<(string, string)>();
@@ -131,14 +146,21 @@ public class TranslationDatabase : IDisposable
             ON CONFLICT(key) DO UPDATE SET
                 english = excluded.english,
                 japanese = CASE
+                    WHEN translations.source = 'original' THEN excluded.english
+                    WHEN translations.source IN ('manual', 'ai', 'csv', 'glossary') THEN translations.japanese
                     WHEN excluded.japanese IS NOT NULL AND excluded.japanese != '' THEN excluded.japanese
                     WHEN translations.english != excluded.english THEN NULL
                     ELSE translations.japanese
                 END,
                 source = CASE
+                    WHEN translations.source IN ('original', 'manual', 'ai', 'csv', 'glossary') THEN translations.source
                     WHEN excluded.japanese IS NOT NULL AND excluded.japanese != '' THEN excluded.source
                     WHEN translations.english != excluded.english AND translations.japanese IS NOT NULL AND translations.japanese != '' THEN 'stale'
                     ELSE translations.source
+                END,
+                translator = CASE
+                    WHEN translations.source IN ('original', 'manual', 'ai', 'csv', 'glossary') THEN translations.translator
+                    ELSE translations.translator
                 END,
                 modified_at = datetime('now', 'localtime')
             """;
@@ -232,6 +254,22 @@ public class TranslationDatabase : IDisposable
         tx.Commit();
     }
 
+    public void SetToOriginalEnglish(List<string> keys)
+    {
+        if (keys.Count == 0) return;
+        using var tx = _conn.BeginTransaction();
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "UPDATE translations SET japanese = english, source = 'original', translator = 'original', modified_at = datetime('now', 'localtime') WHERE key = $key";
+        var pKey = cmd.Parameters.Add("$key", SqliteType.Text);
+
+        foreach (var key in keys)
+        {
+            pKey.Value = key;
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+
     public Dictionary<string, string> GetAllTranslations()
     {
         var result = new Dictionary<string, string>();
@@ -243,7 +281,7 @@ public class TranslationDatabase : IDisposable
         return result;
     }
 
-    public (int total, int translated, int official, int ai, int manual, int untranslated) GetStats()
+    public (int total, int translated, int official, int ai, int manual, int original, int untranslated) GetStats()
     {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
@@ -253,13 +291,14 @@ public class TranslationDatabase : IDisposable
                 COUNT(CASE WHEN source = 'official' AND japanese IS NOT NULL AND japanese != '' THEN 1 END) as official,
                 COUNT(CASE WHEN source = 'ai' THEN 1 END) as ai,
                 COUNT(CASE WHEN source = 'manual' THEN 1 END) as manual,
-                COUNT(CASE WHEN japanese IS NULL OR japanese = '' THEN 1 END) as untranslated
+                COUNT(CASE WHEN source = 'original' THEN 1 END) as original,
+                COUNT(CASE WHEN source IN ('untranslated', 'stale') OR (japanese IS NULL AND source NOT IN ('original')) THEN 1 END) as untranslated
             FROM translations
             """;
         using var reader = cmd.ExecuteReader();
         reader.Read();
         return (reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2),
-                reader.GetInt32(3), reader.GetInt32(4), reader.GetInt32(5));
+                reader.GetInt32(3), reader.GetInt32(4), reader.GetInt32(5), reader.GetInt32(6));
     }
 
     public void ExportCsv(string csvPath)

@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -58,6 +59,7 @@ public partial class MainWindow : Window
         UpdateDbPathDisplay();
         RefreshProfileLists();
         LoadGlossary();
+        RefreshEditor();
         InitChat();
 
         if (config.WebServerAutoStart)
@@ -492,8 +494,8 @@ public partial class MainWindow : Window
         try
         {
             using var db = new TranslationDatabase(DbPath);
-            var (total, translated, official, ai, manual, untranslated) = db.GetStats();
-            txtDbStats.Text = $"全{total:N0}件 | 翻訳済{translated:N0} (公式{official:N0}, AI{ai:N0}, 手動{manual:N0}) | 未翻訳{untranslated:N0}";
+            var (total, translated, official, ai, manual, original, untranslated) = db.GetStats();
+            txtDbStats.Text = $"全{total:N0}件 | 翻訳済{translated:N0} (公式{official:N0}, AI{ai:N0}, 手動{manual:N0}, 原文{original:N0}) | 未翻訳{untranslated:N0}";
             _allRows = LoadAllRows(db);
             BuildTranslatorFilter();
             ApplyFilter();
@@ -503,35 +505,11 @@ public partial class MainWindow : Window
 
     // === Translation Editor ===
 
-    private void LoadDb_Click(object sender, RoutedEventArgs e)
-    {
-        if (!File.Exists(DbPath))
-        {
-            MessageBox.Show("データベースが見つかりません。先に Extract または All を実行してください。", "エラー");
-            return;
-        }
-
-        try
-        {
-            using var db = new TranslationDatabase(DbPath);
-            var (total, translated, official, ai, manual, untranslated) = db.GetStats();
-            txtDbStats.Text = $"全{total:N0}件 | 翻訳済{translated:N0} (公式{official:N0}, AI{ai:N0}, 手動{manual:N0}) | 未翻訳{untranslated:N0}";
-
-            _allRows = LoadAllRows(db);
-            BuildTranslatorFilter();
-            ApplyFilter();
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"DB読み込みエラー: {ex.Message}", "エラー");
-        }
-    }
-
     private List<TranslationRow> LoadAllRows(TranslationDatabase db)
     {
         var rows = new List<TranslationRow>();
         using var cmd = db.CreateCommand();
-        cmd.CommandText = "SELECT key, english, japanese, source, translator, modified_at FROM translations ORDER BY key";
+        cmd.CommandText = "SELECT key, english, japanese, source, translator, modified_at FROM translations ORDER BY key COLLATE NOCASE";
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
@@ -581,23 +559,36 @@ public partial class MainWindow : Window
 
         if (!string.IsNullOrEmpty(search))
         {
+            var partial = chkPartialMatch.IsChecked == true;
+            var matcher = BuildSearchMatcher(search, partial);
+
             _filteredRows = searchField switch
             {
-                "Key" => _filteredRows.Where(r =>
-                    r.Key.Contains(search, StringComparison.OrdinalIgnoreCase)).ToList(),
-                "English" => _filteredRows.Where(r =>
-                    r.English.Contains(search, StringComparison.OrdinalIgnoreCase)).ToList(),
-                "Japanese" => _filteredRows.Where(r =>
-                    r.Japanese.Contains(search, StringComparison.OrdinalIgnoreCase)).ToList(),
+                "Key" => _filteredRows.Where(r => matcher(r.Key)).ToList(),
+                "English" => _filteredRows.Where(r => matcher(r.English)).ToList(),
+                "Japanese" => _filteredRows.Where(r => matcher(r.Japanese)).ToList(),
                 _ => _filteredRows.Where(r =>
-                    r.Key.Contains(search, StringComparison.OrdinalIgnoreCase) ||
-                    r.English.Contains(search, StringComparison.OrdinalIgnoreCase) ||
-                    r.Japanese.Contains(search, StringComparison.OrdinalIgnoreCase)).ToList()
+                    matcher(r.Key) || matcher(r.English) || matcher(r.Japanese)).ToList()
             };
         }
 
         _page = 0;
         ShowPage();
+    }
+
+    private Func<string, bool> BuildSearchMatcher(string search, bool partial)
+    {
+        if (search.Contains('*') || search.Contains('?'))
+        {
+            var pattern = "^" + Regex.Escape(search).Replace("\\*", ".*").Replace("\\?", ".") + "$";
+            var regex = new Regex(pattern, RegexOptions.IgnoreCase);
+            return value => regex.IsMatch(value);
+        }
+
+        if (partial)
+            return value => value.Contains(search, StringComparison.OrdinalIgnoreCase);
+
+        return value => value.Equals(search, StringComparison.OrdinalIgnoreCase);
     }
 
     private void ShowPage()
@@ -658,6 +649,45 @@ public partial class MainWindow : Window
             chkSelectAll.IsChecked = false;
             dgTranslations.Items.Refresh();
             MessageBox.Show($"{selected.Count:N0} 件の翻訳を削除しました。", "完了");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+        }
+    }
+
+    private void SetOriginal_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = _filteredRows.Where(r => r.IsSelected).ToList();
+        if (selected.Count == 0)
+        {
+            MessageBox.Show("原文にする行をチェックボックスで選択してください。");
+            return;
+        }
+
+        if (MessageBox.Show(
+            $"選択した {selected.Count:N0} 件の日本語を英語原文のままにします。\n実行しますか？",
+            "原文設定の確認", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+            return;
+
+        try
+        {
+            var keys = selected.Select(r => r.Key).ToList();
+            using var db = new TranslationDatabase(DbPath);
+            db.SetToOriginalEnglish(keys);
+
+            foreach (var row in selected)
+            {
+                row.Japanese = row.English;
+                row.Source = "original";
+                row.Translator = "original";
+                row.IsSelected = false;
+                row.ModifiedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            }
+
+            chkSelectAll.IsChecked = false;
+            dgTranslations.Items.Refresh();
+            MessageBox.Show($"{selected.Count:N0} 件を英語原文に設定しました。", "完了");
         }
         catch (Exception ex)
         {
@@ -731,7 +761,7 @@ public partial class MainWindow : Window
             using var db = new TranslationDatabase(DbPath);
             var count = db.ImportCsv(dlg.FileName);
             MessageBox.Show($"CSVインポート完了: {count}件", "完了");
-            LoadDb_Click(sender, e);
+            RefreshEditor();
         }
         catch (Exception ex)
         {
@@ -781,15 +811,34 @@ public partial class MainWindow : Window
         }
     }
 
+    private void GlossarySelectAll_Click(object sender, RoutedEventArgs e)
+    {
+        var isChecked = chkGlossarySelectAll.IsChecked == true;
+        foreach (var row in _glossaryRows)
+            row.IsSelected = isChecked;
+    }
+
     private void GlossaryDelete_Click(object sender, RoutedEventArgs e)
     {
-        if (dgGlossary.SelectedItem is not GlossaryRow row) { MessageBox.Show("削除する用語を選択してください。"); return; }
+        var selected = _glossaryRows.Where(r => r.IsSelected).ToList();
+        if (selected.Count == 0)
+        {
+            MessageBox.Show("削除する用語をチェックボックスで選択してください。");
+            return;
+        }
+
+        if (MessageBox.Show(
+            $"選択した {selected.Count} 件の用語を削除します。実行しますか？",
+            "用語削除の確認", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            return;
 
         try
         {
             using var db = new TranslationDatabase(DbPath);
-            db.DeleteGlossary(row.English);
+            db.DeleteGlossaryBulk(selected.Select(r => r.English).ToList());
+            chkGlossarySelectAll.IsChecked = false;
             LoadGlossary();
+            MessageBox.Show($"{selected.Count} 件の用語を削除しました。", "完了");
         }
         catch (Exception ex)
         {
@@ -817,7 +866,7 @@ public partial class MainWindow : Window
             MessageBox.Show($"一括置換完了: {count:N0}件のエントリを更新しました。", "完了");
 
             if (_allRows.Count > 0)
-                LoadDb_Click(sender, e);
+                RefreshEditor();
         }
         catch (Exception ex)
         {
@@ -2297,10 +2346,19 @@ public class TranslationRow : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }
 
-public class GlossaryRow
+public class GlossaryRow : INotifyPropertyChanged
 {
-    public string English { get; set; } = "";
-    public string Japanese { get; set; } = "";
+    private string _english = "";
+    private string _japanese = "";
+    private bool _isSelected;
+
+    public string English { get => _english; set { _english = value; OnPropertyChanged(); } }
+    public string Japanese { get => _japanese; set { _japanese = value; OnPropertyChanged(); } }
+    public bool IsSelected { get => _isSelected; set { _isSelected = value; OnPropertyChanged(); } }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+    private void OnPropertyChanged([CallerMemberName] string? name = null) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }
 
 public class ChatBubble

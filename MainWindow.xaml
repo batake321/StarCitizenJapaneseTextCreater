@@ -84,6 +84,8 @@
                         <TextBox x:Name="txtSearch" Width="300" VerticalAlignment="Center" Margin="0,0,4,0"
                                  KeyDown="SearchBox_KeyDown"/>
                         <Button Content="検索" Click="Search_Click" Padding="10,4" Margin="0,0,8,0"/>
+                        <CheckBox x:Name="chkPartialMatch" Content="部分一致" IsChecked="True"
+                                  VerticalAlignment="Center" Margin="0,0,8,0"/>
                         <ComboBox x:Name="cmbSearchField" Width="110" VerticalAlignment="Center" Margin="0,0,8,0">
                             <ComboBoxItem Content="全フィールド" IsSelected="True"/>
                             <ComboBoxItem Content="Key"/>
@@ -98,11 +100,11 @@
                             <ComboBoxItem Content="manual"/>
                             <ComboBoxItem Content="csv"/>
                             <ComboBoxItem Content="glossary"/>
+                            <ComboBoxItem Content="original"/>
                             <ComboBoxItem Content="untranslated"/>
                         </ComboBox>
                         <ComboBox x:Name="cmbTranslatorFilter" Width="160" VerticalAlignment="Center" Margin="0,0,8,0"
                                   SelectionChanged="TranslatorFilter_Changed"/>
-                        <Button Content="DB読込" Click="LoadDb_Click" Padding="10,4"/>
                     </StackPanel>
 
                     <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
@@ -151,6 +153,8 @@
                                   Click="SelectAll_Click"/>
                         <Button Content="選択した翻訳を削除 (再翻訳用)" Click="DeleteSelected_Click"
                                 Padding="10,4" Margin="0,0,12,0" Foreground="#C00"/>
+                        <Button Content="全て原文" Click="SetOriginal_Click"
+                                Padding="10,4" Margin="0,0,12,0" ToolTip="選択したレコードの日本語を英語原文のままにする"/>
                         <Button Content="CSV Export" Click="CsvExport_Click" Style="{StaticResource ActionButton}"/>
                         <Button Content="CSV Import" Click="CsvImport_Click" Style="{StaticResource ActionButton}"/>
                     </WrapPanel>
@@ -172,9 +176,10 @@
 
                     <DataGrid x:Name="dgGlossary" Grid.Row="1" AutoGenerateColumns="False"
                               CanUserAddRows="False" CanUserDeleteRows="False"
-                              SelectionMode="Single" GridLinesVisibility="Horizontal"
+                              SelectionMode="Extended" GridLinesVisibility="Horizontal"
                               AlternatingRowBackground="#F8F8F8" FontSize="13">
                         <DataGrid.Columns>
+                            <DataGridCheckBoxColumn Header="" Binding="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}" Width="30"/>
                             <DataGridTextColumn Header="English" Binding="{Binding English}" Width="350" IsReadOnly="True"/>
                             <DataGridTextColumn Header="Japanese" Binding="{Binding Japanese}" Width="350" IsReadOnly="True"/>
                         </DataGrid.Columns>
@@ -195,7 +200,9 @@
 
                     <WrapPanel Grid.Row="3" Margin="0,8,0,0">
                         <Button Content="追加/更新" Click="GlossaryAdd_Click" Style="{StaticResource ActionButton}"/>
-                        <Button Content="削除" Click="GlossaryDelete_Click" Style="{StaticResource ActionButton}"/>
+                        <CheckBox x:Name="chkGlossarySelectAll" Content="全選択" VerticalAlignment="Center" Margin="0,0,8,0"
+                                  Click="GlossarySelectAll_Click"/>
+                        <Button Content="選択削除" Click="GlossaryDelete_Click" Style="{StaticResource ActionButton}" Foreground="#C00"/>
                         <Button Content="一括置換 (翻訳済みテキストに適用)" Click="GlossaryBulkReplace_Click"
                                 Style="{StaticResource ActionButton}" FontWeight="Bold"/>
                         <Button Content="CSV Export" Click="GlossaryCsvExport_Click" Style="{StaticResource ActionButton}"/>
