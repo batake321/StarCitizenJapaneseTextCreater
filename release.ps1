@@ -1,4 +1,6 @@
 param(
+    [string]$BackupZip,
+
     [Parameter(Mandatory=$true)]
     [string]$Version,
 
@@ -83,10 +85,17 @@ $uploadHeaders = @{
     "Authorization" = "token $token"
     "Content-Type"  = "application/zip"
 }
-$asset = Invoke-RestMethod -Uri $uploadUrl -Method Post -Headers $uploadHeaders -InFile $ZipPath
+
+
+if ($BackupZip) {
+    $uploadUrl2 = "https://uploads.github.com/repos/$Repo/releases/$releaseId/assets?name=$(Split-Path $BackupZip -Leaf)"
+    Invoke-RestMethod -Uri $uploadUrl2 -Method Post -Headers $uploadHeaders -InFile $BackupZip
+    Write-Host "Backup asset uploaded" -ForegroundColor Green
+}
 Write-Host "Asset uploaded: $($asset.browser_download_url)" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "=== Done ===" -ForegroundColor Green
 Write-Host "Release: $($release.html_url)"
 Write-Host "Download: $($asset.browser_download_url)"
+

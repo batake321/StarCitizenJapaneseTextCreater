@@ -21,9 +21,21 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[Releases ページ](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases)** から最新の ZIP をダウンロードしてください。
+> **[StarCitizenJapaneseTextCreater-v1.12.7-win-x64.zip (最新 v1.12.7 バイナリ)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.12.7/StarCitizenJapaneseTextCreater-v1.12.7-win-x64.zip)**
 >
-> **[翻訳データベース (バックアップ)](https://github.com/batake321/StarCitizenJapaneseTextCreater/raw/main/db_backup/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260602_153536.zip (翻訳データベース)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.12.7/sc_japanese_backup_20260602_153536.zip)** — アプリの「インポート (復元)」から取り込めます。
+
+### 🚀 v1.12.7 更新内容 (前回のAI変更点)
+
+- **[全て原文]ボタンの実装**: 翻訳エディタで選択したレコードの日本語テキストを英語原文に一括設定 (source=original) できるようになりました。
+- **検索の強化**: 翻訳エディタの検索に部分一致チェックボックスと、ワイルドカード (`*`, `?`) を使用した柔軟な検索を追加しました。
+- **翻訳の保護機能**: Initial import 時に `original`, `manual`, `ai`, `csv`, `glossary` 等の手動・独自翻訳データが公式テキスト等で上書きされないよう保護する機能を追加しました。
+- **統計情報の正確化**: `original` カウントを追加し、未翻訳カウントを source 基準で正確集計・表示するように修正しました。
+- **DB自動読込の実装**: アプリ起動時に自動で RefreshEditor が実行されるよう改善し、不要な手動「DB読込」ボタンを削除しました。
+- **ソート順の改善**: `ORDER BY key COLLATE NOCASE` を採用し、大文字・小文字混在キーが自然順にソートされるようになりました。
+- **用語集の一括削除機能**: 用語集エディタにチェックボックス式複数選択と、選択項目の一括削除機能を追加しました。
+- **特定パターンの英語強制**: `ui_pregame_port_*_name` (例: Seraphim Station) などの地名を翻訳対象外(英語維持)とするパターンを追加しました。
+- 翻訳データベースのバックアップを最新化(`sc_japanese_backup_20260602_153536.zip` 同梱)
 
 ### 動作要件
 
