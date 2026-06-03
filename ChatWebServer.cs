@@ -124,7 +124,11 @@ public class ChatWebServer : IDisposable
 
         foreach (var kv in _wsClients)
         {
-            try { kv.Value.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None).Wait(1000); }
+            try
+            {
+                using var timeout = new CancellationTokenSource(1000);
+                _ = kv.Value.CloseAsync(WebSocketCloseStatus.NormalClosure, "", timeout.Token);
+            }
             catch { }
         }
         _wsClients.Clear();

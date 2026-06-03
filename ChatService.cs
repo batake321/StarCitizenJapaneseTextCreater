@@ -179,6 +179,9 @@ public class ChatService
     private static ActionMapData? _keybindData;
     public static void SetKeybindData(ActionMapData data) => _keybindData = data;
 
+    private static TradeService? _tradeService;
+    public static void SetTradeService(TradeService service) => _tradeService = service;
+
     private static List<string> LookupEnglishKeywords(string japaneseQuery)
     {
         if (string.IsNullOrEmpty(_translationDbPath) || !File.Exists(_translationDbPath))
@@ -283,6 +286,24 @@ public class ChatService
                         ["system"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "星系名（例: Stanton）" }
                     },
                     ["required"] = new[] { "name" }
+                }
+            },
+            new()
+            {
+                ["name"] = "search_trade_routes",
+                ["description"] = "キャッシュ済み価格データから最適交易ルートを検索。予算・積載量・星系で絞り込み。在庫・コンテナサイズ付き。search_commodityより高速",
+                ["input_schema"] = new Dictionary<string, object>
+                {
+                    ["type"] = "object",
+                    ["properties"] = new Dictionary<string, object>
+                    {
+                        ["budget"] = new Dictionary<string, object> { ["type"] = "number", ["description"] = "予算 (aUEC)。省略で500000" },
+                        ["cargo_scu"] = new Dictionary<string, object> { ["type"] = "integer", ["description"] = "積載量 (SCU)。省略で100" },
+                        ["buy_system"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "購入星系 (Stanton/Pyro/Nyx)。省略で全星系" },
+                        ["sell_system"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "売却星系。省略で全星系" },
+                        ["commodity"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "コモディティ名で絞り込み（省略で全商品）" },
+                    },
+                    ["required"] = Array.Empty<string>()
                 }
             },
             new()
@@ -405,6 +426,7 @@ public class ChatService
                 "lookup" => ExecuteLookupAsync(args),
                 "search_ship" => ExecuteSearchShipAsync(args),
                 "search_commodity" => ExecuteSearchCommodityAsync(args),
+                "search_trade_routes" => Task.FromResult(ExecuteSearchTradeRoutes(args)),
                 "search_item" => ExecuteSearchItemAsync(args),
                 "search_mission" => ExecuteSearchMissionAsync(args),
                 "search_price" => ExecuteSearchPriceAsync(args),
@@ -813,6 +835,20 @@ public class ChatService
         if (!string.IsNullOrEmpty(dcbCommodityResult))
             return dcbCommodityResult + "\n" + uexResult;
         return uexResult;
+    }
+
+    private static string ExecuteSearchTradeRoutes(JsonElement args)
+    {
+        if (_tradeService == null || !_tradeService.HasPriceData)
+            return "交易価格データが未取得です。コモディティタブで [価格更新] を実行するか、アプリ起動後しばらくお待ちください。";
+
+        var budget = args.TryGetProperty("budget", out var b) && b.ValueKind == JsonValueKind.Number ? b.GetDouble() : 500000;
+        var cargoScu = args.TryGetProperty("cargo_scu", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetInt32() : 100;
+        var buySystem = args.TryGetProperty("buy_system", out var bs) ? bs.GetString() ?? "全て" : "全て";
+        var sellSystem = args.TryGetProperty("sell_system", out var ss) ? ss.GetString() ?? "全て" : "全て";
+        var commodity = args.TryGetProperty("commodity", out var com) ? com.GetString() : null;
+
+        return _tradeService.FormatTradeRouteSummary(budget, cargoScu, buySystem, sellSystem, commodity, topN: 10);
     }
 
     private static async Task<string> ExecuteSearchItemAsync(JsonElement args)

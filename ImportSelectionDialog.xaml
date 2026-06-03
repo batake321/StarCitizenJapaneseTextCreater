@@ -47,6 +47,12 @@
                     <TextBlock x:Name="txtKnowledgeCount" Foreground="#666" Margin="8,0,0,0"/>
                 </StackPanel>
             </CheckBox>
+            <CheckBox x:Name="chkTrade" Margin="0,6" FontSize="13">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="交易データ (価格・在庫)" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="txtTradeCount" Foreground="#666" Margin="8,0,0,0"/>
+                </StackPanel>
+            </CheckBox>
 
             <CheckBox x:Name="chkAll" Content="すべて選択" FontSize="13" Margin="0,6"
                       Checked="ChkAll_Changed" Unchecked="ChkAll_Changed"/>

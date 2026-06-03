@@ -28,6 +28,10 @@ public partial class MainWindow : Window
     // Glossary state
     private ObservableCollection<GlossaryRow> _glossaryRows = new();
 
+    // Trade state
+    private readonly TradeService _tradeService = new();
+    private HashSet<string>? _selectedCommodities;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -61,6 +65,7 @@ public partial class MainWindow : Window
         LoadGlossary();
         RefreshEditor();
         InitChat();
+        _ = StartBackgroundTradeFetchAsync();
 
         if (config.WebServerAutoStart)
             _ = StartWebServerAsync();
@@ -1248,8 +1253,9 @@ public partial class MainWindow : Window
         try
         {
             txtBackupStatus.Text = "エクスポート中...";
+            var tradeDbPath = Path.Combine(WorkDir, "trade_cache.db");
             await DatabaseBackupService.ExportAsync(DbPath, IndexDbPath, dlg.FileName,
-                s => Dispatcher.Invoke(() => txtBackupStatus.Text = s));
+                s => Dispatcher.Invoke(() => txtBackupStatus.Text = s), tradeDbPath);
             var size = new FileInfo(dlg.FileName).Length;
             txtBackupStatus.Text = $"エクスポート完了 ({size / 1024.0:N0} KB)";
             MessageBox.Show($"バックアップを保存しました。\n{dlg.FileName}\n({size / 1024.0:N0} KB)", "エクスポート完了");
@@ -1291,9 +1297,10 @@ public partial class MainWindow : Window
             }
 
             txtBackupStatus.Text = "インポート中...";
+            var tradeDbImportPath = Path.Combine(WorkDir, "trade_cache.db");
             await DatabaseBackupService.ImportFromZipAsync(dlg.FileName, DbPath, IndexDbPath,
                 selectDlg.SelectedCategories, selectDlg.Mode,
-                s => Dispatcher.Invoke(() => txtBackupStatus.Text = s));
+                s => Dispatcher.Invoke(() => txtBackupStatus.Text = s), tradeDbImportPath);
 
             txtBackupStatus.Text = "インポート完了";
             UpdateDbPathDisplay();
@@ -1715,7 +1722,7 @@ public partial class MainWindow : Window
     {
         if (_webServer?.IsRunning == true)
         {
-            _webServer.Stop();
+            await Task.Run(() => _webServer.Stop());
             btnWebServer.Content = "サーバー起動";
             btnWebServer.Background = new System.Windows.Media.SolidColorBrush(
                 System.Windows.Media.Color.FromRgb(0x4A, 0x90, 0xD9));
@@ -2321,9 +2328,479 @@ public partial class MainWindow : Window
             svChat.ScrollToEnd();
         });
     }
+
+    // === Ship Management (船舶管理) ===
+
+    private void RefreshMyShips()
+    {
+        _tradeService.SetCacheDir(WorkDir);
+        _tradeService.LoadMyShips();
+        dgMyShips.ItemsSource = null;
+        dgMyShips.ItemsSource = _tradeService.MyShips;
+        txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻";
+        RefreshCommodityShipCombo();
+    }
+
+    private void RefreshCommodityShipCombo()
+    {
+        try
+        {
+            cmbTradeShip.SelectionChanged -= TradeShip_Changed;
+            var items = new List<object>();
+            foreach (var my in _tradeService.MyShips)
+                items.Add(new ShipInfo { Name = $"★ {my.Name}", Manufacturer = my.Manufacturer, Scu = my.Scu });
+            foreach (var s in _tradeService.Ships)
+                items.Add(s);
+            cmbTradeShip.ItemsSource = items;
+            cmbTradeShip.DisplayMemberPath = "DisplayName";
+            cmbTradeShip.SelectionChanged += TradeShip_Changed;
+        }
+        catch { }
+    }
+
+    private void ShipSearch_Click(object sender, RoutedEventArgs e) => SearchShips();
+    private void ShipSearch_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Enter) SearchShips();
+    }
+
+    private void SearchShips()
+    {
+        if (_tradeService.Ships.Count == 0)
+        {
+            if (_tradeService.IsFetching)
+                txtMyShipStatus.Text = "UEX船データを取得中...しばらくお待ちください";
+            else
+                txtMyShipStatus.Text = "船データがありません。コモディティタブの [価格更新] を実行してください";
+            return;
+        }
+
+        var query = txtShipSearch.Text.Trim();
+        if (string.IsNullOrEmpty(query) || query.Length < 2)
+        {
+            cmbAddShip.ItemsSource = _tradeService.Ships;
+            cmbAddShip.IsDropDownOpen = true;
+            txtMyShipStatus.Text = $"全 {_tradeService.Ships.Count} 件 (2文字以上で絞り込み)";
+            return;
+        }
+        var results = _tradeService.Ships
+            .Where(s => s.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                        s.Manufacturer.Contains(query, StringComparison.OrdinalIgnoreCase))
+            .Take(50).ToList();
+        cmbAddShip.ItemsSource = results;
+        cmbAddShip.IsDropDownOpen = results.Count > 0;
+        txtMyShipStatus.Text = results.Count > 0
+            ? $"検索結果: {results.Count} 件 — 候補から選択してください"
+            : $"「{query}」に一致する船が見つかりません (全 {_tradeService.Ships.Count} 件中)";
+    }
+
+    private void AddShip_Selected(object sender, SelectionChangedEventArgs e)
+    {
+        if (cmbAddShip.SelectedItem is ShipInfo ship)
+        {
+            txtAddShipName.Text = ship.Name;
+            txtAddShipMfr.Text = ship.Manufacturer;
+            txtAddShipScu.Text = ship.Scu.ToString();
+        }
+    }
+
+    private void AddMyShip_Click(object sender, RoutedEventArgs e)
+    {
+        var name = txtAddShipName.Text.Trim();
+        if (string.IsNullOrEmpty(name))
+        {
+            MessageBox.Show("船名を入力してください。検索で候補を選択するか、直接入力してください。", "入力エラー");
+            return;
+        }
+
+        // @vehicle_Name 解決
+        name = _tradeService.ResolveVehicleName(name);
+
+        var mfr = txtAddShipMfr.Text.Trim();
+        int.TryParse(txtAddShipScu.Text.Trim(), out var scu);
+        var notes = txtAddShipNotes.Text.Trim();
+
+        // UEX データから SCU を補完
+        if (scu == 0)
+        {
+            var uex = _tradeService.FindUexShip(name);
+            if (uex != null)
+            {
+                scu = uex.Scu;
+                if (string.IsNullOrEmpty(mfr)) mfr = uex.Manufacturer;
+            }
+        }
+
+        _tradeService.AddMyShip(name, mfr, scu, notes);
+        RefreshMyShips();
+        txtAddShipName.Text = "";
+        txtAddShipMfr.Text = "";
+        txtAddShipScu.Text = "0";
+        txtAddShipNotes.Text = "";
+        Log($"[Ship] 追加: {name} ({scu} SCU)");
+    }
+
+    private void DeleteMyShip_Click(object sender, RoutedEventArgs e)
+    {
+        if (dgMyShips.SelectedItem is not MyShipEntry ship) return;
+        if (MessageBox.Show($"「{ship.Name}」を削除しますか？", "確認", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
+
+        _tradeService.DeleteMyShip(ship.Id);
+        RefreshMyShips();
+        Log($"[Ship] 削除: {ship.Name}");
+    }
+
+    private void MyShip_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (dgMyShips.SelectedItem is not MyShipEntry ship) return;
+
+        txtAddShipName.Text = ship.Name;
+        txtAddShipMfr.Text = ship.Manufacturer;
+        txtAddShipScu.Text = ship.Scu.ToString();
+        txtAddShipNotes.Text = ship.Notes;
+        txtMyShipStatus.Text = $"編集中: {ship.Name} — 入力欄を変更して [追加] で新規 or 下の更新ボタンで上書き";
+    }
+
+    private void UpdateMyShip_Click(object sender, RoutedEventArgs e)
+    {
+        if (dgMyShips.SelectedItem is not MyShipEntry ship) return;
+        var name = txtAddShipName.Text.Trim();
+        if (string.IsNullOrEmpty(name)) return;
+        int.TryParse(txtAddShipScu.Text.Trim(), out var scu);
+        _tradeService.UpdateMyShip(ship.Id, name, txtAddShipMfr.Text.Trim(), scu, txtAddShipNotes.Text.Trim());
+        RefreshMyShips();
+        Log($"[Ship] 更新: {name} ({scu} SCU)");
+    }
+
+    // === Commodity Trade ===
+
+    private void CommodityFilter_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_tradeService.HasPriceData)
+        {
+            MessageBox.Show("価格データ未取得です。先に [価格更新] を実行してください。", "データなし");
+            return;
+        }
+
+        var allNames = _tradeService.GetCommodityNames();
+        var win = new Window
+        {
+            Title = "コモディティ選択",
+            Width = 400, Height = 550,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Owner = this
+        };
+
+        var sp = new StackPanel { Margin = new Thickness(8) };
+        var btnAll = new Button { Content = "全選択", Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(0, 0, 4, 8) };
+        var btnNone = new Button { Content = "全解除", Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(0, 0, 4, 8) };
+        var btnOk = new Button { Content = "OK", Padding = new Thickness(16, 4, 16, 4), Margin = new Thickness(8, 0, 0, 8), FontWeight = FontWeights.Bold, Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x19, 0x76, 0xD2)), Foreground = System.Windows.Media.Brushes.White };
+        var toolbar = new StackPanel { Orientation = Orientation.Horizontal };
+        toolbar.Children.Add(btnAll);
+        toolbar.Children.Add(btnNone);
+        toolbar.Children.Add(btnOk);
+        sp.Children.Add(toolbar);
+
+        var listBox = new ListBox { Height = 440 };
+        var checkBoxes = new List<CheckBox>();
+        foreach (var name in allNames)
+        {
+            var cb = new CheckBox { Content = name, IsChecked = _selectedCommodities == null || _selectedCommodities.Contains(name), Margin = new Thickness(2) };
+            checkBoxes.Add(cb);
+            listBox.Items.Add(cb);
+        }
+        sp.Children.Add(listBox);
+
+        btnAll.Click += (_, _) => checkBoxes.ForEach(cb => cb.IsChecked = true);
+        btnNone.Click += (_, _) => checkBoxes.ForEach(cb => cb.IsChecked = false);
+        btnOk.Click += (_, _) =>
+        {
+            var selected = checkBoxes.Where(cb => cb.IsChecked == true).Select(cb => cb.Content.ToString()!).ToHashSet();
+            if (selected.Count == allNames.Count)
+            {
+                _selectedCommodities = null;
+                btnCommodityFilter.Content = "コモディティ選択 (全て)";
+            }
+            else
+            {
+                _selectedCommodities = selected;
+                btnCommodityFilter.Content = $"コモディティ選択 ({selected.Count}/{allNames.Count})";
+            }
+            win.Close();
+        };
+
+        win.Content = sp;
+        win.ShowDialog();
+    }
+
+    private void TradeRoutes_CellClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (dgTradeRoutes.CurrentItem is not TradeRoute route) return;
+
+        // Determine which column was clicked
+        var cell = dgTradeRoutes.CurrentCell;
+        var colHeader = cell.Column?.Header?.ToString() ?? "";
+
+        if (colHeader == "購入場所")
+            ShowLocationDetail(route.BuyTerminal, route.BuyDisplay);
+        else if (colHeader == "売却場所")
+            ShowLocationDetail(route.SellTerminal, route.SellDisplay);
+        else
+            ShowCommodityDetail(route.CommodityName);
+    }
+
+    private void ShowCommodityDetail(string commodityName)
+    {
+        var (buyLocs, sellLocs) = _tradeService.GetCommodityDetail(commodityName);
+
+        dgDetailBuy.ItemsSource = buyLocs.Select(p => new TradeDetailRow
+        {
+            Location = $"{p.LocationShort} ({p.StarSystem})",
+            Price = $"{p.PriceBuy:N1}",
+            Stock = p.ScuBuy > 0 ? $"{p.ScuBuy:N0}" : "-",
+            Terminal = p.Terminal,
+        }).ToList();
+
+        dgDetailSell.ItemsSource = sellLocs.Select(p => new TradeDetailRow
+        {
+            Location = $"{p.LocationShort} ({p.StarSystem})",
+            Price = $"{p.PriceSell:N1}",
+            Stock = p.ScuSell > 0 ? $"{p.ScuSell:N0}" : "-",
+            Terminal = p.Terminal,
+        }).ToList();
+
+        grpDetailLeft.Header = $"購入場所 (安い順) — {commodityName}";
+        grpDetailRight.Header = $"売却場所 (高い順) — {commodityName}";
+        txtDetailHeader.Text = $"{commodityName} — 購入 {buyLocs.Count} 箇所 / 売却 {sellLocs.Count} 箇所  [購入場所/売却場所クリックでその場所の全商品]";
+        grpTradeDetail.Visibility = Visibility.Visible;
+    }
+
+    private void ShowLocationDetail(string terminal, string displayName)
+    {
+        if (string.IsNullOrEmpty(terminal)) return;
+
+        var buyable = _tradeService.GetBuyableAtLocation(terminal);
+        var sellable = _tradeService.GetSellableAtLocation(terminal);
+
+        dgDetailBuy.ItemsSource = buyable.Select(p => new TradeDetailRow
+        {
+            Location = p.CommodityName,
+            Price = $"{p.PriceBuy:N1}",
+            Stock = p.ScuBuy > 0 ? $"{p.ScuBuy:N0}" : "-",
+            Terminal = p.Terminal,
+        }).ToList();
+
+        dgDetailSell.ItemsSource = sellable.Select(p => new TradeDetailRow
+        {
+            Location = p.CommodityName,
+            Price = $"{p.PriceSell:N1}",
+            Stock = p.ScuSell > 0 ? $"{p.ScuSell:N0}" : "-",
+            Terminal = p.Terminal,
+        }).ToList();
+
+        grpDetailLeft.Header = $"購入できる商品 — {displayName}";
+        grpDetailRight.Header = $"売却できる商品 — {displayName}";
+        txtDetailHeader.Text = $"{displayName} — 購入 {buyable.Count} 品 / 売却 {sellable.Count} 品";
+        grpTradeDetail.Visibility = Visibility.Visible;
+    }
+
+    private void CloseDetail_Click(object sender, RoutedEventArgs e)
+    {
+        grpTradeDetail.Visibility = Visibility.Collapsed;
+    }
+
+    private void DetailBuy_Selected(object sender, SelectionChangedEventArgs e)
+    {
+        if (dgDetailBuy.SelectedItem is TradeDetailRow row && !string.IsNullOrEmpty(row.Location))
+        {
+            var name = row.Location;
+            if (_tradeService.GetCommodityNames().Contains(name, StringComparer.OrdinalIgnoreCase))
+                ShowCommodityDetail(name);
+        }
+    }
+
+    private void DetailSell_Selected(object sender, SelectionChangedEventArgs e)
+    {
+        if (dgDetailSell.SelectedItem is TradeDetailRow row && !string.IsNullOrEmpty(row.Location))
+        {
+            var name = row.Location;
+            if (_tradeService.GetCommodityNames().Contains(name, StringComparer.OrdinalIgnoreCase))
+                ShowCommodityDetail(name);
+        }
+    }
+
+    private static double ParseSuffixedNumber(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input)) return 0;
+        input = input.Trim().Replace(",", "").Replace("_", "");
+        double multiplier = 1;
+        if (input.EndsWith("k", StringComparison.OrdinalIgnoreCase)) { multiplier = 1_000; input = input[..^1]; }
+        else if (input.EndsWith("m", StringComparison.OrdinalIgnoreCase)) { multiplier = 1_000_000; input = input[..^1]; }
+        else if (input.EndsWith("b", StringComparison.OrdinalIgnoreCase)) { multiplier = 1_000_000_000; input = input[..^1]; }
+        return double.TryParse(input.Trim(), out var val) ? val * multiplier : 0;
+    }
+
+    private string DetectGamePatch()
+    {
+        try
+        {
+            var manifestPath = Path.Combine(txtGamePath.Text.Trim(), "build_manifest.id");
+            if (File.Exists(manifestPath))
+            {
+                var content = File.ReadAllText(manifestPath);
+                var match = System.Text.RegularExpressions.Regex.Match(content, @"""RequestedP4ChangeNum""\s*""(\d+)""");
+                var branchMatch = System.Text.RegularExpressions.Regex.Match(content, @"""Branch""\s*""([^""]+)""");
+                var versionMatch = System.Text.RegularExpressions.Regex.Match(content, @"""Data""\s*""[^""]*?(\d+\.\d+)");
+                if (versionMatch.Success) return versionMatch.Groups[1].Value;
+                if (branchMatch.Success) return branchMatch.Groups[1].Value;
+            }
+        }
+        catch { }
+        return "4.0";
+    }
+
+    private async Task StartBackgroundTradeFetchAsync()
+    {
+        _tradeService.OnProgress += msg =>
+        {
+            try
+            {
+                Dispatcher.BeginInvoke(() =>
+                {
+                    txtTradeStatus.Text = $"[自動取得] {msg}";
+                    Log($"[Trade] {msg}");
+                });
+            }
+            catch { }
+        };
+
+        try
+        {
+            _tradeService.SetCacheDir(WorkDir);
+            _tradeService.GamePatch = DetectGamePatch();
+            Log($"[Trade] パッチ: {_tradeService.GamePatch} バックグラウンド価格取得を開始...");
+            await Task.Run(async () => await _tradeService.FetchAllDataAsync());
+            Log($"[Trade] 取得完了: 価格 {_tradeService.PriceCount:N0} 件, 船 {_tradeService.Ships.Count} 件");
+        }
+        catch (Exception ex)
+        {
+            Log($"[Trade] 取得エラー: {ex}");
+            try { Dispatcher.Invoke(() => txtTradeStatus.Text = $"自動取得失敗: {ex.Message}"); } catch { }
+            return;
+        }
+
+        try
+        {
+            Dispatcher.Invoke(() =>
+            {
+                _tradeService.LoadMyShips();
+                RefreshCommodityShipCombo();
+                dgMyShips.ItemsSource = _tradeService.MyShips;
+                txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻";
+                cmbAddShip.ItemsSource = _tradeService.Ships;
+                cmbAddShip.DisplayMemberPath = "DisplayName";
+                txtTradeStatus.Text = $"価格 {_tradeService.PriceCount:N0} 件 | 船 {_tradeService.Ships.Count} 件 | 所持船 {_tradeService.MyShips.Count} 隻 | 更新: {_tradeService.LastPriceUpdate:HH:mm}";
+            });
+            ChatService.SetTradeService(_tradeService);
+        }
+        catch (Exception ex)
+        {
+            Log($"[Trade] UI更新エラー: {ex}");
+            try { Dispatcher.Invoke(() => txtTradeStatus.Text = $"エラー: {ex.Message}"); } catch { }
+        }
+    }
+
+
+    private async void TradeRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        if (_tradeService.IsFetching)
+        {
+            txtTradeStatus.Text = "取得中です...しばらくお待ちください";
+            return;
+        }
+
+        dgTradeRoutes.ItemsSource = null;
+        try
+        {
+            _tradeService.SetCacheDir(WorkDir);
+            _tradeService.GamePatch = DetectGamePatch();
+            await Task.Run(async () => await _tradeService.FetchAllDataAsync(force: true));
+            Log($"[Trade] 強制取得完了: 船 {_tradeService.Ships.Count}, 価格 {_tradeService.PriceCount}");
+            RefreshCommodityShipCombo();
+            cmbAddShip.ItemsSource = _tradeService.Ships;
+            cmbAddShip.DisplayMemberPath = "DisplayName";
+            dgMyShips.ItemsSource = _tradeService.MyShips;
+            txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻 | UEX船データ: {_tradeService.Ships.Count} 件";
+            txtTradeStatus.Text = $"価格 {_tradeService.PriceCount:N0} 件 | 船 {_tradeService.Ships.Count} 件 | 所持船 {_tradeService.MyShips.Count} 隻 | 更新: {_tradeService.LastPriceUpdate:HH:mm} (強制取得)";
+            ChatService.SetTradeService(_tradeService);
+        }
+        catch (Exception ex)
+        {
+            txtTradeStatus.Text = $"エラー: {ex.Message}";
+        }
+    }
+
+    private void TradeShip_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (cmbTradeShip.SelectedItem is ShipInfo ship)
+            txtTradeScu.Text = ship.Scu.ToString();
+    }
+
+    private void TradeSearch_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_tradeService.HasPriceData)
+        {
+            txtTradeStatus.Text = _tradeService.IsFetching
+                ? "バックグラウンドで取得中... 完了までお待ちください"
+                : "まず [価格更新] を実行してデータを取得してください";
+            return;
+        }
+
+        if (!int.TryParse(txtTradeScu.Text.Trim(), out var scu) || scu <= 0)
+        {
+            MessageBox.Show("積載量 (SCU) を正の整数で入力してください。", "入力エラー");
+            return;
+        }
+        var budget = ParseSuffixedNumber(txtTradeBudget.Text.Trim());
+        if (budget <= 0)
+        {
+            MessageBox.Show("予算 (aUEC) を入力してください。\n例: 1000000, 1M, 500k, 3.5m", "入力エラー");
+            return;
+        }
+
+        var buySystem = (cmbTradeBuySystem.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "全て";
+        var sellSystem = (cmbTradeSellSystem.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "全て";
+        var excludeOutposts = chkExcludeOutpost.IsChecked == true;
+        var loadingDockOnly = chkLoadingDockOnly.IsChecked == true;
+        var excludeLowStock = chkExcludeLowStock.IsChecked == true;
+
+        var routes = _tradeService.CalculateBestRoutes(budget, scu, buySystem, sellSystem,
+            excludeOutposts, loadingDockOnly, excludeLowStock, _selectedCommodities, topN: 20);
+
+        dgTradeRoutes.ItemsSource = routes;
+        if (routes.Count > 0)
+        {
+            var best = routes[0];
+            txtTradeInfo.Text = $"上位 {routes.Count} ルート | 最高: {best.CommodityName} ({best.TotalProfitDisplay} aUEC, ROI {best.RoiDisplay})";
+        }
+        else
+        {
+            txtTradeInfo.Text = "条件に合うルートが見つかりません。フィルタや予算を変更してみてください。";
+        }
+        txtTradeStatus.Text = $"更新: {_tradeService.LastPriceUpdate:HH:mm} | {buySystem} → {sellSystem} | {scu} SCU | 予算 {budget:N0}";
+    }
 }
 
 // === Helper classes ===
+
+public class TradeDetailRow
+{
+    public string Location { get; set; } = "";
+    public string Price { get; set; } = "";
+    public string Stock { get; set; } = "";
+    public string Terminal { get; set; } = "";
+    public bool IsCommodityView { get; set; }
+}
 
 public class TranslationRow : INotifyPropertyChanged
 {

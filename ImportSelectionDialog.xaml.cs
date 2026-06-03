@@ -61,6 +61,17 @@ public partial class ImportSelectionDialog : Window
             chkKnowledge.IsEnabled = false;
             txtKnowledgeCount.Text = "(データなし)";
         }
+
+        if (contents.TryGetValue(BackupCategory.Trade, out var trc))
+        {
+            chkTrade.IsEnabled = true;
+            txtTradeCount.Text = $"({trc:N0} 件)";
+        }
+        else
+        {
+            chkTrade.IsEnabled = false;
+            txtTradeCount.Text = "(データなし)";
+        }
     }
 
     private void ChkAll_Changed(object sender, RoutedEventArgs e)
@@ -70,6 +81,7 @@ public partial class ImportSelectionDialog : Window
         if (chkGlossary.IsEnabled) chkGlossary.IsChecked = isChecked;
         if (chkIndex.IsEnabled) chkIndex.IsChecked = isChecked;
         if (chkKnowledge.IsEnabled) chkKnowledge.IsChecked = isChecked;
+        if (chkTrade.IsEnabled) chkTrade.IsChecked = isChecked;
     }
 
     private void Import_Click(object sender, RoutedEventArgs e)
@@ -79,6 +91,7 @@ public partial class ImportSelectionDialog : Window
         if (chkGlossary.IsChecked == true) SelectedCategories.Add(BackupCategory.Glossary);
         if (chkIndex.IsChecked == true) SelectedCategories.Add(BackupCategory.Index);
         if (chkKnowledge.IsChecked == true) SelectedCategories.Add(BackupCategory.Knowledge);
+        if (chkTrade.IsChecked == true) SelectedCategories.Add(BackupCategory.Trade);
 
         if (SelectedCategories.Count == 0)
         {

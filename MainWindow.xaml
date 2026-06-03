@@ -277,6 +277,338 @@
                 </Grid>
             </TabItem>
 
+            <!-- コモディティタブ -->
+            <TabItem Header="コモディティ">
+                <Grid Margin="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- 条件入力 -->
+                    <GroupBox Grid.Row="0" Header="検索条件" Margin="0,0,0,4">
+                        <Grid Margin="8,4">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="180"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="100"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="100"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="120"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="120"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <TextBlock Text="船:" VerticalAlignment="Center" Margin="0,0,4,0" Grid.Row="0" Grid.Column="0"/>
+                            <ComboBox x:Name="cmbTradeShip" Grid.Row="0" Grid.Column="1" Margin="0,0,12,0"
+                                      SelectionChanged="TradeShip_Changed"/>
+
+                            <TextBlock Text="積載 (SCU):" VerticalAlignment="Center" Margin="0,0,4,0" Grid.Row="0" Grid.Column="2"/>
+                            <TextBox x:Name="txtTradeScu" Grid.Row="0" Grid.Column="3" Margin="0,0,12,0"
+                                     Text="100" VerticalAlignment="Center"/>
+
+                            <TextBlock Text="予算 (aUEC):" VerticalAlignment="Center" Margin="0,0,4,0" Grid.Row="0" Grid.Column="4"/>
+                            <TextBox x:Name="txtTradeBudget" Grid.Row="0" Grid.Column="5" Margin="0,0,12,0"
+                                     Text="1000000" VerticalAlignment="Center" ToolTip="3M=300万, 500k=50万, 1.5m=150万"/>
+
+                            <TextBlock Text="買い星系:" VerticalAlignment="Center" Margin="0,0,4,0" Grid.Row="0" Grid.Column="6"/>
+                            <ComboBox x:Name="cmbTradeBuySystem" Grid.Row="0" Grid.Column="7" Margin="0,0,12,0" VerticalAlignment="Center">
+                                <ComboBoxItem Content="全て" IsSelected="True"/>
+                                <ComboBoxItem Content="Stanton"/>
+                                <ComboBoxItem Content="Pyro"/>
+                                <ComboBoxItem Content="Nyx"/>
+                            </ComboBox>
+
+                            <TextBlock Text="売り星系:" VerticalAlignment="Center" Margin="0,0,4,0" Grid.Row="0" Grid.Column="8"/>
+                            <ComboBox x:Name="cmbTradeSellSystem" Grid.Row="0" Grid.Column="9" Margin="0,0,12,0" VerticalAlignment="Center">
+                                <ComboBoxItem Content="全て" IsSelected="True"/>
+                                <ComboBoxItem Content="Stanton"/>
+                                <ComboBoxItem Content="Pyro"/>
+                                <ComboBoxItem Content="Nyx"/>
+                            </ComboBox>
+
+                            <!-- コモディティフィルタ -->
+                            <TextBlock Text="コモディティ:" VerticalAlignment="Center" Margin="0,0,4,0" Grid.Row="0" Grid.Column="10"/>
+
+                            <StackPanel Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="11" Orientation="Horizontal" Margin="0,6,0,0">
+                                <Button x:Name="btnCommodityFilter" Content="コモディティ選択 (全て)" Click="CommodityFilter_Click"
+                                        Padding="8,3" Margin="0,0,12,0"/>
+                                <CheckBox x:Name="chkExcludeOutpost" Content="地上小規模拠点を除く" IsChecked="True"
+                                          VerticalAlignment="Center" Margin="0,0,12,0"/>
+                                <CheckBox x:Name="chkLoadingDockOnly" Content="外部積込対応のみ (Hull C等)"
+                                          VerticalAlignment="Center" Margin="0,0,12,0"/>
+                                <CheckBox x:Name="chkExcludeLowStock" Content="在庫不足ルートを除く"
+                                          VerticalAlignment="Center" Margin="0,0,16,0"/>
+                                <Button Content="ルート検索" Click="TradeSearch_Click" Padding="16,4" Margin="0,0,4,0"
+                                        FontWeight="Bold" Background="#1976D2" Foreground="White"/>
+                                <Button Content="価格更新" Click="TradeRefresh_Click" Padding="12,4"/>
+                            </StackPanel>
+                            <TextBlock x:Name="txtTradeStatus" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="11"
+                                       Foreground="#666" FontSize="11" Margin="0,4,0,0"/>
+                        </Grid>
+                    </GroupBox>
+
+                    <!-- 結果テーブル -->
+                    <DataGrid x:Name="dgTradeRoutes" Grid.Row="2" AutoGenerateColumns="False"
+                              CanUserAddRows="False" CanUserDeleteRows="False" IsReadOnly="True"
+                              SelectionMode="Single" GridLinesVisibility="Horizontal"
+                              AlternatingRowBackground="#FAFAFA" FontSize="13" RowHeight="52"
+                              MouseLeftButtonUp="TradeRoutes_CellClick">
+                        <DataGrid.RowStyle>
+                            <Style TargetType="DataGridRow">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsLowBuyStock}" Value="True">
+                                        <Setter Property="Background" Value="#FFF8E1"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </DataGrid.RowStyle>
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="コモディティ" Binding="{Binding CommodityName}" Width="120">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/><Setter Property="Padding" Value="4,0"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="CS" Binding="{Binding ContainerScuDisplay}" Width="40">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Foreground" Value="#888"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="利益/SCU" Binding="{Binding ProfitDisplay}" Width="80">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/><Setter Property="FontFamily" Value="Consolas"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding ProfitPerScu, Converter={x:Static local:PositiveConverter.Instance}}" Value="True"><Setter Property="Foreground" Value="#1565C0"/></DataTrigger>
+                                            <DataTrigger Binding="{Binding ProfitPerScu, Converter={x:Static local:PositiveConverter.Instance}}" Value="False"><Setter Property="Foreground" Value="#D32F2F"/></DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="買値" Binding="{Binding BuyPriceDisplay}" Width="70">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="購入場所" Binding="{Binding BuyDisplay}" Width="180">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="TextWrapping" Value="Wrap"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="在庫(買)" Binding="{Binding BuyStockDisplay}" Width="65">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/><Setter Property="Foreground" Value="#666"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="売値" Binding="{Binding SellPriceDisplay}" Width="70">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="売却場所" Binding="{Binding SellDisplay}" Width="180">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="TextWrapping" Value="Wrap"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="在庫(売)" Binding="{Binding SellStockDisplay}" Width="65">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/><Setter Property="Foreground" Value="#666"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="数量" Binding="{Binding ActualScuDisplay}" Width="55">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="総利益" Binding="{Binding TotalProfitDisplay}" Width="90">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/><Setter Property="FontFamily" Value="Consolas"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding TotalProfit, Converter={x:Static local:PositiveConverter.Instance}}" Value="True"><Setter Property="Foreground" Value="#1565C0"/></DataTrigger>
+                                            <DataTrigger Binding="{Binding TotalProfit, Converter={x:Static local:PositiveConverter.Instance}}" Value="False"><Setter Property="Foreground" Value="#D32F2F"/></DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="ROI" Binding="{Binding RoiDisplay}" Width="55">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/><Setter Property="Foreground" Value="#666"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="" Binding="{Binding StockWarning}" Width="70">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Foreground" Value="#D32F2F"/><Setter Property="FontWeight" Value="Bold"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- ステータスバー -->
+                    <!-- 詳細パネル -->
+                    <GroupBox x:Name="grpTradeDetail" Grid.Row="3" Margin="0,4,0,0" MaxHeight="220"
+                              Visibility="Collapsed">
+                        <GroupBox.Header>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="txtDetailHeader" Text="詳細"/>
+                                <Button Grid.Column="1" Content="✕" Click="CloseDetail_Click"
+                                        Padding="4,0" FontSize="11" Cursor="Hand" Background="Transparent" BorderThickness="0"/>
+                            </Grid>
+                        </GroupBox.Header>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <GroupBox x:Name="grpDetailLeft" Header="購入場所 (安い順)" Grid.Column="0" Margin="0,0,4,0">
+                                <DataGrid x:Name="dgDetailBuy" AutoGenerateColumns="False" IsReadOnly="True"
+                                          CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                                          FontSize="12" RowHeight="24" HeadersVisibility="Column"
+                                          SelectionChanged="DetailBuy_Selected">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="場所/コモディティ" Binding="{Binding Location}" Width="*"/>
+                                        <DataGridTextColumn Header="価格" Binding="{Binding Price}" Width="70"/>
+                                        <DataGridTextColumn Header="在庫" Binding="{Binding Stock}" Width="55"/>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </GroupBox>
+                            <GroupBox x:Name="grpDetailRight" Header="売却場所 (高い順)" Grid.Column="1" Margin="4,0,0,0">
+                                <DataGrid x:Name="dgDetailSell" AutoGenerateColumns="False" IsReadOnly="True"
+                                          CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                                          FontSize="12" RowHeight="24" HeadersVisibility="Column"
+                                          SelectionChanged="DetailSell_Selected">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="場所/コモディティ" Binding="{Binding Location}" Width="*"/>
+                                        <DataGridTextColumn Header="価格" Binding="{Binding Price}" Width="70"/>
+                                        <DataGridTextColumn Header="在庫" Binding="{Binding Stock}" Width="55"/>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </GroupBox>
+                        </Grid>
+                    </GroupBox>
+
+                    <TextBlock x:Name="txtTradeInfo" Grid.Row="4" Foreground="#666" FontSize="11" Margin="0,4,0,0"/>
+                </Grid>
+            </TabItem>
+
+            <!-- 船舶管理タブ -->
+            <TabItem Header="船舶管理">
+                <Grid Margin="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- ヘッダー -->
+                    <TextBlock Grid.Row="0" Margin="0,0,0,8" Foreground="#333">
+                        所持している船を管理します。コモディティタブの船セレクタに反映されます。UEX船データから選択するか、手動で追加できます。
+                    </TextBlock>
+
+                    <!-- 所持船一覧 -->
+                    <DataGrid x:Name="dgMyShips" Grid.Row="1" AutoGenerateColumns="False"
+                              CanUserAddRows="False" CanUserDeleteRows="False" IsReadOnly="True"
+                              SelectionMode="Single" GridLinesVisibility="Horizontal"
+                              AlternatingRowBackground="#FAFAFA" FontSize="13" RowHeight="30"
+                              MouseDoubleClick="MyShip_DoubleClick">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="船名" Binding="{Binding Name}" Width="200">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/><Setter Property="Padding" Value="4,0"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="メーカー" Binding="{Binding Manufacturer}" Width="150">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="積載 (SCU)" Binding="{Binding Scu}" Width="90">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="メモ" Binding="{Binding Notes}" Width="*">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Foreground" Value="#666"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="追加日" Binding="{Binding AddedAt}" Width="130">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Foreground" Value="#999"/><Setter Property="FontSize" Value="11"/></Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- UEX船検索 + 追加 -->
+                    <GroupBox Grid.Row="2" Header="船を追加" Margin="0,8,0,0">
+                        <Grid Margin="8,4">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="200"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="130"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="70"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Row 0: 検索 + 候補選択 -->
+                            <TextBlock Text="検索:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <TextBox x:Name="txtShipSearch" Grid.Column="1" Margin="0,0,4,0" VerticalAlignment="Center"
+                                     KeyDown="ShipSearch_KeyDown" ToolTip="船名を入力して検索 or Enter"/>
+                            <Button Content="検索" Grid.Column="2" Click="ShipSearch_Click" Padding="8,3" Margin="0,0,8,0"/>
+                            <TextBlock Text="候補:" Grid.Column="3" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <ComboBox x:Name="cmbAddShip" Grid.Column="4" Grid.ColumnSpan="4" MinWidth="280"
+                                      DisplayMemberPath="DisplayName" SelectionChanged="AddShip_Selected" Margin="0,0,8,0"/>
+
+                            <!-- Row 1: 詳細入力 -->
+                            <TextBlock Text="船名:" Grid.Row="1" VerticalAlignment="Center" Margin="0,4,4,0"/>
+                            <TextBox x:Name="txtAddShipName" Grid.Row="1" Grid.Column="1" Margin="0,4,8,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="メーカー:" Grid.Row="1" Grid.Column="3" VerticalAlignment="Center" Margin="0,4,4,0"/>
+                            <TextBox x:Name="txtAddShipMfr" Grid.Row="1" Grid.Column="4" Margin="0,4,8,0" VerticalAlignment="Center" MinWidth="120"/>
+                            <TextBlock Text="SCU:" Grid.Row="1" Grid.Column="6" VerticalAlignment="Center" Margin="0,4,4,0"/>
+                            <TextBox x:Name="txtAddShipScu" Grid.Row="1" Grid.Column="7" Text="0" Margin="0,4,8,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="メモ:" Grid.Row="1" Grid.Column="8" VerticalAlignment="Center" Margin="0,4,4,0"/>
+                            <TextBox x:Name="txtAddShipNotes" Grid.Row="1" Grid.Column="9" Margin="0,4,8,0" VerticalAlignment="Center"/>
+                            <Button Content="追加" Grid.Row="1" Grid.Column="10" Click="AddMyShip_Click" Padding="16,4" Margin="0,4,0,0"
+                                    FontWeight="Bold" Background="#4CAF50" Foreground="White"/>
+                        </Grid>
+                    </GroupBox>
+
+                    <!-- 操作ボタン -->
+                    <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,0">
+                        <Button Content="選択を更新" Click="UpdateMyShip_Click" Padding="12,4" Margin="0,0,4,0"/>
+                        <Button Content="選択を削除" Click="DeleteMyShip_Click" Padding="12,4" Margin="0,0,8,0" Foreground="#D32F2F"/>
+                        <TextBlock x:Name="txtMyShipStatus" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+
             <!-- チャットタブ -->
             <TabItem Header="チャット">
                 <Grid Margin="8">

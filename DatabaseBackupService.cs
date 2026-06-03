@@ -9,7 +9,8 @@ public enum BackupCategory
     Translations,
     Glossary,
     Index,
-    Knowledge
+    Knowledge,
+    Trade
 }
 
 public static class DatabaseBackupService
@@ -18,6 +19,7 @@ public static class DatabaseBackupService
     private static readonly string[] GlossaryTables = ["glossary"];
     private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
+    private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships"];
 
     public static string[] GetTables(BackupCategory category) => category switch
     {
@@ -25,11 +27,12 @@ public static class DatabaseBackupService
         BackupCategory.Glossary => GlossaryTables,
         BackupCategory.Index => IndexTables,
         BackupCategory.Knowledge => KnowledgeTables,
+        BackupCategory.Trade => TradeTables,
         _ => []
     };
 
     public static async Task ExportAsync(string translationDbPath, string indexDbPath, string outputPath,
-        Action<string>? onStatus = null)
+        Action<string>? onStatus = null, string? tradeDbPath = null)
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"sc_export_{Guid.NewGuid():N}");
         try
@@ -46,6 +49,11 @@ public static class DatabaseBackupService
                 {
                     onStatus?.Invoke("gamedata_cache.db をコピー中...");
                     File.Copy(indexDbPath, Path.Combine(tempDir, "gamedata_cache.db"), true);
+                }
+                if (!string.IsNullOrEmpty(tradeDbPath) && File.Exists(tradeDbPath))
+                {
+                    onStatus?.Invoke("trade_cache.db をコピー中...");
+                    File.Copy(tradeDbPath, Path.Combine(tempDir, "trade_cache.db"), true);
                 }
 
                 onStatus?.Invoke("ZIP を作成中...");
@@ -126,7 +134,7 @@ public static class DatabaseBackupService
     }
 
     public static async Task ImportFromZipAsync(string zipPath, string translationDbPath, string indexDbPath,
-        IEnumerable<BackupCategory> categories, ImportMode mode, Action<string>? onStatus = null)
+        IEnumerable<BackupCategory> categories, ImportMode mode, Action<string>? onStatus = null, string? tradeDbPath = null)
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"sc_backup_{Guid.NewGuid():N}");
         try
@@ -138,7 +146,7 @@ public static class DatabaseBackupService
             foreach (var dbFile in Directory.GetFiles(tempDir, "*.db"))
             {
                 onStatus?.Invoke($"{Path.GetFileName(dbFile)} をインポート中...");
-                await ImportFromDbAsync(dbFile, translationDbPath, indexDbPath, categories, mode, onStatus);
+                await ImportFromDbAsync(dbFile, translationDbPath, indexDbPath, categories, mode, onStatus, tradeDbPath);
             }
         }
         finally { try { Directory.Delete(tempDir, true); } catch { } }
@@ -147,7 +155,7 @@ public static class DatabaseBackupService
     }
 
     public static async Task ImportFromDbAsync(string sourceDbPath, string translationDbPath, string indexDbPath,
-        IEnumerable<BackupCategory> categories, ImportMode mode, Action<string>? onStatus = null)
+        IEnumerable<BackupCategory> categories, ImportMode mode, Action<string>? onStatus = null, string? tradeDbPath = null)
     {
         var cats = categories.ToHashSet();
         var allowedTables = new HashSet<string>();
@@ -162,6 +170,7 @@ public static class DatabaseBackupService
 
             var translationTables = allowedTables.Intersect(TranslationTables.Concat(GlossaryTables)).ToHashSet();
             var indexTables = allowedTables.Intersect(IndexTables.Concat(KnowledgeTables)).ToHashSet();
+            var tradeTables = allowedTables.Intersect(TradeTables).ToHashSet();
 
             if (translationTables.Count > 0)
             {
@@ -178,9 +187,41 @@ public static class DatabaseBackupService
                 EnsureIndexSchema(destConn);
                 CopyTables(srcConn, destConn, indexTables, mode, onStatus);
             }
+
+            if (tradeTables.Count > 0 && !string.IsNullOrEmpty(tradeDbPath))
+            {
+                onStatus?.Invoke("交易DBにインポート中...");
+                using var destConn = new SqliteConnection($"Data Source={tradeDbPath}");
+                destConn.Open();
+                EnsureTradeSchema(destConn);
+                CopyTables(srcConn, destConn, tradeTables, mode, onStatus);
+            }
         });
 
         onStatus?.Invoke("インポート完了");
+    }
+
+    private static void EnsureTradeSchema(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            CREATE TABLE IF NOT EXISTS trade_prices (
+                commodity_id INTEGER, commodity_name TEXT, commodity_kind TEXT, container_scu INTEGER,
+                terminal TEXT, city TEXT, outpost TEXT, moon TEXT, planet TEXT, star_system TEXT, location_short TEXT,
+                price_buy REAL, price_sell REAL, price_buy_avg REAL, price_sell_avg REAL,
+                scu_buy INTEGER, scu_sell INTEGER, scu_buy_avg INTEGER, scu_sell_avg INTEGER,
+                date_modified TEXT, fetched_at TEXT, patch TEXT, is_current INTEGER DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS trade_ships (name TEXT, manufacturer TEXT, scu INTEGER, fetched_at TEXT);
+            CREATE TABLE IF NOT EXISTS trade_terminals (name TEXT PRIMARY KEY, has_loading_dock INTEGER, has_docking_port INTEGER, is_cargo_center INTEGER);
+            CREATE TABLE IF NOT EXISTS trade_meta (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE IF NOT EXISTS my_ships (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL, manufacturer TEXT DEFAULT '', scu INTEGER DEFAULT 0,
+                notes TEXT DEFAULT '', added_at TEXT DEFAULT (datetime('now','localtime'))
+            );
+            """;
+        cmd.ExecuteNonQuery();
     }
 
     private static void CopyTables(SqliteConnection src, SqliteConnection dest,
