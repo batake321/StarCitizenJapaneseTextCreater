@@ -267,12 +267,20 @@ public class TradeService
 
         var bestBuyPerCommodity = buyEntries
             .GroupBy(p => p.CommodityId)
-            .Select(g => g.OrderBy(p => p.PriceBuy).First())
+            .Select(g =>
+            {
+                var stocked = g.Where(p => p.ScuBuy > 0).OrderBy(p => p.PriceBuy).FirstOrDefault();
+                return stocked ?? g.OrderBy(p => p.PriceBuy).First();
+            })
             .ToDictionary(p => p.CommodityId);
 
         var bestSellPerCommodity = sellEntries
             .GroupBy(p => p.CommodityId)
-            .Select(g => g.OrderByDescending(p => p.PriceSell).First())
+            .Select(g =>
+            {
+                var stocked = g.Where(p => p.ScuSell > 0).OrderByDescending(p => p.PriceSell).FirstOrDefault();
+                return stocked ?? g.OrderByDescending(p => p.PriceSell).First();
+            })
             .ToDictionary(p => p.CommodityId);
 
         var routes = new List<TradeRoute>();
@@ -289,8 +297,9 @@ public class TradeService
             var actualScu = Math.Min(maxByBudget, maxByCargo);
             if (actualScu <= 0 || actualScu == int.MaxValue) continue;
 
-            var isLowStock = buy.ScuBuy > 0 && buy.ScuBuy < actualScu;
-            if (excludeLowStock && isLowStock) continue;
+            var isLowStock = buy.ScuBuy > 0 ? buy.ScuBuy < actualScu : false;
+            var isNoStock = buy.ScuBuy == 0;
+            if (excludeLowStock && (isLowStock || isNoStock)) continue;
 
             var investment = buy.PriceBuy * actualScu;
             var revenue = sell.PriceSell * actualScu;
@@ -323,7 +332,7 @@ public class TradeService
                 ScuSellStock = sell.ScuSell,
                 ScuBuyAvg = buy.ScuBuyAvg,
                 ScuSellAvg = sell.ScuSellAvg,
-                IsLowBuyStock = isLowStock,
+                IsLowBuyStock = isLowStock || isNoStock,
             });
         }
 
@@ -809,8 +818,8 @@ public class TradeRoute
     public string ProfitDisplay => ProfitPerScu >= 0 ? $"+{ProfitPerScu:N1}" : $"{ProfitPerScu:N1}";
     public string TotalProfitDisplay => TotalProfit >= 0 ? $"+{TotalProfit:N0}" : $"{TotalProfit:N0}";
     public string RoiDisplay => $"{Roi:N1}%";
-    public string BuyDisplay => $"{BuyLocation} ({BuySystem})";
-    public string SellDisplay => $"{SellLocation} ({SellSystem})";
+    public string BuyDisplay => BuyLocation.Contains($"({BuySystem})") ? BuyLocation : $"{BuyLocation} ({BuySystem})";
+    public string SellDisplay => SellLocation.Contains($"({SellSystem})") ? SellLocation : $"{SellLocation} ({SellSystem})";
     public string BuyPriceDisplay => $"{BuyPrice:N1}";
     public string SellPriceDisplay => $"{SellPrice:N1}";
     public string InvestmentDisplay => $"{Investment:N0}";

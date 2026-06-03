@@ -14,6 +14,20 @@ public class AppConfig
     public bool WebServerAutoStart { get; set; } = false;
     public string VoiceVoxUrl { get; set; } = "http://localhost:50021";
     public int VoiceVoxSpeakerId { get; set; } = 0;
+
+    // Window state
+    public double WindowLeft { get; set; } = double.NaN;
+    public double WindowTop { get; set; } = double.NaN;
+    public double WindowWidth { get; set; } = double.NaN;
+    public double WindowHeight { get; set; } = double.NaN;
+    public bool WindowMaximized { get; set; } = false;
+
+    // Trade search params
+    public string TradeShipName { get; set; } = "";
+    public int TradeScu { get; set; } = 100;
+    public string TradeBudget { get; set; } = "1000000";
+    public string TradeBuySystem { get; set; } = "全て";
+    public string TradeSellSystem { get; set; } = "全て";
 }
 
 public class TranslationConfig

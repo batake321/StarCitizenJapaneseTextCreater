@@ -40,6 +40,10 @@ public partial class MainWindow : Window
     private void Window_Loaded(object sender, RoutedEventArgs e)
     {
         var config = App.Config;
+
+        // Restore window position/size
+        RestoreWindowState(config);
+
         txtGamePath.Text = config.GamePath;
         txtSettingsGamePath.Text = config.GamePath;
         txtWorkDir.Text = config.WorkingDirectory;
@@ -51,6 +55,12 @@ public partial class MainWindow : Window
         txtVoiceVoxUrl.Text = config.VoiceVoxUrl;
         txtVoiceVoxSpeaker.Text = config.VoiceVoxSpeakerId.ToString();
         chkWebAutoStart.IsChecked = config.WebServerAutoStart;
+
+        // Restore trade params
+        txtTradeScu.Text = config.TradeScu > 0 ? config.TradeScu.ToString() : "100";
+        txtTradeBudget.Text = !string.IsNullOrEmpty(config.TradeBudget) ? config.TradeBudget : "1000000";
+        SelectComboByContent(cmbTradeBuySystem, config.TradeBuySystem);
+        SelectComboByContent(cmbTradeSellSystem, config.TradeSellSystem);
 
         ChatService.OnLog += msg => Dispatcher.BeginInvoke(() =>
         {
@@ -1395,7 +1405,17 @@ public partial class MainWindow : Window
                 App.Config.WebServerHttpsPort,
                 App.Config.WebServerAutoStart,
                 App.Config.VoiceVoxUrl,
-                App.Config.VoiceVoxSpeakerId
+                App.Config.VoiceVoxSpeakerId,
+                App.Config.WindowLeft,
+                App.Config.WindowTop,
+                App.Config.WindowWidth,
+                App.Config.WindowHeight,
+                App.Config.WindowMaximized,
+                App.Config.TradeShipName,
+                App.Config.TradeScu,
+                App.Config.TradeBudget,
+                App.Config.TradeBuySystem,
+                App.Config.TradeSellSystem,
             };
 
             var json = JsonSerializer.Serialize(config, new JsonSerializerOptions
@@ -2329,6 +2349,84 @@ public partial class MainWindow : Window
         });
     }
 
+    private void RestoreSavedShipSelection()
+    {
+        var savedName = App.Config.TradeShipName;
+        if (string.IsNullOrEmpty(savedName) || cmbTradeShip.ItemsSource == null) return;
+        foreach (var item in cmbTradeShip.ItemsSource)
+        {
+            if (item is ShipInfo s && s.Name.Contains(savedName, StringComparison.OrdinalIgnoreCase))
+            {
+                cmbTradeShip.SelectedItem = item;
+                return;
+            }
+        }
+    }
+
+    // === Window State ===
+
+    private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
+    {
+        var config = App.Config;
+        if (WindowState == WindowState.Maximized)
+        {
+            config.WindowMaximized = true;
+        }
+        else
+        {
+            config.WindowMaximized = false;
+            config.WindowLeft = Left;
+            config.WindowTop = Top;
+            config.WindowWidth = Width;
+            config.WindowHeight = Height;
+        }
+        SaveConfigToFile();
+    }
+
+    private void RestoreWindowState(AppConfig config)
+    {
+        if (config.WindowMaximized)
+        {
+            WindowState = WindowState.Maximized;
+        }
+        else if (!double.IsNaN(config.WindowWidth) && config.WindowWidth > 100 &&
+                 !double.IsNaN(config.WindowHeight) && config.WindowHeight > 100)
+        {
+            Width = config.WindowWidth;
+            Height = config.WindowHeight;
+
+            if (!double.IsNaN(config.WindowLeft) && !double.IsNaN(config.WindowTop))
+            {
+                var left = config.WindowLeft;
+                var top = config.WindowTop;
+                // Simple bounds check against virtual screen
+                var vw = SystemParameters.VirtualScreenWidth;
+                var vh = SystemParameters.VirtualScreenHeight;
+                var vl = SystemParameters.VirtualScreenLeft;
+                var vt = SystemParameters.VirtualScreenTop;
+                if (left >= vl && left + Width <= vl + vw && top >= vt && top + Height <= vt + vh)
+                {
+                    WindowStartupLocation = WindowStartupLocation.Manual;
+                    Left = left;
+                    Top = top;
+                }
+            }
+        }
+    }
+
+    private static void SelectComboByContent(ComboBox combo, string? content)
+    {
+        if (string.IsNullOrEmpty(content)) return;
+        for (int i = 0; i < combo.Items.Count; i++)
+        {
+            if (combo.Items[i] is ComboBoxItem ci && ci.Content?.ToString() == content)
+            {
+                combo.SelectedIndex = i;
+                return;
+            }
+        }
+    }
+
     // === Ship Management (船舶管理) ===
 
     private void RefreshMyShips()
@@ -2555,7 +2653,7 @@ public partial class MainWindow : Window
 
         dgDetailBuy.ItemsSource = buyLocs.Select(p => new TradeDetailRow
         {
-            Location = $"{p.LocationShort} ({p.StarSystem})",
+            Location = p.LocationShort.Contains($"({p.StarSystem})") ? p.LocationShort : $"{p.LocationShort} ({p.StarSystem})",
             Price = $"{p.PriceBuy:N1}",
             Stock = p.ScuBuy > 0 ? $"{p.ScuBuy:N0}" : "-",
             Terminal = p.Terminal,
@@ -2563,7 +2661,7 @@ public partial class MainWindow : Window
 
         dgDetailSell.ItemsSource = sellLocs.Select(p => new TradeDetailRow
         {
-            Location = $"{p.LocationShort} ({p.StarSystem})",
+            Location = p.LocationShort.Contains($"({p.StarSystem})") ? p.LocationShort : $"{p.LocationShort} ({p.StarSystem})",
             Price = $"{p.PriceSell:N1}",
             Stock = p.ScuSell > 0 ? $"{p.ScuSell:N0}" : "-",
             Terminal = p.Terminal,
@@ -2695,8 +2793,9 @@ public partial class MainWindow : Window
             {
                 _tradeService.LoadMyShips();
                 RefreshCommodityShipCombo();
+                RestoreSavedShipSelection();
                 dgMyShips.ItemsSource = _tradeService.MyShips;
-                txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻";
+                txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻 | UEX船データ: {_tradeService.Ships.Count} 件";
                 cmbAddShip.ItemsSource = _tradeService.Ships;
                 cmbAddShip.DisplayMemberPath = "DisplayName";
                 txtTradeStatus.Text = $"価格 {_tradeService.PriceCount:N0} 件 | 船 {_tradeService.Ships.Count} 件 | 所持船 {_tradeService.MyShips.Count} 隻 | 更新: {_tradeService.LastPriceUpdate:HH:mm}";
@@ -2773,6 +2872,13 @@ public partial class MainWindow : Window
         var excludeOutposts = chkExcludeOutpost.IsChecked == true;
         var loadingDockOnly = chkLoadingDockOnly.IsChecked == true;
         var excludeLowStock = chkExcludeLowStock.IsChecked == true;
+
+        // Save search params
+        App.Config.TradeShipName = (cmbTradeShip.SelectedItem is ShipInfo si) ? si.Name : "";
+        App.Config.TradeScu = scu;
+        App.Config.TradeBudget = txtTradeBudget.Text.Trim();
+        App.Config.TradeBuySystem = buySystem;
+        App.Config.TradeSellSystem = sellSystem;
 
         var routes = _tradeService.CalculateBestRoutes(budget, scu, buySystem, sellSystem,
             excludeOutposts, loadingDockOnly, excludeLowStock, _selectedCommodities, topN: 20);

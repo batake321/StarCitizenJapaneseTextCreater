@@ -125,6 +125,13 @@ public static class IniMerger
         if (glossaryFixed > 0)
             Console.WriteLine($"    Glossary applied: {glossaryFixed}");
 
+        // Fix currency symbol overlap with Japanese font by adding trailing space
+        if (merged.TryGetValue("text_ui_units_credits", out var creditsVal) && creditsVal == "¤")
+        {
+            merged["text_ui_units_credits"] = "¤ ";
+            Console.WriteLine("    Currency symbol spacing fix applied");
+        }
+
         return merged;
     }
 }
