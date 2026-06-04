@@ -125,12 +125,18 @@ public static class IniMerger
         if (glossaryFixed > 0)
             Console.WriteLine($"    Glossary applied: {glossaryFixed}");
 
-        // Fix currency symbol overlap with Japanese font by adding trailing space
-        if (merged.TryGetValue("text_ui_units_credits", out var creditsVal) && creditsVal == "¤")
+        // Add @-prefixed duplicates for keys the game may reference with @ prefix
+        int atDupes = 0;
+        foreach (var key in merged.Keys.ToList())
         {
-            merged["text_ui_units_credits"] = "¤ ";
-            Console.WriteLine("    Currency symbol spacing fix applied");
+            var atKey = "@" + key;
+            if (!merged.ContainsKey(atKey))
+            {
+                merged[atKey] = merged[key];
+                atDupes++;
+            }
         }
+        Console.WriteLine($"    @-prefixed duplicates added: {atDupes}");
 
         return merged;
     }

@@ -22,22 +22,20 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v1.12.9-win-x64.zip (最新 v1.12.9 バイナリ)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.12.9/StarCitizenJapaneseTextCreater-v1.12.9-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v1.13.0-win-x64.zip (最新 v1.13.0 バイナリ)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.13.0/StarCitizenJapaneseTextCreater-v1.13.0-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260603_154200.zip (翻訳データベース)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.12.9/sc_japanese_backup_20260603_154200.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260604_121612.zip (翻訳データベース)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.13.0/sc_japanese_backup_20260604_121612.zip)** — アプリの「インポート (復元)」から取り込めます。
 
-### 🚀 v1.12.9 更新内容
+### 🚀 v1.13.0 更新内容
 
-- **コモディティ交易タブ新設**: UEX 価格データから最適交易ルートを自動計算。予算・積載量 (SCU)・星系フィルタで絞り込み。在庫 (SCU) 表示で無駄足を回避
-- **コモディティ詳細ドリルダウン**: コモディティ名クリックで全購入/売却場所を表示。場所クリックでその場所の全商品リストに切替。商品→場所→商品と自由にドリルダウン
-- **コモディティ選択フィルタ**: チェックボックス付きポップアップで対象コモディティを絞り込み
-- **場所フィルタ**: 地上小規模拠点除外 (Shubin等)、外部積込対応のみ (Hull C等大型船)、在庫不足ルート除外
-- **価格 DB キャッシュ**: SQLite に保存し12時間有効。起動時に自動読込、手動で強制更新可。パッチバージョンも記録
-- **船舶管理タブ新設**: 所持船の追加/編集/削除。UEX 船データから検索して SCU を自動補完。コモディティタブの船セレクタに所持船を優先表示 (★マーク)
-- **AI チャット交易連携**: `search_trade_routes` ツール追加。キャッシュデータから即座に最適ルートを回答
-- **サーバー停止フリーズ修正**: WebSocket の同期 Close をタイムアウト付き非同期に変更
-- **バックアップに交易データ追加**: エクスポート/インポートに trade_cache.db (価格・船・ターミナル・所持船) を含む
-- 翻訳データベースのバックアップを最新化 (`sc_japanese_backup_20260603_154200.zip` 同梱)
+- **交易ルート最適化: 在庫優先選択**: ルート計算時、在庫が確認されている場所を優先して選択するよう改善。在庫 0 のステーション (MIC-L2 等) より在庫のある場所 (Terra Gateway 等) が推奨されるように
+- **在庫不足フィルタ修正**: 「在庫不足ルートを除く」チェック時、在庫データ 0 (scu_buy=0) のルートも正しく除外されるよう修正
+- **表示名重複修正**: Terra Gateway 等、ターミナル名に既にシステム名が含まれる場合の「(Stanton) (Stanton)」表示を修正
+- **@付きローカライゼーションキー対応**: ゲームが `@vehicle_Name...` 等のキーで検索する場合に備え、`@` 付きエントリを自動追加。新型船 (Tiburon, Pitbull, Command Module) の名前が正しく表示されるように
+- **通貨記号(¤)重なり修正**: 日本語フォントで全角描画される ¤ を翻訳 DB で Cr に置換し、価格表示の文字重なりを解消
+- **ウィンドウ状態保存**: ウィンドウ位置・サイズ・最大化状態を記憶し、次回起動時に復元
+- **交易検索パラメータ保存**: 船・積載量・予算・星系の設定を保存し、次回起動時に復元
+- 翻訳データベースのバックアップを最新化 (`sc_japanese_backup_20260604_121612.zip` 同梱)
 
 ### 動作要件
 
@@ -220,6 +218,8 @@ PC のブラウザやスマホから、AI チャットと VoiceVox 音声読み�
    - **LAN (他のデバイス)**: `http://192.168.x.x:8099/` (アプリに表示される URL)
    - **HTTPS PC**: `https://localhost:8100/`
    - **HTTPS LAN (マイク利用)**: `https://192.168.x.x:8100/` (スマホのマイクにはこちらが必要)
+
+> **`192.168.x.x` の確認方法:** PC でコマンドプロンプトまたは PowerShell を開き `ipconfig` を実行します。「Wi-Fi」または「イーサネット」の **IPv4 アドレス** (例: `192.168.1.15`) がこの PC のアドレスです。スマホから同じ Wi-Fi に接続し、そのアドレスでアクセスしてください。
 
 #### VoiceVox 音声読み上げ
 
