@@ -25,6 +25,8 @@ public class OllamaBackend : TranslationBackend
             messages = new object[]
             {
                 new { role = "system", content = SystemPrompt },
+                new { role = "user", content = "mission_desc_01\tDeliver the package to Hurston.\nmission_title_02\tBounty: Eliminate the target" },
+                new { role = "assistant", content = "mission_desc_01\tパッケージを Hurston に届けよ。\nmission_title_02\t賞金首：ターゲットを排除せよ" },
                 new { role = "user", content = userMsg }
             },
             stream = false,
