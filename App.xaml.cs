@@ -50,15 +50,20 @@ public partial class App : Application
             Config.WorkingDirectory = @"C:\temp";
         Directory.CreateDirectory(Config.WorkingDirectory);
 
-        // 同梱DBをWorkDirにコピー（同梱版が新しければ上書き）
+        // 同梱DBをWorkDirにマージ（同梱版が新しければ差分インポート）
         var baseDir = AppContext.BaseDirectory;
         foreach (var dbName in new[] { "translations.db", "gamedata_cache.db" })
         {
             var src = Path.Combine(baseDir, dbName);
             var dest = Path.Combine(Config.WorkingDirectory, dbName);
             if (!File.Exists(src)) continue;
-            if (!File.Exists(dest) || File.GetLastWriteTime(src) > File.GetLastWriteTime(dest))
-                File.Copy(src, dest, overwrite: true);
+            if (!File.Exists(dest))
+            {
+                File.Copy(src, dest);
+                continue;
+            }
+            if (File.GetLastWriteTime(src) > File.GetLastWriteTime(dest))
+                MergeBundledDb(src, dest);
         }
     }
 
@@ -106,6 +111,66 @@ public partial class App : Application
             Console.WriteLine($"Backup: {new FileInfo(outPath).Length / 1024.0:N0} KB -> {outPath}");
 
         Console.WriteLine("Export complete.");
+    }
+
+    private static void MergeBundledDb(string srcPath, string destPath)
+    {
+        try
+        {
+            using var src = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={srcPath};Mode=ReadOnly");
+            src.Open();
+            using var dest = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={destPath}");
+            dest.Open();
+
+            // テーブル一覧を取得
+            using var listCmd = src.CreateCommand();
+            listCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table'";
+            var tables = new List<string>();
+            using (var r = listCmd.ExecuteReader())
+                while (r.Read()) tables.Add(r.GetString(0));
+
+            using var tx = dest.BeginTransaction();
+            foreach (var table in tables)
+            {
+                // 宛先にテーブルがなければスキップ
+                using var chk = dest.CreateCommand();
+                chk.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=@n";
+                chk.Parameters.AddWithValue("@n", table);
+                if ((long)(chk.ExecuteScalar() ?? 0) == 0) continue;
+
+                using var readCmd = src.CreateCommand();
+                readCmd.CommandText = $"SELECT * FROM {table}";
+                using var reader = readCmd.ExecuteReader();
+                var colCount = reader.FieldCount;
+                var colNames = new string[colCount];
+                for (int i = 0; i < colCount; i++) colNames[i] = reader.GetName(i);
+                var colList = string.Join(", ", colNames);
+                var paramList = string.Join(", ", colNames.Select((_, i) => $"@p{i}"));
+
+                string sql;
+                if (table == "translations" && colNames.Contains("japanese"))
+                {
+                    // 未翻訳レコードのみ上書き、手動翻訳は保護
+                    sql = $"INSERT INTO {table} ({colList}) VALUES ({paramList}) ON CONFLICT(key) DO UPDATE SET japanese = excluded.japanese, source = excluded.source, translator = excluded.translator, modified_at = excluded.modified_at WHERE {table}.japanese IS NULL OR {table}.japanese = ''";
+                }
+                else
+                {
+                    sql = $"INSERT OR IGNORE INTO {table} ({colList}) VALUES ({paramList})";
+                }
+
+                while (reader.Read())
+                {
+                    using var ins = dest.CreateCommand();
+                    ins.CommandText = sql;
+                    ins.Transaction = tx;
+                    for (int i = 0; i < colCount; i++)
+                        ins.Parameters.AddWithValue($"@p{i}", reader.GetValue(i));
+                    ins.ExecuteNonQuery();
+                }
+            }
+            tx.Commit();
+        }
+        catch { }
     }
 
     private static List<string> DetectFromLauncherLog()
