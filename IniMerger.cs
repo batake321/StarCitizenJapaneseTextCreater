@@ -139,6 +139,23 @@ public static class IniMerger
         if (dbExtras > 0)
             Console.WriteLine($"    DB-only keys added (not in extraction): {dbExtras}");
 
+        // Strip ",P" suffix variants — game references keys without the parameter tag
+        int paramStripped = 0;
+        foreach (var key in merged.Keys.ToList())
+        {
+            if (key.EndsWith(",P", StringComparison.Ordinal))
+            {
+                var baseKey = key[..^2];
+                if (!merged.ContainsKey(baseKey))
+                {
+                    merged[baseKey] = merged[key];
+                    paramStripped++;
+                }
+            }
+        }
+        if (paramStripped > 0)
+            Console.WriteLine($"    ,P suffix stripped duplicates: {paramStripped}");
+
         // Add @-prefixed duplicates for keys the game may reference with @ prefix
         int atDupes = 0;
         foreach (var key in merged.Keys.ToList())
