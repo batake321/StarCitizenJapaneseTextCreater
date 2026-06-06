@@ -429,6 +429,7 @@ public class TradeService
                 date_modified TEXT, fetched_at TEXT, patch TEXT, is_current INTEGER DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS trade_ships (name TEXT, manufacturer TEXT, scu INTEGER, fetched_at TEXT);
+            DROP TABLE IF EXISTS trade_terminals;
             CREATE TABLE IF NOT EXISTS trade_terminals (id INTEGER DEFAULT 0, name TEXT PRIMARY KEY, has_loading_dock INTEGER, has_docking_port INTEGER, is_cargo_center INTEGER);
             CREATE TABLE IF NOT EXISTS trade_meta (key TEXT PRIMARY KEY, value TEXT);
             CREATE TABLE IF NOT EXISTS my_ships (
@@ -536,11 +537,15 @@ public class TradeService
 
             SetMeta(db, "fetched_at", _lastPriceUpdate.ToString("o"));
             tx.Commit();
+            OnProgress?.Invoke($"キャッシュ保存完了 ({_allPrices.Count:N0} 件)");
 
             // Detect missing routes
             DetectMissingRoutes(db);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            OnProgress?.Invoke($"キャッシュ保存エラー: {ex.Message}");
+        }
     }
 
     private void DetectMissingRoutes(SqliteConnection db)
