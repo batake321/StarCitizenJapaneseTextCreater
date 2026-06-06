@@ -77,7 +77,9 @@ public class MissionService : IDisposable
             _transDict = LoadTranslations(translationDbPath);
     }
 
-    private static Dictionary<string, string> LoadTranslations(string dbPath)
+    public string? TransLoadError { get; private set; }
+
+    private Dictionary<string, string> LoadTranslations(string dbPath)
     {
         var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         try
@@ -90,12 +92,16 @@ public class MissionService : IDisposable
             while (r.Read())
             {
                 var key = r.GetString(0);
-                var ja = r.GetString(1);
-                dict[key] = ja;
-                if (!key.StartsWith("@")) dict["@" + key] = ja;
+                var ja = r.IsDBNull(1) ? "" : r.GetString(1);
+                if (string.IsNullOrEmpty(ja)) continue;
+                dict[key] = ja.Replace("\\n", "\n");
+                if (!key.StartsWith("@")) dict["@" + key] = ja.Replace("\\n", "\n");
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            TransLoadError = ex.Message;
+        }
         return dict;
     }
 

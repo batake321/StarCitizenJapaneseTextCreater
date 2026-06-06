@@ -1488,7 +1488,10 @@ public partial class MainWindow : Window
             _missionService = new MissionService(dbPath, jaIniPath, DbPath);
             var categories = _missionService.GetCategories();
             lstMissionCategories.ItemsSource = categories;
-            txtMissionStatus.Text = $"{categories.Sum(c => c.Count)} 件 (ini:{_missionService.JaDictCount} 翻訳DB:{_missionService.TransDictCount})";
+            var transInfo = _missionService.TransLoadError != null
+                ? $"翻訳DBエラー:{_missionService.TransLoadError}"
+                : $"翻訳DB:{_missionService.TransDictCount}";
+            txtMissionStatus.Text = $"{categories.Sum(c => c.Count)} 件 (ini:{_missionService.JaDictCount} {transInfo})";
             dgMissions.ItemsSource = null;
             txtMissionDetail.Text = "カテゴリを選択してください。";
         }
