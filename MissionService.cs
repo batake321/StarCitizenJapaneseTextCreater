@@ -557,13 +557,15 @@ public class MissionService : IDisposable
         {
             lines.Add("");
             lines.Add("■ 説明 (日本語)");
-            lines.Add($"  {m.DescriptionJa}");
+            foreach (var dl in m.DescriptionJa.Split('\n'))
+                lines.Add($"  {dl.TrimEnd()}");
         }
         if (!IsLocKey(m.Description) && !string.IsNullOrEmpty(m.Description))
         {
             lines.Add("");
             lines.Add("■ 説明 (英語)");
-            lines.Add($"  {m.Description}");
+            foreach (var dl in m.Description.Replace("\\n", "\n").Split('\n'))
+                lines.Add($"  {dl.TrimEnd()}");
         }
 
         return string.Join("\n", lines);
@@ -658,13 +660,12 @@ public class MissionService : IDisposable
     private static string ResolveLoc(string raw, Dictionary<string, string> dict)
     {
         if (string.IsNullOrEmpty(raw)) return "";
-        // Try as-is (e.g. "@key")
-        if (dict.TryGetValue(raw, out var v1) && !string.IsNullOrEmpty(v1)) return v1;
-        // Try with @ prefix
-        if (!raw.StartsWith("@") && dict.TryGetValue("@" + raw, out var v2) && !string.IsNullOrEmpty(v2)) return v2;
-        // Try without @ prefix
-        if (raw.StartsWith("@") && dict.TryGetValue(raw[1..], out var v3) && !string.IsNullOrEmpty(v3)) return v3;
-        return "";
+        string? val = null;
+        if (dict.TryGetValue(raw, out var v1) && !string.IsNullOrEmpty(v1)) val = v1;
+        else if (!raw.StartsWith("@") && dict.TryGetValue("@" + raw, out var v2) && !string.IsNullOrEmpty(v2)) val = v2;
+        else if (raw.StartsWith("@") && dict.TryGetValue(raw[1..], out var v3) && !string.IsNullOrEmpty(v3)) val = v3;
+        if (val == null) return "";
+        return val.Replace("\\n", "\n");
     }
 
     private static string SafeStr(SqliteDataReader r, int i) =>
