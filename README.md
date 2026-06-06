@@ -25,7 +25,7 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 > **[StarCitizenJapaneseTextCreater-v1.14.3-win-x64.zip (最新 v1.14.3 バイナリ)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.3/StarCitizenJapaneseTextCreater-v1.14.3-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260607_003531.zip (翻訳データベース 4.8.1 6/7更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.3/sc_japanese_backup_20260606_123738.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260607_023111.zip (翻訳データベース 4.8.1 6/7更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.3/sc_japanese_backup_20260606_123738.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後・翻訳DB取り込み後は、翻訳タブの「3. 反映」を実行してください。** 通貨記号の重なり修正や新型船名の表示修正など、ゲーム内表示に関わる改善が global.ini に反映されます。
 
