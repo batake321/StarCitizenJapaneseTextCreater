@@ -50,14 +50,15 @@ public partial class App : Application
             Config.WorkingDirectory = @"C:\temp";
         Directory.CreateDirectory(Config.WorkingDirectory);
 
-        // 同梱DBをWorkDirにコピー（未存在時のみ）
+        // 同梱DBをWorkDirにコピー（同梱版が新しければ上書き）
         var baseDir = AppContext.BaseDirectory;
         foreach (var dbName in new[] { "translations.db", "gamedata_cache.db" })
         {
             var src = Path.Combine(baseDir, dbName);
             var dest = Path.Combine(Config.WorkingDirectory, dbName);
-            if (File.Exists(src) && !File.Exists(dest))
-                File.Copy(src, dest);
+            if (!File.Exists(src)) continue;
+            if (!File.Exists(dest) || File.GetLastWriteTime(src) > File.GetLastWriteTime(dest))
+                File.Copy(src, dest, overwrite: true);
         }
     }
 
