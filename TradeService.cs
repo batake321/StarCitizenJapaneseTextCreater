@@ -445,7 +445,11 @@ public class TradeService
 
     private bool TryLoadCache()
     {
-        if (_dbPath == null || !File.Exists(_dbPath)) return false;
+        if (_dbPath == null || !File.Exists(_dbPath))
+        {
+            OnProgress?.Invoke($"キャッシュDB未検出: {_dbPath ?? "(null)"}");
+            return false;
+        }
 
         try
         {
@@ -453,9 +457,18 @@ public class TradeService
             InitDb(db);
 
             var fetchedAt = GetMeta(db, "fetched_at");
-            if (string.IsNullOrEmpty(fetchedAt)) return false;
+            if (string.IsNullOrEmpty(fetchedAt))
+            {
+                OnProgress?.Invoke("キャッシュ: fetched_at が空のため再取得");
+                return false;
+            }
             var fetchTime = DateTime.Parse(fetchedAt);
-            if ((DateTime.Now - fetchTime).TotalHours > CacheHours) return false;
+            var ageHours = (DateTime.Now - fetchTime).TotalHours;
+            if (ageHours > CacheHours)
+            {
+                OnProgress?.Invoke($"キャッシュ期限切れ: {ageHours:F1}時間経過 (上限{CacheHours}h)");
+                return false;
+            }
 
             _allPrices = LoadPricesFromDb(db, isCurrent: true);
             _ships = LoadShipsFromDb(db);
@@ -465,7 +478,11 @@ public class TradeService
             _lastPriceUpdate = fetchTime;
             return _allPrices.Count > 0;
         }
-        catch { return false; }
+        catch (Exception ex)
+        {
+            OnProgress?.Invoke($"キャッシュ読込エラー: {ex.Message}");
+            return false;
+        }
     }
 
     private void SaveCache()

@@ -573,7 +573,8 @@ public class MissionService : IDisposable
 
     private static bool IsLocKey(string s) =>
         string.IsNullOrEmpty(s) || s.StartsWith("@") || s.StartsWith("LOC_") ||
-        s.Contains("LOC_UNINITIALIZED") || s.Contains("LOC_EMPTY") || s.Contains("procedural_text_null");
+        s.Contains("LOC_UNINITIALIZED") || s.Contains("LOC_EMPTY") || s.Contains("procedural_text_null") ||
+        s.Contains("UNINITIALIZED") || s.Contains("procedural_text_null");
 
     private static string FormatFaction(string f)
     {
@@ -724,8 +725,17 @@ public class MissionService : IDisposable
         public string DescriptionJa { get; set; } = "";
         public string OriginalTitleKey { get; set; } = "";
         public string MissionGiverJa { get; set; } = "";
-        public string DisplayNameJa => !string.IsNullOrEmpty(TitleJa) && !IsLocKeyStatic(TitleJa) ? TitleJa : "";
-        public string DisplayNameEn => !string.IsNullOrEmpty(DisplayNameJa) ? $"({CleanedName})" : CleanedName;
+        public string DisplayNameJa
+        {
+            get
+            {
+                var ja = !string.IsNullOrEmpty(TitleJa) && !IsLocKeyStatic(TitleJa) ? TitleJa : "";
+                if (NotForRelease && !string.IsNullOrEmpty(ja)) return $"{ja} (開発中)";
+                if (NotForRelease && string.IsNullOrEmpty(ja)) return "(開発中)";
+                return ja;
+            }
+        }
+        public string DisplayNameEn => !string.IsNullOrEmpty(TitleJa) && !IsLocKeyStatic(TitleJa) ? $"({CleanedName})" : CleanedName;
         public string Title { get; set; } = "";
         public string TitleHud { get; set; } = "";
         public string MissionType { get; set; } = "";

@@ -23,13 +23,13 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v1.14.1-win-x64.zip (最新 v1.14.1 バイナリ)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.1/StarCitizenJapaneseTextCreater-v1.14.1-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v1.14.2-win-x64.zip (最新 v1.14.2 バイナリ)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.2/StarCitizenJapaneseTextCreater-v1.14.2-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260606_123738.zip (翻訳データベース 4.8.1 6/5パッチ対応)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.1/sc_japanese_backup_20260606_123738.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260606_123738.zip (翻訳データベース 4.8.1 6/5パッチ対応)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.2/sc_japanese_backup_20260606_123738.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後・翻訳DB取り込み後は、翻訳タブの「3. 反映」を実行してください。** 通貨記号の重なり修正や新型船名の表示修正など、ゲーム内表示に関わる改善が global.ini に反映されます。
 
-### 🚀 v1.14.1 更新内容
+### 🚀 v1.14.2 更新内容
 
 - **ミッションタブ新設**: ゲームデータ (Data.p4k) からミッション情報を抽出し、カテゴリ別に一覧表示。バウンティハンター・傭兵・回収・調査・サルベージ・配達・デリバリー・輸送・ハンドマイニング・燃料補給・PVP 等13カテゴリに自動分類
   - **ミッション詳細表示**: 報酬・レピュテーション要件/報酬・前提ミッション（解放条件）・敵の構成（ターゲット数/増援数）・制限時間・犯罪レベル制限など、raw データから解析した詳細情報を表示
