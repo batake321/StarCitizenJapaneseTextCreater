@@ -10,6 +10,7 @@ public class MissionService : IDisposable
 {
     private readonly SqliteConnection _conn;
     private Dictionary<string, string>? _jaDict;
+    private Dictionary<string, string>? _transDict;
 
     private static readonly string[] StripPrefixes =
     {
@@ -64,13 +65,38 @@ public class MissionService : IDisposable
     };
 
     public int JaDictCount => _jaDict?.Count ?? 0;
+    public int TransDictCount => _transDict?.Count ?? 0;
 
-    public MissionService(string dbPath, string? jaIniPath = null)
+    public MissionService(string dbPath, string? jaIniPath = null, string? translationDbPath = null)
     {
         _conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
         _conn.Open();
         if (!string.IsNullOrEmpty(jaIniPath) && File.Exists(jaIniPath))
             _jaDict = GlobalIniParser.Parse(jaIniPath);
+        if (!string.IsNullOrEmpty(translationDbPath) && File.Exists(translationDbPath))
+            _transDict = LoadTranslations(translationDbPath);
+    }
+
+    private static Dictionary<string, string> LoadTranslations(string dbPath)
+    {
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT key, japanese FROM translations WHERE japanese IS NOT NULL AND japanese != ''";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var key = r.GetString(0);
+                var ja = r.GetString(1);
+                dict[key] = ja;
+                if (!key.StartsWith("@")) dict["@" + key] = ja;
+            }
+        }
+        catch { }
+        return dict;
     }
 
     public List<MissionCategory> GetCategories()
@@ -170,23 +196,19 @@ public class MissionService : IDisposable
             // Resolve Japanese title from original @key
             var titleKey = GetString(rv, "title");
             entry.OriginalTitleKey = titleKey;
-            if (_jaDict != null && !string.IsNullOrEmpty(titleKey))
-            {
-                entry.TitleJa = ResolveLoc(titleKey, _jaDict);
-            }
+            if (!string.IsNullOrEmpty(titleKey))
+                entry.TitleJa = ResolveJa(titleKey);
 
             // Resolve Japanese description
             var descKey = GetString(rv, "description");
-            if (_jaDict != null && !string.IsNullOrEmpty(descKey))
-            {
-                entry.DescriptionJa = ResolveLoc(descKey, _jaDict);
-            }
+            if (!string.IsNullOrEmpty(descKey))
+                entry.DescriptionJa = ResolveJa(descKey);
 
             // Resolve Japanese mission giver
             var giverKey = GetString(rv, "missionGiver");
-            if (_jaDict != null && !string.IsNullOrEmpty(giverKey))
+            if (!string.IsNullOrEmpty(giverKey))
             {
-                var resolved = ResolveLoc(giverKey, _jaDict);
+                var resolved = ResolveJa(giverKey);
                 if (!IsLocKey(resolved)) entry.MissionGiverJa = resolved;
             }
 
@@ -574,7 +596,10 @@ public class MissionService : IDisposable
     private static bool IsLocKey(string s) =>
         string.IsNullOrEmpty(s) || s.StartsWith("@") || s.StartsWith("LOC_") ||
         s.Contains("LOC_UNINITIALIZED") || s.Contains("LOC_EMPTY") || s.Contains("procedural_text_null") ||
-        s.Contains("UNINITIALIZED") || s.Contains("procedural_text_null");
+        s.Contains("UNINITIALIZED");
+
+    private static bool ContainsJapanese(string s) =>
+        !string.IsNullOrEmpty(s) && s.Any(c => c >= '　' && c <= '鿿' || c >= '＀' && c <= '￯');
 
     private static string FormatFaction(string f)
     {
@@ -658,6 +683,23 @@ public class MissionService : IDisposable
         return name.Replace("_", " ").Trim();
     }
 
+    private string ResolveJa(string raw)
+    {
+        // 1. translations.db (翻訳エディタの内容、DBバックアップに含まれる)
+        if (_transDict != null)
+        {
+            var val = ResolveLoc(raw, _transDict);
+            if (!string.IsNullOrEmpty(val) && ContainsJapanese(val)) return val;
+        }
+        // 2. subPC/global.ini (ローカルiniファイル)
+        if (_jaDict != null)
+        {
+            var val = ResolveLoc(raw, _jaDict);
+            if (!string.IsNullOrEmpty(val)) return val;
+        }
+        return "";
+    }
+
     private static string ResolveLoc(string raw, Dictionary<string, string> dict)
     {
         if (string.IsNullOrEmpty(raw)) return "";
@@ -729,7 +771,7 @@ public class MissionService : IDisposable
         {
             get
             {
-                var ja = !string.IsNullOrEmpty(TitleJa) && !IsLocKeyStatic(TitleJa) ? TitleJa : "";
+                var ja = !string.IsNullOrEmpty(TitleJa) && !IsLocKeyStatic(TitleJa) && ContainsJapanese(TitleJa) ? TitleJa : "";
                 if (NotForRelease && !string.IsNullOrEmpty(ja)) return $"{ja} (開発中)";
                 if (NotForRelease && string.IsNullOrEmpty(ja)) return "(開発中)";
                 return ja;

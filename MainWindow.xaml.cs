@@ -63,8 +63,10 @@ public partial class MainWindow : Window
         txtVoiceVoxUrl.Text = config.VoiceVoxUrl;
         txtVoiceVoxSpeaker.Text = config.VoiceVoxSpeakerId.ToString();
         chkWebAutoStart.IsChecked = config.WebServerAutoStart;
-        txtMissionFontSize.Text = config.MissionDetailFontSize.ToString();
-        txtMissionDetail.FontSize = config.MissionDetailFontSize;
+        var mfs = config.MissionDetailFontSize;
+        if (mfs < 8 || mfs > 30) mfs = 14;
+        txtMissionFontSize.Text = mfs.ToString();
+        txtMissionDetail.FontSize = mfs;
 
         // Restore trade params
         txtTradeScu.Text = config.TradeScu > 0 ? config.TradeScu.ToString() : "100";
@@ -1483,10 +1485,10 @@ public partial class MainWindow : Window
         {
             _missionService?.Dispose();
             string? jaIniPath = FindJapaneseIni();
-            _missionService = new MissionService(dbPath, jaIniPath);
+            _missionService = new MissionService(dbPath, jaIniPath, DbPath);
             var categories = _missionService.GetCategories();
             lstMissionCategories.ItemsSource = categories;
-            txtMissionStatus.Text = $"{categories.Sum(c => c.Count)} 件 (辞書:{_missionService.JaDictCount}語)";
+            txtMissionStatus.Text = $"{categories.Sum(c => c.Count)} 件 (ini:{_missionService.JaDictCount} 翻訳DB:{_missionService.TransDictCount})";
             dgMissions.ItemsSource = null;
             txtMissionDetail.Text = "カテゴリを選択してください。";
         }
