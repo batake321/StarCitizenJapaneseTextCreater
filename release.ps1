@@ -23,6 +23,19 @@ dotnet publish -c Release -r win-x64 --self-contained false -o $PublishDir
 if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 Write-Host "Build OK" -ForegroundColor Green
 
+# 1.5. Bundle DB files from WorkDir
+Write-Host "=== Bundle DB ===" -ForegroundColor Cyan
+$workDir = "D:\temp"
+foreach ($db in @("translations.db", "gamedata_cache.db")) {
+    $src = Join-Path $workDir $db
+    if (Test-Path $src) {
+        Copy-Item $src (Join-Path $PublishDir $db) -Force
+        Write-Host "  Bundled: $db ($("{0:N1} MB" -f ((Get-Item $src).Length / 1MB)))" -ForegroundColor Green
+    } else {
+        Write-Host "  Skip: $db (not found in $workDir)" -ForegroundColor Yellow
+    }
+}
+
 # 2. Create ZIP
 Write-Host "=== Create ZIP ===" -ForegroundColor Cyan
 if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }

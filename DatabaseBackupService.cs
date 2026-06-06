@@ -256,7 +256,6 @@ public static class DatabaseBackupService
             string insertSql;
             if (mode == ImportMode.Add && table == "translations" && colNames.Contains("japanese"))
             {
-                // 追加モード: ローカルが未翻訳ならインポート側で上書き
                 insertSql = $"INSERT INTO {table} ({colList}) VALUES ({paramList}) ON CONFLICT(key) DO UPDATE SET japanese = excluded.japanese, source = excluded.source, translator = excluded.translator, modified_at = excluded.modified_at WHERE {table}.japanese IS NULL OR {table}.japanese = ''";
             }
             else

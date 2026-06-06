@@ -2,7 +2,7 @@ using System.Windows;
 
 namespace StarCitizenJapaneseTextCreater;
 
-public enum ImportMode { Add, Drop }
+public enum ImportMode { Add, Overwrite, Drop }
 
 public partial class ImportSelectionDialog : Window
 {
@@ -99,7 +99,9 @@ public partial class ImportSelectionDialog : Window
             return;
         }
 
-        Mode = rbDrop.IsChecked == true ? ImportMode.Drop : ImportMode.Add;
+        Mode = rbDrop.IsChecked == true ? ImportMode.Drop
+             : rbOverwrite.IsChecked == true ? ImportMode.Overwrite
+             : ImportMode.Add;
 
         DialogResult = true;
     }

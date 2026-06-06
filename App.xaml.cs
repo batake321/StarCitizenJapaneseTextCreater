@@ -49,6 +49,16 @@ public partial class App : Application
         if (string.IsNullOrEmpty(Config.WorkingDirectory))
             Config.WorkingDirectory = @"C:\temp";
         Directory.CreateDirectory(Config.WorkingDirectory);
+
+        // 同梱DBをWorkDirにコピー（未存在時のみ）
+        var baseDir = AppContext.BaseDirectory;
+        foreach (var dbName in new[] { "translations.db", "gamedata_cache.db" })
+        {
+            var src = Path.Combine(baseDir, dbName);
+            var dest = Path.Combine(Config.WorkingDirectory, dbName);
+            if (File.Exists(src) && !File.Exists(dest))
+                File.Copy(src, dest);
+        }
     }
 
     public static List<string> DetectGameChannels()

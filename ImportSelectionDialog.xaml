@@ -70,9 +70,16 @@
                                    Foreground="#666" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"/>
                     </StackPanel>
                 </RadioButton>
+                <RadioButton x:Name="rbOverwrite" Margin="0,6" FontSize="13">
+                    <StackPanel>
+                        <TextBlock Text="上書き（既存データを更新）" FontWeight="SemiBold"/>
+                        <TextBlock Text="既存データをバックアップの内容で上書きします。バックアップにないデータは残ります。"
+                                   Foreground="#666" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                    </StackPanel>
+                </RadioButton>
                 <RadioButton x:Name="rbDrop" Margin="0,6" FontSize="13">
                     <StackPanel>
-                        <TextBlock Text="書き換え（一度クリア）" FontWeight="SemiBold"/>
+                        <TextBlock Text="全置換（一度クリア）" FontWeight="SemiBold"/>
                         <TextBlock Text="既存データを削除し、バックアップの内容で完全に置き換えます。"
                                    Foreground="#C00" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"/>
                     </StackPanel>
