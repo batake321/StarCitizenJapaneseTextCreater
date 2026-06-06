@@ -15,6 +15,7 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 - **ロケーション検索** - ステーション・都市の施設情報（精錬所・ハンガー・エレベーター等）を Star Citizen Wiki API + UEX から統合取得
 - **コモディティ交易** - UEX 価格データから最適ルート自動計算、在庫・コンテナサイズ表示、所持船管理、AI チャット連携
 - **キーバインドエディタ** - キーボード・マウス・ゲームパッド (Xbox)・HOTAS (VKB Gladiator NXT 左右) のビジュアル表示、activation mode 色分け、翻訳連携
+- **ミッション一覧** - Data.p4k から全ミッションを抽出し、カテゴリ別に一覧表示。報酬・レピュテーション要件/報酬・前提ミッション・敵構成・制限時間など詳細情報を表示
 - **ゲームデータ連携** - Data.p4k の DCB データベースからオンデマンドで船・武器・コンポーネント情報を取得
 - **プロファイル管理** - キャラクターデザイン・キーバインド設定のバックアップ/リストア
 - **ゲームパス自動検出** - RSI Launcher のログから Star Citizen のインストール先を自動検出
@@ -22,18 +23,30 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v1.13.1-win-x64.zip (最新 v1.13.1 バイナリ)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.13.1/StarCitizenJapaneseTextCreater-v1.13.1-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v1.14.0-win-x64.zip (最新 v1.14.0 バイナリ)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.0/StarCitizenJapaneseTextCreater-v1.14.0-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260606_123738.zip (翻訳データベース 4.8.1 6/5パッチ対応)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.13.1/sc_japanese_backup_20260606_123738.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260606_123738.zip (翻訳データベース 4.8.1 6/5パッチ対応)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.0/sc_japanese_backup_20260606_123738.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後・翻訳DB取り込み後は、翻訳タブの「3. 反映」を実行してください。** 通貨記号の重なり修正や新型船名の表示修正など、ゲーム内表示に関わる改善が global.ini に反映されます。
 
-### 🚀 v1.13.1 更新内容
+### 🚀 v1.14.0 更新内容
+
+- **ミッションタブ新設**: ゲームデータ (Data.p4k) からミッション情報を抽出し、カテゴリ別に一覧表示。バウンティハンター・傭兵・回収・調査・サルベージ・配達・デリバリー・輸送・ハンドマイニング・燃料補給・PVP 等13カテゴリに自動分類
+  - **ミッション詳細表示**: 報酬・レピュテーション要件/報酬・前提ミッション（解放条件）・敵の構成（ターゲット数/増援数）・制限時間・犯罪レベル制限など、raw データから解析した詳細情報を表示
+  - **日本語/英語タイトル並記**: 翻訳済みの日本語タイトルを上段に、英語名を下段に2段表示
+  - **難易度順ソート**: Intro → Very Easy → Easy → Medium → Hard → Very Hard の順で表示
+- **ミッション詳細フォントサイズ設定**: 設定タブから変更可能（既定 14pt）
+- **コモディティ価格キャッシュ延長**: 12時間 → 24時間に変更し、起動時のAPI取得頻度を軽減
+
+<details>
+<summary>v1.13.1 更新内容</summary>
 
 - **交易ルート計算を大幅改善**: コモディティ毎に購入候補5拠点・売却候補3拠点を評価し、在庫充足率で重み付け。在庫豊富な拠点が優先されるように改善。コンテナSCU (CS) を考慮した積載量計算にも対応
 - **翻訳反映の未翻訳キー対策**: 翻訳DBに存在するキーは、Data.p4k の再抽出前でも global.ini に反映されるよう改善。パッチ直後でも「3. 反映」だけで新キーを含む翻訳が適用可能に
 - **ベクトルインデックス構築の途中再開対応**: 500エラー等で中断しても、再実行で処理済み分をスキップし残りから再開。バッチ毎にDB保存、最大3回リトライ
 - 翻訳データベースを 4.8.1 (6/5パッチ) に対応したバックアップに更新
+
+</details>
 
 <details>
 <summary>v1.13.0 更新内容</summary>

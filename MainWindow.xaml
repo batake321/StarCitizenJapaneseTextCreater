@@ -752,6 +752,105 @@
                 </Grid>
             </TabItem>
 
+            <!-- ミッションタブ -->
+            <TabItem Header="ミッション">
+                <Grid Margin="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="200"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Left: Category list -->
+                    <Grid Grid.Column="0" Margin="0,0,8,0">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="カテゴリ" FontWeight="Bold" FontSize="13" Margin="0,0,0,6"/>
+                        <Button Grid.Row="1" x:Name="btnLoadMissions" Content="ミッション読み込み"
+                                Click="LoadMissions_Click" Padding="10,6" Margin="0,0,0,8"
+                                FontWeight="Bold" Background="#4CAF50" Foreground="White"/>
+                        <ListBox Grid.Row="2" x:Name="lstMissionCategories"
+                                 SelectionChanged="MissionCategory_Changed"
+                                 FontSize="13" Padding="2">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding}" Padding="4,3"/>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                        <TextBlock Grid.Row="3" x:Name="txtMissionStatus" Foreground="#666"
+                                   FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                    </Grid>
+
+                    <!-- Right: Mission list + detail -->
+                    <Grid Grid.Column="1">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*" MinHeight="120"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*" MinHeight="120"/>
+                        </Grid.RowDefinitions>
+
+                        <!-- Mission list -->
+                        <DataGrid Grid.Row="0" x:Name="dgMissions" AutoGenerateColumns="False"
+                                  IsReadOnly="True" SelectionChanged="Mission_Selected"
+                                  CanUserSortColumns="True" HeadersVisibility="Column"
+                                  GridLinesVisibility="Horizontal" AlternatingRowBackground="#F8F8F8"
+                                  FontSize="12">
+                            <DataGrid.Columns>
+                                <DataGridTemplateColumn Header="名前" Width="320" SortMemberPath="CleanedName">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Margin="2,2">
+                                                <TextBlock Text="{Binding DisplayNameJa}" FontWeight="Bold" FontSize="12.5"
+                                                           Foreground="Black" TextTrimming="CharacterEllipsis"
+                                                           Visibility="{Binding DisplayNameJa, Converter={x:Static local:StringToVisConverter.Instance}}"/>
+                                                <TextBlock Text="{Binding DisplayNameEn}" Foreground="#333" FontSize="11"
+                                                           TextTrimming="CharacterEllipsis"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTextColumn Header="難易度" Binding="{Binding Difficulty}" Width="80">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="報酬 (aUEC)" Binding="{Binding DisplayReward}" Width="100">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="VerticalAlignment" Value="Center"/>
+                                            <Setter Property="TextAlignment" Value="Right"/>
+                                            <Setter Property="FontFamily" Value="Consolas"/>
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="場所" Binding="{Binding Location}" Width="160">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                            </DataGrid.Columns>
+                        </DataGrid>
+
+                        <GridSplitter Grid.Row="1" Height="5" HorizontalAlignment="Stretch"
+                                      VerticalAlignment="Center" Background="#DDD" Margin="0,2"/>
+
+                        <!-- Mission detail -->
+                        <Border Grid.Row="2" Background="#1E1E1E" CornerRadius="4" Padding="4">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                                <TextBlock x:Name="txtMissionDetail" TextWrapping="Wrap"
+                                           FontFamily="Consolas" FontSize="14"
+                                           Foreground="#DCDCDC" Padding="8"
+                                           Text="カテゴリを選択し、ミッションをクリックすると詳細が表示されます。"/>
+                            </ScrollViewer>
+                        </Border>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
             <!-- チャットタブ -->
             <TabItem Header="チャット">
                 <Grid Margin="8">
@@ -968,6 +1067,14 @@
                                 <TextBlock x:Name="txtBackendSummary" TextWrapping="Wrap" Margin="0,0,0,8"
                                            Text="設定されていません"/>
                                 <Button Content="AI 設定を開く" Click="AiSettings_Click" Padding="14,6" HorizontalAlignment="Left"/>
+                            </StackPanel>
+                        </GroupBox>
+
+                        <GroupBox Header="表示設定" Margin="0,0,0,8" Padding="8">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="ミッション詳細フォントサイズ:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBox x:Name="txtMissionFontSize" Width="50" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBlock Text="pt (既定: 14)" VerticalAlignment="Center" Foreground="#666"/>
                             </StackPanel>
                         </GroupBox>
 

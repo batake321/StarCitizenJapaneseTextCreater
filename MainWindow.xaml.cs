@@ -63,6 +63,8 @@ public partial class MainWindow : Window
         txtVoiceVoxUrl.Text = config.VoiceVoxUrl;
         txtVoiceVoxSpeaker.Text = config.VoiceVoxSpeakerId.ToString();
         chkWebAutoStart.IsChecked = config.WebServerAutoStart;
+        txtMissionFontSize.Text = config.MissionDetailFontSize.ToString();
+        txtMissionDetail.FontSize = config.MissionDetailFontSize;
 
         // Restore trade params
         txtTradeScu.Text = config.TradeScu > 0 ? config.TradeScu.ToString() : "100";
@@ -1387,6 +1389,11 @@ public partial class MainWindow : Window
         if (int.TryParse(txtVoiceVoxSpeaker.Text.Trim(), out var spk)) App.Config.VoiceVoxSpeakerId = spk;
         App.Config.WebServerAutoStart = chkWebAutoStart.IsChecked == true;
         App.Config.UexApiKey = txtUexApiKey.Text.Trim();
+        if (double.TryParse(txtMissionFontSize.Text.Trim(), out var fs) && fs >= 8 && fs <= 30)
+        {
+            App.Config.MissionDetailFontSize = fs;
+            txtMissionDetail.FontSize = fs;
+        }
         txtGamePath.Text = App.Config.GamePath;
 
         SaveConfigToFile();
@@ -1427,6 +1434,7 @@ public partial class MainWindow : Window
                 App.Config.TradeBuySystem,
                 App.Config.TradeSellSystem,
                 App.Config.UexApiKey,
+                App.Config.MissionDetailFontSize,
             };
 
             var json = JsonSerializer.Serialize(config, new JsonSerializerOptions
@@ -1456,6 +1464,105 @@ public partial class MainWindow : Window
     private readonly List<ChatMessage> _chatHistory = new();
     private bool _chatSending;
     private GameDataExtractor? _gameDataExtractor;
+
+    // ── Mission tab ──
+    private MissionService? _missionService;
+    private List<MissionService.MissionEntry>? _currentMissions;
+
+    private void LoadMissions_Click(object sender, RoutedEventArgs e)
+    {
+        var dbPath = IndexDbPath;
+        if (!File.Exists(dbPath))
+        {
+            MessageBox.Show("ゲームデータのインデックスが未構築です。\n設定タブの「インデックス構築」を実行してください。",
+                "ミッション", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        try
+        {
+            _missionService?.Dispose();
+            string? jaIniPath = FindJapaneseIni();
+            _missionService = new MissionService(dbPath, jaIniPath);
+            var categories = _missionService.GetCategories();
+            lstMissionCategories.ItemsSource = categories;
+            txtMissionStatus.Text = $"{categories.Sum(c => c.Count)} 件 (辞書:{_missionService.JaDictCount}語)";
+            dgMissions.ItemsSource = null;
+            txtMissionDetail.Text = "カテゴリを選択してください。";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"ミッション読み込みエラー:\n{ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void MissionCategory_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_missionService == null) return;
+        if (lstMissionCategories.SelectedItem is not MissionService.MissionCategory cat) return;
+
+        try
+        {
+            _currentMissions = _missionService.GetMissions(cat.Name);
+            dgMissions.ItemsSource = _currentMissions;
+            var jaCount = _currentMissions.Count(m => !string.IsNullOrEmpty(m.DisplayNameJa));
+            txtMissionStatus.Text = $"{cat.Name}: {_currentMissions.Count} 件 (日本語:{jaCount}, 辞書:{_missionService.JaDictCount})";
+            txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
+        }
+        catch (Exception ex)
+        {
+            txtMissionStatus.Text = $"エラー: {ex.Message}";
+        }
+    }
+
+    private string? FindJapaneseIni()
+    {
+        var roots = new List<string> { WorkDir, AppDomain.CurrentDomain.BaseDirectory, Directory.GetCurrentDirectory() };
+        var exePath = Environment.ProcessPath;
+        if (!string.IsNullOrEmpty(exePath))
+            roots.Add(Path.GetDirectoryName(exePath) ?? "");
+
+        // subPC/global.ini を最優先（全キー入り）
+        foreach (var root in roots.Where(r => !string.IsNullOrEmpty(r)))
+        {
+            var c = Path.Combine(root, "subPC", "global.ini");
+            if (File.Exists(c)) return c;
+        }
+        foreach (var root in roots.Where(r => !string.IsNullOrEmpty(r)))
+        {
+            var dir = root;
+            for (int i = 0; i < 6 && dir != null; i++)
+            {
+                var c = Path.Combine(dir, "subPC", "global.ini");
+                if (File.Exists(c)) return c;
+                var parent = Path.GetDirectoryName(dir);
+                if (parent == dir) break;
+                dir = parent;
+            }
+        }
+        // フォールバック: japanese_(japan)/global.ini
+        foreach (var root in roots.Where(r => !string.IsNullOrEmpty(r)))
+        {
+            var c = Path.Combine(root, "japanese_(japan)", "global.ini");
+            if (File.Exists(c)) return c;
+        }
+        return null;
+    }
+
+    private void Mission_Selected(object sender, SelectionChangedEventArgs e)
+    {
+        if (_missionService == null) return;
+        if (dgMissions.SelectedItem is not MissionService.MissionEntry mission) return;
+
+        try
+        {
+            txtMissionDetail.Text = _missionService.FormatDetail(mission);
+        }
+        catch (Exception ex)
+        {
+            txtMissionDetail.Text = $"詳細表示エラー: {ex.Message}";
+        }
+    }
 
     private void InitChat()
     {

@@ -29,6 +29,9 @@ public class AppConfig
     public string TradeBuySystem { get; set; } = "全て";
     public string TradeSellSystem { get; set; } = "全て";
 
+    // UI
+    public double MissionDetailFontSize { get; set; } = 14;
+
     // UEX Capture
     public string UexApiKey { get; set; } = "";
     public string PreferredOcrEngine { get; set; } = "Windows OCR";

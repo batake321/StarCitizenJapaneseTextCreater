@@ -16,7 +16,7 @@ public class TradeService
     private DateTime _lastPriceUpdate = DateTime.MinValue;
     private bool _isFetching;
     private string? _dbPath;
-    private const int CacheHours = 12;
+    private const int CacheHours = 24;
 
     public bool HasPriceData => _allPrices.Count > 0;
     public bool HasShipData => _ships.Count > 0;
