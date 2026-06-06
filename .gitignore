@@ -8,3 +8,4 @@ publish/
 !db_backup/*.zip
 .vs/
 tools/
+subPC/
