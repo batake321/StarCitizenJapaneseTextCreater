@@ -8,6 +8,8 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media.Imaging;
 using Microsoft.Win32;
 
 namespace StarCitizenJapaneseTextCreater;
@@ -32,6 +34,11 @@ public partial class MainWindow : Window
     private readonly TradeService _tradeService = new();
     private HashSet<string>? _selectedCommodities;
 
+    // Capture state
+    private ScreenCaptureService? _captureService;
+    private UexSubmissionService? _uexSubmitService;
+    private TerminalCaptureData? _currentCapture;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -49,6 +56,7 @@ public partial class MainWindow : Window
         txtWorkDir.Text = config.WorkingDirectory;
         txtOutputLang.Text = config.OutputLanguage;
         txtScApiKey.Text = config.ScApiKey;
+        txtUexApiKey.Text = config.UexApiKey;
 
         txtWebPort.Text = config.WebServerPort.ToString();
         txtWebHttpsPort.Text = config.WebServerHttpsPort.ToString();
@@ -75,6 +83,7 @@ public partial class MainWindow : Window
         LoadGlossary();
         RefreshEditor();
         InitChat();
+        InitCapture();
         _ = StartBackgroundTradeFetchAsync();
 
         if (config.WebServerAutoStart)
@@ -1377,6 +1386,7 @@ public partial class MainWindow : Window
         App.Config.VoiceVoxUrl = txtVoiceVoxUrl.Text.Trim();
         if (int.TryParse(txtVoiceVoxSpeaker.Text.Trim(), out var spk)) App.Config.VoiceVoxSpeakerId = spk;
         App.Config.WebServerAutoStart = chkWebAutoStart.IsChecked == true;
+        App.Config.UexApiKey = txtUexApiKey.Text.Trim();
         txtGamePath.Text = App.Config.GamePath;
 
         SaveConfigToFile();
@@ -1416,6 +1426,7 @@ public partial class MainWindow : Window
                 App.Config.TradeBudget,
                 App.Config.TradeBuySystem,
                 App.Config.TradeSellSystem,
+                App.Config.UexApiKey,
             };
 
             var json = JsonSerializer.Serialize(config, new JsonSerializerOptions
@@ -2367,6 +2378,8 @@ public partial class MainWindow : Window
 
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
+        _captureService?.Dispose();
+
         var config = App.Config;
         if (WindowState == WindowState.Maximized)
         {
@@ -2894,6 +2907,262 @@ public partial class MainWindow : Window
             txtTradeInfo.Text = "条件に合うルートが見つかりません。フィルタや予算を変更してみてください。";
         }
         txtTradeStatus.Text = $"更新: {_tradeService.LastPriceUpdate:HH:mm} | {buySystem} → {sellSystem} | {scu} SCU | 予算 {budget:N0}";
+    }
+
+    // === Screen Capture / OCR / UEX ===
+
+    private void InitCapture()
+    {
+        _captureService = new ScreenCaptureService();
+        _captureService.OnScreenCaptured += png =>
+            Dispatcher.BeginInvoke(() => _ = ProcessCaptureAsync(png));
+        _captureService.OnLog += msg =>
+            Dispatcher.BeginInvoke(() => txtCaptureStatus.Text = msg);
+
+        _uexSubmitService = new UexSubmissionService();
+        _uexSubmitService.OnLog += msg =>
+            Dispatcher.BeginInvoke(() => txtSubmitStatus.Text = msg);
+
+        // Register global hotkey
+        var hwnd = new WindowInteropHelper(this).Handle;
+        var source = HwndSource.FromHwnd(hwnd);
+        source?.AddHook(_captureService.WndProc);
+        _captureService.Register(hwnd);
+
+        // Populate terminal combo
+        PopulateCaptureTerminals();
+    }
+
+    private void PopulateCaptureTerminals()
+    {
+        if (!_tradeService.HasPriceData) return;
+
+        var terminals = _tradeService.GetTerminals()
+            .OrderBy(kv => kv.Key)
+            .Select(kv => new KeyValuePair<string, int>(kv.Key, kv.Value.Id))
+            .ToList();
+        cmbCaptureTerminal.ItemsSource = terminals;
+    }
+
+    private async Task ProcessCaptureAsync(byte[] pngImage)
+    {
+        txtCaptureStatus.Text = "OCR処理中...";
+        txtOcrTiming.Text = "";
+        txtOcrConfidence.Text = "";
+
+        // Show preview
+        var bitmapImage = new BitmapImage();
+        bitmapImage.BeginInit();
+        bitmapImage.StreamSource = new MemoryStream(pngImage);
+        bitmapImage.CacheOption = BitmapCacheOption.OnLoad;
+        bitmapImage.EndInit();
+        bitmapImage.Freeze();
+        imgCapturePreview.Source = bitmapImage;
+
+        IOcrEngine ocrEngine = new WindowsOcrEngine();
+
+        try
+        {
+            var ocrResult = await ocrEngine.RecognizeAsync(pngImage);
+            txtOcrConfidence.Text = $"{ocrResult.Confidence:P0}";
+            txtOcrTiming.Text = $"{ocrResult.ProcessingTime.TotalMilliseconds:N0}ms";
+
+            if (!_tradeService.HasPriceData)
+            {
+                txtCaptureStatus.Text = "価格データ未取得。コモディティタブで [価格更新] を実行してください";
+                return;
+            }
+
+            // Build commodity dictionary with Japanese names
+            var dictionary = new CommodityDictionary();
+            var translationDbPath = Path.Combine(WorkDir, "translations.db");
+            dictionary.BuildFromTradeService(_tradeService, translationDbPath);
+
+            var parser = new TradingTerminalParser(
+                _tradeService.GetTerminalNameToIdMap(),
+                dictionary);
+
+            _currentCapture = parser.Parse(ocrResult);
+            if (_currentCapture != null)
+            {
+                _currentCapture.ScreenshotPng = pngImage;
+                DisplayCaptureResult(_currentCapture);
+                var matchedCount = _currentCapture.Commodities.Count(c => c.IsMatched);
+                txtCaptureStatus.Text = $"認識完了: {_currentCapture.Commodities.Count} 品目 ({matchedCount} マッチ)";
+            }
+            else
+            {
+                txtCaptureStatus.Text = "トレードターミナルを認識できませんでした。ゲーム画面でトレードターミナルを表示した状態でキャプチャしてください。";
+            }
+        }
+        catch (Exception ex)
+        {
+            txtCaptureStatus.Text = $"OCRエラー: {ex.Message}";
+        }
+    }
+
+    private void DisplayCaptureResult(TerminalCaptureData data)
+    {
+        // Set terminal in combo
+        if (cmbCaptureTerminal.ItemsSource is List<KeyValuePair<string, int>> terminals)
+        {
+            var match = terminals.FirstOrDefault(t =>
+                t.Key.Equals(data.TerminalName, StringComparison.OrdinalIgnoreCase));
+            if (match.Key != null)
+                cmbCaptureTerminal.SelectedItem = match;
+            else
+                cmbCaptureTerminal.Text = data.TerminalName;
+        }
+
+        // Set mode
+        SelectComboByContent(cmbCaptureMode, data.Mode);
+
+        // Bind commodities
+        dgCapturedCommodities.ItemsSource = data.Commodities;
+    }
+
+    private void ManualCapture_Click(object sender, RoutedEventArgs e)
+    {
+        var png = _captureService?.CaptureScreenAsPng();
+        if (png != null)
+            _ = ProcessCaptureAsync(png);
+        else
+            txtCaptureStatus.Text = "画面キャプチャに失敗しました";
+    }
+
+    private void ClipboardCapture_Click(object sender, RoutedEventArgs e)
+    {
+        if (Clipboard.ContainsImage())
+        {
+            var bitmapSource = Clipboard.GetImage();
+            if (bitmapSource != null)
+            {
+                using var ms = new MemoryStream();
+                var encoder = new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(bitmapSource));
+                encoder.Save(ms);
+                _ = ProcessCaptureAsync(ms.ToArray());
+                return;
+            }
+        }
+        txtCaptureStatus.Text = "クリップボードに画像がありません。ゲーム画面で PrintScreen キーを押してから実行してください。";
+    }
+
+    private void FileCapture_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFileDialog
+        {
+            Filter = "画像ファイル (*.png;*.jpg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp|すべてのファイル (*.*)|*.*",
+            Title = "スクリーンショットを選択"
+        };
+        if (dlg.ShowDialog() == true)
+        {
+            try
+            {
+                var bytes = File.ReadAllBytes(dlg.FileName);
+                // Convert to PNG if not already
+                var bi = new BitmapImage();
+                bi.BeginInit();
+                bi.StreamSource = new MemoryStream(bytes);
+                bi.CacheOption = BitmapCacheOption.OnLoad;
+                bi.EndInit();
+                bi.Freeze();
+
+                using var ms = new MemoryStream();
+                var encoder = new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(bi));
+                encoder.Save(ms);
+                _ = ProcessCaptureAsync(ms.ToArray());
+            }
+            catch (Exception ex)
+            {
+                txtCaptureStatus.Text = $"ファイル読込エラー: {ex.Message}";
+            }
+        }
+    }
+
+    private void HotkeyEnabled_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_captureService == null) return;
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (chkHotkeyEnabled.IsChecked == true)
+            _captureService.Register(hwnd);
+        else
+            _captureService.Unregister();
+    }
+
+    private async void SubmitUex_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentCapture == null)
+        {
+            txtSubmitStatus.Text = "キャプチャデータがありません";
+            return;
+        }
+        if (string.IsNullOrEmpty(App.Config.UexApiKey))
+        {
+            txtSubmitStatus.Text = "UEX APIキーが未設定です。設定タブで入力してください。";
+            return;
+        }
+
+        // Update terminal from combo if user changed it
+        if (cmbCaptureTerminal.SelectedItem is KeyValuePair<string, int> selectedTerm)
+        {
+            _currentCapture.TerminalName = selectedTerm.Key;
+            _currentCapture.TerminalId = selectedTerm.Value;
+        }
+
+        // Update mode from combo
+        var mode = (cmbCaptureMode.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "BUY";
+        _currentCapture.Mode = mode;
+
+        var matched = _currentCapture.Commodities.Where(c => c.IsMatched && c.CommodityId > 0).ToList();
+        if (matched.Count == 0)
+        {
+            txtSubmitStatus.Text = "マッチしたコモディティがありません";
+            return;
+        }
+
+        if (_currentCapture.TerminalId <= 0)
+        {
+            txtSubmitStatus.Text = "ターミナルが選択されていないか、IDが不明です";
+            return;
+        }
+
+        btnSubmitUex.IsEnabled = false;
+        txtSubmitStatus.Text = "UEXに送信中...";
+
+        try
+        {
+            var result = await _uexSubmitService!.SubmitAsync(
+                App.Config.UexApiKey,
+                _currentCapture,
+                includeScreenshot: chkCaptureScreenshot.IsChecked == true);
+
+            txtSubmitStatus.Text = result.Success
+                ? $"送信成功: {matched.Count} 品目"
+                : $"送信失敗: {result.Message}";
+        }
+        catch (Exception ex)
+        {
+            txtSubmitStatus.Text = $"送信エラー: {ex.Message}";
+        }
+        finally
+        {
+            btnSubmitUex.IsEnabled = true;
+        }
+    }
+
+    private void ClearCapture_Click(object sender, RoutedEventArgs e)
+    {
+        _currentCapture = null;
+        dgCapturedCommodities.ItemsSource = null;
+        imgCapturePreview.Source = null;
+        cmbCaptureTerminal.SelectedItem = null;
+        cmbCaptureTerminal.Text = "";
+        txtCaptureStatus.Text = "";
+        txtSubmitStatus.Text = "";
+        txtOcrConfidence.Text = "";
+        txtOcrTiming.Text = "";
     }
 }
 

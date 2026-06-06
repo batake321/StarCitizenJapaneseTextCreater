@@ -124,6 +124,7 @@ public class TradeService
                 if (string.IsNullOrEmpty(name)) continue;
                 terminals[name] = new TerminalInfo
                 {
+                    Id = GetInt(t, "id"),
                     Name = name,
                     HasLoadingDock = GetBool(t, "has_loading_dock"),
                     HasDockingPort = GetBool(t, "has_docking_port"),
@@ -265,78 +266,115 @@ public class TradeService
             sellEntries = sellEntries.Where(HasLoadingDock);
         }
 
-        var bestBuyPerCommodity = buyEntries
+        // Top buy candidates per commodity: up to 5, scored by price + stock fillability
+        var buysByCommodity = buyEntries
             .GroupBy(p => p.CommodityId)
-            .Select(g =>
+            .ToDictionary(g => g.Key, g =>
             {
-                var stocked = g.Where(p => p.ScuBuy > 0).OrderBy(p => p.PriceBuy).FirstOrDefault();
-                return stocked ?? g.OrderBy(p => p.PriceBuy).First();
-            })
-            .ToDictionary(p => p.CommodityId);
+                return g.OrderBy(p =>
+                {
+                    // Effective price: penalize locations that can't fill the cargo
+                    var fillRatio = cargoScu > 0 && p.ScuBuy > 0
+                        ? Math.Min(1.0, (double)p.ScuBuy / cargoScu)
+                        : (p.ScuBuy > 0 ? 1.0 : 0.01);
+                    return p.PriceBuy / fillRatio;
+                }).Take(5).ToList();
+            });
 
-        var bestSellPerCommodity = sellEntries
+        // Top sell candidates per commodity: up to 3, prefer high price with stock
+        var sellsByCommodity = sellEntries
             .GroupBy(p => p.CommodityId)
-            .Select(g =>
+            .ToDictionary(g => g.Key, g =>
             {
-                var stocked = g.Where(p => p.ScuSell > 0).OrderByDescending(p => p.PriceSell).FirstOrDefault();
-                return stocked ?? g.OrderByDescending(p => p.PriceSell).First();
-            })
-            .ToDictionary(p => p.CommodityId);
+                return g.OrderByDescending(p =>
+                {
+                    var fillRatio = cargoScu > 0 && p.ScuSell > 0
+                        ? Math.Min(1.0, (double)p.ScuSell / cargoScu)
+                        : (p.ScuSell > 0 ? 1.0 : 0.01);
+                    return p.PriceSell * fillRatio;
+                }).Take(3).ToList();
+            });
 
         var routes = new List<TradeRoute>();
 
-        foreach (var (commodityId, buy) in bestBuyPerCommodity)
+        foreach (var (commodityId, buys) in buysByCommodity)
         {
-            if (!bestSellPerCommodity.TryGetValue(commodityId, out var sell)) continue;
+            if (!sellsByCommodity.TryGetValue(commodityId, out var sells)) continue;
 
-            var profitPerScu = sell.PriceSell - buy.PriceBuy;
-            if (profitPerScu <= 0) continue;
-
-            var maxByBudget = budget > 0 ? (int)Math.Floor(budget / buy.PriceBuy) : int.MaxValue;
-            var maxByCargo = cargoScu > 0 ? cargoScu : int.MaxValue;
-            var actualScu = Math.Min(maxByBudget, maxByCargo);
-            if (actualScu <= 0 || actualScu == int.MaxValue) continue;
-
-            var isLowStock = buy.ScuBuy > 0 ? buy.ScuBuy < actualScu : false;
-            var isNoStock = buy.ScuBuy == 0;
-            if (excludeLowStock && (isLowStock || isNoStock)) continue;
-
-            var investment = buy.PriceBuy * actualScu;
-            var revenue = sell.PriceSell * actualScu;
-            var totalProfit = revenue - investment;
-            var roi = investment > 0 ? (totalProfit / investment) * 100 : 0;
-
-            routes.Add(new TradeRoute
+            foreach (var buy in buys)
             {
-                CommodityName = buy.CommodityName,
-                CommodityKind = buy.CommodityKind,
-                ContainerScu = buy.ContainerScu,
-                BuyLocation = buy.LocationShort,
-                BuyTerminal = buy.Terminal,
-                BuySystem = buy.StarSystem,
-                BuyPlanet = buy.Planet,
-                BuyPrice = buy.PriceBuy,
-                BuyPriceAvg = buy.PriceBuyAvg,
-                SellLocation = sell.LocationShort,
-                SellTerminal = sell.Terminal,
-                SellSystem = sell.StarSystem,
-                SellPlanet = sell.Planet,
-                SellPrice = sell.PriceSell,
-                SellPriceAvg = sell.PriceSellAvg,
-                ProfitPerScu = profitPerScu,
-                ActualScu = actualScu,
-                Investment = investment,
-                TotalProfit = totalProfit,
-                Roi = roi,
-                ScuBuyStock = buy.ScuBuy,
-                ScuSellStock = sell.ScuSell,
-                ScuBuyAvg = buy.ScuBuyAvg,
-                ScuSellAvg = sell.ScuSellAvg,
-                IsLowBuyStock = isLowStock || isNoStock,
-            });
+                foreach (var sell in sells)
+                {
+                    // Skip same-terminal routes
+                    if (buy.Terminal == sell.Terminal && buy.City == sell.City) continue;
+
+                    var profitPerScu = sell.PriceSell - buy.PriceBuy;
+                    if (profitPerScu <= 0) continue;
+
+                    var maxByBudget = budget > 0 ? (int)Math.Floor(budget / buy.PriceBuy) : int.MaxValue;
+                    var maxByCargo = cargoScu > 0 ? cargoScu : int.MaxValue;
+
+                    // Factor in container SCU: round down to container boundary
+                    var cs = buy.ContainerScu > 0 ? buy.ContainerScu : 1;
+                    var actualScu = Math.Min(maxByBudget, maxByCargo);
+                    actualScu = (actualScu / cs) * cs;
+                    if (actualScu <= 0 || actualScu > 1_000_000) continue;
+
+                    // Clamp to available buy stock
+                    var fillableScu = buy.ScuBuy > 0 ? Math.Min(actualScu, buy.ScuBuy) : actualScu;
+                    fillableScu = (fillableScu / cs) * cs;
+                    if (fillableScu <= 0) fillableScu = actualScu;
+
+                    var isLowStock = buy.ScuBuy > 0 && buy.ScuBuy < actualScu;
+                    var isNoStock = buy.ScuBuy == 0;
+                    if (excludeLowStock && (isLowStock || isNoStock)) continue;
+
+                    // Use fillable SCU for realistic profit calculation
+                    var useScu = (isLowStock && buy.ScuBuy > 0) ? fillableScu : actualScu;
+                    var investment = buy.PriceBuy * useScu;
+                    var revenue = sell.PriceSell * useScu;
+                    var totalProfit = revenue - investment;
+                    var roi = investment > 0 ? (totalProfit / investment) * 100 : 0;
+
+                    routes.Add(new TradeRoute
+                    {
+                        CommodityName = buy.CommodityName,
+                        CommodityKind = buy.CommodityKind,
+                        ContainerScu = buy.ContainerScu,
+                        BuyLocation = buy.LocationShort,
+                        BuyTerminal = buy.Terminal,
+                        BuySystem = buy.StarSystem,
+                        BuyPlanet = buy.Planet,
+                        BuyPrice = buy.PriceBuy,
+                        BuyPriceAvg = buy.PriceBuyAvg,
+                        SellLocation = sell.LocationShort,
+                        SellTerminal = sell.Terminal,
+                        SellSystem = sell.StarSystem,
+                        SellPlanet = sell.Planet,
+                        SellPrice = sell.PriceSell,
+                        SellPriceAvg = sell.PriceSellAvg,
+                        ProfitPerScu = profitPerScu,
+                        ActualScu = useScu,
+                        Investment = investment,
+                        TotalProfit = totalProfit,
+                        Roi = roi,
+                        ScuBuyStock = buy.ScuBuy,
+                        ScuSellStock = sell.ScuSell,
+                        ScuBuyAvg = buy.ScuBuyAvg,
+                        ScuSellAvg = sell.ScuSellAvg,
+                        IsLowBuyStock = isLowStock || isNoStock,
+                    });
+                }
+            }
         }
 
-        return routes.OrderByDescending(r => r.TotalProfit).Take(topN).ToList();
+        // Deduplicate: keep best route per (commodity, buyTerminal) combination
+        var deduped = routes
+            .GroupBy(r => (r.CommodityName, r.BuyTerminal))
+            .Select(g => g.OrderByDescending(r => r.TotalProfit).First())
+            .ToList();
+
+        return deduped.OrderByDescending(r => r.TotalProfit).Take(topN).ToList();
     }
 
     // === ChatService API ===
@@ -391,7 +429,7 @@ public class TradeService
                 date_modified TEXT, fetched_at TEXT, patch TEXT, is_current INTEGER DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS trade_ships (name TEXT, manufacturer TEXT, scu INTEGER, fetched_at TEXT);
-            CREATE TABLE IF NOT EXISTS trade_terminals (name TEXT PRIMARY KEY, has_loading_dock INTEGER, has_docking_port INTEGER, is_cargo_center INTEGER);
+            CREATE TABLE IF NOT EXISTS trade_terminals (id INTEGER DEFAULT 0, name TEXT PRIMARY KEY, has_loading_dock INTEGER, has_docking_port INTEGER, is_cargo_center INTEGER);
             CREATE TABLE IF NOT EXISTS trade_meta (key TEXT PRIMARY KEY, value TEXT);
             CREATE TABLE IF NOT EXISTS my_ships (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -476,8 +514,8 @@ public class TradeService
             // Terminals
             Exec(db, "DELETE FROM trade_terminals");
             foreach (var t in _terminals.Values)
-                Exec(db, "INSERT OR REPLACE INTO trade_terminals VALUES (@n,@ld,@dp,@cc)",
-                    ("@n", t.Name), ("@ld", t.HasLoadingDock ? 1 : 0), ("@dp", t.HasDockingPort ? 1 : 0), ("@cc", t.IsCargoCenter ? 1 : 0));
+                Exec(db, "INSERT OR REPLACE INTO trade_terminals VALUES (@id,@n,@ld,@dp,@cc)",
+                    ("@id", t.Id), ("@n", t.Name), ("@ld", t.HasLoadingDock ? 1 : 0), ("@dp", t.HasDockingPort ? 1 : 0), ("@cc", t.IsCargoCenter ? 1 : 0));
 
             SetMeta(db, "fetched_at", _lastPriceUpdate.ToString("o"));
             tx.Commit();
@@ -557,12 +595,19 @@ public class TradeService
     {
         var dict = new Dictionary<string, TerminalInfo>(StringComparer.OrdinalIgnoreCase);
         using var cmd = db.CreateCommand();
-        cmd.CommandText = "SELECT name, has_loading_dock, has_docking_port, is_cargo_center FROM trade_terminals";
+        cmd.CommandText = "SELECT name, has_loading_dock, has_docking_port, is_cargo_center, COALESCE(id, 0) FROM trade_terminals";
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
             var name = r.GetString(0);
-            dict[name] = new TerminalInfo { Name = name, HasLoadingDock = r.GetInt32(1) == 1, HasDockingPort = r.GetInt32(2) == 1, IsCargoCenter = r.GetInt32(3) == 1 };
+            dict[name] = new TerminalInfo
+            {
+                Name = name,
+                HasLoadingDock = r.GetInt32(1) == 1,
+                HasDockingPort = r.GetInt32(2) == 1,
+                IsCargoCenter = r.GetInt32(3) == 1,
+                Id = r.GetInt32(4),
+            };
         }
         return dict;
     }
@@ -588,6 +633,18 @@ public class TradeService
             cmd.Parameters.AddWithValue(name, value);
         cmd.ExecuteNonQuery();
     }
+
+    // === Capture Accessors ===
+
+    public Dictionary<string, int> GetTerminalNameToIdMap()
+        => _terminals.ToDictionary(kv => kv.Key, kv => kv.Value.Id, StringComparer.OrdinalIgnoreCase);
+
+    public Dictionary<string, int> GetCommodityNameToIdMap()
+        => _commodities.Values.ToDictionary(c => c.Name, c => c.Id, StringComparer.OrdinalIgnoreCase);
+
+    public Dictionary<int, CommodityInfo> GetCommodities() => _commodities;
+
+    public Dictionary<string, TerminalInfo> GetTerminals() => _terminals;
 
     // === Commodity List & Detail ===
 
@@ -771,6 +828,7 @@ public class CommodityPriceEntry
 
 public class TerminalInfo
 {
+    public int Id { get; set; }
     public string Name { get; set; } = "";
     public bool HasLoadingDock { get; set; }
     public bool HasDockingPort { get; set; }

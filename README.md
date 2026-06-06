@@ -22,13 +22,21 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v1.13.0-win-x64.zip (最新 v1.13.0 バイナリ)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.13.0/StarCitizenJapaneseTextCreater-v1.13.0-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v1.13.1-win-x64.zip (最新 v1.13.1 バイナリ)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.13.1/StarCitizenJapaneseTextCreater-v1.13.1-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260604_121612.zip (翻訳データベース)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.13.0/sc_japanese_backup_20260604_121612.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260606_115719.zip (翻訳データベース 4.8.1 6/5パッチ対応)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.13.1/sc_japanese_backup_20260606_115719.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後・翻訳DB取り込み後は、翻訳タブの「3. 反映」を実行してください。** 通貨記号の重なり修正や新型船名の表示修正など、ゲーム内表示に関わる改善が global.ini に反映されます。
 
-### 🚀 v1.13.0 更新内容
+### 🚀 v1.13.1 更新内容
+
+- **交易ルート計算を大幅改善**: コモディティ毎に購入候補5拠点・売却候補3拠点を評価し、在庫充足率で重み付け。在庫豊富な拠点が優先されるように改善。コンテナSCU (CS) を考慮した積載量計算にも対応
+- **翻訳反映の未翻訳キー対策**: 翻訳DBに存在するキーは、Data.p4k の再抽出前でも global.ini に反映されるよう改善。パッチ直後でも「3. 反映」だけで新キーを含む翻訳が適用可能に
+- **ベクトルインデックス構築の途中再開対応**: 500エラー等で中断しても、再実行で処理済み分をスキップし残りから再開。バッチ毎にDB保存、最大3回リトライ
+- 翻訳データベースを 4.8.1 (6/5パッチ) に対応したバックアップに更新
+
+<details>
+<summary>v1.13.0 更新内容</summary>
 
 - **交易ルート最適化: 在庫優先選択**: ルート計算時、在庫が確認されている場所を優先して選択するよう改善。在庫 0 のステーション (MIC-L2 等) より在庫のある場所 (Terra Gateway 等) が推奨されるように
 - **在庫不足フィルタ修正**: 「在庫不足ルートを除く」チェック時、在庫データ 0 (scu_buy=0) のルートも正しく除外されるよう修正
@@ -37,7 +45,7 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 - **通貨記号(¤)重なり修正**: 日本語フォントで全角描画される ¤ を翻訳 DB で Cr に置換し、価格表示の文字重なりを解消
 - **ウィンドウ状態保存**: ウィンドウ位置・サイズ・最大化状態を記憶し、次回起動時に復元
 - **交易検索パラメータ保存**: 船・積載量・予算・星系の設定を保存し、次回起動時に復元
-- 翻訳データベースのバックアップを最新化 (`sc_japanese_backup_20260604_121612.zip` 同梱)
+</details>
 
 ### 動作要件
 

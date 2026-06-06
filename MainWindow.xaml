@@ -609,6 +609,149 @@
                 </Grid>
             </TabItem>
 
+            <!-- 価格キャプチャタブ -->
+            <TabItem Header="価格キャプチャ">
+                <Grid Margin="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- コントロールバー -->
+                    <GroupBox Grid.Row="0" Header="キャプチャ設定" Margin="0,0,0,4">
+                        <StackPanel Margin="8,4">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <Button Content="手動キャプチャ (画面全体)" Click="ManualCapture_Click"
+                                        Padding="12,4" Margin="0,0,8,0" Background="#1976D2" Foreground="White" FontWeight="Bold"/>
+                                <Button Content="クリップボードから読取" Click="ClipboardCapture_Click"
+                                        Padding="12,4" Margin="0,0,8,0"/>
+                                <Button Content="ファイルから読取" Click="FileCapture_Click"
+                                        Padding="12,4" Margin="0,0,16,0"/>
+                                <CheckBox x:Name="chkHotkeyEnabled" Content="PrintScreenホットキー有効"
+                                          VerticalAlignment="Center" IsChecked="True"
+                                          Checked="HotkeyEnabled_Changed" Unchecked="HotkeyEnabled_Changed"/>
+                            </StackPanel>
+                            <TextBlock x:Name="txtCaptureStatus" Foreground="#666" FontSize="11"/>
+                        </StackPanel>
+                    </GroupBox>
+
+                    <!-- メインコンテンツ: プレビュー + パース結果 -->
+                    <Grid Grid.Row="1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="2*"/>
+                            <ColumnDefinition Width="3*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- 左: スクリーンショットプレビュー -->
+                        <GroupBox Header="キャプチャ画像" Grid.Column="0" Margin="0,0,4,0">
+                            <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                                <Image x:Name="imgCapturePreview" Stretch="Uniform"/>
+                            </ScrollViewer>
+                        </GroupBox>
+
+                        <!-- 右: パース結果 -->
+                        <Grid Grid.Column="1" Margin="4,0,0,0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- ターミナル情報 -->
+                            <GroupBox Header="認識結果" Grid.Row="0" Margin="0,0,0,4">
+                                <Grid Margin="8,4">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="80"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="70"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="ターミナル:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                    <ComboBox x:Name="cmbCaptureTerminal" Grid.Column="1" IsEditable="True"
+                                              DisplayMemberPath="Key" SelectedValuePath="Value"/>
+                                    <TextBlock Text="モード:" Grid.Column="2" VerticalAlignment="Center" Margin="12,0,4,0"/>
+                                    <ComboBox x:Name="cmbCaptureMode" Grid.Column="3">
+                                        <ComboBoxItem Content="BUY" IsSelected="True"/>
+                                        <ComboBoxItem Content="SELL"/>
+                                    </ComboBox>
+                                    <TextBlock Text="信頼度:" Grid.Column="4" VerticalAlignment="Center" Margin="12,0,4,0"/>
+                                    <TextBlock x:Name="txtOcrConfidence" Grid.Column="5" VerticalAlignment="Center"
+                                               FontFamily="Consolas" FontWeight="Bold"/>
+                                </Grid>
+                            </GroupBox>
+
+                            <!-- コモディティデータグリッド (編集可能) -->
+                            <DataGrid x:Name="dgCapturedCommodities" Grid.Row="1"
+                                      AutoGenerateColumns="False" CanUserAddRows="False"
+                                      CanUserDeleteRows="True" IsReadOnly="False"
+                                      GridLinesVisibility="Horizontal" AlternatingRowBackground="#FAFAFA"
+                                      FontSize="13" RowHeight="30">
+                                <DataGrid.RowStyle>
+                                    <Style TargetType="DataGridRow">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsMatched}" Value="False">
+                                                <Setter Property="Background" Value="#FFF3E0"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGrid.RowStyle>
+                                <DataGrid.Columns>
+                                    <DataGridCheckBoxColumn Header="✓" Binding="{Binding IsMatched}" Width="30"/>
+                                    <DataGridTextColumn Header="コモディティ" Binding="{Binding MatchedName}" Width="150">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/></Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="OCR原文" Binding="{Binding RawName}" Width="120" IsReadOnly="True">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Foreground" Value="#999"/></Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="価格" Binding="{Binding Price}" Width="80">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="在庫(SCU)" Binding="{Binding Inventory}" Width="80">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="信頼度" Binding="{Binding MatchConfidence, StringFormat=P0}" Width="60" IsReadOnly="True">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </Grid>
+
+                    <!-- 下部: アクションボタン + ステータス -->
+                    <Grid Grid.Row="2" Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Button x:Name="btnSubmitUex" Content="UEXに送信" Click="SubmitUex_Click"
+                                Padding="14,6" Margin="0,0,8,0" FontWeight="Bold" Background="#FF6F00" Foreground="White"/>
+                        <CheckBox x:Name="chkCaptureScreenshot" Content="スクリーンショットも送信"
+                                  Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                        <Button Content="クリア" Grid.Column="2" Click="ClearCapture_Click" Padding="12,4" Margin="0,0,8,0"/>
+                        <TextBlock x:Name="txtSubmitStatus" Grid.Column="4" VerticalAlignment="Center"
+                                   Foreground="#666" FontSize="11" TextWrapping="Wrap"/>
+                        <TextBlock x:Name="txtOcrTiming" Grid.Column="5" VerticalAlignment="Center"
+                                   Foreground="#999" FontFamily="Consolas" FontSize="11"/>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
             <!-- チャットタブ -->
             <TabItem Header="チャット">
                 <Grid Margin="8">
@@ -719,6 +862,25 @@
 
                                 <TextBlock Grid.Row="1" Grid.ColumnSpan="2" Margin="0,4" Foreground="#666" TextWrapping="Wrap"
                                            Text="starcitizen-api.com の API キー。Discord で /api register コマンドで取得できます。"/>
+                            </Grid>
+                        </GroupBox>
+
+                        <GroupBox Header="UEX 価格送信 (Screen Capture)" Margin="0,0,0,8">
+                            <Grid Margin="8">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+
+                                <TextBlock Text="UEX API Key:" Grid.Row="0" VerticalAlignment="Center" Margin="0,4"/>
+                                <TextBox x:Name="txtUexApiKey" Grid.Row="0" Grid.Column="1" Margin="0,4"/>
+
+                                <TextBlock Grid.Row="1" Grid.ColumnSpan="2" Margin="0,4" Foreground="#666" TextWrapping="Wrap"
+                                           Text="uexcorp.space のデータ送信用 API キー。My Apps ページでアプリを作成して取得できます。PrintScreenキーでゲーム画面をキャプチャし、OCRで価格を読み取ってUEXに送信します。"/>
                             </Grid>
                         </GroupBox>
 

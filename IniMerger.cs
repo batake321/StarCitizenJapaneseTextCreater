@@ -125,6 +125,20 @@ public static class IniMerger
         if (glossaryFixed > 0)
             Console.WriteLine($"    Glossary applied: {glossaryFixed}");
 
+        // Include translation DB keys not present in english extraction
+        // (covers new keys from patches applied before re-extraction)
+        int dbExtras = 0;
+        foreach (var (key, val) in translations)
+        {
+            if (!merged.ContainsKey(key) && !string.IsNullOrWhiteSpace(val))
+            {
+                merged[key] = val;
+                dbExtras++;
+            }
+        }
+        if (dbExtras > 0)
+            Console.WriteLine($"    DB-only keys added (not in extraction): {dbExtras}");
+
         // Add @-prefixed duplicates for keys the game may reference with @ prefix
         int atDupes = 0;
         foreach (var key in merged.Keys.ToList())

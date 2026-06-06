@@ -28,6 +28,10 @@ public class AppConfig
     public string TradeBudget { get; set; } = "1000000";
     public string TradeBuySystem { get; set; } = "全て";
     public string TradeSellSystem { get; set; } = "全て";
+
+    // UEX Capture
+    public string UexApiKey { get; set; } = "";
+    public string PreferredOcrEngine { get; set; } = "Windows OCR";
 }
 
 public class TranslationConfig

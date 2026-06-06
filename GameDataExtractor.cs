@@ -1500,30 +1500,46 @@ public class GameDataExtractor
         StatusChanged?.Invoke("ベクトルインデックス構築中...");
         ProgressChanged?.Invoke(0, "アイテム名を読み込み中...");
 
-        var items = new List<(string uuid, string text)>();
+        // Collect existing UUIDs to skip (resume support)
+        var existingUuids = new HashSet<string>();
         using (var cmd = _db!.CreateCommand())
+        {
+            cmd.CommandText = "SELECT uuid FROM item_vectors";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                existingUuids.Add(reader.GetString(0));
+        }
+
+        var items = new List<(string uuid, string text)>();
+        using (var cmd = _db.CreateCommand())
         {
             cmd.CommandText = "SELECT uuid, COALESCE(name,'') || ' ' || COALESCE(name_ja,'') || ' ' || COALESCE(item_type,'') || ' ' || COALESCE(manufacturer,'') FROM item_index";
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
-                items.Add((reader.GetString(0), reader.GetString(1).Trim()));
+            {
+                var uuid = reader.GetString(0);
+                if (!existingUuids.Contains(uuid))
+                    items.Add((uuid, reader.GetString(1).Trim()));
+            }
         }
 
-        using (var cmd = _db.CreateCommand())
+        if (items.Count == 0)
         {
-            cmd.CommandText = "DELETE FROM item_vectors";
-            cmd.ExecuteNonQuery();
+            StatusChanged?.Invoke($"ベクトルインデックスは既に完了しています ({existingUuids.Count}件)");
+            ProgressChanged?.Invoke(100, "完了済み");
+            return;
         }
+
+        int skipped = existingUuids.Count;
+        int total = skipped + items.Count;
+        if (skipped > 0)
+            StatusChanged?.Invoke($"既存 {skipped}件をスキップ、残り {items.Count}件を処理");
 
         int batchSize = backend.Type.Equals("Ollama", StringComparison.OrdinalIgnoreCase) ? 50 : 200;
         int processed = 0;
+        int errors = 0;
+        const int maxRetries = 3;
         var sw = Stopwatch.StartNew();
-
-        using var tx = _db.BeginTransaction();
-        using var insertCmd = _db.CreateCommand();
-        insertCmd.CommandText = "INSERT OR REPLACE INTO item_vectors(uuid, embedding) VALUES(@uuid, @emb)";
-        var pUuid = insertCmd.Parameters.Add("@uuid", SqliteType.Text);
-        var pEmb = insertCmd.Parameters.Add("@emb", SqliteType.Blob);
 
         for (int i = 0; i < items.Count; i += batchSize)
         {
@@ -1531,12 +1547,34 @@ public class GameDataExtractor
             var batch = items.Skip(i).Take(batchSize).ToList();
             var texts = batch.Select(b => b.text).ToList();
 
-            var embeddings = await GetEmbeddingsAsync(backend, texts, ct);
+            List<float[]>? embeddings = null;
+            for (int retry = 0; retry < maxRetries; retry++)
+            {
+                try
+                {
+                    embeddings = await GetEmbeddingsAsync(backend, texts, ct);
+                    if (embeddings != null && embeddings.Count == texts.Count) break;
+                }
+                catch (HttpRequestException) when (retry < maxRetries - 1)
+                {
+                    StatusChanged?.Invoke($"リトライ {retry + 1}/{maxRetries} (batch {i / batchSize + 1})");
+                    await Task.Delay(2000 * (retry + 1), ct);
+                }
+            }
+
             if (embeddings == null || embeddings.Count != texts.Count)
             {
-                StatusChanged?.Invoke($"エンベディング取得エラー (batch {i / batchSize + 1})");
+                errors += batch.Count;
+                StatusChanged?.Invoke($"エンベディング取得エラー (batch {i / batchSize + 1}), スキップして続行");
                 continue;
             }
+
+            // Commit per batch so progress is saved even if later batches fail
+            using var tx = _db.BeginTransaction();
+            using var insertCmd = _db.CreateCommand();
+            insertCmd.CommandText = "INSERT OR REPLACE INTO item_vectors(uuid, embedding) VALUES(@uuid, @emb)";
+            var pUuid = insertCmd.Parameters.Add("@uuid", SqliteType.Text);
+            var pEmb = insertCmd.Parameters.Add("@emb", SqliteType.Blob);
 
             for (int j = 0; j < batch.Count; j++)
             {
@@ -1544,20 +1582,23 @@ public class GameDataExtractor
                 pEmb.Value = FloatsToBytes(embeddings[j]);
                 insertCmd.ExecuteNonQuery();
             }
+            tx.Commit();
 
             processed += batch.Count;
-            var pct = processed * 100 / items.Count;
-            var eta = sw.Elapsed.TotalSeconds / processed * (items.Count - processed);
-            ProgressChanged?.Invoke(pct, $"ベクトル化中... {processed}/{items.Count} (残り約{eta:F0}秒)");
+            var pct = (skipped + processed) * 100 / total;
+            var eta = sw.Elapsed.TotalSeconds / processed * (items.Count - processed - errors);
+            ProgressChanged?.Invoke(pct, $"ベクトル化中... {skipped + processed}/{total} (残り約{eta:F0}秒)");
         }
-        tx.Commit();
+
         SetMeta("vector_model", $"{backend.Type}:{backend.Model}");
-        SetMeta("vector_count", processed.ToString());
+        SetMeta("vector_count", (skipped + processed).ToString());
         SetMeta("vector_built_at", DateTime.UtcNow.ToString("o"));
 
         sw.Stop();
-        ProgressChanged?.Invoke(100, $"ベクトルインデックス完了 ({processed}件, {sw.Elapsed.TotalSeconds:F1}秒)");
-        StatusChanged?.Invoke($"ベクトルインデックス構築完了: {processed}件 ({sw.Elapsed.TotalSeconds:F1}秒)");
+        var msg = $"ベクトルインデックス完了 ({skipped + processed}/{total}件, {sw.Elapsed.TotalSeconds:F1}秒)";
+        if (errors > 0) msg += $" ※{errors}件エラー";
+        ProgressChanged?.Invoke(100, msg);
+        StatusChanged?.Invoke(msg);
     }
 
     private static async Task<List<float[]>?> GetEmbeddingsAsync(BackendConfig backend, List<string> texts, CancellationToken ct)
