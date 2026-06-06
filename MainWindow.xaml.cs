@@ -1484,14 +1484,13 @@ public partial class MainWindow : Window
         try
         {
             _missionService?.Dispose();
-            string? jaIniPath = FindJapaneseIni();
-            _missionService = new MissionService(dbPath, jaIniPath, DbPath);
+            _missionService = new MissionService(dbPath, DbPath);
             var categories = _missionService.GetCategories();
             lstMissionCategories.ItemsSource = categories;
             var transInfo = _missionService.TransLoadError != null
                 ? $"翻訳DBエラー:{_missionService.TransLoadError}"
                 : $"翻訳DB:{_missionService.TransDictCount}";
-            txtMissionStatus.Text = $"{categories.Sum(c => c.Count)} 件 (ini:{_missionService.JaDictCount} {transInfo})";
+            txtMissionStatus.Text = $"{categories.Sum(c => c.Count)} 件 ({transInfo})";
             dgMissions.ItemsSource = null;
             txtMissionDetail.Text = "カテゴリを選択してください。";
         }
@@ -1511,7 +1510,7 @@ public partial class MainWindow : Window
             _currentMissions = _missionService.GetMissions(cat.Name);
             dgMissions.ItemsSource = _currentMissions;
             var jaCount = _currentMissions.Count(m => !string.IsNullOrEmpty(m.DisplayNameJa));
-            txtMissionStatus.Text = $"{cat.Name}: {_currentMissions.Count} 件 (日本語:{jaCount}, 辞書:{_missionService.JaDictCount})";
+            txtMissionStatus.Text = $"{cat.Name}: {_currentMissions.Count} 件 (日本語:{jaCount})";
             txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
         }
         catch (Exception ex)
@@ -1520,39 +1519,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private string? FindJapaneseIni()
-    {
-        var roots = new List<string> { WorkDir, AppDomain.CurrentDomain.BaseDirectory, Directory.GetCurrentDirectory() };
-        var exePath = Environment.ProcessPath;
-        if (!string.IsNullOrEmpty(exePath))
-            roots.Add(Path.GetDirectoryName(exePath) ?? "");
 
-        // subPC/global.ini を最優先（全キー入り）
-        foreach (var root in roots.Where(r => !string.IsNullOrEmpty(r)))
-        {
-            var c = Path.Combine(root, "subPC", "global.ini");
-            if (File.Exists(c)) return c;
-        }
-        foreach (var root in roots.Where(r => !string.IsNullOrEmpty(r)))
-        {
-            var dir = root;
-            for (int i = 0; i < 6 && dir != null; i++)
-            {
-                var c = Path.Combine(dir, "subPC", "global.ini");
-                if (File.Exists(c)) return c;
-                var parent = Path.GetDirectoryName(dir);
-                if (parent == dir) break;
-                dir = parent;
-            }
-        }
-        // フォールバック: japanese_(japan)/global.ini
-        foreach (var root in roots.Where(r => !string.IsNullOrEmpty(r)))
-        {
-            var c = Path.Combine(root, "japanese_(japan)", "global.ini");
-            if (File.Exists(c)) return c;
-        }
-        return null;
-    }
 
     private void Mission_Selected(object sender, SelectionChangedEventArgs e)
     {

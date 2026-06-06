@@ -9,7 +9,6 @@ namespace StarCitizenJapaneseTextCreater;
 public class MissionService : IDisposable
 {
     private readonly SqliteConnection _conn;
-    private Dictionary<string, string>? _jaDict;
     private Dictionary<string, string>? _transDict;
 
     private static readonly string[] StripPrefixes =
@@ -64,15 +63,12 @@ public class MissionService : IDisposable
         ("燃料補給",          (rn, t) => t.Contains("servicebeacon") || rn.Contains("ServiceBeacon") || t.Contains("maintenance")),
     };
 
-    public int JaDictCount => _jaDict?.Count ?? 0;
     public int TransDictCount => _transDict?.Count ?? 0;
 
-    public MissionService(string dbPath, string? jaIniPath = null, string? translationDbPath = null)
+    public MissionService(string dbPath, string? translationDbPath = null)
     {
         _conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
         _conn.Open();
-        if (!string.IsNullOrEmpty(jaIniPath) && File.Exists(jaIniPath))
-            _jaDict = GlobalIniParser.Parse(jaIniPath);
         if (!string.IsNullOrEmpty(translationDbPath) && File.Exists(translationDbPath))
             _transDict = LoadTranslations(translationDbPath);
     }
@@ -607,6 +603,7 @@ public class MissionService : IDisposable
     private static bool ContainsJapanese(string s) =>
         !string.IsNullOrEmpty(s) && s.Any(c => c >= '　' && c <= '鿿' || c >= '＀' && c <= '￯');
 
+
     private static string FormatFaction(string f)
     {
         if (f.StartsWith("factionreputation_")) f = f["factionreputation_".Length..];
@@ -691,18 +688,9 @@ public class MissionService : IDisposable
 
     private string ResolveJa(string raw)
     {
-        // 1. translations.db (翻訳エディタの内容、DBバックアップに含まれる)
-        if (_transDict != null)
-        {
-            var val = ResolveLoc(raw, _transDict);
-            if (!string.IsNullOrEmpty(val) && ContainsJapanese(val)) return val;
-        }
-        // 2. subPC/global.ini (ローカルiniファイル)
-        if (_jaDict != null)
-        {
-            var val = ResolveLoc(raw, _jaDict);
-            if (!string.IsNullOrEmpty(val)) return val;
-        }
+        if (_transDict == null) return "";
+        var val = ResolveLoc(raw, _transDict);
+        if (!string.IsNullOrEmpty(val) && ContainsJapanese(val)) return val;
         return "";
     }
 
