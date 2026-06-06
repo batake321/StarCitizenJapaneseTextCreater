@@ -252,8 +252,18 @@ public static class DatabaseBackupService
 
             var colList = string.Join(", ", colNames);
             var paramList = string.Join(", ", colNames.Select((_, i) => $"@p{i}"));
-            var insertVerb = mode == ImportMode.Add ? "INSERT OR IGNORE" : "INSERT OR REPLACE";
-            var insertSql = $"{insertVerb} INTO {table} ({colList}) VALUES ({paramList})";
+
+            string insertSql;
+            if (mode == ImportMode.Add && table == "translations" && colNames.Contains("japanese"))
+            {
+                // 追加モード: ローカルが未翻訳ならインポート側で上書き
+                insertSql = $"INSERT INTO {table} ({colList}) VALUES ({paramList}) ON CONFLICT(key) DO UPDATE SET japanese = excluded.japanese, source = excluded.source, translator = excluded.translator, modified_at = excluded.modified_at WHERE {table}.japanese IS NULL OR {table}.japanese = ''";
+            }
+            else
+            {
+                var insertVerb = mode == ImportMode.Add ? "INSERT OR IGNORE" : "INSERT OR REPLACE";
+                insertSql = $"{insertVerb} INTO {table} ({colList}) VALUES ({paramList})";
+            }
 
             int count = 0;
             while (reader.Read())
