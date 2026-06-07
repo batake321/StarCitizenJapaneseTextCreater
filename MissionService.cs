@@ -158,25 +158,54 @@ public class MissionService : IDisposable
         return filtered;
     }
 
+    private static readonly Dictionary<string, string> DifficultyCodeMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        {"vlrt", "Very Easy"}, {"lrt", "Easy"}, {"mrt", "Medium"}, {"hrt", "Hard"}, {"vhrt", "Very Hard"}, {"ert", "Super"},
+        {"intro", "Intro"}, {"rank0", "Intro"},
+    };
+
     public List<MissionEntry> Search(string query)
     {
         var all = LoadAllMissions();
         foreach (var m in all)
             ParseRawJson(m);
 
-        var matcher = BuildMatcher(query);
+        var matchers = BuildMatchers(query);
         var filtered = all.Where(m =>
-            matcher(m.CleanedName) ||
-            matcher(m.TitleEn) ||
-            matcher(m.TitleJa) ||
-            matcher(m.DisplayNameJa) ||
-            matcher(m.DescriptionEn) ||
-            matcher(m.DescriptionJa) ||
-            matcher(m.MissionGiverEn) ||
-            matcher(m.MissionGiverJa) ||
-            matcher(m.MissionGiver) ||
-            matcher(m.FriendlyName)
-        ).ToList();
+        {
+            var fields = new[] { m.CleanedName, m.TitleEn, m.TitleJa, m.DisplayNameJa,
+                m.DescriptionEn, m.DescriptionJa, m.MissionGiverEn, m.MissionGiverJa,
+                m.MissionGiver, m.FriendlyName, m.Title };
+            return matchers.All(matcher => fields.Any(f => matcher(f)));
+        }).ToList();
+
+        if (filtered.Count == 0)
+        {
+            var transHits = SearchTranslations(query);
+            if (transHits.Count > 0)
+            {
+                var matchedMissions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var (key, en, ja) in transHits)
+                {
+                    var parts = key.Split('_');
+                    var faction = parts[0];
+                    string? difficulty = null;
+                    foreach (var p in parts)
+                        if (DifficultyCodeMap.TryGetValue(p, out var d)) { difficulty = d; break; }
+
+                    foreach (var m in all)
+                    {
+                        if (!m.FriendlyName.Contains(faction, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (difficulty != null && !string.IsNullOrEmpty(m.Difficulty) &&
+                            !m.Difficulty.Equals(difficulty, StringComparison.OrdinalIgnoreCase)) continue;
+                        matchedMissions.Add(m.RecordName);
+                        if (string.IsNullOrEmpty(m.TranslationHint))
+                            m.TranslationHint = $"{ja} ({en})";
+                    }
+                }
+                filtered = all.Where(m => matchedMissions.Contains(m.RecordName)).ToList();
+            }
+        }
 
         filtered.Sort((a, b) =>
         {
@@ -188,7 +217,48 @@ public class MissionService : IDisposable
         return filtered;
     }
 
-    private static Func<string, bool> BuildMatcher(string pattern)
+    public List<(string key, string en, string ja)> SearchTranslations(string query)
+    {
+        var results = new List<(string key, string en, string ja)>();
+        if (_enDict == null) return results;
+
+        var matcher = BuildSingleMatcher(query);
+        foreach (var (key, enVal) in _enDict)
+        {
+            if (key.StartsWith("@")) continue;
+            if (!key.Contains("title", StringComparison.OrdinalIgnoreCase)) continue;
+            if (matcher(enVal))
+            {
+                var ja = _transDict != null && _transDict.TryGetValue(key, out var jaVal) ? jaVal : "";
+                results.Add((key, enVal, ja));
+            }
+        }
+        if (_transDict != null)
+        {
+            foreach (var (key, jaVal) in _transDict)
+            {
+                if (key.StartsWith("@")) continue;
+                if (!key.Contains("title", StringComparison.OrdinalIgnoreCase)) continue;
+                if (results.Any(r => r.key.Equals(key, StringComparison.OrdinalIgnoreCase))) continue;
+                if (matcher(jaVal))
+                {
+                    var en = _enDict.TryGetValue(key, out var enVal) ? enVal : "";
+                    results.Add((key, en, jaVal));
+                }
+            }
+        }
+        return results;
+    }
+
+    private static List<Func<string, bool>> BuildMatchers(string query)
+    {
+        var words = query.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length <= 1)
+            return [BuildSingleMatcher(query)];
+        return words.Select(BuildSingleMatcher).ToList();
+    }
+
+    private static Func<string, bool> BuildSingleMatcher(string pattern)
     {
         bool startsWithStar = pattern.StartsWith('*');
         bool endsWithStar = pattern.EndsWith('*');
@@ -196,13 +266,15 @@ public class MissionService : IDisposable
         if (string.IsNullOrEmpty(core))
             return _ => true;
 
+        var coreAlt = core.Contains('_') ? core.Replace('_', ' ') : core.Replace(' ', '_');
+
         if (startsWithStar && endsWithStar)
-            return s => !string.IsNullOrEmpty(s) && s.Contains(core, StringComparison.OrdinalIgnoreCase);
+            return s => !string.IsNullOrEmpty(s) && (s.Contains(core, StringComparison.OrdinalIgnoreCase) || s.Contains(coreAlt, StringComparison.OrdinalIgnoreCase));
         if (startsWithStar)
-            return s => !string.IsNullOrEmpty(s) && s.EndsWith(core, StringComparison.OrdinalIgnoreCase);
+            return s => !string.IsNullOrEmpty(s) && (s.EndsWith(core, StringComparison.OrdinalIgnoreCase) || s.EndsWith(coreAlt, StringComparison.OrdinalIgnoreCase));
         if (endsWithStar)
-            return s => !string.IsNullOrEmpty(s) && s.StartsWith(core, StringComparison.OrdinalIgnoreCase);
-        return s => !string.IsNullOrEmpty(s) && s.Contains(core, StringComparison.OrdinalIgnoreCase);
+            return s => !string.IsNullOrEmpty(s) && (s.StartsWith(core, StringComparison.OrdinalIgnoreCase) || s.StartsWith(coreAlt, StringComparison.OrdinalIgnoreCase));
+        return s => !string.IsNullOrEmpty(s) && (s.Contains(core, StringComparison.OrdinalIgnoreCase) || s.Contains(coreAlt, StringComparison.OrdinalIgnoreCase));
     }
 
     private List<MissionEntry> LoadAllMissions()
@@ -533,8 +605,22 @@ public class MissionService : IDisposable
         if (!string.IsNullOrEmpty(m.Location))
             lines.Add($"  場所: {m.Location}");
         lines.Add($"  合法性: {(m.IsLawful ? "合法" : "非合法")}");
+        if (!string.IsNullOrEmpty(m.TranslationHint))
+            lines.Add($"  ※ 検索一致タイトル: {m.TranslationHint}");
         if (m.NotForRelease)
             lines.Add("  ※ 未リリース (開発中)");
+
+        var titleVariants = FindTitleVariants(m.Title);
+        if (titleVariants.Count > 0)
+        {
+            lines.Add("");
+            lines.Add("■ タイトルバリアント (ランタイム選択)");
+            foreach (var (key, en, ja) in titleVariants)
+            {
+                var display = !string.IsNullOrEmpty(ja) ? $"{ja} ({en})" : en;
+                lines.Add($"  - {display}");
+            }
+        }
 
         lines.Add("");
         lines.Add("■ 報酬");
@@ -759,6 +845,23 @@ public class MissionService : IDisposable
         return name.Replace("_", " ").Trim();
     }
 
+    private List<(string key, string en, string ja)> FindTitleVariants(string titleKey)
+    {
+        var results = new List<(string key, string en, string ja)>();
+        if (string.IsNullOrEmpty(titleKey) || _enDict == null) return results;
+        var prefix = titleKey.TrimEnd("0123456789".ToCharArray()).TrimEnd('_');
+        if (prefix.Length < 5) return results;
+        foreach (var (key, enVal) in _enDict)
+        {
+            if (key.StartsWith("@")) continue;
+            if (!key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!key.Contains("title", StringComparison.OrdinalIgnoreCase)) continue;
+            var ja = _transDict != null && _transDict.TryGetValue(key, out var jaVal) ? jaVal : "";
+            results.Add((key, enVal, ja));
+        }
+        return results;
+    }
+
     private string ResolveJa(string raw)
     {
         if (_transDict == null) return "";
@@ -897,6 +1000,7 @@ public class MissionService : IDisposable
         public double WantedLevelMin { get; set; }
         public double WantedLevelMax { get; set; }
         public string MissionGiverRecord { get; set; } = "";
+        public string TranslationHint { get; set; } = "";
 
         public List<string> RequiredMissions { get; set; } = new();
         public List<ReputationRequirement> RepRequirements { get; set; } = new();

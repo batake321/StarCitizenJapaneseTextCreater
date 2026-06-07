@@ -1558,7 +1558,31 @@ public partial class MainWindow : Window
             _currentMissions = _missionService.Search(query);
             dgMissions.ItemsSource = _currentMissions;
             txtMissionSearchStatus.Text = $"{_currentMissions.Count} 件";
-            txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
+
+            if (_currentMissions.Count == 0)
+            {
+                var transHits = _missionService.SearchTranslations(query);
+                if (transHits.Count > 0)
+                {
+                    var sb = new System.Text.StringBuilder();
+                    sb.AppendLine("ミッションデータに直接の一致はありませんが、翻訳データベースに以下のタイトルが見つかりました。");
+                    sb.AppendLine("（ゲーム内でランタイム生成されるミッションの可能性があります）\n");
+                    foreach (var (key, en, ja) in transHits.Take(20))
+                    {
+                        var display = !string.IsNullOrEmpty(ja) ? $"{ja} ({en})" : en;
+                        sb.AppendLine($"  ● {display}");
+                        sb.AppendLine($"    キー: {key}");
+                    }
+                    if (transHits.Count > 20)
+                        sb.AppendLine($"\n  ...他 {transHits.Count - 20} 件");
+                    txtMissionDetail.Text = sb.ToString();
+                    txtMissionSearchStatus.Text = $"0 件 (翻訳DB: {transHits.Count} 件)";
+                }
+                else
+                    txtMissionDetail.Text = "該当するミッションが見つかりませんでした。";
+            }
+            else
+                txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
         }
         catch (Exception ex)
         {
