@@ -788,13 +788,24 @@
                     <!-- Right: Mission list + detail -->
                     <Grid Grid.Column="1">
                         <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*" MinHeight="120"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*" MinHeight="120"/>
                         </Grid.RowDefinitions>
 
+                        <!-- Search bar -->
+                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
+                            <TextBox x:Name="txtMissionSearch" Width="300" Padding="4,3"
+                                     FontSize="13" KeyDown="MissionSearch_KeyDown"
+                                     ToolTip="英語名・日本語名・依頼者で検索 (*前方一致, 後方一致*, 部分一致)"/>
+                            <Button Content="検索" Click="MissionSearch_Click" Padding="12,3" Margin="4,0,0,0"/>
+                            <Button Content="クリア" Click="MissionSearchClear_Click" Padding="12,3" Margin="4,0,0,0"/>
+                            <TextBlock x:Name="txtMissionSearchStatus" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="#666" FontSize="12"/>
+                        </StackPanel>
+
                         <!-- Mission list -->
-                        <DataGrid Grid.Row="0" x:Name="dgMissions" AutoGenerateColumns="False"
+                        <DataGrid Grid.Row="1" x:Name="dgMissions" AutoGenerateColumns="False"
                                   IsReadOnly="True" SelectionChanged="Mission_Selected"
                                   CanUserSortColumns="True" HeadersVisibility="Column"
                                   GridLinesVisibility="Horizontal" AlternatingRowBackground="#F8F8F8"
@@ -835,11 +846,11 @@
                             </DataGrid.Columns>
                         </DataGrid>
 
-                        <GridSplitter Grid.Row="1" Height="5" HorizontalAlignment="Stretch"
+                        <GridSplitter Grid.Row="2" Height="5" HorizontalAlignment="Stretch"
                                       VerticalAlignment="Center" Background="#DDD" Margin="0,2"/>
 
                         <!-- Mission detail -->
-                        <Border Grid.Row="2" Background="#1E1E1E" CornerRadius="4" Padding="4">
+                        <Border Grid.Row="3" Background="#1E1E1E" CornerRadius="4" Padding="4">
                             <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
                                 <TextBlock x:Name="txtMissionDetail" TextWrapping="Wrap"
                                            FontFamily="Consolas" FontSize="14"

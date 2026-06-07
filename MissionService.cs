@@ -143,6 +143,50 @@ public class MissionService : IDisposable
         return filtered;
     }
 
+    public List<MissionEntry> Search(string query)
+    {
+        var all = LoadAllMissions();
+        foreach (var m in all)
+            ParseRawJson(m);
+
+        var matcher = BuildMatcher(query);
+        var filtered = all.Where(m =>
+            matcher(m.CleanedName) ||
+            matcher(m.Title) ||
+            matcher(m.TitleJa) ||
+            matcher(m.DisplayNameJa) ||
+            matcher(m.MissionGiver) ||
+            matcher(m.MissionGiverJa) ||
+            matcher(m.FriendlyName)
+        ).ToList();
+
+        filtered.Sort((a, b) =>
+        {
+            var d = a.DifficultyOrder.CompareTo(b.DifficultyOrder);
+            if (d != 0) return d;
+            return a.RewardMax.CompareTo(b.RewardMax);
+        });
+
+        return filtered;
+    }
+
+    private static Func<string, bool> BuildMatcher(string pattern)
+    {
+        bool startsWithStar = pattern.StartsWith('*');
+        bool endsWithStar = pattern.EndsWith('*');
+        var core = pattern.Trim('*');
+        if (string.IsNullOrEmpty(core))
+            return _ => true;
+
+        if (startsWithStar && endsWithStar)
+            return s => !string.IsNullOrEmpty(s) && s.Contains(core, StringComparison.OrdinalIgnoreCase);
+        if (startsWithStar)
+            return s => !string.IsNullOrEmpty(s) && s.EndsWith(core, StringComparison.OrdinalIgnoreCase);
+        if (endsWithStar)
+            return s => !string.IsNullOrEmpty(s) && s.StartsWith(core, StringComparison.OrdinalIgnoreCase);
+        return s => !string.IsNullOrEmpty(s) && s.Contains(core, StringComparison.OrdinalIgnoreCase);
+    }
+
     private List<MissionEntry> LoadAllMissions()
     {
         var list = new List<MissionEntry>();

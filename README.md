@@ -23,9 +23,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v1.14.6-win-x64.zip (最新 v1.14.6 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.6/StarCitizenJapaneseTextCreater-v1.14.6-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v1.14.7-win-x64.zip (最新 v1.14.7 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.7/StarCitizenJapaneseTextCreater-v1.14.7-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260607_171441.zip (翻訳データベース 4.8.1 6/7更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.6/sc_japanese_backup_20260607_171441.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260607_224618.zip (翻訳データベース 4.8.1 6/7更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.7/sc_japanese_backup_20260607_224618.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの「3. 反映」を実行してください。**
 
@@ -40,12 +40,23 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v1.14.6 更新内容
+### 🚀 v1.14.7 更新内容
 
-- **交易ルート「実績なし」フィルタ**: 買い場所の在庫が 0、または売り場所の需要が 0 のルートを「実績なし（取引不可の可能性大）」として識別
-  - **「在庫不足ルートを除く」連動**: チェック時に実績なしルートも自動除外
-  - **ランキング集計から除外**: 実績ありルートを上位に優先表示し、実績なしルートは参考として最下部に表示
-- **バックアップに所持船舶データの除外オプション追加**: エクスポート時に「所持船舶データを含める」チェックボックスで、個人の船舶データ (my_ships) を含めるか選択可能に。公開配布用バックアップから個人データを除外できます
+- **ミッション検索機能**: 英語名・日本語名・依頼者名で全カテゴリ横断検索。`*keyword` で後方一致、`keyword*` で前方一致、`keyword` で部分一致
+- **ゲームデータ抽出の大幅強化**:
+  - **船舶ハードポイント抽出**: 各船のロードアウト定義から武器・シールド・パワープラント・QD・クーラー等のハードポイントを抽出（約14,800ポート）
+  - **装備アイテムの性能データ抽出**: Shield/PowerPlant/QuantumDrive/Cooler/武器のコンポーネントパラメータを items テーブルに格納
+  - **コンポーネントメーカー対応**: POWR/SHLD/COOL/QDRV/MISL等のプレフィックスをインデックスに追加
+- **交易ルート「実績なし」フィルタ**: 在庫/需要が 0 のルートを分離表示
+- **バックアップの船舶データ除外オプション**: エクスポート時に個人の船舶データを含めるか選択可能
+
+<details>
+<summary>v1.14.6 更新内容</summary>
+
+- 交易ルート「実績なし」フィルタ（v1.14.7 で統合）
+- バックアップの船舶データ除外オプション（v1.14.7 で統合）
+
+</details>
 
 <details>
 <summary>v1.14.5 更新内容</summary>

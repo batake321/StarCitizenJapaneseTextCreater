@@ -1508,6 +1508,8 @@ public partial class MainWindow : Window
 
         try
         {
+            txtMissionSearch.Text = "";
+            txtMissionSearchStatus.Text = "";
             _currentMissions = _missionService.GetMissions(cat.Name);
             dgMissions.ItemsSource = _currentMissions;
             var jaCount = _currentMissions.Count(m => !string.IsNullOrEmpty(m.DisplayNameJa));
@@ -1520,7 +1522,49 @@ public partial class MainWindow : Window
         }
     }
 
+    private void MissionSearch_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Enter) MissionSearch_Execute();
+    }
+    private void MissionSearch_Click(object sender, RoutedEventArgs e) => MissionSearch_Execute();
+    private void MissionSearchClear_Click(object sender, RoutedEventArgs e)
+    {
+        txtMissionSearch.Text = "";
+        txtMissionSearchStatus.Text = "";
+        if (lstMissionCategories.SelectedItem is MissionService.MissionCategory cat)
+        {
+            _currentMissions = _missionService?.GetMissions(cat.Name);
+            dgMissions.ItemsSource = _currentMissions;
+        }
+        else
+        {
+            dgMissions.ItemsSource = null;
+        }
+    }
 
+    private void MissionSearch_Execute()
+    {
+        if (_missionService == null)
+        {
+            txtMissionSearchStatus.Text = "先にミッション読み込みを実行してください";
+            return;
+        }
+        var query = txtMissionSearch.Text.Trim();
+        if (string.IsNullOrEmpty(query)) { MissionSearchClear_Click(this, new RoutedEventArgs()); return; }
+
+        try
+        {
+            lstMissionCategories.SelectedIndex = -1;
+            _currentMissions = _missionService.Search(query);
+            dgMissions.ItemsSource = _currentMissions;
+            txtMissionSearchStatus.Text = $"{_currentMissions.Count} 件";
+            txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
+        }
+        catch (Exception ex)
+        {
+            txtMissionSearchStatus.Text = $"エラー: {ex.Message}";
+        }
+    }
 
     private void Mission_Selected(object sender, SelectionChangedEventArgs e)
     {
