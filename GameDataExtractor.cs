@@ -51,7 +51,25 @@ public class GameDataExtractor
 
     private void EnsureDb()
     {
-        if (_db != null) return;
+        if (_db != null)
+        {
+            try
+            {
+                using var chk = _db.CreateCommand();
+                chk.CommandText = "SELECT sql FROM sqlite_master WHERE name='ship_ports'";
+                var s = chk.ExecuteScalar() as string ?? "";
+                if (!s.Contains("equipped_item", StringComparison.OrdinalIgnoreCase))
+                {
+                    _db.Close();
+                    _db.Dispose();
+                    _db = null;
+                    SqliteConnection.ClearAllPools();
+                    File.Delete(DbPath);
+                }
+                else return;
+            }
+            catch { _db = null; }
+        }
         if (File.Exists(DbPath))
         {
             try
@@ -62,7 +80,8 @@ public class GameDataExtractor
                 testCmd.CommandText = "SELECT sql FROM sqlite_master WHERE name='ship_ports'";
                 var schema = testCmd.ExecuteScalar() as string ?? "";
                 testConn.Close();
-                if (schema.Contains("FOREIGN KEY", StringComparison.OrdinalIgnoreCase))
+                if (schema.Contains("FOREIGN KEY", StringComparison.OrdinalIgnoreCase) ||
+                    !schema.Contains("equipped_item", StringComparison.OrdinalIgnoreCase))
                 {
                     SqliteConnection.ClearAllPools();
                     File.Delete(DbPath);
@@ -636,27 +655,32 @@ public class GameDataExtractor
         return count;
     }
 
-    private static void CollectLoadoutEntries(JsonElement element, List<(string portName, string entityName)> results)
+    private static void CollectLoadoutEntries(JsonElement components, List<(string portName, string entityName)> results)
     {
-        if (element.ValueKind == JsonValueKind.Object)
+        foreach (var comp in components.EnumerateArray())
         {
-            if (element.TryGetProperty("_Type_", out var t) && t.GetString() == "SItemPortLoadoutEntryParams")
-            {
-                var portName = element.TryGetProperty("itemPortName", out var pn) ? pn.GetString() ?? "" : "";
-                var entityName = element.TryGetProperty("entityClassName", out var en) ? en.GetString() ?? "" : "";
-                if (!string.IsNullOrEmpty(portName) &&
-                    EquipmentPortPrefixes.Any(p => portName.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
-                {
-                    results.Add((portName, entityName));
-                }
-            }
-            foreach (var prop in element.EnumerateObject())
-                CollectLoadoutEntries(prop.Value, results);
+            if (!comp.TryGetProperty("_Type_", out var t)) continue;
+            if (t.GetString() != "SEntityComponentDefaultLoadoutParams") continue;
+            if (!comp.TryGetProperty("loadout", out var loadout)) continue;
+            CollectEntriesFromLoadout(loadout, results);
+            break;
         }
-        else if (element.ValueKind == JsonValueKind.Array)
+    }
+
+    private static void CollectEntriesFromLoadout(JsonElement loadout, List<(string portName, string entityName)> results)
+    {
+        if (!loadout.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array) return;
+        foreach (var entry in entries.EnumerateArray())
         {
-            foreach (var item in element.EnumerateArray())
-                CollectLoadoutEntries(item, results);
+            var portName = entry.TryGetProperty("itemPortName", out var pn) ? pn.GetString() ?? "" : "";
+            var entityName = entry.TryGetProperty("entityClassName", out var en) ? en.GetString() ?? "" : "";
+            if (!string.IsNullOrEmpty(portName) &&
+                EquipmentPortPrefixes.Any(p => portName.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+            {
+                results.Add((portName, entityName));
+            }
+            if (entry.TryGetProperty("loadout", out var subLoadout) && subLoadout.ValueKind == JsonValueKind.Object)
+                CollectEntriesFromLoadout(subLoadout, results);
         }
     }
 
