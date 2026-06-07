@@ -593,7 +593,8 @@ public static class DatabaseBackupService
                 ship_record_name TEXT NOT NULL,
                 port_name TEXT,
                 item_type TEXT,
-                size INTEGER
+                size INTEGER,
+                equipped_item TEXT
             );
             CREATE TABLE IF NOT EXISTS items (
                 record_name TEXT PRIMARY KEY,

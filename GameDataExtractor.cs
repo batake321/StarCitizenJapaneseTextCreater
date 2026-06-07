@@ -102,9 +102,11 @@ public class GameDataExtractor
                 ship_record_name TEXT NOT NULL,
                 port_name TEXT,
                 item_type TEXT,
-                size INTEGER
+                size INTEGER,
+                equipped_item TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_ship_ports_ship ON ship_ports(ship_record_name);
+            CREATE INDEX IF NOT EXISTS idx_ship_ports_type ON ship_ports(item_type);
 
             CREATE TABLE IF NOT EXISTS items (
                 record_name TEXT PRIMARY KEY,
@@ -275,7 +277,7 @@ public class GameDataExtractor
         StatusChanged?.Invoke("ゲームデータの構造化インデックスを構築中...");
         var sw = Stopwatch.StartNew();
         int step = 0;
-        int totalSteps = 4;
+        int totalSteps = 6;
         var now = DateTime.UtcNow.ToString("o");
 
         // クリア
@@ -294,24 +296,46 @@ public class GameDataExtractor
         StatusChanged?.Invoke($"FTS5 全文検索インデックスを構築中...");
         RebuildFts5Index();
 
-        // Step 2: 船・車両（詳細データ）
+        // Step 2: 船・車両（詳細データ + ハードポイント）
         step++;
         ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] 船・車両データを抽出中...");
         int shipCount = await ExtractShipsAsync(dataP4kPath, now, ct);
 
-        // Step 3: ミッション・契約
+        // Step 3: アイテム詳細（装備コンポーネント）
+        step++;
+        ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] 装備アイテムを抽出中...");
+        int itemCount = 0;
+        var componentQueries = new[]
+        {
+            ("SHLD_*", "SCItemShieldGeneratorParams"),
+            ("POWR_*", "SCItemPowerPlantParams"),
+            ("QDRV_*", "SCItemQuantumDriveParams"),
+            ("COOL_*", "SCItemCoolerParams"),
+        };
+        foreach (var (filter, compType) in componentQueries)
+        {
+            StatusChanged?.Invoke($"[{step}/{totalSteps}] 装備抽出: {filter}");
+            itemCount += await ExtractItemsAsync(dataP4kPath, $"EntityClassDefinition.{filter}", compType, now, ct);
+        }
+        foreach (var prefix in ItemPrefixes.Where(p => p.Length <= 4))
+        {
+            var filter = $"EntityClassDefinition.{prefix}_*";
+            StatusChanged?.Invoke($"[{step}/{totalSteps}] 武器抽出: {prefix}");
+            itemCount += await ExtractItemsAsync(dataP4kPath, filter, "SCItemWeaponComponentParams", now, ct);
+        }
+
+        // Step 4: ミッション・契約
         step++;
         ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] ミッション・契約を抽出中...");
         int missionCount = await ExtractMissionsAsync(dataP4kPath, now, ct);
 
-        // Step 4: コモディティ
+        // Step 5: コモディティ
         step++;
         ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] コモディティを抽出中...");
         int commodityCount = await ExtractCommoditiesAsync(dataP4kPath, now, ct);
 
         // Step 6: メタ情報
         step++;
-        // メタ情報
         var p4kModified = File.GetLastWriteTimeUtc(dataP4kPath);
         SetMeta("game_version", p4kModified.ToString("yyyy-MM-dd HH:mm"));
         SetMeta("p4k_last_modified", p4kModified.ToString("o"));
@@ -320,7 +344,7 @@ public class GameDataExtractor
 
         sw.Stop();
         ProgressChanged?.Invoke(100, $"完了！ ({sw.Elapsed.TotalSeconds:F1}秒)");
-        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}, 契約: {missionCount}, 商品: {commodityCount}");
+        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}, 装備: {itemCount}, 契約: {missionCount}, 商品: {commodityCount}");
     }
 
     public bool IsP4kUpdated()
@@ -355,7 +379,10 @@ public class GameDataExtractor
         ["AEGS", "ANVL", "ARGO", "BANU", "CNOU", "CRUS", "DRAK", "GAMA", "GATA", "GRIN", "KRIG", "MISC", "MRAI", "ORIG", "RSI", "TMBL", "VNCL", "XIAN", "ESPR"];
 
     private static readonly string[] ItemPrefixes =
-        ["behr", "klwe", "ksar", "lbco", "gmni", "hdso", "jofl", "grin", "apar", "crus", "aegs", "anvl", "argo", "cnou", "drak", "krig", "misc", "mrai", "orig", "rsi", "tmbl", "xian", "espr"];
+        ["behr", "klwe", "ksar", "lbco", "gmni", "hdso", "jofl", "grin", "apar", "crus", "aegs", "anvl", "argo", "cnou", "drak", "krig", "misc", "mrai", "orig", "rsi", "tmbl", "xian", "espr",
+         "POWR", "SHLD", "COOL", "QDRV", "MISL", "MRCK", "RADR", "COMP", "INTK", "HTNK", "QTNK", "ARMR", "LFSP", "RELAY",
+         "powr", "shld", "cool", "qdrv", "misl", "mrck", "radr", "comp", "intk", "htnk", "qtnk", "armr", "lfsp", "relay",
+         "GODI", "WETK", "TYDT", "GRNP", "FSKI", "godi", "wetk", "tydt", "grnp", "fski"];
 
     private async Task<int> ExtractItemIndexAsync(string p4kPath, string now, CancellationToken ct)
     {
@@ -486,11 +513,12 @@ public class GameDataExtractor
         var pEa = shipCmd.Parameters.Add("@ea", SqliteType.Text);
 
         using var portCmd = _db.CreateCommand();
-        portCmd.CommandText = "INSERT INTO ship_ports(ship_record_name,port_name,item_type,size) VALUES(@srn,@pn,@it,@sz)";
+        portCmd.CommandText = "INSERT INTO ship_ports(ship_record_name,port_name,item_type,size,equipped_item) VALUES(@srn,@pn,@it,@sz,@ei)";
         var ppSrn = portCmd.Parameters.Add("@srn", SqliteType.Text);
         var ppPn = portCmd.Parameters.Add("@pn", SqliteType.Text);
         var ppIt = portCmd.Parameters.Add("@it", SqliteType.Text);
         var ppSz = portCmd.Parameters.Add("@sz", SqliteType.Integer);
+        var ppEi = portCmd.Parameters.Add("@ei", SqliteType.Text);
 
         for (int pi = 0; pi < VehicleManufacturerPrefixes.Length; pi++)
         {
@@ -501,18 +529,52 @@ public class GameDataExtractor
             if (string.IsNullOrEmpty(rawJson)) continue;
 
             count += ParseAndInsertShips(rawJson, now, shipCmd, pRn, pNm, pMf, pCa, pRo, pCr, pSz, pRj, pEa,
-                portCmd, ppSrn, ppPn, ppIt, ppSz);
+                portCmd, ppSrn, ppPn, ppIt, ppSz, ppEi);
         }
 
         tx.Commit();
         return count;
     }
 
+    private static readonly HashSet<string> EquipmentPortPrefixes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "hardpoint_gun", "hardpoint_weapon", "hardpoint_turret",
+        "hardpoint_shield", "hardpoint_power_plant", "hardpoint_quantum_drive",
+        "hardpoint_cooler", "Hardpoint_cooler",
+        "hardpoint_missilerack", "hardpoint_missile",
+        "hardpoint_radar", "Hardpoint_Avionics", "Hardpoint_Life_Support",
+        "hardpoint_countermeasure",
+    };
+
+    private static string InferPortType(string portName)
+    {
+        var lower = portName.ToLowerInvariant();
+        if (lower.Contains("gun") || (lower.Contains("weapon") && !lower.Contains("rack"))) return "WeaponGun";
+        if (lower.Contains("turret")) return "Turret";
+        if (lower.Contains("shield")) return "Shield";
+        if (lower.Contains("power_plant")) return "PowerPlant";
+        if (lower.Contains("quantum_drive")) return "QuantumDrive";
+        if (lower.Contains("cooler")) return "Cooler";
+        if (lower.Contains("missilerack") || lower.Contains("missile_rack")) return "MissileLauncher";
+        if (lower.Contains("radar")) return "Radar";
+        if (lower.Contains("avionics")) return "Avionics";
+        if (lower.Contains("life_support")) return "LifeSupport";
+        if (lower.Contains("countermeasure")) return "CounterMeasure";
+        return "";
+    }
+
+    private static int InferSizeFromEntityName(string entityName)
+    {
+        if (string.IsNullOrEmpty(entityName)) return 0;
+        var match = System.Text.RegularExpressions.Regex.Match(entityName, @"_S(\d+)_");
+        return match.Success ? int.Parse(match.Groups[1].Value) : 0;
+    }
+
     private static int ParseAndInsertShips(string rawJson, string now,
         SqliteCommand shipCmd, SqliteParameter pRn, SqliteParameter pNm, SqliteParameter pMf,
         SqliteParameter pCa, SqliteParameter pRo, SqliteParameter pCr, SqliteParameter pSz,
         SqliteParameter pRj, SqliteParameter pEa,
-        SqliteCommand portCmd, SqliteParameter ppSrn, SqliteParameter ppPn, SqliteParameter ppIt, SqliteParameter ppSz)
+        SqliteCommand portCmd, SqliteParameter ppSrn, SqliteParameter ppPn, SqliteParameter ppIt, SqliteParameter ppSz, SqliteParameter ppEi)
     {
         int count = 0;
         foreach (var block in SplitJsonBlocks(rawJson))
@@ -555,26 +617,47 @@ public class GameDataExtractor
                 pSz.Value = size; pRj.Value = block; pEa.Value = now;
                 shipCmd.ExecuteNonQuery();
 
-                foreach (var comp in components.EnumerateArray())
+                var loadoutEntries = new List<(string portName, string entityName)>();
+                CollectLoadoutEntries(components, loadoutEntries);
+
+                foreach (var (portName, entityName) in loadoutEntries)
                 {
-                    var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
-                    if (type == "SAttachableComponentParams" && comp.TryGetProperty("AttachDef", out var ad))
-                    {
-                        var itemType = ad.TryGetProperty("Type", out var it) ? it.GetString() ?? "" : "";
-                        if (!string.IsNullOrEmpty(itemType) && itemType != "UNDEFINED" && itemType != "MainThruster")
-                        {
-                            var portSize = ad.TryGetProperty("Size", out var ps) ? ps.GetInt32() : 0;
-                            var portName = ad.TryGetProperty("Localization", out var pl) && pl.TryGetProperty("Name", out var pln) ? pln.GetString() ?? "" : "";
-                            ppSrn.Value = recordName; ppPn.Value = portName; ppIt.Value = itemType; ppSz.Value = portSize;
-                            portCmd.ExecuteNonQuery();
-                        }
-                    }
+                    var portType = InferPortType(portName);
+                    if (string.IsNullOrEmpty(portType)) continue;
+                    var portSize = InferSizeFromEntityName(entityName);
+                    ppSrn.Value = recordName; ppPn.Value = portName; ppIt.Value = portType; ppSz.Value = portSize;
+                    ppEi.Value = string.IsNullOrEmpty(entityName) ? DBNull.Value : entityName;
+                    portCmd.ExecuteNonQuery();
                 }
                 count++;
             }
             catch { }
         }
         return count;
+    }
+
+    private static void CollectLoadoutEntries(JsonElement element, List<(string portName, string entityName)> results)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (element.TryGetProperty("_Type_", out var t) && t.GetString() == "SItemPortLoadoutEntryParams")
+            {
+                var portName = element.TryGetProperty("itemPortName", out var pn) ? pn.GetString() ?? "" : "";
+                var entityName = element.TryGetProperty("entityClassName", out var en) ? en.GetString() ?? "" : "";
+                if (!string.IsNullOrEmpty(portName) &&
+                    EquipmentPortPrefixes.Any(p => portName.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+                {
+                    results.Add((portName, entityName));
+                }
+            }
+            foreach (var prop in element.EnumerateObject())
+                CollectLoadoutEntries(prop.Value, results);
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+                CollectLoadoutEntries(item, results);
+        }
     }
 
     private async Task<int> ExtractItemsAsync(string p4kPath, string filter, string componentType, string now, CancellationToken ct)
