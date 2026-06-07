@@ -10,6 +10,7 @@ public class MissionService : IDisposable
 {
     private readonly SqliteConnection _conn;
     private Dictionary<string, string>? _transDict;
+    private Dictionary<string, string>? _enDict;
 
     private static readonly string[] StripPrefixes =
     {
@@ -50,6 +51,10 @@ public class MissionService : IDisposable
     {
         ("バウンティハンター", (rn, t) => t.Contains("bountyhunter") && !rn.Contains("PVP")),
         ("PVPミッション",     (rn, t) => rn.Contains("PVP") || rn.Contains("CertificationMission_PVP")),
+        ("暗殺",             (rn, t) => rn.Contains("Assassination")),
+        ("窃盗・強奪",        (rn, t) => rn.Contains("Steal") || rn.Contains("Theft") || rn.Contains("TripMines")),
+        ("ハッキング",        (rn, t) => rn.Contains("CommArrayHack") || rn.Contains("HackPrevention")),
+        ("麻薬",             (rn, t) => rn.Contains("Drug") || rn.Contains("Narcotics") || rn.Contains("DestroyNarcotics")),
         ("傭兵",             (rn, t) => t.Contains("mercenary")),
         ("回収",             (rn, t) => rn.Contains("Recover") || rn.Contains("Recovery") || rn.Contains("RetrieveConsignment") || rn.Contains("Collect_")),
         ("調査",             (rn, t) => t.Contains("investigation") || rn.Contains("MissingPerson") || t.Contains("search") || t.Contains("research")),
@@ -61,6 +66,8 @@ public class MissionService : IDisposable
         ("輸送",             (rn, t) => rn.Contains("TowShip") || rn.Contains("NTLockdown_Delivery")),
         ("ハンドマイニング",   (rn, t) => t.Contains("mining") || rn.Contains("Mining_")),
         ("燃料補給",          (rn, t) => t.Contains("servicebeacon") || rn.Contains("ServiceBeacon") || t.Contains("maintenance")),
+        ("ECN・緊急通信",     (rn, t) => t.Contains("ecn") || rn.Contains("ECN_")),
+        ("レース",           (rn, t) => t.Contains("race") || rn.Contains("Race")),
     };
 
     public int TransDictCount => _transDict?.Count ?? 0;
@@ -70,35 +77,43 @@ public class MissionService : IDisposable
         _conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
         _conn.Open();
         if (!string.IsNullOrEmpty(translationDbPath) && File.Exists(translationDbPath))
-            _transDict = LoadTranslations(translationDbPath);
+            LoadTranslations(translationDbPath);
     }
 
     public string? TransLoadError { get; private set; }
 
-    private Dictionary<string, string> LoadTranslations(string dbPath)
+    private void LoadTranslations(string dbPath)
     {
-        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        _transDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        _enDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
             conn.Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT key, japanese FROM translations WHERE japanese IS NOT NULL AND japanese != ''";
+            cmd.CommandText = "SELECT key, english, japanese FROM translations WHERE (japanese IS NOT NULL AND japanese != '') OR (english IS NOT NULL AND english != '')";
             using var r = cmd.ExecuteReader();
             while (r.Read())
             {
                 var key = r.GetString(0);
-                var ja = r.IsDBNull(1) ? "" : r.GetString(1);
-                if (string.IsNullOrEmpty(ja)) continue;
-                dict[key] = ja.Replace("\\n", "\n");
-                if (!key.StartsWith("@")) dict["@" + key] = ja.Replace("\\n", "\n");
+                var en = r.IsDBNull(1) ? "" : r.GetString(1);
+                var ja = r.IsDBNull(2) ? "" : r.GetString(2);
+                if (!string.IsNullOrEmpty(ja))
+                {
+                    _transDict[key] = ja.Replace("\\n", "\n");
+                    if (!key.StartsWith("@")) _transDict["@" + key] = ja.Replace("\\n", "\n");
+                }
+                if (!string.IsNullOrEmpty(en))
+                {
+                    _enDict[key] = en.Replace("\\n", "\n");
+                    if (!key.StartsWith("@")) _enDict["@" + key] = en.Replace("\\n", "\n");
+                }
             }
         }
         catch (Exception ex)
         {
             TransLoadError = ex.Message;
         }
-        return dict;
     }
 
     public List<MissionCategory> GetCategories()
@@ -152,11 +167,14 @@ public class MissionService : IDisposable
         var matcher = BuildMatcher(query);
         var filtered = all.Where(m =>
             matcher(m.CleanedName) ||
-            matcher(m.Title) ||
+            matcher(m.TitleEn) ||
             matcher(m.TitleJa) ||
             matcher(m.DisplayNameJa) ||
-            matcher(m.MissionGiver) ||
+            matcher(m.DescriptionEn) ||
+            matcher(m.DescriptionJa) ||
+            matcher(m.MissionGiverEn) ||
             matcher(m.MissionGiverJa) ||
+            matcher(m.MissionGiver) ||
             matcher(m.FriendlyName)
         ).ToList();
 
@@ -239,16 +257,24 @@ public class MissionService : IDisposable
             using var doc = JsonDocument.Parse(entry.RawJson);
             if (!doc.RootElement.TryGetProperty("_RecordValue_", out var rv)) return;
 
-            // Resolve Japanese title from original @key
+            // Resolve English/Japanese title from original @key
             var titleKey = GetString(rv, "title");
             entry.OriginalTitleKey = titleKey;
             if (!string.IsNullOrEmpty(titleKey))
+            {
                 entry.TitleJa = ResolveJa(titleKey);
+                var en = ResolveEn(titleKey);
+                if (!IsLocKey(en)) entry.TitleEn = en;
+            }
 
-            // Resolve Japanese description
+            // Resolve English/Japanese description
             var descKey = GetString(rv, "description");
             if (!string.IsNullOrEmpty(descKey))
+            {
                 entry.DescriptionJa = ResolveJa(descKey);
+                var en = ResolveEn(descKey);
+                if (!IsLocKey(en)) entry.DescriptionEn = en;
+            }
 
             // Resolve Japanese mission giver
             var giverKey = GetString(rv, "missionGiver");
@@ -256,6 +282,8 @@ public class MissionService : IDisposable
             {
                 var resolved = ResolveJa(giverKey);
                 if (!IsLocKey(resolved)) entry.MissionGiverJa = resolved;
+                var en = ResolveEn(giverKey);
+                if (!IsLocKey(en)) entry.MissionGiverEn = en;
             }
 
             // Reward details
@@ -489,8 +517,9 @@ public class MissionService : IDisposable
         lines.Add($"  レコード名: {m.FriendlyName}");
         if (!string.IsNullOrEmpty(m.TitleJa) && !IsLocKey(m.TitleJa))
             lines.Add($"  タイトル (日本語): {m.TitleJa}");
-        if (!IsLocKey(m.Title) && !string.IsNullOrEmpty(m.Title))
-            lines.Add($"  タイトル (英語): {m.Title}");
+        var englishTitle = !string.IsNullOrEmpty(m.TitleEn) ? m.TitleEn : m.Title;
+        if (!IsLocKey(englishTitle) && !string.IsNullOrEmpty(englishTitle))
+            lines.Add($"  タイトル (英語): {englishTitle}");
         if (!IsLocKey(m.TitleHud) && !string.IsNullOrEmpty(m.TitleHud) && m.TitleHud != m.Title)
             lines.Add($"  HUDタイトル: {m.TitleHud}");
         if (!string.IsNullOrEmpty(m.Difficulty))
@@ -738,6 +767,12 @@ public class MissionService : IDisposable
         return "";
     }
 
+    private string ResolveEn(string raw)
+    {
+        if (_enDict == null) return "";
+        return ResolveLoc(raw, _enDict);
+    }
+
     private static string ResolveLoc(string raw, Dictionary<string, string> dict)
     {
         if (string.IsNullOrEmpty(raw)) return "";
@@ -815,7 +850,17 @@ public class MissionService : IDisposable
                 return ja;
             }
         }
-        public string DisplayNameEn => !string.IsNullOrEmpty(TitleJa) && !IsLocKeyStatic(TitleJa) ? $"({CleanedName})" : CleanedName;
+        public string TitleEn { get; set; } = "";
+        public string DescriptionEn { get; set; } = "";
+        public string MissionGiverEn { get; set; } = "";
+        public string DisplayNameEn
+        {
+            get
+            {
+                var en = !string.IsNullOrEmpty(TitleEn) ? TitleEn : CleanedName;
+                return !string.IsNullOrEmpty(TitleJa) && !IsLocKeyStatic(TitleJa) ? $"({en})" : en;
+            }
+        }
         public string Title { get; set; } = "";
         public string TitleHud { get; set; } = "";
         public string MissionType { get; set; } = "";

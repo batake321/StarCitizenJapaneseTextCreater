@@ -824,8 +824,11 @@ public class GameDataExtractor
                     pMg.Value = ResolveLoc(GetStr(rv, "missionGiver"), locDict);
                     pLl.Value = location;
                     pDe.Value = ResolveLoc(GetStr(rv, "description"), locDict);
-                    pRmin.Value = GetNum(rv, "rewardMin", GetNum(rv, "payoutMin", GetNum(rv, "reward", 0)));
-                    pRmax.Value = GetNum(rv, "rewardMax", GetNum(rv, "payoutMax", GetNum(rv, "payout", 0)));
+                    double rewardBase = 0;
+                    if (rv.TryGetProperty("missionReward", out var mReward))
+                        rewardBase = GetNum(mReward, "reward", GetNum(mReward, "max", 0));
+                    pRmin.Value = GetNum(rv, "rewardMin", GetNum(rv, "payoutMin", rewardBase));
+                    pRmax.Value = GetNum(rv, "rewardMax", GetNum(rv, "payoutMax", rewardBase));
                     pRr.Value = GetStr(rv, "requiredReputation", GetStr(rv, "minReputation"));
                     pLt.Value = GetStr(rv, "lawfulnessType");
                     pJu.Value = GetStr(rv, "jurisdiction");
