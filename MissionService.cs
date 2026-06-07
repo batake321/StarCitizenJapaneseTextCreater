@@ -11,6 +11,7 @@ public class MissionService : IDisposable
     private readonly SqliteConnection _conn;
     private Dictionary<string, string>? _transDict;
     private Dictionary<string, string>? _enDict;
+    private readonly bool _hasWikiColumns;
 
     private static readonly string[] StripPrefixes =
     {
@@ -76,6 +77,16 @@ public class MissionService : IDisposable
     {
         _conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
         _conn.Open();
+
+        try
+        {
+            using var chk = _conn.CreateCommand();
+            chk.CommandText = "SELECT sql FROM sqlite_master WHERE name='missions'";
+            var schema = chk.ExecuteScalar() as string ?? "";
+            _hasWikiColumns = schema.Contains("wiki_title", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { _hasWikiColumns = false; }
+
         if (!string.IsNullOrEmpty(translationDbPath) && File.Exists(translationDbPath))
             LoadTranslations(translationDbPath);
     }
@@ -114,6 +125,53 @@ public class MissionService : IDisposable
         {
             TransLoadError = ex.Message;
         }
+    }
+
+    public List<string> GetFactions()
+    {
+        var factions = new List<string> { "(すべて)" };
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = _hasWikiColumns
+            ? "SELECT DISTINCT wiki_faction FROM missions WHERE wiki_faction IS NOT NULL AND wiki_faction != '' ORDER BY wiki_faction"
+            : "SELECT DISTINCT mission_giver FROM missions WHERE mission_giver != '' AND mission_giver NOT LIKE '%LOC%' ORDER BY mission_giver";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            var f = r.GetString(0);
+            var ja = FactionJaMap.TryGetValue(f, out var j) ? j : "";
+            factions.Add(!string.IsNullOrEmpty(ja) ? $"{ja} ({f})" : f);
+        }
+        return factions;
+    }
+
+    public List<string> GetRanks()
+    {
+        var ranks = new List<string> { "(すべて)" };
+        foreach (var r in RankNames)
+            ranks.Add(r);
+        return ranks;
+    }
+
+    public List<MissionEntry> FilterByFactionAndRank(List<MissionEntry> missions, string? factionFilter, string? rankFilter)
+    {
+        var result = missions;
+        if (!string.IsNullOrEmpty(factionFilter) && factionFilter != "(すべて)")
+        {
+            var factionEn = factionFilter;
+            var parenIdx = factionFilter.IndexOf('(');
+            if (parenIdx > 0) factionEn = factionFilter[(parenIdx + 1)..].TrimEnd(')').Trim();
+
+            result = result.Where(m =>
+                m.WikiFaction.Equals(factionEn, StringComparison.OrdinalIgnoreCase) ||
+                m.MissionGiver.Contains(factionEn.Split(' ')[0], StringComparison.OrdinalIgnoreCase) ||
+                m.FriendlyName.Contains(factionEn.Split(' ')[0], StringComparison.OrdinalIgnoreCase)
+            ).ToList();
+        }
+        if (!string.IsNullOrEmpty(rankFilter) && rankFilter != "(すべて)")
+        {
+            result = result.Where(m => m.WikiRank == rankFilter).ToList();
+        }
+        return result;
     }
 
     public List<MissionCategory> GetCategories()
@@ -158,6 +216,27 @@ public class MissionService : IDisposable
         return filtered;
     }
 
+    private static readonly Dictionary<string, string> FactionJaMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        {"Headhunters", "ヘッドハンターズ"}, {"Bounty Hunters Guild", "バウンティーハンターズ・ギルド"},
+        {"Northrock Service Group", "ノースロック"}, {"Adagio Holdings", "アダージョ・ホールディングス"},
+        {"Bit Zeros", "ビットゼロズ"}, {"Dead Saints", "デッドセインツ"},
+        {"InterSec Defense Solutions", "インターセック"}, {"United Wayfarers Club", "ユナイテッド・ウェイファーラーズ"},
+        {"Red Wind Linehaul", "レッドウィンド"}, {"Shubin Interstellar", "シュビン・インターステラー"},
+        {"Covalex", "コバレックス"}, {"Crusader Industries", "クルセイダー"},
+        {"Hurston Dynamics", "ハーストン"}, {"microTech", "マイクロテック"},
+        {"ArcCorp", "アークコープ"}, {"Vaughn", "ヴォーン"},
+        {"Ruto", "ルート"}, {"Citizens For Prosperity", "CFP"},
+        {"Rayari Incorporated", "レイアリ"}, {"Tar Pits", "タールピッツ"},
+        {"Eckhart Security", "エッカート・セキュリティ"}, {"Wildstar Racing", "ワイルドスター"},
+        {"Foxwell Enforcement", "フォックスウェル"},
+    };
+
+    private static readonly string[] RankNames = { "中立", "ジュニア・コントラクター", "コントラクター", "シニア・コントラクター", "エキスパート", "エリート・コントラクター" };
+
+    private static string GetRankName(int rankIndex) =>
+        rankIndex >= 0 && rankIndex < RankNames.Length ? RankNames[rankIndex] : "";
+
     private static readonly Dictionary<string, string> DifficultyCodeMap = new(StringComparer.OrdinalIgnoreCase)
     {
         {"vlrt", "Very Easy"}, {"lrt", "Easy"}, {"mrt", "Medium"}, {"hrt", "Hard"}, {"vhrt", "Very Hard"}, {"ert", "Super"},
@@ -175,7 +254,8 @@ public class MissionService : IDisposable
         {
             var fields = new[] { m.CleanedName, m.TitleEn, m.TitleJa, m.DisplayNameJa,
                 m.DescriptionEn, m.DescriptionJa, m.MissionGiverEn, m.MissionGiverJa,
-                m.MissionGiver, m.FriendlyName, m.Title, m.WikiTitle, m.WikiFaction };
+                m.MissionGiver, m.FriendlyName, m.Title, m.WikiTitle,
+                m.WikiFaction, m.WikiFactionJa, m.WikiRank };
             return matchers.All(matcher => fields.Any(f => matcher(f)));
         }).ToList();
 
@@ -281,7 +361,9 @@ public class MissionService : IDisposable
     {
         var list = new List<MissionEntry>();
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT record_name, title, title_hud, mission_type, difficulty, mission_giver, location_label, description, reward_min, reward_max, required_reputation, lawfulness_type, jurisdiction, time_limit, raw_json, wiki_title, wiki_faction, wiki_reward, wiki_legality, wiki_enemy_min, wiki_enemy_max, wiki_duration_min FROM missions";
+        cmd.CommandText = _hasWikiColumns
+            ? "SELECT record_name, title, title_hud, mission_type, difficulty, mission_giver, location_label, description, reward_min, reward_max, required_reputation, lawfulness_type, jurisdiction, time_limit, raw_json, wiki_title, wiki_faction, wiki_reward, wiki_legality, wiki_enemy_min, wiki_enemy_max, wiki_duration_min FROM missions"
+            : "SELECT record_name, title, title_hud, mission_type, difficulty, mission_giver, location_label, description, reward_min, reward_max, required_reputation, lawfulness_type, jurisdiction, time_limit, raw_json FROM missions";
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
@@ -306,13 +388,13 @@ public class MissionService : IDisposable
                 Jurisdiction = SafeStr(r, 12),
                 TimeLimit = SafeStr(r, 13),
                 RawJson = SafeStr(r, 14),
-                WikiTitle = SafeStr(r, 15),
-                WikiFaction = SafeStr(r, 16),
-                WikiReward = r.IsDBNull(17) ? 0 : r.GetDouble(17),
-                WikiLegality = SafeStr(r, 18),
-                WikiEnemyMin = r.IsDBNull(19) ? 0 : r.GetInt32(19),
-                WikiEnemyMax = r.IsDBNull(20) ? 0 : r.GetInt32(20),
-                WikiDuration = r.IsDBNull(21) ? 0 : r.GetDouble(21),
+                WikiTitle = _hasWikiColumns ? SafeStr(r, 15) : "",
+                WikiFaction = _hasWikiColumns ? SafeStr(r, 16) : "",
+                WikiReward = _hasWikiColumns && !r.IsDBNull(17) ? r.GetDouble(17) : 0,
+                WikiLegality = _hasWikiColumns ? SafeStr(r, 18) : "",
+                WikiEnemyMin = _hasWikiColumns && !r.IsDBNull(19) ? r.GetInt32(19) : 0,
+                WikiEnemyMax = _hasWikiColumns && !r.IsDBNull(20) ? r.GetInt32(20) : 0,
+                WikiDuration = _hasWikiColumns && !r.IsDBNull(21) ? r.GetDouble(21) : 0,
             };
 
             if (string.IsNullOrEmpty(entry.Difficulty))
@@ -323,6 +405,33 @@ public class MissionService : IDisposable
             entry.DifficultyOrder = DiffOrder(entry.Difficulty);
             entry.FriendlyName = ExtractFriendlyName(rn);
             entry.CleanedName = CleanRecordName(rn);
+
+            // WikiFactionJa / WikiRank を設定
+            if (!string.IsNullOrEmpty(entry.WikiFaction) && FactionJaMap.TryGetValue(entry.WikiFaction, out var fja))
+                entry.WikiFactionJa = fja;
+            if (!string.IsNullOrEmpty(entry.Difficulty))
+                entry.WikiRank = GetRankName(DiffOrder(entry.Difficulty) switch { 0 => 0, 1 => 0, 2 => 1, 3 => 2, 4 => 3, 5 => 4, _ => -1 });
+
+            // Wiki ミッション: タイトル・説明から日本語を解決
+            if (rn.StartsWith("WikiMission.") && !string.IsNullOrEmpty(entry.Title))
+            {
+                entry.TitleEn = entry.Title;
+                var (titleJa, titleKey) = ResolveJaByEnglishWithKey(entry.Title);
+                entry.TitleJa = titleJa;
+                if (!string.IsNullOrEmpty(entry.Description))
+                    entry.DescriptionEn = entry.Description;
+                if (!string.IsNullOrEmpty(titleKey))
+                {
+                    var descKey = titleKey.Replace("_title_", "_desc_");
+                    var descJa = ResolveJa(descKey);
+                    if (!string.IsNullOrEmpty(descJa)) entry.DescriptionJa = descJa;
+                }
+                if (string.IsNullOrEmpty(entry.DescriptionJa) && !string.IsNullOrEmpty(entry.Description))
+                    entry.DescriptionJa = ResolveJaByEnglish(entry.Description);
+                if (!string.IsNullOrEmpty(entry.MissionGiver))
+                    entry.MissionGiverEn = entry.MissionGiver;
+            }
+
             list.Add(entry);
         }
         return list;
@@ -617,7 +726,12 @@ public class MissionService : IDisposable
         if (!string.IsNullOrEmpty(m.WikiTitle))
             lines.Add($"  Wiki タイトル: {m.WikiTitle}");
         if (!string.IsNullOrEmpty(m.WikiFaction))
-            lines.Add($"  ファクション: {m.WikiFaction}");
+        {
+            var factionDisplay = !string.IsNullOrEmpty(m.WikiFactionJa) ? $"{m.WikiFactionJa} ({m.WikiFaction})" : m.WikiFaction;
+            lines.Add($"  ファクション: {factionDisplay}");
+        }
+        if (!string.IsNullOrEmpty(m.WikiRank))
+            lines.Add($"  ランク: {m.WikiRank}");
         if (!string.IsNullOrEmpty(m.WikiLegality))
             lines.Add($"  合法性 (Wiki): {m.WikiLegality}");
         if (m.WikiEnemyMin > 0 || m.WikiEnemyMax > 0)
@@ -887,6 +1001,44 @@ public class MissionService : IDisposable
         return "";
     }
 
+    private (string ja, string key) ResolveJaByEnglishWithKey(string english)
+    {
+        if (_enDict == null || _transDict == null || string.IsNullOrEmpty(english)) return ("", "");
+        foreach (var (key, enVal) in _enDict)
+        {
+            if (key.StartsWith("@")) continue;
+            if (!enVal.Equals(english, StringComparison.OrdinalIgnoreCase)) continue;
+            if (_transDict.TryGetValue(key, out var ja) && !string.IsNullOrEmpty(ja) && ContainsJapanese(ja))
+                return (ja, key);
+        }
+        return ("", "");
+    }
+
+    private string ResolveJaByEnglish(string english)
+    {
+        if (_enDict == null || _transDict == null || string.IsNullOrEmpty(english)) return "";
+        foreach (var (key, enVal) in _enDict)
+        {
+            if (key.StartsWith("@")) continue;
+            if (!enVal.Equals(english, StringComparison.OrdinalIgnoreCase)) continue;
+            if (_transDict.TryGetValue(key, out var ja) && !string.IsNullOrEmpty(ja) && ContainsJapanese(ja))
+                return ja;
+        }
+        // 長文の場合: 先頭50文字で前方一致
+        if (english.Length > 50)
+        {
+            var prefix = english[..50];
+            foreach (var (key, enVal) in _enDict)
+            {
+                if (key.StartsWith("@")) continue;
+                if (!enVal.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                if (_transDict.TryGetValue(key, out var ja) && !string.IsNullOrEmpty(ja) && ContainsJapanese(ja))
+                    return ja;
+            }
+        }
+        return "";
+    }
+
     private string ResolveEn(string raw)
     {
         if (_enDict == null) return "";
@@ -1021,6 +1173,8 @@ public class MissionService : IDisposable
         public string TranslationHint { get; set; } = "";
         public string WikiTitle { get; set; } = "";
         public string WikiFaction { get; set; } = "";
+        public string WikiFactionJa { get; set; } = "";
+        public string WikiRank { get; set; } = "";
         public double WikiReward { get; set; }
         public string WikiLegality { get; set; } = "";
         public int WikiEnemyMin { get; set; }

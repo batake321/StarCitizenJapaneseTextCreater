@@ -795,13 +795,23 @@
                         </Grid.RowDefinitions>
 
                         <!-- Search bar -->
-                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
-                            <TextBox x:Name="txtMissionSearch" Width="300" Padding="4,3"
-                                     FontSize="13" KeyDown="MissionSearch_KeyDown"
-                                     ToolTip="英語名・日本語名・依頼者で検索 (*前方一致, 後方一致*, 部分一致)"/>
-                            <Button Content="検索" Click="MissionSearch_Click" Padding="12,3" Margin="4,0,0,0"/>
-                            <Button Content="クリア" Click="MissionSearchClear_Click" Padding="12,3" Margin="4,0,0,0"/>
-                            <TextBlock x:Name="txtMissionSearchStatus" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="#666" FontSize="12"/>
+                        <StackPanel Grid.Row="0" Margin="0,0,0,6">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <TextBlock Text="組合:" VerticalAlignment="Center" Margin="0,0,4,0" FontSize="12"/>
+                                <ComboBox x:Name="cmbMissionFaction" Width="200" FontSize="12"
+                                          SelectionChanged="MissionFilter_Changed"/>
+                                <TextBlock Text="ランク:" VerticalAlignment="Center" Margin="12,0,4,0" FontSize="12"/>
+                                <ComboBox x:Name="cmbMissionRank" Width="180" FontSize="12"
+                                          SelectionChanged="MissionFilter_Changed"/>
+                                <TextBlock x:Name="txtMissionSearchStatus" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="#666" FontSize="12"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBox x:Name="txtMissionSearch" Width="300" Padding="4,3"
+                                         FontSize="13" KeyDown="MissionSearch_KeyDown"
+                                         ToolTip="英語名・日本語名・依頼者で検索 (*前方一致, 後方一致*, 部分一致)"/>
+                                <Button Content="検索" Click="MissionSearch_Click" Padding="12,3" Margin="4,0,0,0"/>
+                                <Button Content="クリア" Click="MissionSearchClear_Click" Padding="12,3" Margin="4,0,0,0"/>
+                            </StackPanel>
                         </StackPanel>
 
                         <!-- Mission list -->

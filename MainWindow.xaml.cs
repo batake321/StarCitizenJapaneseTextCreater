@@ -1472,32 +1472,68 @@ public partial class MainWindow : Window
     private MissionService? _missionService;
     private List<MissionService.MissionEntry>? _currentMissions;
 
-    private void LoadMissions_Click(object sender, RoutedEventArgs e)
-    {
-        var dbPath = IndexDbPath;
-        if (!File.Exists(dbPath))
-        {
-            MessageBox.Show("ゲームデータのインデックスが未構築です。\n設定タブの「インデックス構築」を実行してください。",
-                "ミッション", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
-        }
+    private void LoadMissions_Click(object sender, RoutedEventArgs e) => LoadMissionsAsync();
 
+    private async void LoadMissionsAsync()
+    {
         try
         {
-            _missionService?.Dispose();
-            _missionService = new MissionService(dbPath, DbPath);
-            var categories = _missionService.GetCategories();
-            lstMissionCategories.ItemsSource = categories;
-            var transInfo = _missionService.TransLoadError != null
-                ? $"翻訳DBエラー:{_missionService.TransLoadError}"
-                : $"翻訳DB:{_missionService.TransDictCount}";
-            txtMissionStatus.Text = $"{categories.Sum(c => c.Count)} 件 ({transInfo})";
-            dgMissions.ItemsSource = null;
-            txtMissionDetail.Text = "カテゴリを選択してください。";
+            var dbPath = IndexDbPath;
+            if (!File.Exists(dbPath))
+            {
+                Dispatcher.Invoke(() => txtMissionStatus.Text = "インデックス未構築");
+                return;
+            }
+
+            Dispatcher.Invoke(() =>
+            {
+                btnLoadMissions.IsEnabled = false;
+                txtMissionStatus.Text = "ミッション読み込み中...";
+            });
+
+            var transDbPath = DbPath;
+            var svc = await Task.Run(() =>
+            {
+                try { return new MissionService(dbPath, transDbPath); }
+                catch { return null; }
+            });
+            if (svc == null)
+            {
+                Dispatcher.Invoke(() => txtMissionStatus.Text = "ミッションDB読み込み失敗");
+                return;
+            }
+
+            var categories = await Task.Run(() => svc.GetCategories());
+            var factions = await Task.Run(() => svc.GetFactions());
+
+            Dispatcher.Invoke(() =>
+            {
+                _missionService?.Dispose();
+                _missionService = svc;
+                lstMissionCategories.ItemsSource = categories;
+                cmbMissionFaction.ItemsSource = factions;
+                cmbMissionFaction.SelectedIndex = 0;
+                cmbMissionRank.ItemsSource = _missionService.GetRanks();
+                cmbMissionRank.SelectedIndex = 0;
+
+                var transInfo = _missionService.TransLoadError != null
+                    ? $"翻訳DBエラー:{_missionService.TransLoadError}"
+                    : $"翻訳DB:{_missionService.TransDictCount}";
+                txtMissionStatus.Text = $"{categories.Sum(c => c.Count)} 件 ({transInfo})";
+                dgMissions.ItemsSource = null;
+                txtMissionDetail.Text = "カテゴリを選択してください。";
+                btnLoadMissions.IsEnabled = true;
+            });
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"ミッション読み込みエラー:\n{ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+            try
+            {
+                var logPath = Path.Combine(WorkDir, "mission_load_error.log");
+                File.AppendAllText(logPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {ex}\n");
+                Dispatcher.Invoke(() => { txtMissionStatus.Text = $"読み込みエラー: {ex.Message}"; btnLoadMissions.IsEnabled = true; });
+            }
+            catch { }
         }
     }
 
@@ -1520,6 +1556,32 @@ public partial class MainWindow : Window
         {
             txtMissionStatus.Text = $"エラー: {ex.Message}";
         }
+    }
+
+    private async void MissionFilter_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_missionService == null) return;
+        var faction = cmbMissionFaction.SelectedItem as string;
+        var rank = cmbMissionRank.SelectedItem as string;
+        if (faction == "(すべて)" && rank == "(すべて)") return;
+
+        txtMissionSearchStatus.Text = "検索中...";
+        try
+        {
+            lstMissionCategories.SelectedIndex = -1;
+            txtMissionSearch.Text = "";
+            var svc = _missionService;
+            var filtered = await Task.Run(() =>
+            {
+                var all = svc.Search("");
+                return svc.FilterByFactionAndRank(all, faction, rank);
+            });
+            _currentMissions = filtered;
+            dgMissions.ItemsSource = _currentMissions;
+            txtMissionSearchStatus.Text = $"{_currentMissions.Count} 件";
+            txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
+        }
+        catch (Exception ex) { txtMissionSearchStatus.Text = $"エラー: {ex.Message}"; }
     }
 
     private void MissionSearch_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
@@ -1556,6 +1618,9 @@ public partial class MainWindow : Window
         {
             lstMissionCategories.SelectedIndex = -1;
             _currentMissions = _missionService.Search(query);
+            var faction = cmbMissionFaction.SelectedItem as string;
+            var rank = cmbMissionRank.SelectedItem as string;
+            _currentMissions = _missionService.FilterByFactionAndRank(_currentMissions, faction, rank);
             dgMissions.ItemsSource = _currentMissions;
             txtMissionSearchStatus.Text = $"{_currentMissions.Count} 件";
 
@@ -1628,6 +1693,7 @@ public partial class MainWindow : Window
             welcomeLines.Add("\n⚠️ AI バックエンドが未設定です。設定タブの「AI 設定を開く」から Claude / Gemini / Ollama を設定してください。");
 
         InitGameDataExtractor();
+        LoadMissionsAsync();
 
         if (_gameDataExtractor != null && !_gameDataExtractor.HasStructuredData())
             welcomeLines.Add("\n💡 ミッション・契約の検索には、設定タブの「インデックス構築」の実行が必要です（約2分半）。");
@@ -1665,16 +1731,24 @@ public partial class MainWindow : Window
         }
         catch { }
 
-        var ver = _gameDataExtractor.GetCachedVersion();
-        if (ver != null)
+        try
         {
-            var updateNote = _gameDataExtractor.IsP4kUpdated() ? " ⚠パッチ更新あり" : "";
-            txtGameDataStatus.Text = $"インデックス済み ({ver}){updateNote}";
+            var ver = _gameDataExtractor.GetCachedVersion();
+            if (ver != null)
+            {
+                var updateNote = _gameDataExtractor.IsP4kUpdated() ? " ⚠パッチ更新あり" : "";
+                txtGameDataStatus.Text = $"インデックス済み ({ver}){updateNote}";
+            }
+            else if (_gameDataExtractor.IsStarBreakerInstalled)
+                txtGameDataStatus.Text = "未インデックス (インデックス構築で高速化)";
+            else
+                txtGameDataStatus.Text = "StarBreaker 未導入 (初回は自動ダウンロード)";
         }
-        else if (_gameDataExtractor.IsStarBreakerInstalled)
-            txtGameDataStatus.Text = "未インデックス (インデックス構築で高速化)";
-        else
-            txtGameDataStatus.Text = "StarBreaker 未導入 (初回は自動ダウンロード)";
+        catch (Exception ex)
+        {
+            txtGameDataStatus.Text = $"DB初期化エラー: {ex.Message}";
+            try { File.AppendAllText(Path.Combine(WorkDir, "startup_error.log"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] InitGameData: {ex}\n"); } catch { }
+        }
     }
 
     private async void ExtractGameData_Click(object sender, RoutedEventArgs e)

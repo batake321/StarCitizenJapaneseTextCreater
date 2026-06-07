@@ -23,9 +23,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v1.14.7-win-x64.zip (最新 v1.14.7 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.7/StarCitizenJapaneseTextCreater-v1.14.7-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v1.14.8-win-x64.zip (最新 v1.14.8 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.8/StarCitizenJapaneseTextCreater-v1.14.8-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260607_224618.zip (翻訳データベース 4.8.1 6/7更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.7/sc_japanese_backup_20260607_224618.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260608_024026.zip (翻訳データベース 4.8.1 6/7更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.8/sc_japanese_backup_20260608_024026.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの「3. 反映」を実行してください。**
 
@@ -40,21 +40,25 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v1.14.7 更新内容
+### 🚀 v1.14.8 更新内容
 
-- **ミッション検索機能**: 英語名・日本語名・依頼者名で全カテゴリ横断検索。`*keyword` で後方一致、`keyword*` で前方一致、`keyword` で部分一致
+- **ミッション機能の大幅強化**:
+  - **Wiki API 統合**: Star Citizen Wiki API から約1,800件のミッションデータを取得・統合。DCBにないミッション（Adagio, Bit Zeros, Dead Saints, UWC, Shubin 等）も表示
+  - **組合・ランクフィルタ**: ドロップダウンでファクション（日本語名対応）とランクを選択してフィルタリング
+  - **ミッション検索**: 英語名・日本語名・依頼者・ファクション名で全カテゴリ横断検索。複数語AND検索、スペース/アンダースコア相互置換対応
+  - **非合法ミッションカテゴリ追加**: 暗殺・窃盗/強奪・ハッキング・麻薬・ECN/緊急通信・レース
+  - **起動時バックグラウンド読み込み**: ミッションデータを起動時に自動読み込み
 - **ゲームデータ抽出の大幅強化**:
-  - **船舶ハードポイント抽出**: 各船のロードアウト定義から武器・シールド・パワープラント・QD・クーラー等のハードポイントを抽出（約14,800ポート）
-  - **装備アイテムの性能データ抽出**: Shield/PowerPlant/QuantumDrive/Cooler/武器のコンポーネントパラメータを items テーブルに格納
-  - **コンポーネントメーカー対応**: POWR/SHLD/COOL/QDRV/MISL等のプレフィックスをインデックスに追加
+  - **船舶ハードポイント抽出**: 各船のロードアウト定義から武器・シールド・QD等のハードポイントを抽出（約14,800ポート）
+  - **装備アイテムの性能データ抽出**: Shield/PowerPlant/QuantumDrive/Cooler/武器のコンポーネントパラメータを格納
 - **交易ルート「実績なし」フィルタ**: 在庫/需要が 0 のルートを分離表示
 - **バックアップの船舶データ除外オプション**: エクスポート時に個人の船舶データを含めるか選択可能
 
 <details>
 <summary>v1.14.6 更新内容</summary>
 
-- 交易ルート「実績なし」フィルタ（v1.14.7 で統合）
-- バックアップの船舶データ除外オプション（v1.14.7 で統合）
+- 交易ルート「実績なし」フィルタ（v1.14.8 で統合）
+- バックアップの船舶データ除外オプション（v1.14.8 で統合）
 
 </details>
 
