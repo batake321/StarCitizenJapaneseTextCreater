@@ -32,7 +32,7 @@ public static class DatabaseBackupService
     };
 
     public static async Task ExportAsync(string translationDbPath, string indexDbPath, string outputPath,
-        Action<string>? onStatus = null, string? tradeDbPath = null)
+        Action<string>? onStatus = null, string? tradeDbPath = null, bool includeMyShips = true)
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"sc_export_{Guid.NewGuid():N}");
         try
@@ -53,7 +53,28 @@ public static class DatabaseBackupService
                 if (!string.IsNullOrEmpty(tradeDbPath) && File.Exists(tradeDbPath))
                 {
                     onStatus?.Invoke("trade_cache.db をコピー中...");
-                    File.Copy(tradeDbPath, Path.Combine(tempDir, "trade_cache.db"), true);
+                    var tempTradePath = Path.Combine(tempDir, "trade_cache.db");
+                    File.Copy(tradeDbPath, tempTradePath, true);
+
+                    if (!includeMyShips)
+                    {
+                        onStatus?.Invoke("所持船舶データを除外中...");
+                        using (var conn = new SqliteConnection($"Data Source={tempTradePath}"))
+                        {
+                            conn.Open();
+                            using (var cmd = conn.CreateCommand())
+                            {
+                                cmd.CommandText = "DELETE FROM my_ships";
+                                cmd.ExecuteNonQuery();
+                            }
+                            using (var vacCmd = conn.CreateCommand())
+                            {
+                                vacCmd.CommandText = "VACUUM";
+                                vacCmd.ExecuteNonQuery();
+                            }
+                        }
+                        SqliteConnection.ClearAllPools();
+                    }
                 }
 
                 onStatus?.Invoke("ZIP を作成中...");

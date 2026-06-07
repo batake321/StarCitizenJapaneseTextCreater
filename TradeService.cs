@@ -325,12 +325,15 @@ public class TradeService
                     fillableScu = (fillableScu / cs) * cs;
                     if (fillableScu <= 0) fillableScu = actualScu;
 
-                    var isLowStock = buy.ScuBuy > 0 && buy.ScuBuy < actualScu;
-                    var isNoStock = buy.ScuBuy == 0;
-                    if (excludeLowStock && (isLowStock || isNoStock)) continue;
+                    var isLowBuyStock = buy.ScuBuy > 0 && buy.ScuBuy < actualScu;
+                    var isNoBuyStock = buy.ScuBuy == 0;
+                    var isNoSellStock = sell.ScuSell == 0;
+                    var isNoRecord = isNoBuyStock || isNoSellStock;
+                    
+                    if (excludeLowStock && (isLowBuyStock || isNoRecord)) continue;
 
                     // Use fillable SCU for realistic profit calculation
-                    var useScu = (isLowStock && buy.ScuBuy > 0) ? fillableScu : actualScu;
+                    var useScu = (isLowBuyStock && buy.ScuBuy > 0) ? fillableScu : actualScu;
                     var investment = buy.PriceBuy * useScu;
                     var revenue = sell.PriceSell * useScu;
                     var totalProfit = revenue - investment;
@@ -362,7 +365,8 @@ public class TradeService
                         ScuSellStock = sell.ScuSell,
                         ScuBuyAvg = buy.ScuBuyAvg,
                         ScuSellAvg = sell.ScuSellAvg,
-                        IsLowBuyStock = isLowStock || isNoStock,
+                        IsLowBuyStock = isLowBuyStock || isNoBuyStock,
+                        IsNoRecord = isNoRecord,
                     });
                 }
             }
@@ -374,7 +378,12 @@ public class TradeService
             .Select(g => g.OrderByDescending(r => r.TotalProfit).First())
             .ToList();
 
-        return deduped.OrderByDescending(r => r.TotalProfit).Take(topN).ToList();
+        var validRoutes = deduped.Where(r => !r.IsNoRecord).OrderByDescending(r => r.TotalProfit).ToList();
+        var noRecordRoutes = deduped.Where(r => r.IsNoRecord).OrderByDescending(r => r.TotalProfit).ToList();
+
+        var finalRoutes = validRoutes.Take(topN).ToList();
+        finalRoutes.AddRange(noRecordRoutes.Take(topN)); // Add some no record routes at the bottom
+        return finalRoutes;
     }
 
     // === ChatService API ===
@@ -407,7 +416,9 @@ public class TradeService
             sb.AppendLine($"  購入: {r.BuyDisplay} @ {r.BuyPrice:N1}/SCU [在庫: {r.BuyStockDisplay}]");
             sb.AppendLine($"  売却: {r.SellDisplay} @ {r.SellPrice:N1}/SCU [在庫: {r.SellStockDisplay}]");
             sb.AppendLine($"  利益: {r.ProfitDisplay}/SCU × {r.ActualScu} SCU = {r.TotalProfitDisplay} aUEC (ROI {r.RoiDisplay})");
-            if (r.IsLowBuyStock)
+            if (r.IsNoRecord)
+                sb.AppendLine($"  ⚠ 実績なし (在庫データがありません)");
+            else if (r.IsLowBuyStock)
                 sb.AppendLine($"  ⚠ 在庫注意: 現在在庫 {r.ScuBuyStock} SCU < 必要量 {r.ActualScu} SCU");
             sb.AppendLine();
         }
@@ -893,6 +904,7 @@ public class TradeRoute
     public int ScuBuyAvg { get; set; }
     public int ScuSellAvg { get; set; }
     public bool IsLowBuyStock { get; set; }
+    public bool IsNoRecord { get; set; }
 
     // Display properties
     public string ProfitDisplay => ProfitPerScu >= 0 ? $"+{ProfitPerScu:N1}" : $"{ProfitPerScu:N1}";
@@ -908,7 +920,7 @@ public class TradeRoute
     public string BuyStockDisplay => ScuBuyStock > 0 ? $"{ScuBuyStock:N0}" : "-";
     public string SellStockDisplay => ScuSellStock > 0 ? $"{ScuSellStock:N0}" : "-";
     public string BuyStockAvgDisplay => ScuBuyAvg > 0 ? $"{ScuBuyAvg:N0}" : "-";
-    public string StockWarning => IsLowBuyStock ? "⚠在庫不足" : "";
+    public string StockWarning => IsNoRecord ? "実績なし" : (IsLowBuyStock ? "⚠在庫不足" : "");
 }
 
 public class MyShipEntry

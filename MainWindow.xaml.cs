@@ -1277,8 +1277,9 @@ public partial class MainWindow : Window
         {
             txtBackupStatus.Text = "エクスポート中...";
             var tradeDbPath = Path.Combine(WorkDir, "trade_cache.db");
+            var includeMyShips = chkExportMyShips.IsChecked == true;
             await DatabaseBackupService.ExportAsync(DbPath, IndexDbPath, dlg.FileName,
-                s => Dispatcher.Invoke(() => txtBackupStatus.Text = s), tradeDbPath);
+                s => Dispatcher.Invoke(() => txtBackupStatus.Text = s), tradeDbPath, includeMyShips);
             var size = new FileInfo(dlg.FileName).Length;
             txtBackupStatus.Text = $"エクスポート完了 ({size / 1024.0:N0} KB)";
             MessageBox.Show($"バックアップを保存しました。\n{dlg.FileName}\n({size / 1024.0:N0} KB)", "エクスポート完了");

@@ -1087,6 +1087,7 @@
                                     <Button Content="インポート (復元)" Click="ImportDb_Click"
                                             Padding="14,6" FontWeight="Bold" Background="#4CAF50" Foreground="White"/>
                                 </StackPanel>
+                                <CheckBox x:Name="chkExportMyShips" Content="所持船舶データを含める" IsChecked="True" Margin="0,0,0,8"/>
                                 <TextBlock x:Name="txtBackupStatus" TextWrapping="Wrap" Foreground="#666" Margin="0,0,0,8"/>
                                 <StackPanel Orientation="Horizontal">
                                     <Button Content="翻訳DBクリア (全翻訳データ削除)" Click="ClearDb_Click"

@@ -23,15 +23,15 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v1.14.5-win-x64.zip (最新 v1.14.5 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.5/StarCitizenJapaneseTextCreater-v1.14.5-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v1.14.6-win-x64.zip (最新 v1.14.6 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.6/StarCitizenJapaneseTextCreater-v1.14.6-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260607_023111.zip (翻訳データベース 4.8.1 6/7更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.5/sc_japanese_backup_20260607_023111.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260607_171441.zip (翻訳データベース 4.8.1 6/7更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.6/sc_japanese_backup_20260607_171441.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの「3. 反映」を実行してください。**
 
 ### 📦 翻訳DBについて
 
-v1.14.5 からアプリ本体に翻訳データベースが同梱されています。別途バックアップをインポートする必要はありません。
+v1.14.5 以降、アプリ本体に翻訳データベースが同梱されています。別途バックアップをインポートする必要はありません。
 
 - **初回インストール**: ダウンロードして展開するだけで翻訳データが使えます
 - **アプリ更新時**: 同梱DBがローカルDBより新しければ、起動時に自動で差分マージされます（未翻訳レコードのみ更新、手動翻訳は保護）
@@ -40,7 +40,15 @@ v1.14.5 からアプリ本体に翻訳データベースが同梱されていま
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v1.14.5 更新内容
+### 🚀 v1.14.6 更新内容
+
+- **交易ルート「実績なし」フィルタ**: 買い場所の在庫が 0、または売り場所の需要が 0 のルートを「実績なし（取引不可の可能性大）」として識別
+  - **「在庫不足ルートを除く」連動**: チェック時に実績なしルートも自動除外
+  - **ランキング集計から除外**: 実績ありルートを上位に優先表示し、実績なしルートは参考として最下部に表示
+- **バックアップに所持船舶データの除外オプション追加**: エクスポート時に「所持船舶データを含める」チェックボックスで、個人の船舶データ (my_ships) を含めるか選択可能に。公開配布用バックアップから個人データを除外できます
+
+<details>
+<summary>v1.14.5 更新内容</summary>
 
 - **ミッションタブ新設**: ゲームデータ (Data.p4k) からミッション情報を抽出し、カテゴリ別に一覧表示。バウンティハンター・傭兵・回収・調査・サルベージ・配達・デリバリー・輸送・ハンドマイニング・燃料補給・PVP 等13カテゴリに自動分類
   - **ミッション詳細表示**: 報酬・レピュテーション要件/報酬・前提ミッション（解放条件）・敵の構成（ターゲット数/増援数）・制限時間・犯罪レベル制限など、raw データから解析した詳細情報を表示
@@ -48,6 +56,8 @@ v1.14.5 からアプリ本体に翻訳データベースが同梱されていま
   - **難易度順ソート**: Intro → Very Easy → Easy → Medium → Hard → Very Hard の順で表示
 - **ミッション詳細フォントサイズ設定**: 設定タブから変更可能（既定 14pt）
 - **コモディティ価格キャッシュ延長**: 12時間 → 24時間に変更し、起動時のAPI取得頻度を軽減
+
+</details>
 
 <details>
 <summary>v1.13.1 更新内容</summary>
