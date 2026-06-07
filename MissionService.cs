@@ -175,7 +175,7 @@ public class MissionService : IDisposable
         {
             var fields = new[] { m.CleanedName, m.TitleEn, m.TitleJa, m.DisplayNameJa,
                 m.DescriptionEn, m.DescriptionJa, m.MissionGiverEn, m.MissionGiverJa,
-                m.MissionGiver, m.FriendlyName, m.Title };
+                m.MissionGiver, m.FriendlyName, m.Title, m.WikiTitle, m.WikiFaction };
             return matchers.All(matcher => fields.Any(f => matcher(f)));
         }).ToList();
 
@@ -281,7 +281,7 @@ public class MissionService : IDisposable
     {
         var list = new List<MissionEntry>();
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT record_name, title, title_hud, mission_type, difficulty, mission_giver, location_label, description, reward_min, reward_max, required_reputation, lawfulness_type, jurisdiction, time_limit, raw_json FROM missions";
+        cmd.CommandText = "SELECT record_name, title, title_hud, mission_type, difficulty, mission_giver, location_label, description, reward_min, reward_max, required_reputation, lawfulness_type, jurisdiction, time_limit, raw_json, wiki_title, wiki_faction, wiki_reward, wiki_legality, wiki_enemy_min, wiki_enemy_max, wiki_duration_min FROM missions";
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
@@ -306,6 +306,13 @@ public class MissionService : IDisposable
                 Jurisdiction = SafeStr(r, 12),
                 TimeLimit = SafeStr(r, 13),
                 RawJson = SafeStr(r, 14),
+                WikiTitle = SafeStr(r, 15),
+                WikiFaction = SafeStr(r, 16),
+                WikiReward = r.IsDBNull(17) ? 0 : r.GetDouble(17),
+                WikiLegality = SafeStr(r, 18),
+                WikiEnemyMin = r.IsDBNull(19) ? 0 : r.GetInt32(19),
+                WikiEnemyMax = r.IsDBNull(20) ? 0 : r.GetInt32(20),
+                WikiDuration = r.IsDBNull(21) ? 0 : r.GetDouble(21),
             };
 
             if (string.IsNullOrEmpty(entry.Difficulty))
@@ -607,6 +614,16 @@ public class MissionService : IDisposable
         lines.Add($"  合法性: {(m.IsLawful ? "合法" : "非合法")}");
         if (!string.IsNullOrEmpty(m.TranslationHint))
             lines.Add($"  ※ 検索一致タイトル: {m.TranslationHint}");
+        if (!string.IsNullOrEmpty(m.WikiTitle))
+            lines.Add($"  Wiki タイトル: {m.WikiTitle}");
+        if (!string.IsNullOrEmpty(m.WikiFaction))
+            lines.Add($"  ファクション: {m.WikiFaction}");
+        if (!string.IsNullOrEmpty(m.WikiLegality))
+            lines.Add($"  合法性 (Wiki): {m.WikiLegality}");
+        if (m.WikiEnemyMin > 0 || m.WikiEnemyMax > 0)
+            lines.Add($"  敵数 (Wiki): {m.WikiEnemyMin}-{m.WikiEnemyMax}");
+        if (m.WikiDuration > 0)
+            lines.Add($"  所要時間 (Wiki): {m.WikiDuration:0}分");
         if (m.NotForRelease)
             lines.Add("  ※ 未リリース (開発中)");
 
@@ -960,7 +977,8 @@ public class MissionService : IDisposable
         {
             get
             {
-                var en = !string.IsNullOrEmpty(TitleEn) ? TitleEn : CleanedName;
+                var en = !string.IsNullOrEmpty(WikiTitle) ? WikiTitle
+                       : !string.IsNullOrEmpty(TitleEn) ? TitleEn : CleanedName;
                 return !string.IsNullOrEmpty(TitleJa) && !IsLocKeyStatic(TitleJa) ? $"({en})" : en;
             }
         }
@@ -1001,6 +1019,14 @@ public class MissionService : IDisposable
         public double WantedLevelMax { get; set; }
         public string MissionGiverRecord { get; set; } = "";
         public string TranslationHint { get; set; } = "";
+        public string WikiTitle { get; set; } = "";
+        public string WikiFaction { get; set; } = "";
+        public double WikiReward { get; set; }
+        public string WikiLegality { get; set; } = "";
+        public int WikiEnemyMin { get; set; }
+        public int WikiEnemyMax { get; set; }
+        public double WikiDuration { get; set; }
+
 
         public List<string> RequiredMissions { get; set; } = new();
         public List<ReputationRequirement> RepRequirements { get; set; } = new();

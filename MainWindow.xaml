@@ -1015,6 +1015,10 @@
                                             Click="BuildVectorIndex_Click" Padding="14,6" Margin="8,0,0,0"
                                             FontWeight="Bold" Background="#9C27B0" Foreground="White"
                                             ToolTip="Ollama/OpenAI/Gemini のエンベディングモデルでセマンティック検索を有効化（バックグラウンド実行）"/>
+                                    <Button x:Name="btnFetchWikiMissions" Content="Wiki ミッション取得"
+                                            Click="FetchWikiMissions_Click" Padding="14,6" Margin="8,0,0,0"
+                                            FontWeight="Bold" Background="#FF9800" Foreground="White"
+                                            ToolTip="Star Citizen Wiki API からミッションデータを取得し、既存データと統合"/>
                                     <TextBlock x:Name="txtGameDataStatus" VerticalAlignment="Center"
                                                Margin="12,0,0,0" Foreground="#666"/>
                                 </StackPanel>

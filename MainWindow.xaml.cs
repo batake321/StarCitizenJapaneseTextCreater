@@ -1895,6 +1895,36 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void FetchWikiMissions_Click(object sender, RoutedEventArgs e)
+    {
+        if (_gameDataExtractor == null)
+        {
+            MessageBox.Show("GameDataExtractor が初期化されていません。", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        btnFetchWikiMissions.IsEnabled = false;
+        _gameDataExtractor.ProgressChanged += OnGameDataProgress;
+        _gameDataExtractor.StatusChanged += OnGameDataStatus;
+
+        try
+        {
+            await _gameDataExtractor.FetchWikiMissionsAsync();
+            MessageBox.Show("Wiki ミッションデータの取得が完了しました。", "完了", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            txtGameDataStatus.Text = "Wiki ミッション取得失敗";
+            MessageBox.Show($"Wiki ミッション取得エラー:\n{ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            _gameDataExtractor.ProgressChanged -= OnGameDataProgress;
+            _gameDataExtractor.StatusChanged -= OnGameDataStatus;
+            btnFetchWikiMissions.IsEnabled = true;
+        }
+    }
+
     // === Web Server ===
 
     private async void WebServer_Click(object sender, RoutedEventArgs e)

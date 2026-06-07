@@ -625,7 +625,15 @@ public static class DatabaseBackupService
                 jurisdiction TEXT,
                 time_limit TEXT,
                 raw_json TEXT NOT NULL,
-                extracted_at TEXT NOT NULL
+                extracted_at TEXT NOT NULL,
+                wiki_title TEXT,
+                wiki_faction TEXT,
+                wiki_reward REAL,
+                wiki_legality TEXT,
+                wiki_enemy_min INTEGER,
+                wiki_enemy_max INTEGER,
+                wiki_duration_min REAL,
+                wiki_uuid TEXT
             );
             CREATE TABLE IF NOT EXISTS commodities (
                 record_name TEXT PRIMARY KEY,

@@ -60,13 +60,15 @@ public class GameDataExtractor
                 var s = chk.ExecuteScalar() as string ?? "";
                 if (!s.Contains("equipped_item", StringComparison.OrdinalIgnoreCase))
                 {
-                    _db.Close();
-                    _db.Dispose();
-                    _db = null;
+                    _db.Close(); _db.Dispose(); _db = null;
                     SqliteConnection.ClearAllPools();
                     File.Delete(DbPath);
                 }
-                else return;
+                else
+                {
+                    MigrateWikiColumns();
+                    return;
+                }
             }
             catch { _db = null; }
         }
@@ -159,9 +161,18 @@ public class GameDataExtractor
                 jurisdiction TEXT,
                 time_limit TEXT,
                 raw_json TEXT NOT NULL,
-                extracted_at TEXT NOT NULL
+                extracted_at TEXT NOT NULL,
+                wiki_title TEXT,
+                wiki_faction TEXT,
+                wiki_reward REAL,
+                wiki_legality TEXT,
+                wiki_enemy_min INTEGER,
+                wiki_enemy_max INTEGER,
+                wiki_duration_min REAL,
+                wiki_uuid TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_missions_type ON missions(mission_type COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_missions_wiki ON missions(wiki_title COLLATE NOCASE);
             CREATE INDEX IF NOT EXISTS idx_missions_title ON missions(title COLLATE NOCASE);
 
             CREATE TABLE IF NOT EXISTS commodities (
@@ -1832,5 +1843,161 @@ public class GameDataExtractor
             return query.Trim();
 
         return "";
+    }
+
+    private void MigrateWikiColumns()
+    {
+        if (_db == null) return;
+        try
+        {
+            using var chk = _db.CreateCommand();
+            chk.CommandText = "SELECT sql FROM sqlite_master WHERE name='missions'";
+            var schema = chk.ExecuteScalar() as string ?? "";
+            if (schema.Contains("wiki_title", StringComparison.OrdinalIgnoreCase)) return;
+
+            var cols = new[] { "wiki_title TEXT", "wiki_faction TEXT", "wiki_reward REAL",
+                "wiki_legality TEXT", "wiki_enemy_min INTEGER", "wiki_enemy_max INTEGER",
+                "wiki_duration_min REAL", "wiki_uuid TEXT" };
+            foreach (var col in cols)
+            {
+                using var alt = _db.CreateCommand();
+                alt.CommandText = $"ALTER TABLE missions ADD COLUMN {col}";
+                try { alt.ExecuteNonQuery(); } catch { }
+            }
+        }
+        catch { }
+    }
+
+    public async Task FetchWikiMissionsAsync(CancellationToken ct = default)
+    {
+        EnsureDb();
+        MigrateWikiColumns();
+        StatusChanged?.Invoke("Wiki API からミッションデータを取得中...");
+
+        int page = 1, totalFetched = 0, linked = 0, added = 0;
+        var now = DateTime.UtcNow.ToString("o");
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            StatusChanged?.Invoke($"Wiki API ミッション取得中... ページ {page} ({totalFetched} 件取得済み)");
+
+            string json;
+            try
+            {
+                var url = $"https://api.star-citizen.wiki/api/missions?page[number]={page}&page[size]=200";
+                json = await Http.GetStringAsync(url, ct);
+            }
+            catch (Exception ex)
+            {
+                StatusChanged?.Invoke($"Wiki API エラー (page {page}): {ex.Message}");
+                break;
+            }
+
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("data", out var data) || data.GetArrayLength() == 0)
+                break;
+
+            using var tx = _db!.BeginTransaction();
+            foreach (var m in data.EnumerateArray())
+            {
+                var uuid = m.TryGetProperty("uuid", out var u) ? u.GetString() ?? "" : "";
+                var title = m.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+                var debugName = m.TryGetProperty("debug_name", out var dn) ? dn.GetString() ?? "" : "";
+                var faction = "";
+                if (m.TryGetProperty("faction", out var f) && f.ValueKind == JsonValueKind.Object)
+                    faction = f.TryGetProperty("name", out var fn) ? fn.GetString() ?? "" : "";
+                var rewardMin = m.TryGetProperty("reward_min", out var rm) && rm.ValueKind == JsonValueKind.Number ? rm.GetDouble() : 0;
+                var legality = m.TryGetProperty("legality_label", out var ll) ? ll.GetString() ?? "" : "";
+                var enemyMin = m.TryGetProperty("enemy_count_min", out var en1) && en1.ValueKind == JsonValueKind.Number ? en1.GetInt32() : 0;
+                var enemyMax = m.TryGetProperty("enemy_count_max", out var en2) && en2.ValueKind == JsonValueKind.Number ? en2.GetInt32() : 0;
+                var duration = m.TryGetProperty("time_to_complete_minutes", out var dur) && dur.ValueKind == JsonValueKind.Number ? dur.GetDouble() : 0;
+                var missionGiver = m.TryGetProperty("mission_giver", out var mg) ? mg.GetString() ?? "" : "";
+                var description = m.TryGetProperty("description", out var desc) ? desc.GetString() ?? "" : "";
+                var hasCombat = m.TryGetProperty("has_combat", out var hc) && hc.ValueKind == JsonValueKind.True;
+                var shareable = m.TryGetProperty("shareable", out var sh) && sh.ValueKind == JsonValueKind.True;
+                var maxPlayers = m.TryGetProperty("max_players_per_instance", out var mp) && mp.ValueKind == JsonValueKind.Number ? mp.GetInt32() : 0;
+                var rankIndex = m.TryGetProperty("rank_index", out var ri) && ri.ValueKind == JsonValueKind.Number ? ri.GetInt32() : -1;
+                var released = m.TryGetProperty("released", out var rel) && rel.ValueKind == JsonValueKind.True;
+
+                if (string.IsNullOrEmpty(title) || title == "LOC_UNINITIALIZED") { totalFetched++; continue; }
+
+                // Try to link to existing DCB mission by debug_name
+                bool didLink = false;
+                if (!string.IsNullOrEmpty(debugName))
+                {
+                    using var linkCmd = _db.CreateCommand();
+                    linkCmd.Transaction = tx;
+                    linkCmd.CommandText = "UPDATE missions SET wiki_title=@wt, wiki_faction=@wf, wiki_reward=@wr, wiki_legality=@wl, wiki_enemy_min=@we1, wiki_enemy_max=@we2, wiki_duration_min=@wd, wiki_uuid=@wu WHERE record_name LIKE @dn";
+                    linkCmd.Parameters.AddWithValue("@wt", title);
+                    linkCmd.Parameters.AddWithValue("@wf", faction);
+                    linkCmd.Parameters.AddWithValue("@wr", rewardMin);
+                    linkCmd.Parameters.AddWithValue("@wl", legality);
+                    linkCmd.Parameters.AddWithValue("@we1", enemyMin);
+                    linkCmd.Parameters.AddWithValue("@we2", enemyMax);
+                    linkCmd.Parameters.AddWithValue("@wd", duration);
+                    linkCmd.Parameters.AddWithValue("@wu", uuid);
+                    linkCmd.Parameters.AddWithValue("@dn", $"%{debugName}%");
+                    if (linkCmd.ExecuteNonQuery() > 0) { linked++; didLink = true; }
+                }
+
+                // If not linked, insert as new mission
+                if (!didLink)
+                {
+                    var recordName = $"WikiMission.{uuid}";
+                    var missionType = m.TryGetProperty("reward_scope", out var rs) ? rs.GetString() ?? "" : "";
+                    var difficulty = rankIndex switch { 0 => "Intro", 1 => "Easy", 2 => "Medium", 3 => "Hard", 4 => "Very Hard", 5 => "Super", _ => "" };
+                    var location = "";
+                    if (m.TryGetProperty("star_systems", out var ss) && ss.ValueKind == JsonValueKind.Array)
+                    {
+                        var systems = new List<string>();
+                        foreach (var s in ss.EnumerateArray()) systems.Add(s.GetString() ?? "");
+                        location = string.Join(", ", systems);
+                    }
+
+                    using var insCmd = _db.CreateCommand();
+                    insCmd.Transaction = tx;
+                    insCmd.CommandText = @"INSERT OR IGNORE INTO missions(record_name, title, title_hud, mission_type, difficulty,
+                        mission_giver, location_label, description, reward_min, reward_max, required_reputation,
+                        lawfulness_type, jurisdiction, time_limit, raw_json, extracted_at,
+                        wiki_title, wiki_faction, wiki_reward, wiki_legality, wiki_enemy_min, wiki_enemy_max, wiki_duration_min, wiki_uuid)
+                        VALUES(@rn, @ti, '', @mt, @di, @mg, @ll, @de, @rmin, 0, '', @law, '', @tl, '{}', @ea,
+                        @wt, @wf, @wr, @wl, @we1, @we2, @wd, @wu)";
+                    insCmd.Parameters.AddWithValue("@rn", recordName);
+                    insCmd.Parameters.AddWithValue("@ti", title);
+                    insCmd.Parameters.AddWithValue("@mt", missionType.ToLowerInvariant());
+                    insCmd.Parameters.AddWithValue("@di", difficulty);
+                    insCmd.Parameters.AddWithValue("@mg", missionGiver);
+                    insCmd.Parameters.AddWithValue("@ll", location);
+                    insCmd.Parameters.AddWithValue("@de", description);
+                    insCmd.Parameters.AddWithValue("@rmin", rewardMin);
+                    insCmd.Parameters.AddWithValue("@law", legality);
+                    insCmd.Parameters.AddWithValue("@tl", duration > 0 ? $"{duration}" : "");
+                    insCmd.Parameters.AddWithValue("@ea", now);
+                    insCmd.Parameters.AddWithValue("@wt", title);
+                    insCmd.Parameters.AddWithValue("@wf", faction);
+                    insCmd.Parameters.AddWithValue("@wr", rewardMin);
+                    insCmd.Parameters.AddWithValue("@wl", legality);
+                    insCmd.Parameters.AddWithValue("@we1", enemyMin);
+                    insCmd.Parameters.AddWithValue("@we2", enemyMax);
+                    insCmd.Parameters.AddWithValue("@wd", duration);
+                    insCmd.Parameters.AddWithValue("@wu", uuid);
+                    if (insCmd.ExecuteNonQuery() > 0) added++;
+                }
+                totalFetched++;
+            }
+            tx.Commit();
+
+            var meta = doc.RootElement.TryGetProperty("meta", out var metaEl) ? metaEl : default;
+            var lastPage = meta.TryGetProperty("last_page", out var lp) && lp.ValueKind == JsonValueKind.Number ? lp.GetInt32() : 1;
+            if (page >= lastPage) break;
+            page++;
+            await Task.Delay(100, ct);
+        }
+
+        SetMeta("wiki_missions_fetched_at", DateTime.UtcNow.ToString("o"));
+        SetMeta("wiki_missions_count", totalFetched.ToString());
+        StatusChanged?.Invoke($"Wiki API ミッション取得完了: {totalFetched} 件取得, {linked} 件リンク, {added} 件新規追加");
+        ProgressChanged?.Invoke(100, $"Wiki ミッション: {totalFetched} 件 (リンク: {linked}, 新規: {added})");
     }
 }
