@@ -23,9 +23,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v1.14.8-win-x64.zip (最新 v1.14.8 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.8/StarCitizenJapaneseTextCreater-v1.14.8-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v1.14.10-win-x64.zip (最新 v1.14.10 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.10/StarCitizenJapaneseTextCreater-v1.14.10-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260608_024026.zip (翻訳データベース 4.8.1 6/7更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.8/sc_japanese_backup_20260608_024026.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260608_024026.zip (翻訳データベース 4.8.1 6/7更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.14.10/sc_japanese_backup_20260608_024026.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの「3. 反映」を実行してください。**
 
@@ -40,7 +40,7 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v1.14.8 更新内容
+### 🚀 v1.14.10 更新内容
 
 - **ミッション機能の大幅強化**:
   - **Wiki API 統合**: Star Citizen Wiki API から約1,800件のミッションデータを取得・統合。DCBにないミッション（Adagio, Bit Zeros, Dead Saints, UWC, Shubin 等）も表示
@@ -57,8 +57,8 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
 <details>
 <summary>v1.14.6 更新内容</summary>
 
-- 交易ルート「実績なし」フィルタ（v1.14.8 で統合）
-- バックアップの船舶データ除外オプション（v1.14.8 で統合）
+- 交易ルート「実績なし」フィルタ（v1.14.10 で統合）
+- バックアップの船舶データ除外オプション（v1.14.10 で統合）
 
 </details>
 

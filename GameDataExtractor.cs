@@ -172,7 +172,6 @@ public class GameDataExtractor
                 wiki_uuid TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_missions_type ON missions(mission_type COLLATE NOCASE);
-            CREATE INDEX IF NOT EXISTS idx_missions_wiki ON missions(wiki_title COLLATE NOCASE);
             CREATE INDEX IF NOT EXISTS idx_missions_title ON missions(title COLLATE NOCASE);
 
             CREATE TABLE IF NOT EXISTS commodities (
@@ -1864,6 +1863,9 @@ public class GameDataExtractor
                 alt.CommandText = $"ALTER TABLE missions ADD COLUMN {col}";
                 try { alt.ExecuteNonQuery(); } catch { }
             }
+            using var idx = _db.CreateCommand();
+            idx.CommandText = "CREATE INDEX IF NOT EXISTS idx_missions_wiki ON missions(wiki_title COLLATE NOCASE)";
+            try { idx.ExecuteNonQuery(); } catch { }
         }
         catch { }
     }

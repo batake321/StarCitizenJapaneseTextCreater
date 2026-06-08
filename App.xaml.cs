@@ -48,7 +48,16 @@ public partial class App : Application
 
         if (string.IsNullOrEmpty(Config.WorkingDirectory))
             Config.WorkingDirectory = @"C:\temp";
-        Directory.CreateDirectory(Config.WorkingDirectory);
+        try
+        {
+            Directory.CreateDirectory(Config.WorkingDirectory);
+        }
+        catch (Exception ex)
+        {
+            System.Windows.MessageBox.Show(
+                $"Working Directory を作成できません:\n{Config.WorkingDirectory}\n\nエラー: {ex.Message}\n\n設定タブで別のパスを指定してください。",
+                "起動エラー", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+        }
 
         // 同梱DBをWorkDirにマージ（同梱版が新しければ差分インポート）
         var baseDir = AppContext.BaseDirectory;

@@ -874,11 +874,12 @@ public class MissionService : IDisposable
             foreach (var dl in m.DescriptionJa.Split('\n'))
                 lines.Add($"  {dl.TrimEnd()}");
         }
-        if (!IsLocKey(m.Description) && !string.IsNullOrEmpty(m.Description))
+        var engDesc = !string.IsNullOrEmpty(m.DescriptionEn) ? m.DescriptionEn : m.Description;
+        if (!IsLocKey(engDesc) && !string.IsNullOrEmpty(engDesc))
         {
             lines.Add("");
             lines.Add("■ 説明 (英語)");
-            foreach (var dl in m.Description.Replace("\\n", "\n").Split('\n'))
+            foreach (var dl in engDesc.Replace("\\n", "\n").Split('\n'))
                 lines.Add($"  {dl.TrimEnd()}");
         }
 
