@@ -254,6 +254,10 @@ public static class DatabaseBackupService
         {
             if (!TableExists(src, table)) continue;
 
+            // 所有船はバックアップ側にデータがある場合のみ反映する
+            // (船舶除外バックアップは空の my_ships テーブルを含むため、Drop モードでもローカルの所有船を消さない)
+            if (table == "my_ships" && CountRows(src, table) == 0) continue;
+
             if (mode == ImportMode.Drop)
             {
                 using var delCmd = dest.CreateCommand();
@@ -385,6 +389,13 @@ public static class DatabaseBackupService
             }
             sb.AppendLine();
         }
+    }
+
+    private static long CountRows(SqliteConnection conn, string table)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT COUNT(*) FROM {table}";
+        return (long)(cmd.ExecuteScalar() ?? 0L);
     }
 
     private static bool TableExists(SqliteConnection conn, string table)
