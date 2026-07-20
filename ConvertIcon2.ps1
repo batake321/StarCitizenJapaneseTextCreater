@@ -1,0 +1,20 @@
+$pngData = [System.IO.File]::ReadAllBytes("D:\StarCitizenJapaneseTextCreater\676b9b8484cf4af0.png")
+$icoFile = [System.IO.File]::Create("D:\StarCitizenJapaneseTextCreater\app.ico")
+$bw = New-Object System.IO.BinaryWriter($icoFile)
+
+$bw.Write([int16]0)
+$bw.Write([int16]1)
+$bw.Write([int16]1)
+$bw.Write([byte]0)
+$bw.Write([byte]0)
+$bw.Write([byte]0)
+$bw.Write([byte]0)
+$bw.Write([int16]1)
+$bw.Write([int16]32)
+$bw.Write([int32]$pngData.Length)
+$bw.Write([int32]22)
+
+$bw.Write($pngData)
+
+$bw.Close()
+$icoFile.Close()
