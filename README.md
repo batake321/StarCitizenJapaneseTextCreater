@@ -25,7 +25,7 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 > **[StarCitizenJapaneseTextCreater-v1.16.0-win-x64.zip (最新 v1.16.0 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.16.0/StarCitizenJapaneseTextCreater-v1.16.0-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260720_144419.zip (翻訳データベース 2026/7/20 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.16.0/sc_japanese_backup_20260720_144419.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260720_144419.zip (翻訳データベース 4.9 対応 2026/7/20 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.16.0/sc_japanese_backup_20260720_144419.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの「3. 反映」を実行してください。**
 
@@ -43,7 +43,7 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
 ### 🚀 v1.16.0 更新内容
 
 - **起動時クラッシュ修正**: 埋め込み画像リソースの破損により起動直後にクラッシュする問題を修正
-- **翻訳データベース更新**: 2026/7/20 版の翻訳DB・ゲームデータキャッシュを同梱
+- **翻訳データベース更新 (Patch 4.9 対応)**: 2026/7/20 版の翻訳DB・ゲームデータキャッシュを同梱
 - **インストーラー対応**: Inno Setup によるインストーラーを追加、アプリアイコン刷新
 - **Microsoft Store 申請準備**: プライバシーポリシー・ストア用アセットを追加
 
