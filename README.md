@@ -23,9 +23,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v1.16.0-win-x64.zip (最新 v1.16.0 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.16.0/StarCitizenJapaneseTextCreater-v1.16.0-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v1.16.1-win-x64.zip (最新 v1.16.1 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.16.1/StarCitizenJapaneseTextCreater-v1.16.1-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260906_181410.zip (翻訳データベース 4.10 対応 2026/9/6 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.16.0/sc_japanese_backup_20260906_181410.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260906_181410.zip (翻訳データベース 4.10 対応 2026/9/6 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.16.1/sc_japanese_backup_20260906_181410.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの「3. 反映」を実行してください。**
 
@@ -40,13 +40,26 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v1.16.0 更新内容
+### 🚀 v1.16.1 更新内容
+
+- **翻訳データベース更新 (Patch 4.10 対応)**: 2026/9/6 版の翻訳DB・ゲームデータキャッシュを同梱
+- **交易: 商品一覧に差益を表示**: ルートの購入場所／売却場所をクリックすると出る商品一覧に「最良売却先 / 最安仕入先」と「差益/SCU」を追加。差益の降順に並び、正は青・負は赤で表示されます
+- **交易: 絞り込みをルート検索と統一**: 商品一覧の相手先候補にも「コモディティ選択」「地上小規模拠点を除く」「外部積込対応のみ」「在庫不足ルートを除く」が反映されるように修正
+- **ツールチップ表示**: 列幅に収まらない場所名は、マウスを乗せると全文が表示されます
+- **場所名の重複表記を修正**: `HDMS-Woodruff > HDMS-Woodruff` のように同じ名前が2回並ぶ表示を解消
+- **積込フィルタの不具合を修正**: DB初期化のたびにターミナル情報が消えていたため「外部積込対応のみ」が正しく機能していなかった問題を修正
+
+<details>
+<summary>v1.16.0 更新内容</summary>
+
 
 - **起動時クラッシュ修正**: 埋め込み画像リソースの破損により起動直後にクラッシュする問題を修正
 - **翻訳データベース更新 (Patch 4.9 対応)**: 2026/7/21 版の翻訳DB・ゲームデータキャッシュを同梱
 - **インポート時の所有船データ保護**: 所有船データを含まないバックアップをインポートしても、ローカルの所有船リストが消えないように修正
 - **インストーラー対応**: Inno Setup によるインストーラーを追加、アプリアイコン刷新
 - **Microsoft Store 申請準備**: プライバシーポリシー・ストア用アセットを追加
+
+</details>
 
 <details>
 <summary>v1.14.10 更新内容</summary>
