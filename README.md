@@ -25,7 +25,7 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 > **[StarCitizenJapaneseTextCreater-v1.16.0-win-x64.zip (最新 v1.16.0 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.16.0/StarCitizenJapaneseTextCreater-v1.16.0-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260721_002047.zip (翻訳データベース 4.9 対応 2026/7/21 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.16.0/sc_japanese_backup_20260721_002047.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260906_181410.zip (翻訳データベース 4.10 対応 2026/9/6 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.16.0/sc_japanese_backup_20260906_181410.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの「3. 反映」を実行してください。**
 
