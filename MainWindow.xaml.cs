@@ -2942,23 +2942,40 @@ public partial class MainWindow : Window
     {
         if (string.IsNullOrEmpty(terminal)) return;
 
-        var buyable = _tradeService.GetBuyableAtLocation(terminal);
-        var sellable = _tradeService.GetSellableAtLocation(terminal);
+        var buySystem = (cmbTradeBuySystem.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "全て";
+        var sellSystem = (cmbTradeSellSystem.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "全て";
 
-        dgDetailBuy.ItemsSource = buyable.Select(p => new TradeDetailRow
+        var excludeOutposts = chkExcludeOutpost.IsChecked == true;
+        var loadingDockOnly = chkLoadingDockOnly.IsChecked == true;
+        var excludeLowStock = chkExcludeLowStock.IsChecked == true;
+
+        var buyable = _tradeService.GetBuyableWithBestSell(terminal, sellSystem,
+            excludeOutposts, loadingDockOnly, excludeLowStock, _selectedCommodities);
+        var sellable = _tradeService.GetSellableWithBestBuy(terminal, buySystem,
+            excludeOutposts, loadingDockOnly, excludeLowStock, _selectedCommodities);
+
+        dgDetailBuy.ItemsSource = buyable.Select(r => new TradeDetailRow
         {
-            Location = p.CommodityName,
-            Price = $"{p.PriceBuy:N1}",
-            Stock = p.ScuBuy > 0 ? $"{p.ScuBuy:N0}" : "-",
-            Terminal = p.Terminal,
+            Location = r.CommodityName,
+            Price = $"{r.Price:N1}",
+            Stock = r.Stock > 0 ? $"{r.Stock:N0}" : "-",
+            Terminal = r.Terminal,
+            BestLocation = r.HasCounterpart ? r.BestLocation : "-",
+            Profit = r.HasCounterpart ? (r.ProfitPerScu >= 0 ? $"+{r.ProfitPerScu:N1}" : $"{r.ProfitPerScu:N1}") : "-",
+            ProfitValue = r.ProfitPerScu,
+            HasCounterpart = r.HasCounterpart,
         }).ToList();
 
-        dgDetailSell.ItemsSource = sellable.Select(p => new TradeDetailRow
+        dgDetailSell.ItemsSource = sellable.Select(r => new TradeDetailRow
         {
-            Location = p.CommodityName,
-            Price = $"{p.PriceSell:N1}",
-            Stock = p.ScuSell > 0 ? $"{p.ScuSell:N0}" : "-",
-            Terminal = p.Terminal,
+            Location = r.CommodityName,
+            Price = $"{r.Price:N1}",
+            Stock = r.Stock > 0 ? $"{r.Stock:N0}" : "-",
+            Terminal = r.Terminal,
+            BestLocation = r.HasCounterpart ? r.BestLocation : "-",
+            Profit = r.HasCounterpart ? (r.ProfitPerScu >= 0 ? $"+{r.ProfitPerScu:N1}" : $"{r.ProfitPerScu:N1}") : "-",
+            ProfitValue = r.ProfitPerScu,
+            HasCounterpart = r.HasCounterpart,
         }).ToList();
 
         grpDetailLeft.Header = $"購入できる商品 — {displayName}";
@@ -3426,6 +3443,10 @@ public class TradeDetailRow
     public string Price { get; set; } = "";
     public string Stock { get; set; } = "";
     public string Terminal { get; set; } = "";
+    public string BestLocation { get; set; } = "";
+    public string Profit { get; set; } = "";
+    public double ProfitValue { get; set; }
+    public bool HasCounterpart { get; set; }
     public bool IsCommodityView { get; set; }
 }
 

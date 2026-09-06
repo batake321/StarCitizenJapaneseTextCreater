@@ -377,7 +377,7 @@
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="コモディティ" Binding="{Binding CommodityName}" Width="120">
                                 <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/><Setter Property="Padding" Value="4,0"/></Style>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/><Setter Property="Padding" Value="4,0"/><Setter Property="ToolTip" Value="{Binding CommodityName}"/></Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="CS" Binding="{Binding ContainerScuDisplay}" Width="40">
@@ -403,7 +403,7 @@
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="購入場所" Binding="{Binding BuyDisplay}" Width="180">
                                 <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="TextWrapping" Value="Wrap"/></Style>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="TextWrapping" Value="Wrap"/><Setter Property="ToolTip" Value="{Binding BuyDisplay}"/></Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="在庫(買)" Binding="{Binding BuyStockDisplay}" Width="65">
@@ -418,7 +418,7 @@
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="売却場所" Binding="{Binding SellDisplay}" Width="180">
                                 <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="TextWrapping" Value="Wrap"/></Style>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="TextWrapping" Value="Wrap"/><Setter Property="ToolTip" Value="{Binding SellDisplay}"/></Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="在庫(売)" Binding="{Binding SellStockDisplay}" Width="65">
@@ -481,9 +481,51 @@
                                           FontSize="12" RowHeight="24" HeadersVisibility="Column"
                                           SelectionChanged="DetailBuy_Selected">
                                     <DataGrid.Columns>
-                                        <DataGridTextColumn Header="場所/コモディティ" Binding="{Binding Location}" Width="*"/>
+                                        <DataGridTextColumn Header="場所/コモディティ" Binding="{Binding Location}" Width="*">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="VerticalAlignment" Value="Center"/>
+                                                    <Setter Property="ToolTip" Value="{Binding Location}"/>
+                                                </Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
                                         <DataGridTextColumn Header="価格" Binding="{Binding Price}" Width="70"/>
                                         <DataGridTextColumn Header="在庫" Binding="{Binding Stock}" Width="55"/>
+                                        <DataGridTextColumn Header="最良売却先" Binding="{Binding BestLocation}" Width="*">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="VerticalAlignment" Value="Center"/>
+                                                    <Setter Property="ToolTip" Value="{Binding BestLocation}"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding BestLocation}" Value=""><Setter Property="ToolTip" Value="{x:Null}"/></DataTrigger>
+                                                        <DataTrigger Binding="{Binding BestLocation}" Value="-"><Setter Property="ToolTip" Value="{x:Null}"/></DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="差益/SCU" Binding="{Binding Profit}" Width="80">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/><Setter Property="FontFamily" Value="Consolas"/><Setter Property="Foreground" Value="#888"/>
+                                                    <Style.Triggers>
+                                                        <MultiDataTrigger>
+                                                            <MultiDataTrigger.Conditions>
+                                                                <Condition Binding="{Binding HasCounterpart}" Value="True"/>
+                                                                <Condition Binding="{Binding ProfitValue, Converter={x:Static local:PositiveConverter.Instance}}" Value="True"/>
+                                                            </MultiDataTrigger.Conditions>
+                                                            <Setter Property="Foreground" Value="#1565C0"/>
+                                                        </MultiDataTrigger>
+                                                        <MultiDataTrigger>
+                                                            <MultiDataTrigger.Conditions>
+                                                                <Condition Binding="{Binding HasCounterpart}" Value="True"/>
+                                                                <Condition Binding="{Binding ProfitValue, Converter={x:Static local:PositiveConverter.Instance}}" Value="False"/>
+                                                            </MultiDataTrigger.Conditions>
+                                                            <Setter Property="Foreground" Value="#D32F2F"/>
+                                                        </MultiDataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
                             </GroupBox>
@@ -493,9 +535,51 @@
                                           FontSize="12" RowHeight="24" HeadersVisibility="Column"
                                           SelectionChanged="DetailSell_Selected">
                                     <DataGrid.Columns>
-                                        <DataGridTextColumn Header="場所/コモディティ" Binding="{Binding Location}" Width="*"/>
+                                        <DataGridTextColumn Header="場所/コモディティ" Binding="{Binding Location}" Width="*">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="VerticalAlignment" Value="Center"/>
+                                                    <Setter Property="ToolTip" Value="{Binding Location}"/>
+                                                </Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
                                         <DataGridTextColumn Header="価格" Binding="{Binding Price}" Width="70"/>
                                         <DataGridTextColumn Header="在庫" Binding="{Binding Stock}" Width="55"/>
+                                        <DataGridTextColumn Header="最安仕入先" Binding="{Binding BestLocation}" Width="*">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="VerticalAlignment" Value="Center"/>
+                                                    <Setter Property="ToolTip" Value="{Binding BestLocation}"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding BestLocation}" Value=""><Setter Property="ToolTip" Value="{x:Null}"/></DataTrigger>
+                                                        <DataTrigger Binding="{Binding BestLocation}" Value="-"><Setter Property="ToolTip" Value="{x:Null}"/></DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Header="差益/SCU" Binding="{Binding Profit}" Width="80">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/><Setter Property="FontFamily" Value="Consolas"/><Setter Property="Foreground" Value="#888"/>
+                                                    <Style.Triggers>
+                                                        <MultiDataTrigger>
+                                                            <MultiDataTrigger.Conditions>
+                                                                <Condition Binding="{Binding HasCounterpart}" Value="True"/>
+                                                                <Condition Binding="{Binding ProfitValue, Converter={x:Static local:PositiveConverter.Instance}}" Value="True"/>
+                                                            </MultiDataTrigger.Conditions>
+                                                            <Setter Property="Foreground" Value="#1565C0"/>
+                                                        </MultiDataTrigger>
+                                                        <MultiDataTrigger>
+                                                            <MultiDataTrigger.Conditions>
+                                                                <Condition Binding="{Binding HasCounterpart}" Value="True"/>
+                                                                <Condition Binding="{Binding ProfitValue, Converter={x:Static local:PositiveConverter.Instance}}" Value="False"/>
+                                                            </MultiDataTrigger.Conditions>
+                                                            <Setter Property="Foreground" Value="#D32F2F"/>
+                                                        </MultiDataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
                             </GroupBox>

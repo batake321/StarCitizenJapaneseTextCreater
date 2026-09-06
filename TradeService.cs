@@ -53,6 +53,7 @@ public class TradeService
                 OnProgress?.Invoke("ターミナルデータがキャッシュにないためAPIから取得...");
                 try { await FetchTerminalsAsync(); }
                 catch (Exception ex) { OnProgress?.Invoke($"ターミナル取得エラー: {ex.Message}"); }
+                if (_terminals.Count > 0) SaveTerminalsToDb();
             }
             return;
         }
@@ -139,7 +140,7 @@ public class TradeService
             }
             _terminals = terminals;
         }
-        catch { }
+        catch (Exception ex) { OnProgress?.Invoke($"ターミナル取得エラー: {ex.Message}"); }
     }
 
     private async Task FetchCommoditiesAsync()
@@ -239,7 +240,7 @@ public class TradeService
     {
         var locationParts = new[] { city, outpost, terminal }
             .Where(x => !string.IsNullOrEmpty(x))
-            .Distinct(StringComparer.Ordinal);
+            .Distinct(StringComparer.OrdinalIgnoreCase);
         var locationShort = string.Join(" > ", locationParts);
         if (string.IsNullOrEmpty(locationShort)) locationShort = moon;
         if (string.IsNullOrEmpty(locationShort)) locationShort = planet;
@@ -603,6 +604,31 @@ public class TradeService
         }
     }
 
+    // 救済取得したターミナル情報だけを保存する。
+    // SaveCache は価格全件を書き直して履歴も整理するため、キャッシュヒット経路では使えない。
+    private void SaveTerminalsToDb()
+    {
+        if (_dbPath == null || _terminals.Count == 0) return;
+
+        try
+        {
+            using var db = new SqliteConnection($"Data Source={_dbPath}");
+            InitDb(db);
+
+            using var tx = db.BeginTransaction();
+            Exec(db, "DELETE FROM trade_terminals");
+            foreach (var t in _terminals.Values)
+                Exec(db, "INSERT OR REPLACE INTO trade_terminals VALUES (@id,@n,@ld,@dp,@cc)",
+                    ("@id", t.Id), ("@n", t.Name), ("@ld", t.HasLoadingDock ? 1 : 0), ("@dp", t.HasDockingPort ? 1 : 0), ("@cc", t.IsCargoCenter ? 1 : 0));
+            tx.Commit();
+            OnProgress?.Invoke($"ターミナル {_terminals.Count} 件をキャッシュに保存");
+        }
+        catch (Exception ex)
+        {
+            OnProgress?.Invoke($"ターミナル保存エラー: {ex.Message}");
+        }
+    }
+
     private void DetectMissingRoutes(SqliteConnection db)
     {
         try
@@ -763,6 +789,122 @@ public class TradeService
             .ToList();
     }
 
+    private static string LocationWithSystem(CommodityPriceEntry p) =>
+        p.LocationShort.Contains($"({p.StarSystem})") ? p.LocationShort : $"{p.LocationShort} ({p.StarSystem})";
+
+    // ルート検索 (CalculateBestRoutes) と同じ絞り込みを同じ順序で適用する
+    private IEnumerable<CommodityPriceEntry> ApplyRouteFilters(IEnumerable<CommodityPriceEntry> src,
+        bool excludeOutposts, bool loadingDockOnly, HashSet<string>? commodityFilter)
+    {
+        if (commodityFilter != null && commodityFilter.Count > 0)
+            src = src.Where(p => commodityFilter.Contains(p.CommodityName));
+        if (excludeOutposts)
+            src = src.Where(p => !IsSmallGroundOutpost(p));
+        if (loadingDockOnly)
+            src = src.Where(HasLoadingDock);
+        return src;
+    }
+
+    // この拠点で買える商品ごとに、sellSystem 内での最高売値の拠点と差益を求める。
+    // 相手先の候補にはルート検索と同じ絞り込みを適用する
+    public List<LocationCommodityRow> GetBuyableWithBestSell(string terminal, string sellSystem,
+        bool excludeOutposts = false, bool loadingDockOnly = false, bool excludeLowStock = false,
+        HashSet<string>? commodityFilter = null)
+    {
+        var sells = _allPrices.Where(p => p.PriceSell > 0
+            && !p.Terminal.Equals(terminal, StringComparison.OrdinalIgnoreCase));
+        if (sellSystem != "全て")
+            sells = sells.Where(p => p.StarSystem.Equals(sellSystem, StringComparison.OrdinalIgnoreCase));
+        sells = ApplyRouteFilters(sells, excludeOutposts, loadingDockOnly, commodityFilter);
+        // 実績なし (在庫データが無い) 拠点を相手先候補から除く
+        if (excludeLowStock)
+            sells = sells.Where(p => p.ScuSell > 0);
+
+        var bestSell = sells
+            .GroupBy(p => p.CommodityId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(p => p.PriceSell).First());
+
+        // 自拠点の一覧はコモディティ選択のみ反映する (拠点単位の除外は自拠点には適用しない)
+        var own = GetBuyableAtLocation(terminal).AsEnumerable();
+        if (commodityFilter != null && commodityFilter.Count > 0)
+            own = own.Where(p => commodityFilter.Contains(p.CommodityName));
+
+        var rows = own.Select(p =>
+        {
+            var row = new LocationCommodityRow
+            {
+                CommodityName = p.CommodityName,
+                Price = p.PriceBuy,
+                Stock = p.ScuBuy,
+                Terminal = p.Terminal,
+            };
+            if (bestSell.TryGetValue(p.CommodityId, out var best))
+            {
+                row.HasCounterpart = true;
+                row.BestLocation = LocationWithSystem(best);
+                row.BestPrice = best.PriceSell;
+                row.ProfitPerScu = best.PriceSell - p.PriceBuy;
+            }
+            return row;
+        }).ToList();
+
+        return rows
+            .OrderByDescending(r => r.HasCounterpart)
+            .ThenByDescending(r => r.ProfitPerScu)
+            .ThenBy(r => r.CommodityName)
+            .ToList();
+    }
+
+    // この拠点で売れる商品ごとに、buySystem 内での最安買値の拠点と差益を求める。
+    // 相手先の候補にはルート検索と同じ絞り込みを適用する
+    public List<LocationCommodityRow> GetSellableWithBestBuy(string terminal, string buySystem,
+        bool excludeOutposts = false, bool loadingDockOnly = false, bool excludeLowStock = false,
+        HashSet<string>? commodityFilter = null)
+    {
+        var buys = _allPrices.Where(p => p.PriceBuy > 0
+            && !p.Terminal.Equals(terminal, StringComparison.OrdinalIgnoreCase));
+        if (buySystem != "全て")
+            buys = buys.Where(p => p.StarSystem.Equals(buySystem, StringComparison.OrdinalIgnoreCase));
+        buys = ApplyRouteFilters(buys, excludeOutposts, loadingDockOnly, commodityFilter);
+        // 実績なし (在庫データが無い) 拠点を相手先候補から除く
+        if (excludeLowStock)
+            buys = buys.Where(p => p.ScuBuy > 0);
+
+        var bestBuy = buys
+            .GroupBy(p => p.CommodityId)
+            .ToDictionary(g => g.Key, g => g.OrderBy(p => p.PriceBuy).First());
+
+        // 自拠点の一覧はコモディティ選択のみ反映する (拠点単位の除外は自拠点には適用しない)
+        var own = GetSellableAtLocation(terminal).AsEnumerable();
+        if (commodityFilter != null && commodityFilter.Count > 0)
+            own = own.Where(p => commodityFilter.Contains(p.CommodityName));
+
+        var rows = own.Select(p =>
+        {
+            var row = new LocationCommodityRow
+            {
+                CommodityName = p.CommodityName,
+                Price = p.PriceSell,
+                Stock = p.ScuSell,
+                Terminal = p.Terminal,
+            };
+            if (bestBuy.TryGetValue(p.CommodityId, out var best))
+            {
+                row.HasCounterpart = true;
+                row.BestLocation = LocationWithSystem(best);
+                row.BestPrice = best.PriceBuy;
+                row.ProfitPerScu = p.PriceSell - best.PriceBuy;
+            }
+            return row;
+        }).ToList();
+
+        return rows
+            .OrderByDescending(r => r.HasCounterpart)
+            .ThenByDescending(r => r.ProfitPerScu)
+            .ThenBy(r => r.CommodityName)
+            .ToList();
+    }
+
     // === My Ships (所持船管理) ===
 
     private List<MyShipEntry> _myShips = new();
@@ -882,6 +1024,19 @@ public class CommodityInfo
     public string Name { get; set; } = "";
     public string Kind { get; set; } = "";
     public int Scu { get; set; }
+}
+
+// 拠点の商品一覧 1 行分。相手先 (最良売却先 / 最安仕入先) と差益を含む
+public class LocationCommodityRow
+{
+    public string CommodityName { get; set; } = "";
+    public double Price { get; set; }
+    public int Stock { get; set; }
+    public string Terminal { get; set; } = "";
+    public string BestLocation { get; set; } = "";
+    public double BestPrice { get; set; }
+    public bool HasCounterpart { get; set; }
+    public double ProfitPerScu { get; set; }
 }
 
 public class CommodityPriceEntry
