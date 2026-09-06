@@ -48,6 +48,12 @@ public class TradeService
                 try { await FetchShipsAsync(); }
                 catch (Exception ex) { OnProgress?.Invoke($"船データ取得エラー: {ex.Message}"); }
             }
+            if (_terminals.Count == 0)
+            {
+                OnProgress?.Invoke("ターミナルデータがキャッシュにないためAPIから取得...");
+                try { await FetchTerminalsAsync(); }
+                catch (Exception ex) { OnProgress?.Invoke($"ターミナル取得エラー: {ex.Message}"); }
+            }
             return;
         }
 
@@ -200,10 +206,7 @@ public class TradeService
         var planet = GetStr(item, "planet_name");
         var starSystem = GetStr(item, "star_system_name");
 
-        var locationParts = new[] { city, outpost, terminal }.Where(x => !string.IsNullOrEmpty(x));
-        var locationShort = string.Join(" > ", locationParts);
-        if (string.IsNullOrEmpty(locationShort)) locationShort = moon;
-        if (string.IsNullOrEmpty(locationShort)) locationShort = planet;
+        var locationShort = BuildLocationShort(city, outpost, terminal, moon, planet);
 
         return new CommodityPriceEntry
         {
@@ -228,6 +231,19 @@ public class TradeService
             PriceSellAvg = GetDouble(item, "price_sell_avg"),
             DateModified = GetStr(item, "date_modified"),
         };
+    }
+
+    // 場所名の組み立て。city / outpost / terminal に同じ名前が入ることがあるため重複を除去する
+    // (例: outpost="HDMS-Woodruff", terminal="HDMS-Woodruff" → "HDMS-Woodruff > HDMS-Woodruff" になってしまう)
+    private static string BuildLocationShort(string city, string outpost, string terminal, string moon, string planet)
+    {
+        var locationParts = new[] { city, outpost, terminal }
+            .Where(x => !string.IsNullOrEmpty(x))
+            .Distinct(StringComparer.Ordinal);
+        var locationShort = string.Join(" > ", locationParts);
+        if (string.IsNullOrEmpty(locationShort)) locationShort = moon;
+        if (string.IsNullOrEmpty(locationShort)) locationShort = planet;
+        return locationShort;
     }
 
     // === Route Calculation ===
@@ -440,7 +456,6 @@ public class TradeService
                 date_modified TEXT, fetched_at TEXT, patch TEXT, is_current INTEGER DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS trade_ships (name TEXT, manufacturer TEXT, scu INTEGER, fetched_at TEXT);
-            DROP TABLE IF EXISTS trade_terminals;
             CREATE TABLE IF NOT EXISTS trade_terminals (id INTEGER DEFAULT 0, name TEXT PRIMARY KEY, has_loading_dock INTEGER, has_docking_port INTEGER, is_cargo_center INTEGER);
             CREATE TABLE IF NOT EXISTS trade_meta (key TEXT PRIMARY KEY, value TEXT);
             CREATE TABLE IF NOT EXISTS my_ships (
@@ -453,6 +468,35 @@ public class TradeService
             );
             """;
         cmd.ExecuteNonQuery();
+        MigrateTerminalsSchema(db);
+    }
+
+    // 旧スキーマ(id 列なし)の trade_terminals だけを作り直す。
+    // 無条件 DROP にすると InitDb が呼ばれるたびに取得済みターミナルが消えるため、id 列が無い場合に限定する。
+    private static void MigrateTerminalsSchema(SqliteConnection db)
+    {
+        var hasId = false;
+        using (var check = db.CreateCommand())
+        {
+            check.CommandText = "PRAGMA table_info(trade_terminals)";
+            using var r = check.ExecuteReader();
+            while (r.Read())
+            {
+                if (string.Equals(r.GetString(1), "id", StringComparison.OrdinalIgnoreCase))
+                {
+                    hasId = true;
+                    break;
+                }
+            }
+        }
+        if (hasId) return;
+
+        using var mig = db.CreateCommand();
+        mig.CommandText = """
+            DROP TABLE IF EXISTS trade_terminals;
+            CREATE TABLE trade_terminals (id INTEGER DEFAULT 0, name TEXT PRIMARY KEY, has_loading_dock INTEGER, has_docking_port INTEGER, is_cargo_center INTEGER);
+            """;
+        mig.ExecuteNonQuery();
     }
 
     private bool TryLoadCache()
@@ -586,19 +630,24 @@ public class TradeService
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
+            var terminal = r.GetString(r.GetOrdinal("terminal"));
+            var city = r.GetString(r.GetOrdinal("city"));
+            var outpost = r.GetString(r.GetOrdinal("outpost"));
+            var moon = r.GetString(r.GetOrdinal("moon"));
+            var planet = r.GetString(r.GetOrdinal("planet"));
             list.Add(new CommodityPriceEntry
             {
                 CommodityId = r.GetInt32(r.GetOrdinal("commodity_id")),
                 CommodityName = r.GetString(r.GetOrdinal("commodity_name")),
                 CommodityKind = r.GetString(r.GetOrdinal("commodity_kind")),
                 ContainerScu = r.GetInt32(r.GetOrdinal("container_scu")),
-                Terminal = r.GetString(r.GetOrdinal("terminal")),
-                City = r.GetString(r.GetOrdinal("city")),
-                Outpost = r.GetString(r.GetOrdinal("outpost")),
-                Moon = r.GetString(r.GetOrdinal("moon")),
-                Planet = r.GetString(r.GetOrdinal("planet")),
+                Terminal = terminal,
+                City = city,
+                Outpost = outpost,
+                Moon = moon,
+                Planet = planet,
                 StarSystem = r.GetString(r.GetOrdinal("star_system")),
-                LocationShort = r.GetString(r.GetOrdinal("location_short")),
+                LocationShort = BuildLocationShort(city, outpost, terminal, moon, planet),
                 PriceBuy = r.GetDouble(r.GetOrdinal("price_buy")),
                 PriceSell = r.GetDouble(r.GetOrdinal("price_sell")),
                 PriceBuyAvg = r.GetDouble(r.GetOrdinal("price_buy_avg")),

@@ -234,7 +234,7 @@ public static class DatabaseBackupService
                 date_modified TEXT, fetched_at TEXT, patch TEXT, is_current INTEGER DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS trade_ships (name TEXT, manufacturer TEXT, scu INTEGER, fetched_at TEXT);
-            CREATE TABLE IF NOT EXISTS trade_terminals (name TEXT PRIMARY KEY, has_loading_dock INTEGER, has_docking_port INTEGER, is_cargo_center INTEGER);
+            CREATE TABLE IF NOT EXISTS trade_terminals (id INTEGER DEFAULT 0, name TEXT PRIMARY KEY, has_loading_dock INTEGER, has_docking_port INTEGER, is_cargo_center INTEGER);
             CREATE TABLE IF NOT EXISTS trade_meta (key TEXT PRIMARY KEY, value TEXT);
             CREATE TABLE IF NOT EXISTS my_ships (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
