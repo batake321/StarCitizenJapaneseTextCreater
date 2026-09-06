@@ -1471,6 +1471,7 @@ public partial class MainWindow : Window
     // ── Mission tab ──
     private MissionService? _missionService;
     private List<MissionService.MissionEntry>? _currentMissions;
+    private bool _missionUiInitializing;
 
     private void LoadMissions_Click(object sender, RoutedEventArgs e) => LoadMissionsAsync();
 
@@ -1505,23 +1506,27 @@ public partial class MainWindow : Window
 
             var categories = await Task.Run(() => svc.GetCategories());
             var factions = await Task.Run(() => svc.GetFactions());
+            var allMissions = await Task.Run(() => svc.Search(""));
 
             Dispatcher.Invoke(() =>
             {
                 _missionService?.Dispose();
                 _missionService = svc;
+                _missionUiInitializing = true;
                 lstMissionCategories.ItemsSource = categories;
                 cmbMissionFaction.ItemsSource = factions;
                 cmbMissionFaction.SelectedIndex = 0;
                 cmbMissionRank.ItemsSource = _missionService.GetRanks();
                 cmbMissionRank.SelectedIndex = 0;
+                _missionUiInitializing = false;
 
                 var transInfo = _missionService.TransLoadError != null
                     ? $"翻訳DBエラー:{_missionService.TransLoadError}"
                     : $"翻訳DB:{_missionService.TransDictCount}";
                 txtMissionStatus.Text = $"{categories.Sum(c => c.Count)} 件 ({transInfo})";
-                dgMissions.ItemsSource = null;
-                txtMissionDetail.Text = "カテゴリを選択してください。";
+                _currentMissions = allMissions;
+                dgMissions.ItemsSource = _currentMissions;
+                txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
                 btnLoadMissions.IsEnabled = true;
             });
         }
@@ -1537,7 +1542,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void MissionCategory_Changed(object sender, SelectionChangedEventArgs e)
+    private async void MissionCategory_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (_missionService == null) return;
         if (lstMissionCategories.SelectedItem is not MissionService.MissionCategory cat) return;
@@ -1546,7 +1551,8 @@ public partial class MainWindow : Window
         {
             txtMissionSearch.Text = "";
             txtMissionSearchStatus.Text = "";
-            _currentMissions = _missionService.GetMissions(cat.Name);
+            var svc = _missionService;
+            _currentMissions = await Task.Run(() => svc.GetMissions(cat.Name));
             dgMissions.ItemsSource = _currentMissions;
             var jaCount = _currentMissions.Count(m => !string.IsNullOrEmpty(m.DisplayNameJa));
             txtMissionStatus.Text = $"{cat.Name}: {_currentMissions.Count} 件 (日本語:{jaCount})";
@@ -1561,6 +1567,7 @@ public partial class MainWindow : Window
     private async void MissionFilter_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (_missionService == null) return;
+        if (_missionUiInitializing) return;
         var faction = cmbMissionFaction.SelectedItem as string;
         var rank = cmbMissionRank.SelectedItem as string;
         if (faction == "(すべて)" && rank == "(すべて)") return;
@@ -1586,16 +1593,19 @@ public partial class MainWindow : Window
 
     private void MissionSearch_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
-        if (e.Key == System.Windows.Input.Key.Enter) MissionSearch_Execute();
+        if (e.Key == System.Windows.Input.Key.Enter) _ = MissionSearch_Execute();
     }
-    private void MissionSearch_Click(object sender, RoutedEventArgs e) => MissionSearch_Execute();
-    private void MissionSearchClear_Click(object sender, RoutedEventArgs e)
+    private void MissionSearch_Click(object sender, RoutedEventArgs e) => _ = MissionSearch_Execute();
+    private void MissionSearchClear_Click(object sender, RoutedEventArgs e) => _ = MissionSearchClear_Execute();
+
+    private async Task MissionSearchClear_Execute()
     {
         txtMissionSearch.Text = "";
         txtMissionSearchStatus.Text = "";
         if (lstMissionCategories.SelectedItem is MissionService.MissionCategory cat)
         {
-            _currentMissions = _missionService?.GetMissions(cat.Name);
+            var svc = _missionService;
+            _currentMissions = svc == null ? null : await Task.Run(() => svc.GetMissions(cat.Name));
             dgMissions.ItemsSource = _currentMissions;
         }
         else
@@ -1604,7 +1614,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void MissionSearch_Execute()
+    private async Task MissionSearch_Execute()
     {
         if (_missionService == null)
         {
@@ -1612,21 +1622,26 @@ public partial class MainWindow : Window
             return;
         }
         var query = txtMissionSearch.Text.Trim();
-        if (string.IsNullOrEmpty(query)) { MissionSearchClear_Click(this, new RoutedEventArgs()); return; }
+        if (string.IsNullOrEmpty(query)) { await MissionSearchClear_Execute(); return; }
 
+        txtMissionSearchStatus.Text = "検索中...";
         try
         {
             lstMissionCategories.SelectedIndex = -1;
-            _currentMissions = _missionService.Search(query);
+            var svc = _missionService;
             var faction = cmbMissionFaction.SelectedItem as string;
             var rank = cmbMissionRank.SelectedItem as string;
-            _currentMissions = _missionService.FilterByFactionAndRank(_currentMissions, faction, rank);
+            _currentMissions = await Task.Run(() =>
+            {
+                var found = svc.Search(query);
+                return svc.FilterByFactionAndRank(found, faction, rank);
+            });
             dgMissions.ItemsSource = _currentMissions;
             txtMissionSearchStatus.Text = $"{_currentMissions.Count} 件";
 
             if (_currentMissions.Count == 0)
             {
-                var transHits = _missionService.SearchTranslations(query);
+                var transHits = await Task.Run(() => svc.SearchTranslations(query));
                 if (transHits.Count > 0)
                 {
                     var sb = new System.Text.StringBuilder();

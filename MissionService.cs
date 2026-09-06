@@ -12,6 +12,9 @@ public class MissionService : IDisposable
     private Dictionary<string, string>? _transDict;
     private Dictionary<string, string>? _enDict;
     private readonly bool _hasWikiColumns;
+    private List<MissionEntry>? _allCache;
+    private Dictionary<string, (string ja, string key)>? _enExactIndex;
+    private Dictionary<string, string>? _enPrefix50Index;
 
     private static readonly string[] StripPrefixes =
     {
@@ -112,12 +115,10 @@ public class MissionService : IDisposable
                 if (!string.IsNullOrEmpty(ja))
                 {
                     _transDict[key] = ja.Replace("\\n", "\n");
-                    if (!key.StartsWith("@")) _transDict["@" + key] = ja.Replace("\\n", "\n");
                 }
                 if (!string.IsNullOrEmpty(en))
                 {
                     _enDict[key] = en.Replace("\\n", "\n");
-                    if (!key.StartsWith("@")) _enDict["@" + key] = en.Replace("\\n", "\n");
                 }
             }
         }
@@ -247,7 +248,11 @@ public class MissionService : IDisposable
     {
         var all = LoadAllMissions();
         foreach (var m in all)
+        {
+            // エントリはキャッシュで使い回されるため、前回の検索で付いたヒントを消してから解析する
+            m.TranslationHint = "";
             ParseRawJson(m);
+        }
 
         var matchers = BuildMatchers(query);
         var filtered = all.Where(m =>
@@ -359,6 +364,8 @@ public class MissionService : IDisposable
 
     private List<MissionEntry> LoadAllMissions()
     {
+        if (_allCache != null) return _allCache;
+
         var list = new List<MissionEntry>();
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = _hasWikiColumns
@@ -434,11 +441,14 @@ public class MissionService : IDisposable
 
             list.Add(entry);
         }
+        _allCache = list;
         return list;
     }
 
     private void ParseRawJson(MissionEntry entry)
     {
+        if (entry.Parsed) return;
+        entry.Parsed = true;
         if (string.IsNullOrEmpty(entry.RawJson)) return;
         try
         {
@@ -1002,41 +1012,49 @@ public class MissionService : IDisposable
         return "";
     }
 
-    private (string ja, string key) ResolveJaByEnglishWithKey(string english)
+    // 英語原文 → 日本語訳 の逆引き索引。_enDict の線形走査を置き換える。
+    // _enDict の列挙順で最初に見つかったものを採用し、走査版と同じ結果になるようにする。
+    private void BuildEnglishIndexes()
     {
-        if (_enDict == null || _transDict == null || string.IsNullOrEmpty(english)) return ("", "");
+        _enExactIndex = new Dictionary<string, (string ja, string key)>(StringComparer.OrdinalIgnoreCase);
+        _enPrefix50Index = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (_enDict == null || _transDict == null) return;
+
         foreach (var (key, enVal) in _enDict)
         {
             if (key.StartsWith("@")) continue;
-            if (!enVal.Equals(english, StringComparison.OrdinalIgnoreCase)) continue;
-            if (_transDict.TryGetValue(key, out var ja) && !string.IsNullOrEmpty(ja) && ContainsJapanese(ja))
-                return (ja, key);
+            if (string.IsNullOrEmpty(enVal)) continue;
+            if (!_transDict.TryGetValue(key, out var ja) || string.IsNullOrEmpty(ja) || !ContainsJapanese(ja)) continue;
+
+            if (!_enExactIndex.ContainsKey(enVal))
+                _enExactIndex[enVal] = (ja, key);
+
+            if (enVal.Length >= 50)
+            {
+                var p = enVal[..50];
+                if (!_enPrefix50Index.ContainsKey(p))
+                    _enPrefix50Index[p] = ja;
+            }
         }
-        return ("", "");
+    }
+
+    private (string ja, string key) ResolveJaByEnglishWithKey(string english)
+    {
+        if (_enDict == null || _transDict == null || string.IsNullOrEmpty(english)) return ("", "");
+        if (_enExactIndex == null) BuildEnglishIndexes();
+        return _enExactIndex!.TryGetValue(english, out var hit) ? hit : ("", "");
     }
 
     private string ResolveJaByEnglish(string english)
     {
         if (_enDict == null || _transDict == null || string.IsNullOrEmpty(english)) return "";
-        foreach (var (key, enVal) in _enDict)
-        {
-            if (key.StartsWith("@")) continue;
-            if (!enVal.Equals(english, StringComparison.OrdinalIgnoreCase)) continue;
-            if (_transDict.TryGetValue(key, out var ja) && !string.IsNullOrEmpty(ja) && ContainsJapanese(ja))
-                return ja;
-        }
+        if (_enExactIndex == null) BuildEnglishIndexes();
+        if (_enExactIndex!.TryGetValue(english, out var hit)) return hit.ja;
+
         // 長文の場合: 先頭50文字で前方一致
-        if (english.Length > 50)
-        {
-            var prefix = english[..50];
-            foreach (var (key, enVal) in _enDict)
-            {
-                if (key.StartsWith("@")) continue;
-                if (!enVal.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
-                if (_transDict.TryGetValue(key, out var ja) && !string.IsNullOrEmpty(ja) && ContainsJapanese(ja))
-                    return ja;
-            }
-        }
+        if (english.Length > 50 && _enPrefix50Index!.TryGetValue(english[..50], out var ja))
+            return ja;
+
         return "";
     }
 
@@ -1181,6 +1199,7 @@ public class MissionService : IDisposable
         public int WikiEnemyMin { get; set; }
         public int WikiEnemyMax { get; set; }
         public double WikiDuration { get; set; }
+        public bool Parsed { get; set; }
 
 
         public List<string> RequiredMissions { get; set; } = new();
