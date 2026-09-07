@@ -592,6 +592,8 @@
 
             <!-- 船舶管理タブ -->
             <TabItem Header="船舶管理">
+                <TabControl Margin="4">
+                    <TabItem Header="所持船 (交易用)">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -686,11 +688,409 @@
 
                     <!-- 操作ボタン -->
                     <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,0">
+                        <Button Content="My Hangar と同期" Click="HangarSync_Click" Padding="12,6" Margin="0,0,8,0" Background="#1976D2" Foreground="White" FontWeight="Bold"/>
                         <Button Content="選択を更新" Click="UpdateMyShip_Click" Padding="12,4" Margin="0,0,4,0"/>
                         <Button Content="選択を削除" Click="DeleteMyShip_Click" Padding="12,4" Margin="0,0,8,0" Foreground="#D32F2F"/>
                         <TextBlock x:Name="txtMyShipStatus" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
                     </StackPanel>
                 </Grid>
+                    </TabItem>
+                    <TabItem Header="アップグレード管理">
+                        <Grid Margin="8">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+                                <Button Content="My Hangar と同期" Click="HangarSync_Click" Padding="12,6" Margin="0,0,8,0"
+                                        Background="#1976D2" Foreground="White" FontWeight="Bold"/>
+                                <Button Content="再読み込み" Click="UpgradeReload_Click" Padding="12,6" Margin="0,0,8,0"/>
+                                <Button Content="シミュレーションをリセット" Click="UpgradeReset_Click" Padding="12,6" Margin="0,0,8,0"/>
+                                <Button x:Name="btnStoreRefresh" Content="ストア情報を更新" Click="StoreRefresh_Click" Padding="12,6" Margin="0,0,8,0"/>
+                                <TextBlock x:Name="txtUpgradeStatus" VerticalAlignment="Center" Foreground="#666"/>
+                            </StackPanel>
+
+                            <Grid Grid.Row="1">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+
+                                <GroupBox Header="保有船" Grid.Column="0" Margin="0,0,4,0">
+                                    <DataGrid x:Name="dgUpgradeShips" AutoGenerateColumns="False" IsReadOnly="True"
+                                              CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                                              FontSize="12" RowHeight="28" HeadersVisibility="Column">
+                                        <DataGrid.RowStyle>
+                                            <Style TargetType="DataGridRow">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsDeadEnd}" Value="True">
+                                                        <Setter Property="Foreground" Value="#999"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding HasApplied}" Value="True">
+                                                        <Setter Property="Background" Value="#E3F2FD"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding IsDuplicate}" Value="True">
+                                                        <Setter Property="Background" Value="#FFF8E1"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding IsUnresolved}" Value="True">
+                                                        <Setter Property="Foreground" Value="#D32F2F"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </DataGrid.RowStyle>
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="船名" Binding="{Binding Name}" Width="*">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="VerticalAlignment" Value="Center"/>
+                                                        <Setter Property="ToolTip" Value="{Binding PledgeName}"/>
+                                                    </Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="保険" Binding="{Binding InsuranceDisplay}" Width="70">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="役割" Binding="{Binding Focus}" Width="110">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="VerticalAlignment" Value="Center"/>
+                                                        <Setter Property="ToolTip" Value="{Binding Focus}"/>
+                                                    </Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="種別" Binding="{Binding Type}" Width="90">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="実装" Binding="{Binding Status}" Width="80">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="VerticalAlignment" Value="Center"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Status}" Value="in-concept">
+                                                                <Setter Property="Foreground" Value="#9C5B08"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="販売" Binding="{Binding OnSaleDisplay}" Width="110">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="VerticalAlignment" Value="Center"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding OnSaleWarbond}" Value="True">
+                                                                <Setter Property="Foreground" Value="#9C5B08"/>
+                                                                <Setter Property="FontWeight" Value="Bold"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTemplateColumn Header="マーク" Width="90">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <ComboBox ItemsSource="{x:Static local:MainWindow.MarkChoices}"
+                                                                  SelectedItem="{Binding MarkDisplay, Mode=OneWay}"
+                                                                  SelectionChanged="UpgradeMark_Changed"
+                                                                  FontSize="11" Margin="2" VerticalAlignment="Center"/>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+                                            <DataGridTextColumn Header="適用後" Binding="{Binding AppliedDisplay}" Width="*">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="VerticalAlignment" Value="Center"/>
+                                                        <Setter Property="FontWeight" Value="Bold"/>
+                                                        <Setter Property="Foreground" Value="#1565C0"/>
+                                                    </Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTemplateColumn Header="" Width="170">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <StackPanel Orientation="Horizontal">
+                                                            <Button Content="アップグレード" IsEnabled="{Binding CanUpgrade}"
+                                                                    Click="UpgradeApply_Click" Padding="6,2" Margin="2"
+                                                                    MinWidth="96" FontSize="11"/>
+                                                            <Button Content="戻す" IsEnabled="{Binding HasApplied}"
+                                                                    Click="UpgradeUndo_Click" Padding="6,2" Margin="2"
+                                                                    MinWidth="48" FontSize="11"/>
+                                                        </StackPanel>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                </GroupBox>
+
+                                <GroupBox Header="アップグレード権利" Grid.Column="1" Margin="4,0,0,0">
+                                    <DataGrid x:Name="dgUpgradeCcus" AutoGenerateColumns="False" IsReadOnly="True"
+                                              CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                                              FontSize="12" RowHeight="28" HeadersVisibility="Column"
+                                              MouseDoubleClick="UpgradeCcu_DoubleClick">
+                                        <DataGrid.RowStyle>
+                                            <Style TargetType="DataGridRow">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsUsed}" Value="True">
+                                                        <Setter Property="Foreground" Value="#999"/>
+                                                        <Setter Property="Background" Value="#F0F0F0"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding IsUnusable}" Value="True">
+                                                        <Setter Property="Foreground" Value="#999"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding IsDuplicateTarget}" Value="True">
+                                                        <Setter Property="Background" Value="#FFF8E1"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </DataGrid.RowStyle>
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="元船 → 先船" Binding="{Binding RouteDisplay}" Width="*">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="VerticalAlignment" Value="Center"/>
+                                                        <Setter Property="ToolTip" Value="{Binding RouteDisplay}"/>
+                                                    </Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="支払額" Binding="{Binding PriceDisplay}" Width="80">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="割引" Binding="{Binding DiscountDisplay}" Width="60">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Foreground" Value="#0E6555"/><Setter Property="FontWeight" Value="Bold"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="種別" Binding="{Binding WarbondDisplay}" Width="70">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Foreground" Value="#9C5B08"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="状態" Binding="{Binding StateDisplay}" Width="70">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="備考" Binding="{Binding NoteDisplay}" Width="110">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Foreground" Value="#9C5B08"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="先船の販売" Binding="{Binding ToShipSaleDisplay}" Width="90">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="VerticalAlignment" Value="Center"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding ToShipSaleDisplay}" Value="Warbond">
+                                                                <Setter Property="Foreground" Value="#9C5B08"/>
+                                                                <Setter Property="FontWeight" Value="Bold"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                </GroupBox>
+                            </Grid>
+
+                            <TextBlock x:Name="txtUpgradeSummary" Grid.Row="2" Margin="0,8,0,0" Foreground="#666" FontSize="12"/>
+
+                            <Expander Grid.Row="3" Header="販売中の船 (RSI ストア)" IsExpanded="True" Margin="0,8,0,0">
+                                <Grid Margin="0,4,0,0">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
+                                        <CheckBox x:Name="chkStoreWarbondOnly" Content="Warbond のみ" VerticalAlignment="Center" Margin="0,0,12,0"
+                                                  Checked="StoreFilter_Changed" Unchecked="StoreFilter_Changed"/>
+                                        <TextBlock Text="カテゴリ:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                        <ComboBox x:Name="cmbStoreCategory" Width="160" VerticalAlignment="Center" Margin="0,0,12,0"
+                                                  SelectionChanged="StoreFilter_Changed"/>
+                                        <TextBlock x:Name="txtStoreStatus" VerticalAlignment="Center" Foreground="#666"/>
+                                    </StackPanel>
+                                    <DataGrid x:Name="dgStore" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True"
+                                              CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                                              FontSize="12" RowHeight="26" HeadersVisibility="Column" MaxHeight="260">
+                                        <DataGrid.RowStyle>
+                                            <Style TargetType="DataGridRow">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsWarbond}" Value="True">
+                                                        <Setter Property="Background" Value="#FFF3E0"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </DataGrid.RowStyle>
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="カテゴリ" Binding="{Binding Category}" Width="130">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="船/商品" Binding="{Binding Name}" Width="*">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="VerticalAlignment" Value="Center"/>
+                                                        <Setter Property="ToolTip" Value="{Binding Name}"/>
+                                                    </Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="税抜 USD" Binding="{Binding NativePriceDisplay}" Width="100">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/><Setter Property="HorizontalAlignment" Value="Right"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="種別" Binding="{Binding WarbondDisplay}" Width="80">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Foreground" Value="#9C5B08"/><Setter Property="FontWeight" Value="Bold"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="在庫" Binding="{Binding StockLevel}" Width="80">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <DataGridTextColumn Header="保有" Binding="{Binding OwnedDisplay}" Width="60">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Foreground" Value="#1565C0"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                </Grid>
+                            </Expander>
+
+                            <Expander Grid.Row="4" Header="プランナー / melt シミュレーション" IsExpanded="False" Margin="0,8,0,0">
+                                <Grid MaxHeight="320" Margin="0,4,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <GroupBox Header="プランナー" Grid.Column="0" Margin="0,0,4,0">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="*"/>
+                                            </Grid.RowDefinitions>
+                                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
+                                                <Button Content="提案を計算" Click="UpgradePlan_Click" Padding="12,4" Margin="0,0,8,0"/>
+                                                <TextBlock x:Name="txtPlanSummary" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
+                                            </StackPanel>
+                                            <DataGrid x:Name="dgPlan" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True"
+                                                      CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                                                      FontSize="12" RowHeight="26" HeadersVisibility="Column">
+                                                <DataGrid.RowStyle>
+                                                    <Style TargetType="DataGridRow">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Kind}" Value="melt">
+                                                                <Setter Property="Foreground" Value="#9C5B08"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Kind}" Value="使用不可">
+                                                                <Setter Property="Foreground" Value="#999"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </DataGrid.RowStyle>
+                                                <DataGrid.Columns>
+                                                    <DataGridTextColumn Header="種別" Binding="{Binding Kind}" Width="70"/>
+                                                    <DataGridTextColumn Header="内容" Binding="{Binding Detail}" Width="*">
+                                                        <DataGridTextColumn.ElementStyle>
+                                                            <Style TargetType="TextBlock"><Setter Property="ToolTip" Value="{Binding Detail}"/></Style>
+                                                        </DataGridTextColumn.ElementStyle>
+                                                    </DataGridTextColumn>
+                                                    <DataGridTextColumn Header="額" Binding="{Binding AmountDisplay}" Width="80">
+                                                        <DataGridTextColumn.ElementStyle>
+                                                            <Style TargetType="TextBlock"><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                                        </DataGridTextColumn.ElementStyle>
+                                                    </DataGridTextColumn>
+                                                    <DataGridTextColumn Header="理由" Binding="{Binding Reason}" Width="*">
+                                                        <DataGridTextColumn.ElementStyle>
+                                                            <Style TargetType="TextBlock"><Setter Property="ToolTip" Value="{Binding Reason}"/></Style>
+                                                        </DataGridTextColumn.ElementStyle>
+                                                    </DataGridTextColumn>
+                                                </DataGrid.Columns>
+                                            </DataGrid>
+                                        </Grid>
+                                    </GroupBox>
+
+                                    <GroupBox Header="melt シミュレーション" Grid.Column="1" Margin="4,0,0,0">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="*"/>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                            </Grid.RowDefinitions>
+                                            <TextBlock x:Name="txtBuybackTokens" Grid.Row="0" Text="Buy Back 残トークン: 未取得"
+                                                       FontWeight="Bold" Margin="0,0,0,4"/>
+                                            <DataGrid x:Name="dgMeltPledges" Grid.Row="1" AutoGenerateColumns="False"
+                                                      CanUserAddRows="False" GridLinesVisibility="Horizontal"
+                                                      FontSize="12" RowHeight="26" HeadersVisibility="Column">
+                                                <DataGrid.RowStyle>
+                                                    <Style TargetType="DataGridRow">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Meltable}" Value="False">
+                                                                <Setter Property="Foreground" Value="#999"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </DataGrid.RowStyle>
+                                                <DataGrid.Columns>
+                                                    <DataGridTemplateColumn Header="melt" Width="44">
+                                                        <DataGridTemplateColumn.CellTemplate>
+                                                            <DataTemplate>
+                                                                <CheckBox IsChecked="{Binding Selected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                          IsEnabled="{Binding Meltable}"
+                                                                          HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                            </DataTemplate>
+                                                        </DataGridTemplateColumn.CellTemplate>
+                                                    </DataGridTemplateColumn>
+                                                    <DataGridTextColumn Header="pledge" Binding="{Binding Name}" Width="*" IsReadOnly="True">
+                                                        <DataGridTextColumn.ElementStyle>
+                                                            <Style TargetType="TextBlock"><Setter Property="ToolTip" Value="{Binding Name}"/></Style>
+                                                        </DataGridTextColumn.ElementStyle>
+                                                    </DataGridTextColumn>
+                                                    <DataGridTextColumn Header="melt額" Binding="{Binding ValueDisplay}" Width="80" IsReadOnly="True">
+                                                        <DataGridTextColumn.ElementStyle>
+                                                            <Style TargetType="TextBlock"><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                                        </DataGridTextColumn.ElementStyle>
+                                                    </DataGridTextColumn>
+                                                    <DataGridTextColumn Header="保険" Binding="{Binding InsuranceDisplay}" Width="60" IsReadOnly="True"/>
+                                                    <DataGridTextColumn Header="船" Binding="{Binding Ships}" Width="*" IsReadOnly="True">
+                                                        <DataGridTextColumn.ElementStyle>
+                                                            <Style TargetType="TextBlock"><Setter Property="ToolTip" Value="{Binding Ships}"/></Style>
+                                                        </DataGridTextColumn.ElementStyle>
+                                                    </DataGridTextColumn>
+                                                </DataGrid.Columns>
+                                            </DataGrid>
+                                            <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,4,0,0">
+                                                <TextBlock Text="目標価格 (USD):" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                                <TextBox x:Name="txtMeltTarget" Width="100" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                                <Button Content="計算" Click="MeltSim_Click" Padding="12,4"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="txtMeltLtiWarning" Grid.Row="3" Text="⚠ LTI を失います"
+                                                       Foreground="#D32F2F" FontWeight="Bold" Margin="0,4,0,0" Visibility="Collapsed"/>
+                                            <TextBlock x:Name="txtMeltResult" Grid.Row="4" Margin="0,4,0,0" FontSize="12" TextWrapping="Wrap"/>
+                                        </Grid>
+                                    </GroupBox>
+                                </Grid>
+                            </Expander>
+                        </Grid>
+                    </TabItem>
+                </TabControl>
             </TabItem>
 
             <!-- 価格キャプチャタブ -->

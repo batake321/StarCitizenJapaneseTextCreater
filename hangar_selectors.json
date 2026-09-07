@@ -1,0 +1,25 @@
+{
+  "pledgeRoot": ".list-items li",
+  "pledgeId": ".js-pledge-id",
+  "pledgeName": ".js-pledge-name",
+  "pledgeValue": ".js-pledge-value",
+  "pledgeCurrency": ".js-pledge-currency",
+  "pledgeConfigValue": ".js-pledge-configuration-value",
+  "pledgeNotBuybackable": ".js-pledge-not-buybackable",
+  "availability": ".availability",
+  "dateCol": ".date-col",
+  "nameableShips": "script.js-pledge-nameable-ships",
+  "itemRoot": ".item",
+  "itemTitle": ".title",
+  "itemKind": ".kind",
+  "itemLiner": ".liner",
+  "buybackTokens": "",
+  "storeCredit": "",
+  "storeGraphqlUrl": "https://robertsspaceindustries.com/graphql",
+  "storeCategories": {
+    "72": "Standalone Ships",
+    "45": "Packages",
+    "241": "Upgrades",
+    "270": "Packs"
+  }
+}

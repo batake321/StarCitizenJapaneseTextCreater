@@ -19,7 +19,10 @@ public static class DatabaseBackupService
     private static readonly string[] GlossaryTables = ["glossary"];
     private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
-    private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships"];
+    private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "store_skus"];
+
+    // 個人資産テーブル。バックアップ側にデータがある場合のみ反映する (ship_matrix は公開データなので含めない)
+    private static readonly string[] PersonalTables = ["my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks"];
 
     public static string[] GetTables(BackupCategory category) => category switch
     {
@@ -58,13 +61,23 @@ public static class DatabaseBackupService
 
                     if (!includeMyShips)
                     {
-                        onStatus?.Invoke("所持船舶データを除外中...");
+                        onStatus?.Invoke("所持船舶・アップグレード権利データを除外中...");
                         using (var conn = new SqliteConnection($"Data Source={tempTradePath}"))
                         {
                             conn.Open();
+                            // hangar_* を導入する前に作られた DB にはテーブルが無いため、DELETE の前に作っておく
+                            EnsureTradeSchema(conn);
                             using (var cmd = conn.CreateCommand())
                             {
-                                cmd.CommandText = "DELETE FROM my_ships";
+                                cmd.CommandText = """
+                                    DELETE FROM my_ships;
+                                    DELETE FROM hangar_pledges;
+                                    DELETE FROM hangar_items;
+                                    DELETE FROM hangar_ccus;
+                                    DELETE FROM hangar_meta;
+                                    DELETE FROM hangar_nameable_ships;
+                                    DELETE FROM hangar_ship_marks;
+                                    """;
                                 cmd.ExecuteNonQuery();
                             }
                             using (var vacCmd = conn.CreateCommand())
@@ -241,8 +254,101 @@ public static class DatabaseBackupService
                 name TEXT NOT NULL, manufacturer TEXT DEFAULT '', scu INTEGER DEFAULT 0,
                 notes TEXT DEFAULT '', added_at TEXT DEFAULT (datetime('now','localtime'))
             );
+            CREATE TABLE IF NOT EXISTS hangar_pledges (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                value_cents INTEGER DEFAULT 0,
+                currency TEXT DEFAULT '',
+                meltable INTEGER DEFAULT 1,
+                upgraded INTEGER DEFAULT 0,
+                insurance TEXT DEFAULT 'Unknown',
+                created_at TEXT DEFAULT '',
+                fetched_at TEXT DEFAULT '',
+                config_value_cents INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS hangar_items (
+                pledge_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                kind TEXT DEFAULT '',
+                manufacturer TEXT DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS hangar_ccus (
+                pledge_id TEXT PRIMARY KEY,
+                from_ship TEXT NOT NULL,
+                to_ship TEXT NOT NULL,
+                warbond INTEGER DEFAULT 0,
+                price_cents INTEGER DEFAULT 0,
+                std_price_cents INTEGER DEFAULT 0,
+                source TEXT DEFAULT 'sync',
+                notes TEXT DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS hangar_meta (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE IF NOT EXISTS hangar_nameable_ships (
+                pledge_id TEXT,
+                membership_id INTEGER,
+                default_name TEXT,
+                custom_name TEXT
+            );
+            CREATE TABLE IF NOT EXISTS hangar_ship_marks (
+                pledge_id TEXT,
+                ship_name TEXT,
+                mark TEXT,
+                PRIMARY KEY(pledge_id, ship_name)
+            );
+            CREATE TABLE IF NOT EXISTS ship_matrix (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                manufacturer_code TEXT,
+                manufacturer_name TEXT,
+                focus TEXT,
+                type TEXT,
+                size TEXT,
+                production_status TEXT,
+                production_note TEXT,
+                fetched_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS store_skus (
+                id TEXT PRIMARY KEY,
+                product_id TEXT,
+                category TEXT,
+                name TEXT,
+                title TEXT,
+                url TEXT,
+                sku_type TEXT,
+                is_warbond INTEGER,
+                native_price_cents INTEGER,
+                price_cents INTEGER,
+                tax_description TEXT,
+                stock_level TEXT,
+                available INTEGER,
+                thumbnail TEXT,
+                fetched_at TEXT
+            );
             """;
         cmd.ExecuteNonQuery();
+
+        // 旧スキーマ (config_value_cents 列なし) の hangar_pledges に列を追加する (HangarService.MigratePledgesSchema と同等)。
+        // 新形式バックアップを旧 DB に取り込む際の列不足を防ぐ
+        var hasConfigValue = false;
+        using (var check = conn.CreateCommand())
+        {
+            check.CommandText = "PRAGMA table_info(hangar_pledges)";
+            using var r = check.ExecuteReader();
+            while (r.Read())
+            {
+                if (string.Equals(r.GetString(1), "config_value_cents", StringComparison.OrdinalIgnoreCase))
+                {
+                    hasConfigValue = true;
+                    break;
+                }
+            }
+        }
+        if (!hasConfigValue)
+        {
+            using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE hangar_pledges ADD COLUMN config_value_cents INTEGER DEFAULT 0";
+            alter.ExecuteNonQuery();
+        }
     }
 
     private static void CopyTables(SqliteConnection src, SqliteConnection dest,
@@ -254,9 +360,9 @@ public static class DatabaseBackupService
         {
             if (!TableExists(src, table)) continue;
 
-            // 所有船はバックアップ側にデータがある場合のみ反映する
-            // (船舶除外バックアップは空の my_ships テーブルを含むため、Drop モードでもローカルの所有船を消さない)
-            if (table == "my_ships" && CountRows(src, table) == 0) continue;
+            // 所有船・アップグレード権利 (pledge/CCU) はバックアップ側にデータがある場合のみ反映する
+            // (個人資産除外バックアップは空の my_ships / hangar_* テーブルを含むため、Drop モードでもローカルの個人資産を消さない)
+            if (PersonalTables.Contains(table) && CountRows(src, table) == 0) continue;
 
             if (mode == ImportMode.Drop)
             {

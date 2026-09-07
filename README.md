@@ -23,9 +23,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v1.16.1-win-x64.zip (最新 v1.16.1 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.16.1/StarCitizenJapaneseTextCreater-v1.16.1-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v1.17.0-win-x64.zip (最新 v1.17.0 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.17.0/StarCitizenJapaneseTextCreater-v1.17.0-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260906_181410.zip (翻訳データベース 4.10 対応 2026/9/6 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.16.1/sc_japanese_backup_20260906_181410.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup_20260906_181410.zip (翻訳データベース 4.10 対応 2026/9/6 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.17.0/sc_japanese_backup_20260906_181410.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの「3. 反映」を実行してください。**
 
@@ -40,7 +40,20 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v1.16.1 更新内容
+### 🚀 v1.17.0 更新内容
+
+- **My Hangar 同期 (RSI アカウント連携)**: 船舶管理タブに「アップグレード管理」を追加。内蔵ブラウザ (WebView2) で RSI にご自身でログインすると、保有 pledge・船・保険・アップグレード権利 (CCU) を自動取得します。アプリは ID / パスワードを扱わず、ページ上のクリックや送信も行いません (読み取りのみ)
+- **アップグレードシミュレーション**: 保有船ごとに使える権利を表示。「アップグレード」で適用 → 連鎖 → 「戻す」。使用済みの権利はグレー表示、元船を持たない権利は「使用不可」、連鎖のない船は灰色で区別
+- **CCU プランナー / melt シミュレーション**: 船ごとの「要る / 要らない / 保留」マーク、適用提案の自動計算、melt 時の Store Credit・実支払 (税 10%)・失う機体・LTI 喪失警告
+- **RSI ストアの販売情報**: 起動時と「ストア情報を更新」で、現在販売中の船・パッケージ・パック・アップグレードと Warbond の有無・価格をバックグラウンド取得して表示。保有船と権利に「販売中」「Warbond 販売中」を表示し、Warbond 権利の値引き率を自動算出
+- **Ship Matrix 連携**: 全船の役割・種別・実装状態を取得 (24 時間キャッシュ)。船名の表記揺れを `hangar_ship_aliases.json` で名寄せし、解決できない名前は警告表示
+- **ミッションタブの高速化**: カテゴリ切替・検索・組合/ランク変更が数秒待ち → 即時に。処理中に画面が固まらなくなりました
+- 同期データ (pledge / CCU / マーク) は所持船と同じ個人データ扱いで、バックアップの「所持船舶データを含める」を外すと除外されます
+
+> WebView2 ランタイム (Evergreen) が必要です。Windows 10/11 には通常インストール済みです。
+
+<details>
+<summary>v1.16.1 更新内容</summary>
 
 - **翻訳データベース更新 (Patch 4.10 対応)**: 2026/9/6 版の翻訳DB・ゲームデータキャッシュを同梱
 - **交易: 商品一覧に差益を表示**: ルートの購入場所／売却場所をクリックすると出る商品一覧に「最良売却先 / 最安仕入先」と「差益/SCU」を追加。差益の降順に並び、正は青・負は赤で表示されます
@@ -48,6 +61,8 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
 - **ツールチップ表示**: 列幅に収まらない場所名は、マウスを乗せると全文が表示されます
 - **場所名の重複表記を修正**: `HDMS-Woodruff > HDMS-Woodruff` のように同じ名前が2回並ぶ表示を解消
 - **積込フィルタの不具合を修正**: DB初期化のたびにターミナル情報が消えていたため「外部積込対応のみ」が正しく機能していなかった問題を修正
+
+</details>
 
 <details>
 <summary>v1.16.0 更新内容</summary>
