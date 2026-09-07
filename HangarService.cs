@@ -13,6 +13,9 @@ public enum HangarInsurance { Unknown, Lti, Months120, Months6 }
 // 保有船に対する 3 値マーク (仕様 §08)。None は未設定
 public enum HangarShipMark { None, Keep, Drop, Hold }
 
+// 保有船の由来 (pledge 名と中身から判定)
+public enum HangarShipOrigin { Unknown, Standalone, Pack, Upgraded, Vip }
+
 public class HangarItem
 {
     public string Title { get; set; } = "";
@@ -38,6 +41,7 @@ public class HangarPledge
     public bool Meltable { get; set; } = true;      // !js-pledge-not-buybackable
     public bool NeedsTicket => ValueCents > 100_000; // $1,000 超はサポートチケットが必要
     public bool Upgraded { get; set; }              // .availability に "upgraded"
+    public string Availability { get; set; } = "";  // .availability の生文字列
     public HangarInsurance Insurance { get; set; } = HangarInsurance.Unknown;
     public string CreatedAt { get; set; } = "";
     public string FetchedAt { get; set; } = "";
@@ -83,10 +87,17 @@ public class HangarShipInstance
     public string PledgeId { get; set; } = "";
     public string PledgeName { get; set; } = "";
     public string Name { get; set; } = "";
+    // 保有船インスタンスを一意に識別するキー (ship_loadouts.ship_key / ツールチップ / シミュレーション状態の復元に使う)。
+    // "{PledgeId}|{Name}"。同 pledge に同名船が 2 機以上あるときは 2 機目以降に "#2", "#3"… を付ける (pledge 内の出現順)
+    public string InstanceKey { get; set; } = "";
     public HangarInsurance Insurance { get; set; } = HangarInsurance.Unknown;
     public ShipMatrixEntry? Matrix { get; set; }    // Ship Matrix で名寄せできた場合のみ
     public bool IsUnresolved => Matrix == null;
     public HangarShipMark Mark { get; set; } = HangarShipMark.None;
+    public HangarShipOrigin Origin { get; set; } = HangarShipOrigin.Unknown;
+    public string OriginDisplay { get; set; } = "";     // "パック: ..." / "単品: ..." / "CCU 適用済 ← ..." / "VIP 特典"
+    public int SameTypeCount { get; set; }              // 正規化名が同じ保有船の数 (自分を含む)
+    public string PledgeShipNames { get; set; } = "";   // 同 pledge の船を ", " 連結
 
     public string InsuranceDisplay => Insurance switch
     {
@@ -95,6 +106,57 @@ public class HangarShipInstance
         HangarInsurance.Months6 => "6ヶ月",
         _ => "",
     };
+}
+
+// 所持コンポーネント (my_components) の 1 件。装備インベントリ
+public class MyComponent
+{
+    public int Id { get; set; }
+    public string ItemRecord { get; set; } = "";      // items.record_name
+    public string ItemName { get; set; } = "";        // 表示名 (解決済み)
+    public string ItemType { get; set; } = "";        // PowerPlant / Shield / QuantumDrive / Cooler / WeaponGun ...
+    public int Size { get; set; }
+    public int Grade { get; set; }
+    public int Quantity { get; set; } = 1;
+    public bool Usable { get; set; } = true;          // false = 壊れている・貸出中 等
+    public string Notes { get; set; } = "";
+    public string AddedAt { get; set; } = "";
+
+    public string SizeDisplay => Size > 0 ? $"S{Size}" : "";
+    public string GradeDisplay => GradeToClass(Grade);
+    public string TypeDisplay => new ShipPortInfo { ItemType = ItemType }.TypeDisplay;
+
+    // items.grade → Class 表記。1..4 = A..D、0 は空、それ以外は数値のまま
+    public static string GradeToClass(int grade) => grade switch
+    {
+        <= 0 => "",
+        >= 1 and <= 4 => ((char)('A' + grade - 1)).ToString(),
+        _ => grade.ToString(),
+    };
+}
+
+// 保有船 1 機の 1 ポートの装備状態 (デフォルト装備 + ship_loadouts の上書き)
+public class ShipPortLoadout
+{
+    public string PortName { get; set; } = "";
+    // ship_loadouts.port_name に保存するキー。同一船に同名ポートが複数あるときは 2 つ目以降を "{port_name}#2", "#3"… にする
+    // (1 つ目は port_name そのまま = 既存データ互換)
+    public string PortKey { get; set; } = "";
+    public string ItemType { get; set; } = "";
+    public string TypeDisplay { get; set; } = "";
+    public int PortSize { get; set; }
+    public string DefaultItemRecord { get; set; } = "";   // ship_ports.equipped_item
+    public string DefaultItemName { get; set; } = "";
+    public string? CurrentItemRecord { get; set; }        // ship_loadouts の上書き ('' = 空スロット)。null = 上書きなし
+    public string CurrentItemName { get; set; } = "";
+    public int ItemSize { get; set; }                     // 有効な装備 (上書き or デフォルト) の Size (未解決なら 0)
+    public int ItemGrade { get; set; }
+    public bool IsCustom => CurrentItemRecord != null;
+    public string EffectiveItemRecord => CurrentItemRecord ?? DefaultItemRecord;
+    public string EffectiveItemName => CurrentItemRecord != null ? CurrentItemName : DefaultItemName;
+    public string PortSizeDisplay => PortSize > 0 ? $"S{PortSize}" : "-";
+    public string ItemSizeDisplay => ItemSize > 0 ? $"S{ItemSize}" : "";
+    public string ItemGradeDisplay => MyComponent.GradeToClass(ItemGrade);
 }
 
 // RSI Ship Matrix (/ship-matrix/index) の 1 件
@@ -225,7 +287,8 @@ public class StoreSku
     public string Url { get; set; } = "";
     public string SkuType { get; set; } = "";
     public bool IsWarbond { get; set; }               // isWarbond || url が "-Warbond" で終わる
-    public long NativePriceCents { get; set; }        // 税抜 USD セント (表示・計算の正)
+    public long NativePriceCents { get; set; }        // 税抜 USD セント (定価)
+    public long NativeDiscountedCents { get; set; }   // nativePrice.discounted (税抜 割引後)。割引なし/不明は 0
     public long PriceCents { get; set; }              // 税込 (参考)
     public string TaxDescription { get; set; } = "";
     public string StockLevel { get; set; } = "";
@@ -233,16 +296,26 @@ public class StoreSku
     public string Thumbnail { get; set; } = "";
     public string FetchedAt { get; set; } = "";
 
-    public string NativePriceDisplay => $"${NativePriceCents / 100.0:N2}";
+    // 価格比較・CCU 標準額推定・「購入可」判定に使う実売価格 (割引があれば割引後、無ければ定価)
+    public long EffectiveNativeCents => NativeDiscountedCents > 0 ? NativeDiscountedCents : NativePriceCents;
+    public bool IsDiscounted => NativeDiscountedCents > 0 && NativeDiscountedCents < NativePriceCents;
+    public string NativePriceDisplay => IsDiscounted
+        ? $"${NativePriceCents / 100.0:N2} → ${NativeDiscountedCents / 100.0:N2}"
+        : $"${NativePriceCents / 100.0:N2}";
 }
 
 public class HangarService
 {
     private string? _dbPath;
+    private string? _cacheDir;   // translations.db / gamedata_cache.db の所在 (ResolveShipRecordName 用)
 
     public event Action<string>? OnProgress;
 
-    public void SetCacheDir(string dir) => _dbPath = Path.Combine(dir, "trade_cache.db");
+    public void SetCacheDir(string dir)
+    {
+        _cacheDir = dir;
+        _dbPath = Path.Combine(dir, "trade_cache.db");
+    }
 
     // === Selector Loading ===
 
@@ -318,6 +391,7 @@ public class HangarService
                 Currency = GetStr(p, "currency"),
                 Meltable = GetStr(p, "notBuybackable").Trim() != "1",
                 Upgraded = GetStr(p, "availability").Contains("upgraded", StringComparison.OrdinalIgnoreCase),
+                Availability = GetStr(p, "availability").Trim(),
                 CreatedAt = GetStr(p, "date"),
                 FetchedAt = fetchedAt,
             };
@@ -472,7 +546,8 @@ public class HangarService
                 insurance TEXT DEFAULT 'Unknown',
                 created_at TEXT DEFAULT '',
                 fetched_at TEXT DEFAULT '',
-                config_value_cents INTEGER DEFAULT 0
+                config_value_cents INTEGER DEFAULT 0,
+                availability TEXT DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS hangar_items (
                 pledge_id TEXT NOT NULL,
@@ -530,33 +605,59 @@ public class HangarService
                 stock_level TEXT,
                 available INTEGER,
                 thumbnail TEXT,
-                fetched_at TEXT
+                fetched_at TEXT,
+                native_discounted_cents INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS my_components (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_record TEXT NOT NULL,
+                item_name TEXT DEFAULT '',
+                item_type TEXT DEFAULT '',
+                size INTEGER DEFAULT 0,
+                grade INTEGER DEFAULT 0,
+                quantity INTEGER DEFAULT 1,
+                usable INTEGER DEFAULT 1,
+                notes TEXT DEFAULT '',
+                added_at TEXT DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE IF NOT EXISTS ship_loadouts (
+                ship_key TEXT NOT NULL,
+                port_name TEXT NOT NULL,
+                item_record TEXT NOT NULL,
+                PRIMARY KEY (ship_key, port_name)
             );
             """;
         cmd.ExecuteNonQuery();
         MigratePledgesSchema(db);
+        MigrateStoreSchema(db);
     }
 
-    // 旧スキーマ (config_value_cents 列なし) の hangar_pledges に列を追加する。DROP はしない
+    // 旧スキーマ (config_value_cents / availability 列なし) の hangar_pledges に列を追加する。DROP はしない
     private static void MigratePledgesSchema(SqliteConnection db)
     {
-        var hasCol = false;
-        using (var check = db.CreateCommand())
-        {
-            check.CommandText = "PRAGMA table_info(hangar_pledges)";
-            using var r = check.ExecuteReader();
-            while (r.Read())
-            {
-                if (string.Equals(r.GetString(1), "config_value_cents", StringComparison.OrdinalIgnoreCase))
-                {
-                    hasCol = true;
-                    break;
-                }
-            }
-        }
-        if (hasCol) return;
+        var cols = TableColumns(db, "hangar_pledges");
+        if (!cols.Contains("config_value_cents"))
+            Exec(db, "ALTER TABLE hangar_pledges ADD COLUMN config_value_cents INTEGER DEFAULT 0");
+        if (!cols.Contains("availability"))
+            Exec(db, "ALTER TABLE hangar_pledges ADD COLUMN availability TEXT DEFAULT ''");
+    }
 
-        Exec(db, "ALTER TABLE hangar_pledges ADD COLUMN config_value_cents INTEGER DEFAULT 0");
+    // 旧スキーマ (native_discounted_cents 列なし) の store_skus に列を追加する。DROP はしない
+    private static void MigrateStoreSchema(SqliteConnection db)
+    {
+        var cols = TableColumns(db, "store_skus");
+        if (!cols.Contains("native_discounted_cents"))
+            Exec(db, "ALTER TABLE store_skus ADD COLUMN native_discounted_cents INTEGER DEFAULT 0");
+    }
+
+    private static HashSet<string> TableColumns(SqliteConnection db, string table)
+    {
+        var cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using var check = db.CreateCommand();
+        check.CommandText = $"PRAGMA table_info({table})";
+        using var r = check.ExecuteReader();
+        while (r.Read()) cols.Add(r.GetString(1));
+        return cols;
     }
 
     // 取得したスナップショットで hangar_pledges / hangar_items / hangar_nameable_ships / hangar_ccus を置き換える。
@@ -599,12 +700,12 @@ public class HangarService
         {
             Exec(db, """
                 INSERT OR REPLACE INTO hangar_pledges
-                    (id, name, value_cents, currency, meltable, upgraded, insurance, created_at, fetched_at, config_value_cents)
-                VALUES (@id, @n, @v, @c, @m, @u, @i, @ca, @fa, @cv)
+                    (id, name, value_cents, currency, meltable, upgraded, insurance, created_at, fetched_at, config_value_cents, availability)
+                VALUES (@id, @n, @v, @c, @m, @u, @i, @ca, @fa, @cv, @av)
                 """,
                 ("@id", p.Id), ("@n", p.Name), ("@v", p.ValueCents), ("@c", p.Currency),
                 ("@m", p.Meltable ? 1 : 0), ("@u", p.Upgraded ? 1 : 0), ("@i", p.Insurance.ToString()),
-                ("@ca", p.CreatedAt), ("@fa", fetchedAt), ("@cv", p.ConfigValueCents));
+                ("@ca", p.CreatedAt), ("@fa", fetchedAt), ("@cv", p.ConfigValueCents), ("@av", p.Availability ?? ""));
 
             foreach (var it in p.Items)
                 Exec(db, "INSERT INTO hangar_items (pledge_id, title, kind, manufacturer) VALUES (@p, @t, @k, @m)",
@@ -670,7 +771,7 @@ public class HangarService
         var byId = new Dictionary<string, HangarPledge>(StringComparer.Ordinal);
         using (var cmd = db.CreateCommand())
         {
-            cmd.CommandText = "SELECT id, name, value_cents, currency, meltable, upgraded, insurance, created_at, fetched_at, config_value_cents FROM hangar_pledges ORDER BY name";
+            cmd.CommandText = "SELECT id, name, value_cents, currency, meltable, upgraded, insurance, created_at, fetched_at, config_value_cents, availability FROM hangar_pledges ORDER BY name";
             using var r = cmd.ExecuteReader();
             while (r.Read())
             {
@@ -686,6 +787,7 @@ public class HangarService
                     CreatedAt = r.IsDBNull(7) ? "" : r.GetString(7),
                     FetchedAt = r.IsDBNull(8) ? "" : r.GetString(8),
                     ConfigValueCents = r.IsDBNull(9) ? 0 : r.GetInt64(9),
+                    Availability = r.IsDBNull(10) ? "" : r.GetString(10),
                 };
                 list.Add(p);
                 if (!string.IsNullOrEmpty(p.Id)) byId[p.Id] = p;
@@ -738,21 +840,564 @@ public class HangarService
         var marks = LoadMarks();
         foreach (var p in LoadPledges())
         {
-            foreach (var name in p.ShipNames)
+            var shipNames = p.ShipNames;
+            var pledgeShipNames = string.Join(", ", shipNames);
+            var namedShips = ExtractNamedShips(p.Name, shipNames);   // pledge 名に含まれる既知の船名 (正規化済み)。pledge ごとに 1 回
+            var nameSeq = new Dictionary<string, int>(StringComparer.Ordinal);   // 同 pledge 内の同名船の出現回数 (InstanceKey の採番)
+            foreach (var name in shipNames)
             {
                 marks.TryGetValue((p.Id, name), out var mark);
+                var (origin, originDisplay) = DetermineOrigin(p, name, namedShips);
+                nameSeq[name] = nameSeq.TryGetValue(name, out var seq) ? seq + 1 : 1;
+                var instanceKey = nameSeq[name] == 1 ? $"{p.Id}|{name}" : $"{p.Id}|{name}#{nameSeq[name]}";
                 list.Add(new HangarShipInstance
                 {
                     PledgeId = p.Id,
                     PledgeName = p.Name,
                     Name = name,
+                    InstanceKey = instanceKey,
                     Insurance = p.Insurance,
                     Matrix = ResolveShip(name),
                     Mark = mark,
+                    Origin = origin,
+                    OriginDisplay = originDisplay,
+                    PledgeShipNames = pledgeShipNames,
                 });
             }
         }
+
+        // 同型 (正規化名が同じ) の保有数
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in list)
+        {
+            var n = NormalizeShipName(s.Name);
+            counts[n] = counts.TryGetValue(n, out var c) ? c + 1 : 1;
+        }
+        foreach (var s in list)
+            s.SameTypeCount = counts[NormalizeShipName(s.Name)];
+
         return list;
+    }
+
+    // 由来の判定:
+    //  基本分類:
+    //   1. pledge 名が "VIP" 始まり → Vip
+    //   2. pledge に船が 2 機以上、または pledge 名が Pack/Packs/Package 始まり → Pack
+    //   3. それ以外 → Standalone
+    //  上書き (CCU 適用済):
+    //   ・pledge.Upgraded なら pledge 内の全船を Upgraded
+    //   ・pledge 名に含まれる既知の船名 (namedShips: Ship Matrix 名 + エイリアス + この pledge の船名。正規化済み) が
+    //     1 つ以上あり、この船 (正規化名) が namedShips に無い → Upgraded。
+    //     namedShips にある船は基本分類のまま (Pitbull Duo Pack に Pitbull + Ironclad → Pitbull は Pack、Ironclad は Upgraded。
+    //     "Standalone Ships - Buccaneer" に Prospector → Upgraded)。
+    //     pledge 名がどの船名も含まない (Industrial Pack 等) 場合は上書きしない
+    private (HangarShipOrigin Origin, string Display) DetermineOrigin(HangarPledge p, string shipName, HashSet<string> namedShips)
+    {
+        var pledgeName = (p.Name ?? "").Trim();
+        var shipNames = p.ShipNames;
+
+        HangarShipOrigin origin;
+        string display;
+        if (pledgeName.StartsWith("VIP", StringComparison.OrdinalIgnoreCase))
+        {
+            origin = HangarShipOrigin.Vip;
+            display = "VIP 特典";
+        }
+        else if (shipNames.Count >= 2
+                 || pledgeName.StartsWith("Pack", StringComparison.OrdinalIgnoreCase))     // Pack / Packs / Package
+        {
+            origin = HangarShipOrigin.Pack;
+            display = $"パック: {pledgeName}";
+        }
+        else
+        {
+            origin = HangarShipOrigin.Standalone;
+            display = $"単品: {pledgeName}";
+        }
+
+        var thisShipNamed = namedShips.Contains(NormalizeShipName((shipName ?? "").Trim()));
+        if (p.Upgraded || (namedShips.Count > 0 && !thisShipNamed))
+        {
+            origin = HangarShipOrigin.Upgraded;
+            display = $"CCU 適用済 ← {pledgeName}";
+        }
+
+        return (origin, display);
+    }
+
+    // pledge 名に含まれる既知の船名を抽出し、正規化名の集合で返す。
+    // 既知船名 = Ship Matrix の全 Name + エイリアス JSON のキー + この pledge の船名 (Matrix 未解決の表記も拾うため)。
+    // 長い名前から順に、単語境界 (前後が英数字でない) で IgnoreCase 一致を探し、一致部分はマスクして
+    // より短い名前が重ねて一致しないようにする ("X1 Force" に一致したら "X1" は拾わない)
+    public HashSet<string> ExtractNamedShips(string pledgeName, IEnumerable<string>? heldShipNames = null)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var text = (pledgeName ?? "").Trim();
+        if (text.Length == 0) return result;
+
+        IEnumerable<string> known = KnownShipNamesByLength();
+        if (heldShipNames != null)
+        {
+            known = known.Concat(heldShipNames.Select(n => (n ?? "").Trim()).Where(n => n.Length > 0))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(n => n.Length)
+                .ThenBy(n => n, StringComparer.Ordinal);
+        }
+
+        var buf = text.ToCharArray();
+        foreach (var name in known)
+        {
+            var idx = 0;
+            while (idx <= buf.Length - name.Length)
+            {
+                var pos = new string(buf).IndexOf(name, idx, StringComparison.OrdinalIgnoreCase);
+                if (pos < 0) break;
+                var end = pos + name.Length;
+                var boundaryBefore = pos == 0 || !char.IsLetterOrDigit(buf[pos - 1]);
+                var boundaryAfter = end >= buf.Length || !char.IsLetterOrDigit(buf[end]);
+                if (boundaryBefore && boundaryAfter)
+                {
+                    result.Add(NormalizeShipName(name));
+                    for (var i = pos; i < end; i++) buf[i] = ' ';
+                }
+                idx = end;
+            }
+        }
+        return result;
+    }
+
+    private List<string>? _knownShipNamesByLength;
+
+    // Ship Matrix の全 Name + エイリアス JSON のキーを長い順に並べたもの (ExtractNamedShips 用)
+    private List<string> KnownShipNamesByLength()
+    {
+        EnsureShipCaches();
+        return _knownShipNamesByLength ??= _matrixCache!.Select(e => e.Name)
+            .Concat(_aliasCache!.Keys)
+            .Select(n => (n ?? "").Trim())
+            .Where(n => n.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(n => n.Length)
+            .ThenBy(n => n, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    // === 装備解決 (translations.db → gamedata_cache.db) ===
+
+    private readonly Dictionary<string, string?> _recordNameCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly string[] ExcludedRecordFragments =
+        ["_PU_AI", "_Template", "_Tutorial", "_BIS", "_Unmanned", "_CitizenCon", "_Showdown"];
+
+    // 表示名 (Hangar の船名) を gamedata_cache.db の ships.record_name に解決する。
+    // 名前候補 = 元の Hangar 名 → NormalizeShipName 後の Matrix 名 → "{Matrix の ManufacturerName} {Matrix 名}"。
+    // 各候補について translations.db の english が 完全一致 / "{manufacturer} {候補}" と一致 / " {候補}" で終わる行の key を
+    // (接尾辞 "," 以降を除いて) "@"+key として ships.name と照合する。
+    // それでも解決できなければ最終手段として Matrix 名のトークン (空白/ハイフン区切り) を全て含む ships.record_name のうち
+    // 除外断片を含まない最短のものを採用する。解決できなければ null
+    public string? ResolveShipRecordName(string shipName, string? manufacturerName)
+    {
+        var name = (shipName ?? "").Trim();
+        if (name.Length == 0 || _cacheDir == null) return null;
+        var mfr = (manufacturerName ?? "").Trim();
+        var cacheKey = $"{name}|{mfr}";
+        if (_recordNameCache.TryGetValue(cacheKey, out var cached)) return cached;
+
+        string? result = null;
+        try
+        {
+            var transPath = Path.Combine(_cacheDir, "translations.db");
+            var gamePath = Path.Combine(_cacheDir, "gamedata_cache.db");
+            if (File.Exists(transPath) && File.Exists(gamePath))
+            {
+                var matrix = ResolveShip(name);
+                var matrixName = matrix?.Name ?? "";
+                var matrixMfr = matrix?.ManufacturerName ?? "";
+
+                var candidates = new List<string> { name };
+                if (matrixName.Length > 0 && !candidates.Contains(matrixName, StringComparer.OrdinalIgnoreCase))
+                    candidates.Add(matrixName);
+                if (matrixName.Length > 0 && matrixMfr.Length > 0)
+                {
+                    var full = $"{matrixMfr} {matrixName}";
+                    if (!candidates.Contains(full, StringComparer.OrdinalIgnoreCase)) candidates.Add(full);
+                }
+
+                using (var tdb = new SqliteConnection($"Data Source={transPath};Mode=ReadOnly"))
+                {
+                    tdb.Open();
+                    foreach (var cand in candidates)
+                    {
+                        // 優先順: 完全一致 → メーカー前置 → " {候補}" 末尾一致
+                        var patterns = new List<(string Sql, string Param)>
+                        {
+                            ("SELECT key FROM translations WHERE english = @e", cand),
+                        };
+                        if (mfr.Length > 0) patterns.Add(("SELECT key FROM translations WHERE english = @e", $"{mfr} {cand}"));
+                        patterns.Add(("SELECT key FROM translations WHERE english LIKE @e ESCAPE '\\'", "% " + EscapeLike(cand)));
+
+                        foreach (var (sql, param) in patterns)
+                        {
+                            using var cmd = tdb.CreateCommand();
+                            cmd.CommandText = sql;
+                            cmd.Parameters.AddWithValue("@e", param);
+                            using var r = cmd.ExecuteReader();
+                            var found = new List<string>();
+                            while (r.Read())
+                                if (!r.IsDBNull(0)) found.Add(r.GetString(0));
+                            if (found.Count == 0) continue;
+                            result = MatchShipRecord(gamePath, found);
+                            if (result != null) break;
+                        }
+                        if (result != null) break;
+                    }
+                }
+
+                if (result == null && matrixName.Length > 0)
+                    result = MatchShipRecordByTokens(gamePath, matrixName);
+            }
+        }
+        catch (Exception ex)
+        {
+            OnProgress?.Invoke($"装備解決に失敗しました ({name}): {ex.Message}");
+            result = null;
+        }
+
+        _recordNameCache[cacheKey] = result;
+        return result;
+    }
+
+    private static string EscapeLike(string s)
+        => s.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+
+    // "@"+key が ships.name に一致する record_name のうち、除外断片を含まない最短のものを返す。
+    // translations.key には "vehicle_NameDRAK_Pitbull,P" のように "," 以降の接尾辞が付くものがあるので、"," より前だけを使う。
+    // さらに "vehicle_NameCRUS_Starlifter_C2_short" のように "_short" で終わる key は、それを除いた形も候補に加える
+    // (ships.name は "@vehicle_NameCRUS_Starlifter_C2" のように "_short" 無しで登録されている)。元の key も候補に残す
+    private static string? MatchShipRecord(string gamePath, List<string> keys)
+    {
+        var candidates = new List<string>();
+        using var gdb = new SqliteConnection($"Data Source={gamePath};Mode=ReadOnly");
+        gdb.Open();
+        const string shortSuffix = "_short";
+        var baseKeys = keys.Select(k => k.Split(',')[0].Trim()).Where(k => k.Length > 0)
+            .SelectMany(k => k.EndsWith(shortSuffix, StringComparison.Ordinal)
+                ? new[] { k, k[..^shortSuffix.Length] }
+                : new[] { k })
+            .Where(k => k.Length > 0)
+            .Distinct(StringComparer.Ordinal);
+        foreach (var key in baseKeys)
+        {
+            using var cmd = gdb.CreateCommand();
+            cmd.CommandText = "SELECT record_name FROM ships WHERE name = @n";
+            cmd.Parameters.AddWithValue("@n", "@" + key);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                if (r.IsDBNull(0)) continue;
+                var rec = r.GetString(0);
+                if (rec.Length == 0) continue;
+                if (ExcludedRecordFragments.Any(f => rec.Contains(f, StringComparison.OrdinalIgnoreCase))) continue;
+                candidates.Add(rec);
+            }
+        }
+        return candidates.OrderBy(c => c.Length).ThenBy(c => c, StringComparer.Ordinal).FirstOrDefault();
+    }
+
+    // 最終手段: Matrix 名を空白/ハイフンで分割したトークンを (順不同・IgnoreCase で) 全て含む ships.record_name のうち、
+    // 除外断片を含まない最短のものを返す (例 "C8R Pisces" → "EntityClassDefinition.ANVL_C8R_Pisces")。
+    // トークンは record_name の "EntityClassDefinition." 以降を "_" で区切った要素との完全一致で数える
+    // (単純な部分文字列一致だと "Hull E" の "E" が "EntityClassDefinition" に一致して MISC_Hull_A を誤って拾う)
+    private static string? MatchShipRecordByTokens(string gamePath, string matrixName)
+    {
+        var tokens = matrixName.Split([' ', '-'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (tokens.Length == 0) return null;
+
+        const string prefix = "EntityClassDefinition.";
+        var candidates = new List<string>();
+        using var gdb = new SqliteConnection($"Data Source={gamePath};Mode=ReadOnly");
+        gdb.Open();
+        using var cmd = gdb.CreateCommand();
+        cmd.CommandText = "SELECT record_name FROM ships";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            if (r.IsDBNull(0)) continue;
+            var rec = r.GetString(0);
+            if (rec.Length == 0) continue;
+            if (ExcludedRecordFragments.Any(f => rec.Contains(f, StringComparison.OrdinalIgnoreCase))) continue;
+            var body = rec.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? rec[prefix.Length..] : rec;
+            var segments = body.Split(['_', '.'], StringSplitOptions.RemoveEmptyEntries);
+            if (!tokens.All(t => segments.Any(sg => sg.Equals(t, StringComparison.OrdinalIgnoreCase)))) continue;
+            candidates.Add(rec);
+        }
+        return candidates.OrderBy(c => c.Length).ThenBy(c => c, StringComparer.Ordinal).FirstOrDefault();
+    }
+
+    // === 装備インベントリ (my_components) / 現在の装備 (ship_loadouts) ===
+
+    public List<MyComponent> LoadMyComponents()
+    {
+        var list = new List<MyComponent>();
+        if (_dbPath == null || !File.Exists(_dbPath)) return list;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT id, item_record, item_name, item_type, size, grade, quantity, usable, notes, added_at FROM my_components ORDER BY item_type, size DESC, grade, item_name, id";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            list.Add(new MyComponent
+            {
+                Id = r.GetInt32(0),
+                ItemRecord = r.IsDBNull(1) ? "" : r.GetString(1),
+                ItemName = r.IsDBNull(2) ? "" : r.GetString(2),
+                ItemType = r.IsDBNull(3) ? "" : r.GetString(3),
+                Size = r.IsDBNull(4) ? 0 : r.GetInt32(4),
+                Grade = r.IsDBNull(5) ? 0 : r.GetInt32(5),
+                Quantity = r.IsDBNull(6) ? 1 : r.GetInt32(6),
+                Usable = r.IsDBNull(7) || r.GetInt32(7) != 0,
+                Notes = r.IsDBNull(8) ? "" : r.GetString(8),
+                AddedAt = r.IsDBNull(9) ? "" : r.GetString(9),
+            });
+        }
+        return list;
+    }
+
+    // 追加した行の id を返す
+    public int AddMyComponent(MyComponent c)
+    {
+        if (_dbPath == null) return 0;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO my_components (item_record, item_name, item_type, size, grade, quantity, usable, notes)
+            VALUES (@r, @n, @t, @s, @g, @q, @u, @o);
+            SELECT last_insert_rowid();
+            """;
+        cmd.Parameters.AddWithValue("@r", c.ItemRecord);
+        cmd.Parameters.AddWithValue("@n", c.ItemName ?? "");
+        cmd.Parameters.AddWithValue("@t", c.ItemType ?? "");
+        cmd.Parameters.AddWithValue("@s", c.Size);
+        cmd.Parameters.AddWithValue("@g", c.Grade);
+        cmd.Parameters.AddWithValue("@q", c.Quantity);
+        cmd.Parameters.AddWithValue("@u", c.Usable ? 1 : 0);
+        cmd.Parameters.AddWithValue("@o", c.Notes ?? "");
+        var id = (int)(long)(cmd.ExecuteScalar() ?? 0L);
+        c.Id = id;
+        return id;
+    }
+
+    public void UpdateMyComponent(MyComponent c)
+    {
+        if (_dbPath == null) return;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        Exec(db, "UPDATE my_components SET item_record = @r, item_name = @n, item_type = @t, size = @s, grade = @g, quantity = @q, usable = @u, notes = @o WHERE id = @id",
+            ("@r", c.ItemRecord), ("@n", c.ItemName ?? ""), ("@t", c.ItemType ?? ""), ("@s", c.Size), ("@g", c.Grade),
+            ("@q", c.Quantity), ("@u", c.Usable ? 1 : 0), ("@o", c.Notes ?? ""), ("@id", c.Id));
+    }
+
+    public void DeleteMyComponent(int id)
+    {
+        if (_dbPath == null) return;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        Exec(db, "DELETE FROM my_components WHERE id = @id", ("@id", id));
+    }
+
+    // port_name → item_record ('' = 空スロット)
+    public Dictionary<string, string> LoadLoadout(string shipKey)
+    {
+        var dict = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (_dbPath == null || !File.Exists(_dbPath)) return dict;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT port_name, item_record FROM ship_loadouts WHERE ship_key = @k";
+        cmd.Parameters.AddWithValue("@k", shipKey);
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            if (r.IsDBNull(0)) continue;
+            dict[r.GetString(0)] = r.IsDBNull(1) ? "" : r.GetString(1);
+        }
+        return dict;
+    }
+
+    // itemRecord が null なら行を削除 (デフォルト装備に戻す)。portName には ShipPortLoadout.PortKey を渡す
+    public void SetLoadoutItem(string shipKey, string portName, string? itemRecord)
+    {
+        if (_dbPath == null) return;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        if (itemRecord == null)
+        {
+            Exec(db, "DELETE FROM ship_loadouts WHERE ship_key = @k AND port_name = @p", ("@k", shipKey), ("@p", portName));
+            return;
+        }
+        Exec(db, "INSERT OR REPLACE INTO ship_loadouts (ship_key, port_name, item_record) VALUES (@k, @p, @r)",
+            ("@k", shipKey), ("@p", portName), ("@r", itemRecord));
+    }
+
+    public void ClearLoadout(string shipKey)
+    {
+        if (_dbPath == null) return;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        Exec(db, "DELETE FROM ship_loadouts WHERE ship_key = @k", ("@k", shipKey));
+    }
+
+    // 保有船 1 機の全ポート (item_type が空のものは除く) の装備状態。
+    // ship_loadouts に上書きがあればそれを、無ければ ship_ports.equipped_item (デフォルト装備) を採用し、
+    // item の表示名・Size・Grade は EquipmentService.GetItemByRecord で解決する (未解決なら record をそのまま名前にし Size/Grade = 0)。
+    // ship_loadouts の上書きは PortKey (同名ポートの 2 つ目以降は "{port_name}#N") 単位で照合する
+    public List<ShipPortLoadout> GetShipLoadout(string shipKey, string shipRecordName, EquipmentService equip)
+        => BuildShipLoadout(shipKey, equip.GetShipPorts(shipRecordName), equip);
+
+    private List<ShipPortLoadout> BuildShipLoadout(string shipKey, List<ShipPortInfo> ports, EquipmentService equip)
+    {
+        var overrides = LoadLoadout(shipKey);
+        var result = new List<ShipPortLoadout>();
+        var portSeq = new Dictionary<string, int>(StringComparer.Ordinal);   // 同名ポートの出現回数 (PortKey の採番)
+        foreach (var p in ports)
+        {
+            if (string.IsNullOrEmpty(p.ItemType)) continue;
+            var portName = p.PortName ?? "";
+            portSeq[portName] = portSeq.TryGetValue(portName, out var seq) ? seq + 1 : 1;
+            var portKey = portSeq[portName] == 1 ? portName : $"{portName}#{portSeq[portName]}";
+            var row = new ShipPortLoadout
+            {
+                PortName = portName,
+                PortKey = portKey,
+                ItemType = p.ItemType,
+                TypeDisplay = p.TypeDisplay,
+                PortSize = p.Size,
+                DefaultItemRecord = p.EquippedItem ?? "",
+            };
+            var def = row.DefaultItemRecord.Length > 0 ? equip.GetItemByRecord(row.DefaultItemRecord) : null;
+            row.DefaultItemName = def?.Name ?? row.DefaultItemRecord;
+
+            EquipmentItem? effective = def;
+            if (overrides.TryGetValue(portKey, out var ov))
+            {
+                row.CurrentItemRecord = ov;
+                var cur = ov.Length > 0 ? equip.GetItemByRecord(ov) : null;
+                row.CurrentItemName = cur?.Name ?? ov;
+                effective = cur;
+            }
+            row.ItemSize = effective?.Size ?? 0;
+            row.ItemGrade = effective?.Grade ?? 0;
+            result.Add(row);
+        }
+        return result;
+    }
+
+    // 保有船 1 機のツールチップ文字列。Ship Matrix / 由来 / 同梱機 / 保険 / 装備 (ポート種別ごとに 1 行)。
+    // shipKey は ship_loadouts のキー (HangarShipInstance.InstanceKey = "{pledge_id}|{ship_name}[#N]" / 所持船は "my|{my_ships.id}")
+    public string BuildShipTooltip(HangarShipInstance s, EquipmentService? equip, string shipKey)
+    {
+        var lines = new List<string> { s.Name };
+
+        var m = s.Matrix;
+        if (m != null)
+        {
+            var parts = new List<string>();
+            if (m.ManufacturerName.Length > 0) parts.Add($"メーカー: {m.ManufacturerName}");
+            if (m.Focus.Length > 0) parts.Add($"役割: {m.Focus}");
+            if (m.Type.Length > 0) parts.Add($"種別: {m.Type}");
+            if (m.Size.Length > 0) parts.Add($"サイズ: {m.Size}");
+            if (m.ProductionStatus.Length > 0) parts.Add($"実装: {m.ProductionStatus}");
+            if (parts.Count > 0) lines.Add(string.Join(" / ", parts));
+        }
+        else
+        {
+            lines.Add("Ship Matrix: 未解決");
+        }
+
+        if (!string.IsNullOrEmpty(s.OriginDisplay)) lines.Add($"由来: {s.OriginDisplay}");
+        if (!string.IsNullOrEmpty(s.PledgeShipNames) && s.PledgeShipNames.Contains(','))
+            lines.Add($"同梱: {s.PledgeShipNames}");
+        if (s.InsuranceDisplay.Length > 0) lines.Add($"保険: {s.InsuranceDisplay}");
+
+        // 装備行。record 未解決 → "船を特定できませんでした"、record 解決済みで ship_ports が 0 件 → "ポート情報なし"。
+        // ポートの size は 0 (未収録) のものが多いので size で絞らず全ポートを対象にする
+        var equipLines = new List<string>();
+        var equipFallback = "装備: 未解決";   // gamedata_cache.db が無い / 例外時
+        if (equip != null)
+        {
+            try
+            {
+                var record = ResolveShipRecordName(s.Name, m?.ManufacturerName);
+                if (record == null)
+                {
+                    equipFallback = "装備: 船を特定できませんでした";
+                }
+                else
+                {
+                    var allPorts = equip.GetShipPorts(record);
+                    var ports = allPorts.Count == 0 ? new List<ShipPortLoadout>() : BuildShipLoadout(shipKey, allPorts, equip);
+                    if (allPorts.Count == 0)
+                    {
+                        equipFallback = "装備: ポート情報なし (ゲームデータ未収録)";
+                    }
+                    // ポート種別 (TypeDisplay。対訳の無い ItemType は英名のまま) ごとに 1 行。
+                    // 表示名 (EffectiveItemName) と Size と Class の組が同じものはまとめて ×N (record が別でも同名なら 1 行。PortKey 単位で 1 ポート)。
+                    // Size は item のもの、無ければ ポートの Size (>0 のとき)、どちらも無ければ Size 表記なし。
+                    // Class は items.grade があるものだけ A〜D。
+                    // 装備名が空: ロードアウトで明示的に空にした ('' 上書き) は "(空スロット)"、
+                    // ゲームデータの equipped_item が空 (空か未収録か区別できない) は "(装備データなし)"
+                    foreach (var g in ports.GroupBy(p => p.TypeDisplay))
+                    {
+                        var entries = g
+                            .Select(p =>
+                            {
+                                var size = p.ItemSize > 0 ? $"S{p.ItemSize}" : p.PortSize > 0 ? $"S{p.PortSize}" : "";
+                                var cls = p.ItemGrade > 0 ? MyComponent.GradeToClass(p.ItemGrade) : "";
+                                var label = p.EffectiveItemName.Length > 0 ? p.EffectiveItemName
+                                    : p.EffectiveItemRecord.Length > 0 ? p.EffectiveItemRecord
+                                    : p.IsCustom ? "(空スロット)" : "(装備データなし)";
+                                return (Port: p, Size: size, Cls: cls, Label: label);
+                            })
+                            .GroupBy(e => (e.Label, e.Size, e.Cls))
+                            .Select(x =>
+                            {
+                                var first = x.First();
+                                var text = string.Join(" ", new[] { first.Size, first.Cls, first.Label }.Where(t => t.Length > 0));
+                                return (Order: first.Port.PortSize, Text: $"{text} ×{x.Count()}");
+                            })
+                            .OrderBy(e => e.Order)
+                            .Select(e => e.Text);
+                        var line = $"{g.Key}: {string.Join(", ", entries)}";
+                        if (g.Any(p => p.IsCustom)) line += " (設定済)";
+                        equipLines.Add(line);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                OnProgress?.Invoke($"装備の取得に失敗しました ({s.Name}): {ex.Message}");
+            }
+        }
+        if (equipLines.Count > 0) lines.AddRange(equipLines);
+        else lines.Add(equipFallback);
+
+        return string.Join("\n", lines);
+    }
+
+    // RSI ストア (Standalone Ships / Upgrades) に、この船より税抜価格が高い船があるか。
+    // 戻り値: (高い船の種類数, その中に Warbond があるか)。この船の価格が分からなければ null
+    public (int Count, bool HasWarbond)? StoreUpgradeTargets(string shipName)
+    {
+        var mine = FindStoreShip(shipName);
+        if (mine == null) return null;
+        var cache = _storeCache ??= LoadStoreSkus();
+        var higher = cache.Where(k =>
+            (k.ProductId == StoreCategoryStandaloneShips || k.ProductId == StoreCategoryUpgrades)
+            && k.EffectiveNativeCents > mine.EffectiveNativeCents).ToList();
+        if (higher.Count == 0) return (0, false);
+        var count = higher.Select(k => NormalizeShipName(k.Name)).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        return (count, higher.Any(k => k.IsWarbond));
     }
 
     // 保有船名と全 CCU の from/to のうち、Ship Matrix で解決できない名前を重複排除して返す (UI が警告表示する)
@@ -958,17 +1603,36 @@ public class HangarService
     {
         _matrixCache = null;
         _matrixByName = null;
+        _knownShipNamesByLength = null;
         _aliasCache = null;
         _priceCache = null;
         _storeCache = null;
     }
 
-    // Ship Matrix を取得して ship_matrix テーブルを全置換する。
-    // 24 時間以内に取得済みで force=false なら何もせず件数を返す。戻り値は保存済み件数
-    public async Task<int> RefreshShipMatrixAsync(bool force)
-    {
-        if (_dbPath == null) return 0;
+    // RefreshShipMatrixAsync / RefreshStoreAsync の同時実行を直列化する (起動時バックグラウンドと「ストア情報を更新」の競合防止)。
+    // 待たされた側はスキップせず、そのまま続行する
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
 
+    // Ship Matrix を取得して ship_matrix テーブルを全置換する。
+    // 24 時間以内に取得済みで force=false なら何もせず件数を返す。
+    // 戻り値: (保存済み件数, 取得を実行したか)。キャッシュ利用なら Fetched=false
+    public async Task<(int Count, bool Fetched)> RefreshShipMatrixAsync(bool force)
+    {
+        if (_dbPath == null) return (0, false);
+
+        await _refreshGate.WaitAsync();
+        try
+        {
+            return await RefreshShipMatrixCoreAsync(force);
+        }
+        finally
+        {
+            _refreshGate.Release();
+        }
+    }
+
+    private async Task<(int Count, bool Fetched)> RefreshShipMatrixCoreAsync(bool force)
+    {
         using (var db = new SqliteConnection($"Data Source={_dbPath}"))
         {
             InitDb(db);
@@ -979,7 +1643,7 @@ public class HangarService
             {
                 var cached = (int)ScalarLong(db, "SELECT COUNT(*) FROM ship_matrix");
                 OnProgress?.Invoke($"Ship Matrix はキャッシュを使用します: {cached:N0} 件 (取得: {fetchedAtRaw})");
-                return cached;
+                return (cached, false);
             }
         }
 
@@ -1055,8 +1719,9 @@ public class HangarService
 
         _matrixCache = null;
         _matrixByName = null;
+        _knownShipNamesByLength = null;
         OnProgress?.Invoke($"Ship Matrix を取得しました: {entries.Count:N0} 件");
-        return entries.Count;
+        return (entries.Count, true);
     }
 
     private static bool IsTruthy(JsonElement el) => el.ValueKind switch
@@ -1209,7 +1874,7 @@ public class HangarService
         var fromSku = FindStoreShip(from);
         var toSku = FindStoreShip(to);
         if (fromSku == null || toSku == null) return null;
-        var storeDiff = toSku.NativePriceCents - fromSku.NativePriceCents;
+        var storeDiff = toSku.EffectiveNativeCents - fromSku.EffectiveNativeCents;
         return storeDiff > 0 ? storeDiff : null;
     }
 
@@ -1238,11 +1903,25 @@ public class HangarService
 
     // RSI ストアの販売中 SKU を取得して store_skus をカテゴリ単位で置き換える。
     // 12 時間以内に取得済みで force=false なら何もせず件数を返す。
-    // 失敗したカテゴリは警告して続行し、そのカテゴリの旧データは残す。戻り値は保存済み総件数
-    public async Task<int> RefreshStoreAsync(bool force, CancellationToken ct = default)
+    // 失敗したカテゴリは警告して続行し、そのカテゴリの旧データは残す。
+    // 戻り値: (保存済み総件数, 取得を実行したか)。キャッシュ利用なら Fetched=false
+    public async Task<(int Count, bool Fetched)> RefreshStoreAsync(bool force, CancellationToken ct = default)
     {
-        if (_dbPath == null) return 0;
+        if (_dbPath == null) return (0, false);
 
+        await _refreshGate.WaitAsync(ct);
+        try
+        {
+            return await RefreshStoreCoreAsync(force, ct);
+        }
+        finally
+        {
+            _refreshGate.Release();
+        }
+    }
+
+    private async Task<(int Count, bool Fetched)> RefreshStoreCoreAsync(bool force, CancellationToken ct)
+    {
         using (var db = new SqliteConnection($"Data Source={_dbPath}"))
         {
             InitDb(db);
@@ -1253,7 +1932,7 @@ public class HangarService
             {
                 var cached = (int)ScalarLong(db, "SELECT COUNT(*) FROM store_skus");
                 OnProgress?.Invoke($"ストア情報はキャッシュを使用します: {cached:N0} 件 (取得: {fetchedAtRaw})");
-                return cached;
+                return (cached, false);
             }
         }
 
@@ -1305,13 +1984,14 @@ public class HangarService
                     Exec(db, """
                         INSERT OR REPLACE INTO store_skus
                             (id, product_id, category, name, title, url, sku_type, is_warbond, native_price_cents, price_cents,
-                             tax_description, stock_level, available, thumbnail, fetched_at)
-                        VALUES (@id, @pid, @cat, @n, @t, @u, @st, @wb, @np, @pr, @tax, @sl, @av, @th, @fa)
+                             tax_description, stock_level, available, thumbnail, fetched_at, native_discounted_cents)
+                        VALUES (@id, @pid, @cat, @n, @t, @u, @st, @wb, @np, @pr, @tax, @sl, @av, @th, @fa, @nd)
                         """,
                         ("@id", s.Id), ("@pid", s.ProductId), ("@cat", s.Category), ("@n", s.Name), ("@t", s.Title),
                         ("@u", s.Url), ("@st", s.SkuType), ("@wb", s.IsWarbond ? 1 : 0),
                         ("@np", s.NativePriceCents), ("@pr", s.PriceCents), ("@tax", s.TaxDescription),
-                        ("@sl", s.StockLevel), ("@av", s.Available ? 1 : 0), ("@th", s.Thumbnail), ("@fa", s.FetchedAt));
+                        ("@sl", s.StockLevel), ("@av", s.Available ? 1 : 0), ("@th", s.Thumbnail), ("@fa", s.FetchedAt),
+                        ("@nd", s.NativeDiscountedCents));
                 }
             }
             SetMeta(db, "store_fetched_at", now);
@@ -1323,10 +2003,11 @@ public class HangarService
         var summary = $"ストア情報を取得しました: {total:N0} 件 ({succeeded.Count}/{categories.Count} カテゴリ)";
         if (failed.Count > 0) summary += $" / 失敗: {string.Join(", ", failed)}";
         OnProgress?.Invoke(summary);
-        return total;
+        return (total, true);
     }
 
-    // 1 カテゴリ (products = [productId]) を count 件になるまでページを進めて取得する
+    // 1 カテゴリ (products = [productId]) を count 件になるまでページを進めて取得する。
+    // 新規 SKU id が 0 件のページが返ったら終了する (page が無視され同一ページが返り続ける場合の無駄なリクエストを防ぐ)
     private static async Task<List<StoreSku>> FetchStoreCategoryAsync(string url, string productId, string categoryName, string fetchedAt, CancellationToken ct)
     {
         var result = new List<StoreSku>();
@@ -1360,7 +2041,7 @@ public class HangarService
             resp.EnsureSuccessStatusCode();
             var json = await resp.Content.ReadAsStringAsync(ct);
 
-            int pageItems = 0;
+            int newItems = 0;   // このページで初めて見た SKU id の数
             using (var doc = JsonDocument.Parse(json))
             {
                 var root = doc.RootElement;
@@ -1393,19 +2074,21 @@ public class HangarService
 
                     var id = GetStr(el, "id").Trim();
                     if (id.Length == 0) continue;
-                    pageItems++;
                     if (!seen.Add(id)) continue;
+                    newItems++;
 
                     var skuUrl = GetStr(el, "url").Trim();
                     var isWarbond = false;
                     if (el.TryGetProperty("isWarbond", out var wbEl)) isWarbond = IsTruthy(wbEl);
                     if (skuUrl.EndsWith("-Warbond", StringComparison.OrdinalIgnoreCase)) isWarbond = true;
 
-                    long nativeCents = 0, priceCents = 0;
+                    long nativeCents = 0, nativeDiscounted = 0, priceCents = 0;
                     var taxDesc = "";
-                    if (el.TryGetProperty("nativePrice", out var np) && np.ValueKind == JsonValueKind.Object
-                        && np.TryGetProperty("amount", out var npAmt))
-                        nativeCents = ReadCents(npAmt);
+                    if (el.TryGetProperty("nativePrice", out var np) && np.ValueKind == JsonValueKind.Object)
+                    {
+                        if (np.TryGetProperty("amount", out var npAmt)) nativeCents = ReadCents(npAmt);
+                        if (np.TryGetProperty("discounted", out var npDisc)) nativeDiscounted = ReadCents(npDisc);   // null → 0
+                    }
                     if (el.TryGetProperty("price", out var pr) && pr.ValueKind == JsonValueKind.Object)
                     {
                         if (pr.TryGetProperty("amount", out var prAmt)) priceCents = ReadCents(prAmt);
@@ -1445,6 +2128,7 @@ public class HangarService
                         SkuType = GetStr(el, "type").Trim(),
                         IsWarbond = isWarbond,
                         NativePriceCents = nativeCents,
+                        NativeDiscountedCents = nativeDiscounted,
                         PriceCents = priceCents,
                         TaxDescription = taxDesc,
                         StockLevel = stockLevel,
@@ -1455,7 +2139,7 @@ public class HangarService
                 }
             }
 
-            if (pageItems == 0) break;                       // 空ページ → 終了
+            if (newItems == 0) break;                        // 新規 SKU が無いページ (空 / 同一ページの繰り返し) → 終了
             if (count >= 0 && result.Count >= count) break;  // count 件に達した
         }
 
@@ -1480,7 +2164,7 @@ public class HangarService
         using var cmd = db.CreateCommand();
         cmd.CommandText = """
             SELECT id, product_id, category, name, title, url, sku_type, is_warbond, native_price_cents, price_cents,
-                   tax_description, stock_level, available, thumbnail, fetched_at
+                   tax_description, stock_level, available, thumbnail, fetched_at, native_discounted_cents
             FROM store_skus ORDER BY category, name, id
             """;
         using var r = cmd.ExecuteReader();
@@ -1503,6 +2187,7 @@ public class HangarService
                 Available = !r.IsDBNull(12) && r.GetInt32(12) != 0,
                 Thumbnail = r.IsDBNull(13) ? "" : r.GetString(13),
                 FetchedAt = r.IsDBNull(14) ? "" : r.GetString(14),
+                NativeDiscountedCents = r.IsDBNull(15) ? 0 : r.GetInt64(15),
             });
         }
         return list;
@@ -1560,11 +2245,13 @@ public class HangarService
 
         // 正規化済みの型名で扱う
         var heldTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var heldCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);   // 型 → 保有数 (重複判定で起点船を除くため)
         var dropTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);   // Drop マークされた保有船の型
         foreach (var s in ships)
         {
             var t = NormalizeShipName(s.Name);
             heldTypes.Add(t);
+            heldCounts[t] = heldCounts.TryGetValue(t, out var n) ? n + 1 : 1;
             if (s.Mark == HangarShipMark.Drop) dropTypes.Add(t);
         }
 
@@ -1675,7 +2362,14 @@ public class HangarService
             rationale.Add(origin.Mark == HangarShipMark.Drop ? "Drop 起点" : "起点");
             rationale.Add($"連鎖 {best.Count} 段");
             rationale.Add($"合計 ${bestCost / 100.0:N2}");
-            if (heldTypes.Contains(finalType)) rationale.Add("重複: 既に保有");   // 2.
+            // 2. 連鎖の各 CCU について、to が現在保有集合 (起点船自身を除く) に含まれれば重複 (終端だけでなく中間段も)
+            foreach (var c in best)
+            {
+                var to = ccuTo[c.PledgeId];
+                var heldOthers = heldCounts.TryGetValue(to, out var n) ? n : 0;
+                if (to.Equals(start, StringComparison.OrdinalIgnoreCase)) heldOthers--;
+                if (heldOthers > 0) rationale.Add($"重複: {to} は既に保有");
+            }
 
             plan.Applies.Add(new CcuPlanApply
             {
@@ -1690,6 +2384,11 @@ public class HangarService
 
             if (plan.TimedOut) break;
         }
+
+        // プラン自身が同一の to を複数の船に提案している場合は「重複候補」を付記する
+        foreach (var g in plan.Applies.GroupBy(a => a.ToShip, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() >= 2))
+            foreach (var a in g)
+                a.Rationale += $" / 重複候補: {g.Key} を {g.Count()} 隻に提案";
 
         // 5. 使われなかった CCU は Melts
         foreach (var c in validCcus)

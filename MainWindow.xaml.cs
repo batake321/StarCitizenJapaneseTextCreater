@@ -44,6 +44,19 @@ public partial class MainWindow : Window
     private List<StoreSku> _storeSkus = new();         // RSI ストアの販売中 SKU (store_skus)
     private List<StoreRow> _storeRows = new();         // 販売中の船グリッドの全行 (フィルタ前)
     private bool _hangarProgressHooked;                // _hangarService.OnProgress を Log へ接続済み
+    private bool _upgradeDataLoadedOnce;               // LoadUpgradeData が一度でも正常終了した (起動時に一度も呼ばれない経路を塞ぐ)
+    private List<HangarShipInstance> _hangarShips = new();   // 同期済み保有船 (GetShipInstances の結果)
+    private EquipmentService? _hangarEquip;            // ツールチップの装備表示用 (gamedata_cache.db が無ければ null)
+    private Dictionary<string, HangarPledge> _pledgeById = new(StringComparer.Ordinal);   // LoadPledges を id で引く
+    private HashSet<string> _soldPledgeIds = new(StringComparer.OrdinalIgnoreCase);   // Sell (melt 予定) にした pledge。pledge 単位 (R-02)。CCU 側の pledge id 比較 (OrdinalIgnoreCase) と揃える
+    private HashSet<string> _expandedPledgeIds = new(StringComparer.Ordinal);  // 保有船グリッドで展開中のグループ (pledge)
+
+    // 装備サブタブ (所持コンポーネント / 現在の装備)
+    private List<MyComponent> _myComponents = new();                 // my_components の写し
+    private List<MyComponentRow> _myComponentRows = new();           // dgMyComponents の表示行 (Usable の変更を DB へ書き戻す)
+    private List<LoadoutShipChoice> _extraLoadoutShips = new();      // 所持船側から開いた "my|{id}" キーの船 (GetShipInstances に無いもの)
+    private bool _suppressLoadoutEvents;                             // cmbLoadoutShip の ItemsSource 再設定中は SelectionChanged を無視
+    private bool _compTypeComboPopulated;                            // cmbCompType は 1 度だけ埋める
 
     // 保有船グリッド「マーク」列の選択肢 (UpgradeShipRow.MarkDisplay と対応)
     public static string[] MarkChoices { get; } = ["", "要る", "要らない", "保留"];
@@ -2657,9 +2670,24 @@ public partial class MainWindow : Window
 
     // === Window State ===
 
+    // 船名のツールチップは開く直前に生成する (行の実体化時に船ごとの SQL を前倒しで走らせない)
+    private void ShipTooltip_Opening(object sender, ToolTipEventArgs e)
+    {
+        if (sender is not FrameworkElement fe) return;
+        var text = fe.DataContext switch
+        {
+            UpgradeShipRow r => r.Tooltip,
+            MyShipRow m => m.Tooltip,
+            _ => "",
+        };
+        if (string.IsNullOrWhiteSpace(text)) { e.Handled = true; return; }
+        fe.ToolTip = text;
+    }
+
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
         _captureService?.Dispose();
+        _hangarEquip?.Dispose();
 
         var config = App.Config;
         if (WindowState == WindowState.Maximized)
@@ -2731,6 +2759,19 @@ public partial class MainWindow : Window
             win.ShowDialog();
             _hangarService.InvalidateCaches();
             LoadUpgradeData();
+
+            // 同期した保有船を所持船にも反映する (既存の所持船行は変更・削除しない)
+            var added = ImportHangarShipsIntoMyShips(confirm: false);
+            if (added > 0)
+            {
+                Log($"[Ship] 同期に伴い所持船へ {added} 件追加");
+                txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻 | 同期で {added} 件追加";
+            }
+            else
+            {
+                Log("[Ship] 同期: 所持船は最新です");
+                txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻 | 所持船は最新です";
+            }
         }
         catch (Exception ex)
         {
@@ -2743,6 +2784,7 @@ public partial class MainWindow : Window
     private void UpgradeReset_Click(object sender, RoutedEventArgs e)
     {
         foreach (var s in _upgradeShips) s.AppliedCcuIds.Clear();
+        _soldPledgeIds.Clear();
         RecomputeUpgradeSim();
     }
 
@@ -2752,26 +2794,125 @@ public partial class MainWindow : Window
         {
             _hangarService.SetCacheDir(WorkDir);
             var ships = _hangarService.GetShipInstances();
+            _hangarShips = ships;
             _allCcus = _hangarService.LoadCcus();
             _storeSkus = _hangarService.LoadStoreSkus();
             PopulateStoreCategoryCombo();
 
-            _upgradeShips = ships.Select(s => new UpgradeShipRow
+            // 装備表示用 (1 度だけ作る。gamedata_cache.db が無い/開けない場合は null のまま)
+            if (_hangarEquip == null)
             {
-                PledgeId = s.PledgeId,
-                PledgeName = s.PledgeName,
-                Name = s.Name,
-                CurrentName = s.Name,
-                InsuranceDisplay = s.InsuranceDisplay,
-                Focus = s.Matrix?.Focus ?? "",
-                Type = s.Matrix?.Type ?? "",
-                Status = s.Matrix?.ProductionStatus ?? "",
-                IsUnresolved = s.IsUnresolved,
-                Mark = s.Mark,
-            }).OrderBy(s => s.Name).ToList();
+                var gamedataPath = Path.Combine(WorkDir, "gamedata_cache.db");
+                if (File.Exists(gamedataPath))
+                {
+                    try { _hangarEquip = new EquipmentService(gamedataPath); }
+                    catch (Exception ex) { Log($"[Hangar] 装備DBを開けませんでした: {ex.Message}"); }
+                }
+            }
 
-            // melt シミュレーション用の pledge 一覧
-            _meltPledges = _hangarService.LoadPledges().Select(p => new MeltPledgeRow
+            var pledges = _hangarService.LoadPledges();
+            _pledgeById = pledges.Where(p => !string.IsNullOrEmpty(p.Id))
+                .GroupBy(p => p.Id, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+
+            // 再読込前のシミュレーション状態 (適用中の CCU) を InstanceKey で保存し、再生成後の同キーの船行へ復元する
+            // (_soldPledgeIds / _expandedPledgeIds は従来どおりフィールドで保持)
+            var prevApplied = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            foreach (var r in _upgradeShips.Where(r => !r.IsGroupHeader && !r.IsCcu && r.AppliedCcuIds.Count > 0))
+                if (!string.IsNullOrEmpty(r.InstanceKey)) prevApplied.TryAdd(r.InstanceKey, r.AppliedCcuIds.ToList());
+
+            // 再読込前の選択行も記録する (行は作り直されるのでキーで持つ)。船行 = InstanceKey、CCU 行 = (CCU の pledge id, 親船行の InstanceKey)。
+            // RecomputeUpgradeSim → RefreshUpgradeShipGrid の後に一致する行を選択し直す
+            var prevSelected = dgUpgradeShips.SelectedItem as UpgradeShipRow;
+            var prevSelShipKey = prevSelected != null && !prevSelected.IsGroupHeader && !prevSelected.IsCcu ? prevSelected.InstanceKey : "";
+            var prevSelCcuId = prevSelected != null && prevSelected.IsCcu ? prevSelected.CcuPledgeId : "";
+            var prevSelCcuParentKey = prevSelected != null && prevSelected.IsCcu ? (prevSelected.CcuParent?.InstanceKey ?? "") : "";
+            var prevSelHeaderKey = prevSelected != null && prevSelected.IsGroupHeader ? prevSelected.GroupPledgeId : "";
+
+            UpgradeShipRow MakeShipRow(HangarShipInstance s)
+            {
+                _pledgeById.TryGetValue(s.PledgeId, out var p);
+                var meltable = p?.Meltable ?? true;
+                return new UpgradeShipRow
+                {
+                    PledgeId = s.PledgeId,
+                    PledgeName = s.PledgeName,
+                    Name = s.Name,
+                    InstanceKey = s.InstanceKey,
+                    AppliedCcuIds = prevApplied.TryGetValue(s.InstanceKey, out var applied) ? new List<string>(applied) : new List<string>(),
+                    CurrentName = s.Name,
+                    DisplayName = s.Name,
+                    InsuranceDisplay = s.InsuranceDisplay,
+                    Focus = s.Matrix?.Focus ?? "",
+                    Type = s.Matrix?.Type ?? "",
+                    Status = s.Matrix?.ProductionStatus ?? "",
+                    IsUnresolved = s.IsUnresolved,
+                    Mark = s.Mark,
+                    SameTypeCount = s.SameTypeCount,
+                    OriginDisplay = s.OriginDisplay,
+                    PledgeShipNames = s.PledgeShipNames,
+                    // ツールチップは初回表示時に生成 (58 船分の SQL を UI スレッドで前倒し実行しない)
+                    TooltipFactory = () => _hangarService.BuildShipTooltip(s, _hangarEquip, s.InstanceKey),
+                    Meltable = meltable,
+                    PledgeValueCents = p?.ValueCents ?? 0,
+                    PriceDisplay = p?.ValueDisplay ?? "",
+                    SellEnabled = meltable && !string.IsNullOrEmpty(s.PledgeId),
+                };
+            }
+
+            // 同 pledge に船が 2 機以上ある pledge は「ヘッダ行 + 子行」にする (Packages の展開表示)。
+            // 初めて現れたグループは既定で展開。既知のグループは前回の展開状態を維持する
+            var prevHeaderIds = new HashSet<string>(
+                _upgradeShips.Where(r => r.IsGroupHeader).Select(r => r.GroupPledgeId), StringComparer.Ordinal);
+            var entries = new List<(string Key, List<UpgradeShipRow> Rows)>();
+            foreach (var g in ships.GroupBy(s => s.PledgeId, StringComparer.Ordinal))
+            {
+                var rows = g.OrderBy(s => s.Name).Select(MakeShipRow).ToList();
+                if (rows.Count >= 2 && !string.IsNullOrEmpty(g.Key))
+                {
+                    _pledgeById.TryGetValue(g.Key, out var p);
+                    var pledgeName = p?.Name ?? rows[0].PledgeName;
+                    if (string.IsNullOrEmpty(pledgeName)) pledgeName = "(pledge)";
+                    var pledgeShipNames = p != null ? string.Join(", ", p.ShipNames) : rows[0].PledgeShipNames;
+                    var meltable = p?.Meltable ?? true;
+                    var header = new UpgradeShipRow
+                    {
+                        IsGroupHeader = true,
+                        GroupPledgeId = g.Key,
+                        PledgeId = g.Key,
+                        PledgeName = pledgeName,
+                        Name = pledgeName,
+                        CurrentName = pledgeName,
+                        DisplayName = $"{pledgeName} ({rows.Count}機)",
+                        InsuranceDisplay = p?.InsuranceDisplay ?? rows[0].InsuranceDisplay,
+                        OriginDisplay = rows[0].OriginDisplay,
+                        PledgeShipNames = pledgeShipNames,
+                        Meltable = meltable,
+                        PledgeValueCents = p?.ValueCents ?? 0,
+                        PriceDisplay = p?.ValueDisplay ?? "",
+                        SellEnabled = meltable,
+                        Tooltip = $"{pledgeName}\n同梱: {pledgeShipNames}\nmelt 額: {(p?.ValueDisplay ?? "不明")}",
+                    };
+                    foreach (var c in rows)
+                    {
+                        c.IsChild = true;
+                        c.GroupPledgeId = g.Key;
+                        c.DisplayName = "　└ " + c.Name;
+                        c.PriceDisplay = "";   // pledge 額はヘッダ行に出す
+                    }
+                    if (!prevHeaderIds.Contains(g.Key)) _expandedPledgeIds.Add(g.Key);
+                    rows.Insert(0, header);
+                    entries.Add((pledgeName, rows));
+                }
+                else
+                {
+                    foreach (var r in rows) entries.Add((r.Name, new List<UpgradeShipRow> { r }));
+                }
+            }
+            _upgradeShips = entries.OrderBy(e => e.Key).SelectMany(e => e.Rows).ToList();
+
+            // melt シミュレーション用の pledge 一覧 (Selected は _soldPledgeIds と双方向に同期)
+            _meltPledges = pledges.Select(p => new MeltPledgeRow
             {
                 PledgeId = p.Id,
                 Name = p.Name,
@@ -2779,7 +2920,10 @@ public partial class MainWindow : Window
                 InsuranceDisplay = p.InsuranceDisplay,
                 Ships = string.Join(", ", p.ShipNames),
                 Meltable = p.Meltable,
+                CanSelect = p.Meltable,   // 適用中 CCU の判定は RecomputeUpgradeSim で更新
+                Selected = !string.IsNullOrEmpty(p.Id) && _soldPledgeIds.Contains(p.Id),
             }).ToList();
+            foreach (var m in _meltPledges) m.PropertyChanged += MeltPledgeRow_PropertyChanged;
             dgMeltPledges.ItemsSource = null;
             dgMeltPledges.ItemsSource = _meltPledges;
 
@@ -2793,6 +2937,30 @@ public partial class MainWindow : Window
             _unresolvedNames = _hangarService.GetUnresolvedNames();
 
             RecomputeUpgradeSim();
+
+            // 選択の復元 (再生成後の行から同じキーの行を探す)
+            if (dgUpgradeShips.ItemsSource is List<UpgradeShipRow> shown)
+            {
+                UpgradeShipRow? reselect = null;
+                if (!string.IsNullOrEmpty(prevSelShipKey))
+                    reselect = shown.FirstOrDefault(r => !r.IsGroupHeader && !r.IsCcu && r.InstanceKey.Equals(prevSelShipKey, StringComparison.Ordinal));
+                else if (!string.IsNullOrEmpty(prevSelCcuId))
+                    reselect = shown.FirstOrDefault(r => r.IsCcu
+                        && r.CcuPledgeId.Equals(prevSelCcuId, StringComparison.OrdinalIgnoreCase)
+                        && (r.CcuParent?.InstanceKey ?? "").Equals(prevSelCcuParentKey, StringComparison.Ordinal));
+                else if (!string.IsNullOrEmpty(prevSelHeaderKey))
+                    reselect = shown.FirstOrDefault(r => r.IsGroupHeader && r.GroupPledgeId.Equals(prevSelHeaderKey, StringComparison.Ordinal));
+                if (reselect != null)
+                {
+                    dgUpgradeShips.SelectedItem = reselect;
+                    dgUpgradeShips.ScrollIntoView(reselect);
+                }
+            }
+
+            // 装備サブタブ (船セレクタ・所持コンポーネント・現在の装備グリッド) も同期状態に合わせる
+            RefreshMyComponents();
+            RefreshLoadoutShipCombo();
+            _upgradeDataLoadedOnce = true;
         }
         catch (Exception ex)
         {
@@ -2815,13 +2983,242 @@ public partial class MainWindow : Window
         }
     }
 
-    // 適用状態から各船の現在名・各権利の状態を再計算し、両グリッドを更新する
+    // 保有船グリッド末尾「使用不可のアップグレード権利」グループの GroupPledgeId (展開状態は _expandedPledgeIds で管理)
+    private const string UnusableCcuGroupId = "__unusable__";
+    // 「使用不可のアップグレード権利」ヘッダ行は再描画のたびに作り直さず同一インスタンスを使う (選択が外れないように)
+    private UpgradeShipRow? _unusableHeaderRow;
+
+    // 保有船グリッドの表示行: ヘッダ行・単独行は常に、子行は展開中のグループのみ (_upgradeShips 自体は全行保持)。
+    // 各船行 (子行/単独行) の直後に、その船に適用済みの CCU (AppliedCcuIds 順) と現在適用可能な未使用 CCU を
+    // 「アップグレード」行として差し込み、どの船にも適用できない CCU は末尾の「使用不可のアップグレード権利」グループ
+    // (既定は折りたたみ) の子として出す。CCU 行は _upgradeShips には入れず、射影のたびに作り直す
+    private void RefreshUpgradeShipGrid()
+    {
+        var selected = dgUpgradeShips.SelectedItem as UpgradeShipRow;
+        var ccuById = _allCcus.Where(c => !string.IsNullOrEmpty(c.PledgeId))
+            .GroupBy(c => c.PledgeId, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        var stateById = _upgradeCcus.Where(r => !string.IsNullOrEmpty(r.PledgeId))
+            .GroupBy(r => r.PledgeId, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        var usable = _upgradeCcus.Where(r => r.StateDisplay == "使用可").ToList();
+        // 売却予定 (Sell) にした CCU。使用不可扱いだが「使用不可のアップグレード権利」グループではなく元船の下 (使用可の後) に出す
+        var soldCcus = _upgradeCcus.Where(r => r.StateDisplay == "売却予定").ToList();
+        var placedSoldCcuIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 現在保有型 (正規化) ごとの船数 (売却予定の船は除く)。同じ未使用 CCU が同型船 N 機の下に重複表示されるとき
+        // 「(他 N-1 機でも使用可)」を CCU 行の表示名に付けるために使う
+        var heldCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in _upgradeShips.Where(s => !s.IsGroupHeader && !s.IsSold))
+        {
+            var n = _hangarService.NormalizeShipName(s.CurrentName);
+            heldCounts[n] = heldCounts.TryGetValue(n, out var cnt) ? cnt + 1 : 1;
+        }
+
+        // 帰属決定: 表示の有無 (グループの展開状態) に関係なく、全船行 (ヘッダ行を除く。売却予定の船を含む) を基準に
+        // 「その CCU がどの船の下に置かれるか」を先に確定する (FromShip 正規化 == CurrentName 正規化)。
+        //   使用可 CCU  … 売却予定でない船の下 (同型船が複数あれば各船の下に重複表示)
+        //   売却予定 CCU … 元船の下 (船自体が売却予定でも Unsell できるよう出す)。ここで placedSoldCcuIds も確定する
+        // 折りたたみ中の子行に属する CCU は、後段の射影で子行と一緒に非表示になる (「使用不可のアップグレード権利」グループには出さない)
+        var usableByShip = new Dictionary<UpgradeShipRow, List<UpgradeCcuRow>>(ReferenceEqualityComparer.Instance);
+        var soldByShip = new Dictionary<UpgradeShipRow, List<UpgradeCcuRow>>(ReferenceEqualityComparer.Instance);
+        foreach (var s in _upgradeShips)
+        {
+            if (s.IsGroupHeader) continue;
+            var current = _hangarService.NormalizeShipName(s.CurrentName);
+            bool FromMatches(UpgradeCcuRow r) =>
+                ccuById.TryGetValue(r.PledgeId, out var c)
+                && _hangarService.NormalizeShipName(c.FromShip).Equals(current, StringComparison.OrdinalIgnoreCase);
+
+            if (!s.IsSold) usableByShip[s] = usable.Where(FromMatches).ToList();
+            var sold = soldCcus.Where(FromMatches).ToList();
+            soldByShip[s] = sold;
+            foreach (var r in sold) placedSoldCcuIds.Add(r.PledgeId);
+        }
+
+        // 射影: ヘッダ行・単独行は常に、子行は展開中のグループのみ。各船行の直後に帰属決定済みの CCU 行を差し込む
+        var list = new List<UpgradeShipRow>();
+        foreach (var s in _upgradeShips)
+        {
+            if (s.IsChild && !_expandedPledgeIds.Contains(s.GroupPledgeId)) continue;
+            list.Add(s);
+            if (s.IsGroupHeader) continue;
+
+            var indent = s.IsChild ? "　　↳ " : "　↳ ";
+
+            // この船に適用済みの CCU (適用順)。Undo は末尾の 1 本のみ可 (途中を外すと連鎖が壊れる)
+            for (var i = 0; i < s.AppliedCcuIds.Count; i++)
+            {
+                if (!ccuById.TryGetValue(s.AppliedCcuIds[i], out var c)) continue;
+                stateById.TryGetValue(c.PledgeId, out var st);
+                list.Add(MakeCcuRow(c, st, s, indent, "使用中", isLastApplied: i == s.AppliedCcuIds.Count - 1));
+            }
+
+            var current = _hangarService.NormalizeShipName(s.CurrentName);
+
+            // この船に現在適用可能な未使用 CCU。売却予定の船には出さない (usableByShip に無い)。
+            // 表示順は 使用中 → 使用可 → 売却予定
+            if (usableByShip.TryGetValue(s, out var usableHere))
+            {
+                var others = heldCounts.TryGetValue(current, out var hc) ? hc - 1 : 0;   // 同型の他の船 (同じ CCU が使える) の数
+                foreach (var r in usableHere)
+                {
+                    if (!ccuById.TryGetValue(r.PledgeId, out var c)) continue;
+                    var row = MakeCcuRow(c, r, s, indent, "使用可", isLastApplied: false);
+                    if (others >= 1) row.DisplayName += $" (他 {others} 機でも使用可)";
+                    list.Add(row);
+                }
+            }
+
+            // 売却予定にした CCU のうち元船がこの船のもの
+            if (soldByShip.TryGetValue(s, out var soldHere))
+            {
+                foreach (var r in soldHere)
+                {
+                    if (!ccuById.TryGetValue(r.PledgeId, out var c)) continue;
+                    list.Add(MakeCcuRow(c, r, s, indent, "売却予定", isLastApplied: false));
+                }
+            }
+        }
+
+        // どの船にも適用できない CCU (使用不可 / 使用不可 (売却))。
+        // 売却予定 CCU は元船の下に出すので除外する (元船を保有しておらず置き場が無かったものだけはここに出す)。
+        // placedSoldCcuIds は帰属決定で全船行を基準に確定済みなので、元船が折りたたみ中でもここには出ない
+        var unusable = _upgradeCcus.Where(r => r.IsUnusable
+            && (r.StateDisplay != "売却予定" || !placedSoldCcuIds.Contains(r.PledgeId))).ToList();
+        if (unusable.Count > 0)
+        {
+            var expanded = _expandedPledgeIds.Contains(UnusableCcuGroupId);
+            _unusableHeaderRow ??= new UpgradeShipRow
+            {
+                IsGroupHeader = true,
+                GroupPledgeId = UnusableCcuGroupId,
+                Name = "使用不可のアップグレード権利",
+                CurrentName = "使用不可のアップグレード権利",
+                Tooltip = "保有船のどれにも適用できないアップグレード権利 (元船を保有していない、または元船を売却予定にした)",
+                SellEnabled = false,
+            };
+            _unusableHeaderRow.IsExpanded = expanded;
+            _unusableHeaderRow.DisplayName = $"使用不可のアップグレード権利 ({unusable.Count})";
+            list.Add(_unusableHeaderRow);
+            if (expanded)
+            {
+                foreach (var r in unusable)
+                {
+                    if (!ccuById.TryGetValue(r.PledgeId, out var c)) continue;
+                    list.Add(MakeCcuRow(c, r, null, "　↳ ", r.StateDisplay, isLastApplied: false));
+                }
+            }
+        }
+
+        dgUpgradeShips.ItemsSource = null;
+        dgUpgradeShips.ItemsSource = list;
+
+        // 選択の復元: 船行・ヘッダ行は同一インスタンスが表示リストに残っている場合のみ (参照一致で確認)。
+        // LoadUpgradeData から呼ばれた際は _upgradeShips が作り直されていて旧オブジェクトは表示リストに無いので代入しない (使用不可グループのヘッダ行は同一インスタンスを再利用するため例外)
+        // (その場合の復元は LoadUpgradeData 側がキーで行う)。CCU 行は作り直されるので同じ CCU・同じ親の行を探す
+        if (selected == null) return;
+        var reselect = !selected.IsCcu
+            ? (list.Any(r => ReferenceEquals(r, selected)) ? selected : null)
+            : list.FirstOrDefault(r => r.IsCcu
+                && r.CcuPledgeId.Equals(selected.CcuPledgeId, StringComparison.OrdinalIgnoreCase)
+                && ReferenceEquals(r.CcuParent, selected.CcuParent));
+        if (reselect != null) dgUpgradeShips.SelectedItem = reselect;
+    }
+
+    // 保有船グリッドに差し込む CCU (アップグレード権利) 1 行。parent は適用先／適用元の船行 (使用不可グループの子は null)
+    private UpgradeShipRow MakeCcuRow(HangarCcu c, UpgradeCcuRow? state, UpgradeShipRow? parent, string indent, string ccuState, bool isLastApplied)
+    {
+        _pledgeById.TryGetValue(c.PledgeId, out var p);
+        var meltable = p?.Meltable ?? true;
+        var pledgeName = string.IsNullOrEmpty(p?.Name) ? c.RouteDisplay : p!.Name;
+
+        var toMatrix = _hangarService.ResolveShip(c.ToShip);
+        var toInfo = "";
+        if (toMatrix != null)
+        {
+            var parts = new[] { toMatrix.Focus, toMatrix.Type }.Where(x => !string.IsNullOrEmpty(x)).ToList();
+            if (parts.Count > 0) toInfo = $" ({string.Join(" / ", parts)})";
+        }
+        var tip = $"{pledgeName}\n支払額 {c.PriceDisplay}";
+        if (c.StdPriceCents > 0) tip += $" / 標準CCU額 ${c.StdPriceCents / 100.0:N2}";
+        if (!string.IsNullOrEmpty(c.DiscountDisplay)) tip += $" / 割引 {c.DiscountDisplay}";
+        tip += $"\n先船: {c.ToShip}{toInfo}";
+
+        var toSale = state?.ToShipSaleDisplay ?? "";
+        return new UpgradeShipRow
+        {
+            IsCcu = true,
+            CcuPledgeId = c.PledgeId,
+            CcuState = ccuState,
+            CcuParent = parent,
+            CcuIsLastApplied = isLastApplied,
+            PledgeId = c.PledgeId,               // Sell は pledge 単位 (UpgradeSell_Click が PledgeId を使う)
+            PledgeName = p?.Name ?? "",
+            Name = c.RouteDisplay,
+            CurrentName = c.ToShip,
+            DisplayName = $"{indent}Upgrade: {c.FromShip} → {c.ToShip}",
+            GroupPledgeId = parent?.GroupPledgeId ?? UnusableCcuGroupId,
+            OriginDisplay = $"アップグレード ← {c.FromShip}",   // 由来 = アップグレード + 何からのアップグレードか
+            PledgeShipNames = p?.Name ?? "",     // 由来セルの ToolTip (pledge 名)
+            PriceDisplay = c.PriceDisplay,
+            DiscountDisplay = c.DiscountDisplay,
+            WarbondDisplay = c.Warbond ? "Warbond" : "",
+            ToShipSaleDisplay = toSale,
+            OnSaleDisplay = toSale,              // 「販売」列 = 先船の販売状況
+            OnSaleWarbond = toSale == "Warbond",
+            Tooltip = tip,
+            Meltable = meltable,
+            PledgeValueCents = p?.ValueCents ?? 0,
+            // 適用中 (使用中) の CCU は先に Undo が必要なので Sell 不可 (SellToolTip で案内)
+            SellEnabled = meltable && !string.IsNullOrEmpty(c.PledgeId) && ccuState != "使用中",
+            IsSold = !string.IsNullOrEmpty(c.PledgeId) && _soldPledgeIds.Contains(c.PledgeId),
+        };
+    }
+
+    // ヘッダ行の「+/−」: グループの展開状態を反転する
+    private void UpgradeGroupToggle_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button btn || btn.DataContext is not UpgradeShipRow row) return;
+        if (!row.IsGroupHeader || string.IsNullOrEmpty(row.GroupPledgeId)) return;
+        if (!_expandedPledgeIds.Remove(row.GroupPledgeId)) _expandedPledgeIds.Add(row.GroupPledgeId);
+        row.IsExpanded = _expandedPledgeIds.Contains(row.GroupPledgeId);
+        RefreshUpgradeShipGrid();
+    }
+
+    // Sell / Unsell: pledge 単位で melt 予定に入れる／外す (パック内の 1 機だけは melt できない: R-02)
+    private void UpgradeSell_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button btn || btn.DataContext is not UpgradeShipRow row) return;
+        if (!row.SellEnabled || string.IsNullOrEmpty(row.PledgeId)) return;
+        if (!_soldPledgeIds.Remove(row.PledgeId)) _soldPledgeIds.Add(row.PledgeId);
+        RecomputeUpgradeSim();
+    }
+
+    // melt シミュレーションパネルのチェック → _soldPledgeIds へ反映 (RecomputeUpgradeSim 側からの同期は状態が一致するので何もしない)
+    private void MeltPledgeRow_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(MeltPledgeRow.Selected) || sender is not MeltPledgeRow row) return;
+        if (string.IsNullOrEmpty(row.PledgeId)) return;
+        if (row.Selected == _soldPledgeIds.Contains(row.PledgeId)) return;
+        if (row.Selected) _soldPledgeIds.Add(row.PledgeId); else _soldPledgeIds.Remove(row.PledgeId);
+        RecomputeUpgradeSim();
+    }
+
+    // 適用状態から各船の現在名・各権利の状態を再計算し、保有船グリッド (船行 + CCU 行) を更新する
     private void RecomputeUpgradeSim()
     {
         var ccuById = _allCcus.ToDictionary(c => c.PledgeId, StringComparer.OrdinalIgnoreCase);
         var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var shipRows = _upgradeShips.Where(s => !s.IsGroupHeader).ToList();   // ヘッダ行は船ではない
 
         foreach (var s in _upgradeShips)
+        {
+            s.IsSold = !string.IsNullOrEmpty(s.PledgeId) && _soldPledgeIds.Contains(s.PledgeId);
+            s.IsExpanded = s.IsGroupHeader && _expandedPledgeIds.Contains(s.GroupPledgeId);
+        }
+
+        foreach (var s in shipRows)
         {
             s.CurrentName = s.Name;
             foreach (var id in s.AppliedCcuIds)
@@ -2832,33 +3229,49 @@ public partial class MainWindow : Window
             }
         }
 
-        // 比較は名寄せ後 (Ship Matrix の正式名) で行う。表示は元の文字列のまま
+        // 比較は名寄せ後 (Ship Matrix の正式名) で行う。表示は元の文字列のまま。売却 (melt 予定) の船は保有から除く
         var heldCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        foreach (var s in _upgradeShips)
+        foreach (var s in shipRows.Where(s => !s.IsSold))
         {
             var n = _hangarService.NormalizeShipName(s.CurrentName);
             heldCounts[n] = heldCounts.TryGetValue(n, out var cnt) ? cnt + 1 : 1;
         }
         var heldNames = new HashSet<string>(heldCounts.Keys, StringComparer.OrdinalIgnoreCase);
 
-        foreach (var s in _upgradeShips)
+        // R-06: 売却船を元船とする CCU は使用不能 (元の型・適用後の型の両方)
+        var soldTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in shipRows.Where(s => s.IsSold))
+        {
+            soldTypes.Add(_hangarService.NormalizeShipName(s.Name));
+            soldTypes.Add(_hangarService.NormalizeShipName(s.CurrentName));
+        }
+
+        foreach (var s in shipRows)
         {
             var current = _hangarService.NormalizeShipName(s.CurrentName);
-            s.CanUpgrade = _allCcus.Any(c => !used.Contains(c.PledgeId)
+            // 未使用かつ売却予定 (Sell / melt パネル) でない CCU だけが候補 (下の _upgradeCcus の usable 判定と同じ条件)
+            s.CanUpgrade = !s.IsSold && _allCcus.Any(c => !used.Contains(c.PledgeId)
+                && !(!string.IsNullOrEmpty(c.PledgeId) && _soldPledgeIds.Contains(c.PledgeId))
                 && _hangarService.NormalizeShipName(c.FromShip).Equals(current, StringComparison.OrdinalIgnoreCase));
-            s.IsDuplicate = heldCounts.TryGetValue(current, out var cnt) && cnt >= 2;
+            s.IsDuplicate = !s.IsSold && heldCounts.TryGetValue(current, out var cnt) && cnt >= 2;
 
             // RSI ストアでの販売状況 (保有船名で照合)
             var warbond = _hangarService.FindStoreShipWarbond(s.Name);
             var normal = _hangarService.FindStoreShip(s.Name);
             s.OnSaleWarbond = warbond != null;
             s.OnSaleDisplay = warbond != null ? "Warbond 販売中" : normal != null ? "販売中" : "";
+            s.UpgradableDisplay = s.CanUpgrade ? "○" : "";
+            s.StoreUpgradeDisplay = StoreUpgradeDisplayFor(s.Name);
         }
 
         _upgradeCcus = _allCcus.Select(c =>
         {
             var isUsed = used.Contains(c.PledgeId);
-            var usable = !isUsed && heldNames.Contains(_hangarService.NormalizeShipName(c.FromShip));
+            // CCU 自体が売却予定 (Sell / melt パネル) なら、元船を保有していても使用不可扱い (heldNames 判定より前に除外)
+            var isSoldCcu = !string.IsNullOrEmpty(c.PledgeId) && _soldPledgeIds.Contains(c.PledgeId);
+            var from = _hangarService.NormalizeShipName(c.FromShip);
+            var usable = !isUsed && !isSoldCcu && heldNames.Contains(from);
+            var blockedBySell = !isUsed && !isSoldCcu && !usable && soldTypes.Contains(from);   // R-06
             return new UpgradeCcuRow
             {
                 PledgeId = c.PledgeId,
@@ -2866,7 +3279,7 @@ public partial class MainWindow : Window
                 PriceDisplay = c.PriceDisplay,
                 DiscountDisplay = c.DiscountDisplay,
                 WarbondDisplay = c.Warbond ? "Warbond" : "",
-                StateDisplay = isUsed ? "使用中" : usable ? "使用可" : "使用不可",
+                StateDisplay = isUsed ? "使用中" : isSoldCcu ? "売却予定" : usable ? "使用可" : blockedBySell ? "使用不可 (売却)" : "使用不可",
                 IsUsed = isUsed,
                 IsUnusable = !isUsed && !usable,
                 IsDuplicateTarget = heldNames.Contains(_hangarService.NormalizeShipName(c.ToShip)),
@@ -2886,11 +3299,18 @@ public partial class MainWindow : Window
             OwnedDisplay = heldNames.Contains(_hangarService.NormalizeShipName(k.Name)) ? "保有" : "",
         }).ToList();
 
-        dgUpgradeShips.ItemsSource = null;
-        dgUpgradeShips.ItemsSource = _upgradeShips;
-        dgUpgradeCcus.ItemsSource = null;
-        dgUpgradeCcus.ItemsSource = _upgradeCcus;
+        RefreshUpgradeShipGrid();   // CCU 行 (_upgradeCcus の状態) も保有船グリッドに差し込まれる
         RefreshStoreGrid();
+        RefreshMyShipRows();   // 所持船の保有数・由来・Upgradable 列も同期状態に合わせる
+
+        // melt シミュレーションパネルのチェックを _soldPledgeIds に合わせる (MeltPledgeRow_PropertyChanged は一致するので再入しない)。
+        // 適用中 (どの船行かの AppliedCcuIds に含まれる) の CCU pledge はチェック不可 (Undo 後に売却できる)
+        var appliedPledgeIds = new HashSet<string>(shipRows.SelectMany(s => s.AppliedCcuIds), StringComparer.OrdinalIgnoreCase);
+        foreach (var m in _meltPledges)
+        {
+            m.Selected = !string.IsNullOrEmpty(m.PledgeId) && _soldPledgeIds.Contains(m.PledgeId);
+            m.CanSelect = m.Meltable && !(!string.IsNullOrEmpty(m.PledgeId) && appliedPledgeIds.Contains(m.PledgeId));
+        }
 
         var appliedTotal = _allCcus.Where(c => used.Contains(c.PledgeId)).Sum(c => c.PriceCents);
         var usableTotal = _upgradeCcus.Where(r => r.StateDisplay == "使用可")
@@ -2902,25 +3322,85 @@ public partial class MainWindow : Window
         var storeCredit = totals.StoreCreditCents.HasValue ? $"${totals.StoreCreditCents.Value / 100.0:N2}" : "未取得";
         var buyback = totals.BuybackTokens.HasValue ? totals.BuybackTokens.Value.ToString() : "未取得";
 
-        txtUpgradeStatus.Text = $"保有船 {_upgradeShips.Count} 機 / 権利 {_allCcus.Count} 本";
+        // クレジット管理 (R-01: 売却 Credit = Σ 売却 pledge 額 + Σ その pledge に適用中の CCU 額。R-09: meltable=false は除外)
+        long sellPledgeCredit = 0;
+        var soldPledgeCount = 0;
+        var losesLti = false;
+        foreach (var id in _soldPledgeIds)
+        {
+            if (!_pledgeById.TryGetValue(id, out var p) || !p.Meltable) continue;
+            soldPledgeCount++;
+            sellPledgeCredit += p.ValueCents;
+            if (p.Insurance == HangarInsurance.Lti) losesLti = true;
+        }
+        var sellCcuCredit = shipRows.Where(s => s.IsSold)
+            .SelectMany(s => s.AppliedCcuIds)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Sum(id => ccuById.TryGetValue(id, out var c) ? c.PriceCents : 0);
+        var sellCredit = sellPledgeCredit + sellCcuCredit;
+        var lostShips = shipRows.Count(s => s.IsSold && s.Meltable);   // Credit と同様、melt 不可の pledge は数えない
+        var totalCredit = totals.StoreCreditCents.HasValue
+            ? $"${(totals.StoreCreditCents.Value + sellCredit) / 100.0:N2}"
+            : $"${sellCredit / 100.0:N2} (Store Credit 未取得)";
+        txtSellLtiWarning.Visibility = losesLti ? Visibility.Visible : Visibility.Collapsed;
+
+        txtUpgradeStatus.Text = $"保有船 {shipRows.Count} 機 / 権利 {_allCcus.Count} 本";
         ApplyUnresolvedWarning();
         txtUpgradeSummary.Text =
             $"適用中 ${appliedTotal / 100.0:N2}  |  未使用 ${usableTotal / 100.0:N2}  |  使用不可 ${unusableTotal / 100.0:N2}" +
             $"  |  pledge {totals.PledgeCount} / 総 melt 額 ${totals.TotalMeltValueCents / 100.0:N2} / melt 可能額 ${totals.MeltableValueCents / 100.0:N2}" +
-            $" / Store Credit {storeCredit} / Buy Back 残 {buyback}" +
-            "   ※ 権利の行をダブルクリックすると標準CCU額を入力でき、割引率が出ます";
+            "   ※ 権利の行をダブルクリックすると標準CCU額を入力でき、割引率が出ます" +
+            $"\n現在の Store Credit {storeCredit}  |  売却で得られる Credit ${sellCredit / 100.0:N2} (pledge {soldPledgeCount} 件)" +
+            $"  |  合計 {totalCredit}  |  失う機体 {lostShips} 機  |  LTI 喪失{(losesLti ? "あり" : "なし")}" +
+            $"  |  Buy Back 残トークン {buyback}";
     }
 
     private void UpgradeApply_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.DataContext is not UpgradeShipRow row) return;
-        if (!row.CanUpgrade) return;
+        if (row.IsCcu)
+        {
+            // CCU 行の Upgrade: その CCU を親の船行に適用する (ダイアログ無し)
+            if (!row.UpgradeEnabled || row.CcuParent == null) return;
+            ApplyUpgradeToRow(row.CcuParent, row.CcuPledgeId);
+            return;
+        }
+        ApplyUpgradeToRow(row);
+    }
+
+    // 指定した権利 1 本を保有船 1 行に適用する (CCU 行の Upgrade ボタン用。ダイアログ無し)。適用したら true
+    private bool ApplyUpgradeToRow(UpgradeShipRow row, string ccuId)
+    {
+        if (row.IsGroupHeader || row.IsCcu || row.IsSold) return false;   // ヘッダ行・CCU 行・売却 (melt 予定) 行には適用しない
+        if (string.IsNullOrEmpty(ccuId)) return false;
+
+        var used = new HashSet<string>(_upgradeShips.SelectMany(s => s.AppliedCcuIds), StringComparer.OrdinalIgnoreCase);
+        if (used.Contains(ccuId)) return false;
+        var ccu = _allCcus.FirstOrDefault(c => c.PledgeId.Equals(ccuId, StringComparison.OrdinalIgnoreCase));
+        if (ccu == null) return false;
+        if (_soldPledgeIds.Contains(ccu.PledgeId)) return false;   // 売却予定 (melt) の権利は適用しない
+
+        var current = _hangarService.NormalizeShipName(row.CurrentName);
+        if (!_hangarService.NormalizeShipName(ccu.FromShip).Equals(current, StringComparison.OrdinalIgnoreCase)) return false;
+
+        row.AppliedCcuIds.Add(ccu.PledgeId);
+        RecomputeUpgradeSim();
+        return true;
+    }
+
+    // 保有船 1 行に使用可能な権利を 1 本適用する (候補が複数なら選択ダイアログ)。適用したら true
+    private bool ApplyUpgradeToRow(UpgradeShipRow row)
+    {
+        if (row.IsGroupHeader || row.IsCcu || row.IsSold) return false;   // ヘッダ行・CCU 行・売却 (melt 予定) 行には適用しない
+        if (!row.CanUpgrade) return false;
 
         var used = new HashSet<string>(_upgradeShips.SelectMany(s => s.AppliedCcuIds), StringComparer.OrdinalIgnoreCase);
         var current = _hangarService.NormalizeShipName(row.CurrentName);
+        // 売却予定 (Sell / melt パネル) の CCU は候補から除く (RecomputeUpgradeSim の CanUpgrade / usable 判定と同じ条件)
         var candidates = _allCcus.Where(c => !used.Contains(c.PledgeId)
+            && !(!string.IsNullOrEmpty(c.PledgeId) && _soldPledgeIds.Contains(c.PledgeId))
             && _hangarService.NormalizeShipName(c.FromShip).Equals(current, StringComparison.OrdinalIgnoreCase)).ToList();
-        if (candidates.Count == 0) return;
+        if (candidates.Count == 0) return false;
 
         HangarCcu? chosen;
         if (candidates.Count == 1)
@@ -2930,17 +3410,36 @@ public partial class MainWindow : Window
         else
         {
             chosen = PickCcu(candidates);
-            if (chosen == null) return;
+            if (chosen == null) return false;
         }
 
         row.AppliedCcuIds.Add(chosen.PledgeId);
         RecomputeUpgradeSim();
+        return true;
     }
 
-    // 最後に適用した1本だけを外す (連鎖の途中まで戻れる)
+    // 「購入可」列: ストア (Standalone Ships / Upgrades) にこの船より税抜価格が高い船があれば件数を出す
+    private string StoreUpgradeDisplayFor(string shipName)
+    {
+        var t = _hangarService.StoreUpgradeTargets(shipName);
+        if (t == null || t.Value.Count == 0) return "";
+        return t.Value.HasWarbond ? $"Warbond あり ({t.Value.Count})" : $"購入可 ({t.Value.Count})";
+    }
+
+    // 最後に適用した1本だけを外す (連鎖の途中まで戻れる)。
+    // 使用中の CCU 行の Undo は、その CCU が親の船行の末尾 (最後に適用した 1 本) のときだけ外す
     private void UpgradeUndo_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.DataContext is not UpgradeShipRow row) return;
+        if (row.IsCcu)
+        {
+            if (!row.UndoEnabled || row.CcuParent == null) return;
+            var ids = row.CcuParent.AppliedCcuIds;
+            if (ids.Count == 0 || !ids[ids.Count - 1].Equals(row.CcuPledgeId, StringComparison.OrdinalIgnoreCase)) return;
+            ids.RemoveAt(ids.Count - 1);
+            RecomputeUpgradeSim();
+            return;
+        }
         if (!row.HasApplied) return;
         row.AppliedCcuIds.RemoveAt(row.AppliedCcuIds.Count - 1);
         RecomputeUpgradeSim();
@@ -2978,11 +3477,19 @@ public partial class MainWindow : Window
         return result;
     }
 
-    // 権利の行をダブルクリックしたら標準CCU額を入力させ、割引率を出せるようにする
+    // 保有船グリッドの CCU (アップグレード) 行をダブルクリックしたら標準CCU額を入力させ、割引率を出せるようにする (船行では何もしない)
     private void UpgradeCcu_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if (dgUpgradeCcus.SelectedItem is not UpgradeCcuRow row) return;
-        var ccu = _allCcus.FirstOrDefault(c => c.PledgeId.Equals(row.PledgeId, StringComparison.OrdinalIgnoreCase));
+        // 行内のボタン (Upgrade / Undo / Sell / 装備) 上のダブルクリック (連打) では開かない: 祖先に Button があれば何もしない
+        for (var d = e.OriginalSource as DependencyObject; d != null;
+             d = d is System.Windows.Media.Visual or System.Windows.Media.Media3D.Visual3D
+                 ? System.Windows.Media.VisualTreeHelper.GetParent(d)
+                 : LogicalTreeHelper.GetParent(d))
+        {
+            if (d is Button) return;
+        }
+        if (dgUpgradeShips.SelectedItem is not UpgradeShipRow row || !row.IsCcu) return;
+        var ccu = _allCcus.FirstOrDefault(c => c.PledgeId.Equals(row.CcuPledgeId, StringComparison.OrdinalIgnoreCase));
         if (ccu == null) return;
 
         var dlg = new InputDialog($"{ccu.RouteDisplay} の標準CCU額 (USD) を入力してください。\n0 を入力すると割引率を消します。")
@@ -3021,6 +3528,7 @@ public partial class MainWindow : Window
     private void UpgradeMark_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (sender is not ComboBox combo || combo.DataContext is not UpgradeShipRow row) return;
+        if (row.IsGroupHeader) return;   // ヘッダ行は船ではないのでマークを保存しない
         var selected = combo.SelectedItem as string ?? "";
         if (selected == row.MarkDisplay) return;
 
@@ -3045,13 +3553,36 @@ public partial class MainWindow : Window
         }
     }
 
-    // CCU プランナー: 保有船 + 権利から適用/melt/使用不可の提案を作る
+    // CCU プランナー: 保有船 + 権利から適用/melt/使用不可の提案を作る。
+    // 手動シミュレーション状態を反映する: 保有船は _upgradeShips の子行/単独行 (売却済みは除外) を CurrentName (適用後の船名) で、
+    // CCU は未使用 (どの行の AppliedCcuIds にも無い) ものだけ渡す
     private void UpgradePlan_Click(object sender, RoutedEventArgs e)
     {
         try
         {
             _hangarService.SetCacheDir(WorkDir);
-            var plan = _hangarService.BuildPlan(_hangarService.GetShipInstances(), _allCcus);
+            var applied = new HashSet<string>(_upgradeShips.SelectMany(s => s.AppliedCcuIds), StringComparer.OrdinalIgnoreCase);
+            var ships = _upgradeShips
+                .Where(r => !r.IsGroupHeader && !r.IsSold)
+                .Select(r =>
+                {
+                    _pledgeById.TryGetValue(r.PledgeId, out var p);
+                    return new HangarShipInstance
+                    {
+                        PledgeId = r.PledgeId,
+                        PledgeName = r.PledgeName,
+                        Name = r.CurrentName,
+                        Insurance = p?.Insurance ?? HangarInsurance.Unknown,
+                        Matrix = _hangarService.ResolveShip(r.CurrentName),
+                        Mark = r.Mark,
+                        OriginDisplay = r.OriginDisplay,
+                        SameTypeCount = r.SameTypeCount,
+                        PledgeShipNames = r.PledgeShipNames,
+                    };
+                })
+                .ToList();
+            var ccus = _allCcus.Where(c => !applied.Contains(c.PledgeId)).ToList();
+            var plan = _hangarService.BuildPlan(ships, ccus);
             var ccuById = _allCcus.Where(c => !string.IsNullOrEmpty(c.PledgeId))
                 .GroupBy(c => c.PledgeId, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
@@ -3118,7 +3649,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var selectedIds = _meltPledges.Where(p => p.Selected).Select(p => p.PledgeId).ToList();
+        var selectedIds = _soldPledgeIds.ToList();   // Sell ボタン／パネルのチェックと双方向に同期している
 
         try
         {
@@ -3161,10 +3692,535 @@ public partial class MainWindow : Window
         _tradeService.SetCacheDir(WorkDir);
         _tradeService.LoadMyShips();
         dgMyShips.ItemsSource = null;
-        dgMyShips.ItemsSource = _tradeService.MyShips;
+        dgMyShips.ItemsSource = _tradeService.MyShips.Select(ToMyShipRow).ToList();
         txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻";
         RefreshCommodityShipCombo();
     }
+
+    // DB を読み直さず、現在の _tradeService.MyShips を表示行に写し直す (同期状態・シミュレーション状態の反映用)
+    private void RefreshMyShipRows()
+    {
+        if (dgMyShips == null) return;   // XAML 読込中
+        var selectedId = (dgMyShips.SelectedItem as MyShipRow)?.Id;
+        dgMyShips.ItemsSource = null;
+        var rows = _tradeService.MyShips.Select(ToMyShipRow).ToList();
+        dgMyShips.ItemsSource = rows;
+        if (selectedId != null)
+            dgMyShips.SelectedItem = rows.FirstOrDefault(r => r.Id == selectedId.Value);
+    }
+
+    // 所持船 (手入力) 1 件を表示行にする。同期済み保有船と正規化名で照合し、保有数・由来・Upgradable・販売・購入可を埋める
+    private MyShipRow ToMyShipRow(MyShipEntry e)
+    {
+        var row = new MyShipRow
+        {
+            Id = e.Id,
+            Name = e.Name,
+            Manufacturer = e.Manufacturer,
+            Scu = e.Scu,
+            Notes = e.Notes,
+            AddedAt = e.AddedAt,
+        };
+
+        var matched = MatchHangarRowsForMyShip(e.Name);
+
+        row.HangarCount = matched.Count;
+        row.HangarOriginDisplay = string.Join(" / ", matched.Select(s => s.OriginDisplay).Where(o => !string.IsNullOrEmpty(o)));
+        row.HangarCanUpgrade = matched.Any(s => s.CanUpgrade);
+        row.HangarUpgradableDisplay = row.HangarCanUpgrade ? "○" : "";
+        row.HangarSaleDisplay = _hangarService.FindStoreShipWarbond(e.Name) != null ? "Warbond 販売中"
+            : _hangarService.FindStoreShip(e.Name) != null ? "販売中" : "";
+        row.HangarStoreUpgradeDisplay = StoreUpgradeDisplayFor(e.Name);
+
+        // ツールチップは初回表示時に生成 (所持船→保有船インスタンスの選び方は OpenLoadout_Click と同じ FindHangarRowForMyShip)
+        var hangarRow = FindHangarRowForMyShip(row);
+        if (hangarRow != null)
+        {
+            row.TooltipFactory = () => hangarRow.Tooltip;
+        }
+        else
+        {
+            // 未同期: Ship Matrix の情報のみ
+            var myId = e.Id;
+            var myName = e.Name;
+            row.TooltipFactory = () =>
+            {
+                var tmp = new HangarShipInstance { Name = myName, Matrix = _hangarService.ResolveShip(myName) };
+                return _hangarService.BuildShipTooltip(tmp, _hangarEquip, $"my|{myId}");
+            };
+        }
+        return row;
+    }
+
+    // 所持船名 (正規化名) に一致する保有船行を _upgradeShips の表示順で返す (ヘッダ行・CCU 行は除く)
+    private List<UpgradeShipRow> MatchHangarRowsForMyShip(string shipName)
+    {
+        var norm = _hangarService.NormalizeShipName(shipName);
+        return _upgradeShips
+            .Where(s => !s.IsGroupHeader && !s.IsCcu
+                && _hangarService.NormalizeShipName(s.Name).Equals(norm, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
+    // 所持船 1 件に対応する保有船インスタンス = _upgradeShips の表示順で最初に正規化名が一致する船行 (ヘッダ行・CCU 行は除く)。
+    // ツールチップ (ToMyShipRow) と「装備」ボタン (OpenLoadout_Click) で同じ船を指すよう、両方からこれを使う。無ければ null
+    private UpgradeShipRow? FindHangarRowForMyShip(MyShipRow my) => MatchHangarRowsForMyShip(my.Name).FirstOrDefault();
+
+    // 所持船の「アップグレード」ボタン: アップグレード管理タブへ切り替え、一致する保有船に権利を適用する
+    private void MyShipUpgrade_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button btn || btn.DataContext is not MyShipRow my) return;
+
+        var norm = _hangarService.NormalizeShipName(my.Name);
+        var target = _upgradeShips.FirstOrDefault(s => !s.IsGroupHeader && !s.IsSold && s.CanUpgrade
+            && _hangarService.NormalizeShipName(s.Name).Equals(norm, StringComparison.OrdinalIgnoreCase));
+
+        tabShipManagement.SelectedItem = tabUpgradeManage;
+        if (target == null)
+        {
+            txtUpgradeStatus.Text = $"「{my.Name}」に使える権利はありません";
+            return;
+        }
+
+        // 折りたたまれたグループの子行なら展開してから選択できるようにする
+        if (target.IsChild && !string.IsNullOrEmpty(target.GroupPledgeId)) _expandedPledgeIds.Add(target.GroupPledgeId);
+
+        ApplyUpgradeToRow(target);   // 内部で RecomputeUpgradeSim → RefreshMyShipRows まで行う
+
+        dgUpgradeShips.SelectedItem = target;
+        dgUpgradeShips.ScrollIntoView(target);
+    }
+
+    // 同期済み保有船のうち、正規化名が所持船に無いものを所持船に追加する (同型は 1 件)
+    private void ImportHangarShips_Click(object sender, RoutedEventArgs e) => ImportHangarShipsIntoMyShips(confirm: true);
+
+    // 同期済み保有船を所持船へ追加する。confirm=true のときだけ確認ダイアログを出す。追加件数を返す。
+    // 既存の所持船行は変更・削除しない (手入力の保護)
+    private int ImportHangarShipsIntoMyShips(bool confirm)
+    {
+        if (_hangarShips.Count == 0)
+        {
+            if (confirm)
+                MessageBox.Show("同期済みの保有船がありません。先に [My Hangar と同期] を実行してください。", "所持船に反映");
+            return 0;
+        }
+
+        _tradeService.SetCacheDir(WorkDir);
+        _tradeService.LoadMyShips();
+        var existing = new HashSet<string>(
+            _tradeService.MyShips.Select(m => _hangarService.NormalizeShipName(m.Name)),
+            StringComparer.OrdinalIgnoreCase);
+
+        var toAdd = new List<HangarShipInstance>();
+        foreach (var s in _hangarShips.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            var norm = _hangarService.NormalizeShipName(s.Name);
+            if (existing.Contains(norm)) continue;
+            existing.Add(norm);
+            toAdd.Add(s);
+        }
+
+        if (toAdd.Count == 0)
+        {
+            if (confirm)
+                MessageBox.Show("同期済み保有船はすべて所持船に登録されています。", "所持船に反映");
+            return 0;
+        }
+
+        if (confirm)
+        {
+            var preview = string.Join("\n", toAdd.Take(20).Select(s => $"・{s.Name}"));
+            if (toAdd.Count > 20) preview += $"\n… 他 {toAdd.Count - 20} 件";
+            var answer = MessageBox.Show(
+                $"所持船に無い保有船 {toAdd.Count} 件を追加しますか？\n\n{preview}",
+                "所持船に反映", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (answer != MessageBoxResult.Yes) return 0;
+        }
+
+        foreach (var s in toAdd)
+        {
+            var uex = _tradeService.FindUexShip(s.Name);
+            var scu = uex?.Scu ?? 0;
+            var mfr = s.Matrix?.ManufacturerName ?? "";
+            if (string.IsNullOrEmpty(mfr)) mfr = uex?.Manufacturer ?? "";
+            _tradeService.AddMyShip(s.Name, mfr, scu, s.OriginDisplay);
+            Log($"[Ship] 追加 (Hangar 反映): {s.Name} ({scu} SCU) {s.OriginDisplay}");
+        }
+
+        RefreshMyShips();
+        txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻 | Hangar から {toAdd.Count} 件追加";
+        return toAdd.Count;
+    }
+
+    // === 装備サブタブ: 所持コンポーネント (my_components) ===
+
+    // my_components を読み直してグリッドに出す。種別コンボは初回のみ埋める
+    private void RefreshMyComponents()
+    {
+        if (dgMyComponents == null) return;   // XAML 読込中
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _myComponents = _hangarService.LoadMyComponents();
+            _myComponentRows = _myComponents
+                .Select(c => new MyComponentRow(c) { OnUsableChanged = MyComponentUsable_Changed })
+                .ToList();
+            var selectedId = (dgMyComponents.SelectedItem as MyComponentRow)?.Id;
+            dgMyComponents.ItemsSource = null;
+            dgMyComponents.ItemsSource = _myComponentRows;
+            if (selectedId != null)
+                dgMyComponents.SelectedItem = _myComponentRows.FirstOrDefault(c => c.Id == selectedId.Value);
+            txtCompStatus.Text = _hangarEquip == null
+                ? "gamedata_cache.db がありません (コンポーネントの検索・追加はできません)"
+                : $"所持コンポーネント: {_myComponents.Count} 件";
+            PopulateCompTypeCombo();
+        }
+        catch (Exception ex)
+        {
+            txtCompStatus.Text = $"読み込みエラー: {ex.Message}";
+        }
+    }
+
+    private void PopulateCompTypeCombo()
+    {
+        if (_compTypeComboPopulated || _hangarEquip == null) return;
+        var categories = _hangarEquip.GetShipComponentCategories();
+        cmbCompType.ItemsSource = categories;
+        if (categories.Count > 0) cmbCompType.SelectedIndex = 0;   // SelectionChanged → RefreshCompCandidates
+        _compTypeComboPopulated = true;
+    }
+
+    private void CompType_Changed(object sender, SelectionChangedEventArgs e) => RefreshCompCandidates();
+    private void CompSearch_TextChanged(object sender, TextChangedEventArgs e) => RefreshCompCandidates();
+
+    // 種別 + 検索語で items を引き、候補コンボに出す。種別が選ばれた／検索文字が変わったときだけ、その種別に絞って組み立てる。
+    // 表示名は GetShipComponents 側で item_index.name 優先に解決済み (行ごとの GetItemByRecord は行わない)
+    private void RefreshCompCandidates()
+    {
+        if (cmbCompCandidates == null) return;
+        if (_hangarEquip == null || cmbCompType.SelectedItem is not EquipmentCategory cat)
+        {
+            cmbCompCandidates.ItemsSource = null;
+            return;
+        }
+        try
+        {
+            var search = txtCompSearch.Text.Trim();
+            var items = _hangarEquip.GetShipComponents(cat.Key, search.Length > 0 ? search : null);
+            var list = new List<CompCandidate>(items.Count);
+            foreach (var i in items)
+            {
+                var name = i.Name;
+                var type = new ShipPortInfo { ItemType = i.ItemType }.TypeDisplay;
+                var parts = new List<string> { name };
+                if (i.SizeDisplay.Length > 0) parts.Add(i.SizeDisplay);
+                var cls = MyComponent.GradeToClass(i.Grade);
+                if (cls.Length > 0) parts.Add(cls);
+                if (type.Length > 0) parts.Add($"[{type}]");
+                list.Add(new CompCandidate { Item = i, Name = name, Display = string.Join(" ", parts) });
+            }
+            cmbCompCandidates.ItemsSource = list;
+            if (list.Count > 0) cmbCompCandidates.SelectedIndex = 0;
+        }
+        catch (Exception ex)
+        {
+            txtCompStatus.Text = $"候補の取得エラー: {ex.Message}";
+        }
+    }
+
+    private void AddMyComponent_Click(object sender, RoutedEventArgs e)
+    {
+        if (_hangarEquip == null)
+        {
+            MessageBox.Show("gamedata_cache.db がありません。コンポーネントを追加できません。", "装備");
+            return;
+        }
+        if (cmbCompCandidates.SelectedItem is not CompCandidate cand)
+        {
+            MessageBox.Show("候補からコンポーネントを選択してください。", "入力エラー");
+            return;
+        }
+        if (!int.TryParse(txtCompQty.Text.Trim(), out var qty) || qty < 1)
+        {
+            MessageBox.Show("数量は 1 以上の整数で入力してください。", "入力エラー");
+            return;
+        }
+
+        var c = new MyComponent
+        {
+            ItemRecord = cand.Item.RecordName,
+            ItemName = cand.Name,
+            ItemType = cand.Item.ItemType,
+            Size = cand.Item.Size,
+            Grade = cand.Item.Grade,
+            Quantity = qty,
+            Usable = chkCompUsable.IsChecked == true,
+            Notes = txtCompNotes.Text.Trim(),
+        };
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _hangarService.AddMyComponent(c);
+            Log($"[Equip] 追加: {c.ItemName} ({c.ItemType} {c.SizeDisplay} {c.GradeDisplay}) ×{qty}{(c.Usable ? "" : " (使用不可)")}");
+            txtCompNotes.Text = "";
+            txtCompQty.Text = "1";
+            RefreshMyComponents();
+            RefreshLoadoutGrid();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"保存に失敗しました: {ex.Message}", "エラー");
+        }
+    }
+
+    private void DeleteMyComponent_Click(object sender, RoutedEventArgs e)
+    {
+        if (dgMyComponents.SelectedItem is not MyComponentRow row) return;
+        var c = row.Model;
+        if (MessageBox.Show($"「{c.ItemName}」({c.SizeDisplay} {c.GradeDisplay} ×{c.Quantity}) を削除しますか？", "確認", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _hangarService.DeleteMyComponent(c.Id);
+            Log($"[Equip] 削除: {c.ItemName}");
+            RefreshMyComponents();
+            RefreshLoadoutGrid();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"削除に失敗しました: {ex.Message}", "エラー");
+        }
+    }
+
+    // 「使用可」チェックの変更 (MyComponentRow.Usable の setter から) → DB へ書き戻す
+    private void MyComponentUsable_Changed(MyComponentRow row)
+    {
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _hangarService.UpdateMyComponent(row.Model);
+            RefreshLoadoutGrid();   // 使用可否は装備候補に影響する
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"保存に失敗しました: {ex.Message}", "エラー");
+        }
+    }
+
+    // === 装備サブタブ: 現在の装備 (ship_loadouts) ===
+
+    // 船セレクタを GetShipInstances の結果 (+ 所持船側から開いた "my|" キーの船) で埋め直す。選択中のキーは維持する
+    private void RefreshLoadoutShipCombo()
+    {
+        if (cmbLoadoutShip == null) return;   // XAML 読込中
+        var prevKey = (cmbLoadoutShip.SelectedItem as LoadoutShipChoice)?.ShipKey;
+        var items = _hangarShips
+            .OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(s => s.PledgeName, StringComparer.OrdinalIgnoreCase)
+            .Select(s => new LoadoutShipChoice
+            {
+                ShipKey = s.InstanceKey,
+                Name = s.Name,
+                Manufacturer = s.Matrix?.ManufacturerName,
+                Display = string.IsNullOrEmpty(s.PledgeName) ? s.Name : $"{s.Name} — {s.PledgeName}",
+            })
+            .ToList();
+        foreach (var extra in _extraLoadoutShips)
+            if (items.All(i => !i.ShipKey.Equals(extra.ShipKey, StringComparison.Ordinal))) items.Add(extra);
+
+        _suppressLoadoutEvents = true;
+        try
+        {
+            cmbLoadoutShip.ItemsSource = items;
+            if (prevKey != null)
+                cmbLoadoutShip.SelectedItem = items.FirstOrDefault(i => i.ShipKey.Equals(prevKey, StringComparison.Ordinal));
+        }
+        finally { _suppressLoadoutEvents = false; }
+        RefreshLoadoutGrid();
+    }
+
+    private void LoadoutShip_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressLoadoutEvents) return;
+        RefreshLoadoutGrid();
+    }
+
+    // 選択中の船の全ポートを「デフォルト装備 / 現在の装備 / 候補」で出す
+    private void RefreshLoadoutGrid()
+    {
+        if (dgLoadout == null) return;   // XAML 読込中
+        var ship = cmbLoadoutShip.SelectedItem as LoadoutShipChoice;
+        dgLoadout.ItemsSource = null;
+        if (_hangarEquip == null)
+        {
+            txtLoadoutStatus.Text = "gamedata_cache.db がありません";
+            return;
+        }
+        if (ship == null)
+        {
+            txtLoadoutStatus.Text = "船を選択してください";
+            return;
+        }
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            ship.Record ??= _hangarService.ResolveShipRecordName(ship.Name, ship.Manufacturer);
+            if (ship.Record == null)
+            {
+                txtLoadoutStatus.Text = $"「{ship.Name}」の装備データ (ships.record_name) を解決できません";
+                return;
+            }
+            var rows = _hangarService.GetShipLoadout(ship.ShipKey, ship.Record, _hangarEquip)
+                .Select(MakeLoadoutRow)
+                .ToList();
+            dgLoadout.ItemsSource = rows;
+            txtLoadoutStatus.Text = $"{ship.Name}: ポート {rows.Count} / 設定済 {rows.Count(r => r.IsCustom)}";
+        }
+        catch (Exception ex)
+        {
+            txtLoadoutStatus.Text = $"読み込みエラー: {ex.Message}";
+        }
+    }
+
+    // 候補 = 所持コンポーネントのうち同じ ItemType かつ Size <= PortSize (ポート size が 0 = 未収録のときはサイズで絞らない) かつ使用可。
+    // 先頭は「(デフォルトに戻す)」
+    private LoadoutRow MakeLoadoutRow(ShipPortLoadout p)
+    {
+        var row = new LoadoutRow
+        {
+            PortName = p.PortName,
+            PortKey = p.PortKey,
+            ItemType = p.ItemType,
+            TypeDisplay = p.TypeDisplay,
+            PortSize = p.PortSize,
+            DefaultItemRecord = p.DefaultItemRecord,
+            DefaultItemName = p.DefaultItemName,
+            CurrentItemRecord = p.CurrentItemRecord,
+            CurrentItemName = p.CurrentItemName,
+            ItemSize = p.ItemSize,
+            ItemGrade = p.ItemGrade,
+        };
+
+        var defaultChoice = new LoadoutChoice { IsDefault = true, ItemRecord = "", Display = "(デフォルトに戻す)" };
+        row.Candidates.Add(defaultChoice);
+        foreach (var c in _myComponents)
+        {
+            if (!c.Usable) continue;
+            if (!c.ItemType.Equals(p.ItemType, StringComparison.OrdinalIgnoreCase)) continue;
+            if (p.PortSize > 0 && c.Size > p.PortSize) continue;
+            var parts = new List<string>();
+            if (c.SizeDisplay.Length > 0) parts.Add(c.SizeDisplay);
+            if (c.GradeDisplay.Length > 0) parts.Add(c.GradeDisplay);
+            parts.Add(c.ItemName);
+            parts.Add($"×{c.Quantity}");
+            row.Candidates.Add(new LoadoutChoice { ItemRecord = c.ItemRecord, Display = string.Join(" ", parts) });
+        }
+
+        if (p.IsCustom)
+        {
+            var cur = row.Candidates.Skip(1).FirstOrDefault(c => c.ItemRecord.Equals(p.CurrentItemRecord, StringComparison.Ordinal));
+            if (cur == null)
+            {
+                // 所持リストに無い (削除済み・使用不可にした・空スロット) 設定値はそのまま表示する
+                var label = string.IsNullOrEmpty(p.CurrentItemRecord) ? "(空スロット)" : $"{p.CurrentItemName} (所持リストに無し)";
+                cur = new LoadoutChoice { ItemRecord = p.CurrentItemRecord ?? "", Display = label };
+                row.Candidates.Insert(1, cur);
+            }
+            row.SelectedChoice = cur;
+        }
+        else
+        {
+            row.SelectedChoice = defaultChoice;
+        }
+        return row;
+    }
+
+    // 装備グリッドの ComboBox。ItemsSource 再代入時にも発火するので、値が同じなら何もしない
+    private void LoadoutItem_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressLoadoutEvents) return;
+        if (sender is not ComboBox combo || combo.DataContext is not LoadoutRow row) return;
+        if (combo.SelectedItem is not LoadoutChoice choice) return;
+        if (ReferenceEquals(choice, row.SelectedChoice)) return;
+        if (cmbLoadoutShip.SelectedItem is not LoadoutShipChoice ship) return;
+
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _hangarService.SetLoadoutItem(ship.ShipKey, row.PortKey, choice.IsDefault ? null : choice.ItemRecord);
+            row.SelectedChoice = choice;
+            Log($"[Equip] {ship.Name} {row.PortKey}: {(choice.IsDefault ? "デフォルトに戻す" : choice.Display)}");
+            LoadUpgradeData();   // ツールチップを更新 (内部で RefreshLoadoutShipCombo → RefreshLoadoutGrid)
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"装備の保存に失敗しました: {ex.Message}", "エラー");
+        }
+    }
+
+    private void LoadoutReset_Click(object sender, RoutedEventArgs e)
+    {
+        if (cmbLoadoutShip.SelectedItem is not LoadoutShipChoice ship) return;
+        if (MessageBox.Show($"「{ship.Name}」の装備設定を全て削除し、デフォルト装備に戻しますか？", "確認", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _hangarService.ClearLoadout(ship.ShipKey);
+            Log($"[Equip] {ship.Name}: 全てデフォルトに戻す");
+            LoadUpgradeData();   // ツールチップを更新 (内部で RefreshLoadoutShipCombo → RefreshLoadoutGrid)
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"装備の保存に失敗しました: {ex.Message}", "エラー");
+        }
+    }
+
+    // 保有船行 (アップグレード管理) / 所持船行の「装備」ボタン: 装備サブタブへ切り替え、船セレクタをその船に合わせる。
+    // 所持船側は FindHangarRowForMyShip (ツールチップと同じ選び方) の保有船インスタンス、無ければ "my|{id}" キー (record は Matrix 名から解決)
+    private void OpenLoadout_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button btn) return;
+        LoadoutShipChoice? target = null;
+
+        if (btn.DataContext is UpgradeShipRow up)
+        {
+            if (up.IsGroupHeader) return;
+            target = FindLoadoutShipChoice(up.InstanceKey);
+        }
+        else if (btn.DataContext is MyShipRow my)
+        {
+            var hangarRow = FindHangarRowForMyShip(my);
+            if (hangarRow != null) target = FindLoadoutShipChoice(hangarRow.InstanceKey);
+            if (target == null)
+            {
+                var key = $"my|{my.Id}";
+                target = FindLoadoutShipChoice(key);
+                if (target == null)
+                {
+                    var matrix = _hangarService.ResolveShip(my.Name);
+                    target = new LoadoutShipChoice
+                    {
+                        ShipKey = key,
+                        Name = my.Name,
+                        Manufacturer = matrix?.ManufacturerName,
+                        Display = $"{my.Name} — 所持船",
+                    };
+                    _extraLoadoutShips.Add(target);
+                    RefreshLoadoutShipCombo();
+                    target = FindLoadoutShipChoice(key);
+                }
+            }
+        }
+        if (target == null) return;
+
+        tabShipManagement.SelectedItem = tabLoadout;
+        cmbLoadoutShip.SelectedItem = target;   // SelectionChanged → RefreshLoadoutGrid (同じ選択なら発火しないので明示的にも更新)
+        RefreshLoadoutGrid();
+    }
+
+    private LoadoutShipChoice? FindLoadoutShipChoice(string shipKey)
+        => (cmbLoadoutShip.ItemsSource as IEnumerable<LoadoutShipChoice>)
+            ?.FirstOrDefault(i => i.ShipKey.Equals(shipKey, StringComparison.Ordinal));
 
     private void RefreshCommodityShipCombo()
     {
@@ -3267,7 +4323,7 @@ public partial class MainWindow : Window
 
     private void DeleteMyShip_Click(object sender, RoutedEventArgs e)
     {
-        if (dgMyShips.SelectedItem is not MyShipEntry ship) return;
+        if (dgMyShips.SelectedItem is not MyShipRow ship) return;
         if (MessageBox.Show($"「{ship.Name}」を削除しますか？", "確認", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
 
         _tradeService.DeleteMyShip(ship.Id);
@@ -3277,7 +4333,7 @@ public partial class MainWindow : Window
 
     private void MyShip_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if (dgMyShips.SelectedItem is not MyShipEntry ship) return;
+        if (dgMyShips.SelectedItem is not MyShipRow ship) return;
 
         txtAddShipName.Text = ship.Name;
         txtAddShipMfr.Text = ship.Manufacturer;
@@ -3288,7 +4344,7 @@ public partial class MainWindow : Window
 
     private void UpdateMyShip_Click(object sender, RoutedEventArgs e)
     {
-        if (dgMyShips.SelectedItem is not MyShipEntry ship) return;
+        if (dgMyShips.SelectedItem is not MyShipRow ship) return;
         var name = txtAddShipName.Text.Trim();
         if (string.IsNullOrEmpty(name)) return;
         int.TryParse(txtAddShipScu.Text.Trim(), out var scu);
@@ -3517,15 +4573,22 @@ public partial class MainWindow : Window
     }
 
     // Ship Matrix と RSI ストアをバックグラウンドで取得する (TTL 内ならキャッシュ)。
-    // 失敗は Log のみ。UI スレッドで HTTP を待たない。完了後にアップグレード管理タブを再読込する
+    // 失敗は Log のみ。UI スレッドで HTTP を待たない。
+    // どちらかで実際に取得 (更新) があった場合、または LoadUpgradeData がまだ一度も正常終了していない場合に
+    // アップグレード管理タブを再読込する (両方キャッシュ利用かつ StartBackgroundTradeFetchAsync 側の LoadUpgradeData で
+    // 表示済みなら呼ばない。交易取得失敗で同メソッドが早期 return した場合はここで初回読込を行う)
     private async Task StartBackgroundHangarFetchAsync()
     {
         EnsureHangarProgressHooked();
         _hangarService.SetCacheDir(WorkDir);
 
+        var matrixFetched = false;
+        var storeFetched = false;
+
         try
         {
-            await Task.Run(() => _hangarService.RefreshShipMatrixAsync(false));
+            var r = await Task.Run(() => _hangarService.RefreshShipMatrixAsync(false));
+            matrixFetched = r.Fetched;
         }
         catch (Exception ex)
         {
@@ -3534,11 +4597,18 @@ public partial class MainWindow : Window
 
         try
         {
-            await Task.Run(() => _hangarService.RefreshStoreAsync(false));
+            var r = await Task.Run(() => _hangarService.RefreshStoreAsync(false));
+            storeFetched = r.Fetched;
         }
         catch (Exception ex)
         {
             Log($"[Hangar] ストア取得エラー: {ex}");
+        }
+
+        if (!matrixFetched && !storeFetched && _upgradeDataLoadedOnce)
+        {
+            Log("[Hangar] Ship Matrix / ストアは共にキャッシュ利用のため再読込を省略");
+            return;
         }
 
         try
@@ -3566,7 +4636,7 @@ public partial class MainWindow : Window
         try
         {
             _hangarService.SetCacheDir(WorkDir);
-            var count = await Task.Run(async () =>
+            var (count, _) = await Task.Run(async () =>
             {
                 await _hangarService.RefreshShipMatrixAsync(true);
                 return await _hangarService.RefreshStoreAsync(true);
@@ -3661,7 +4731,7 @@ public partial class MainWindow : Window
                 _tradeService.LoadMyShips();
                 RefreshCommodityShipCombo();
                 RestoreSavedShipSelection();
-                dgMyShips.ItemsSource = _tradeService.MyShips;
+                dgMyShips.ItemsSource = _tradeService.MyShips.Select(ToMyShipRow).ToList();
                 txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻 | UEX船データ: {_tradeService.Ships.Count} 件";
                 cmbAddShip.ItemsSource = _tradeService.Ships;
                 cmbAddShip.DisplayMemberPath = "DisplayName";
@@ -3696,7 +4766,7 @@ public partial class MainWindow : Window
             RefreshCommodityShipCombo();
             cmbAddShip.ItemsSource = _tradeService.Ships;
             cmbAddShip.DisplayMemberPath = "DisplayName";
-            dgMyShips.ItemsSource = _tradeService.MyShips;
+            dgMyShips.ItemsSource = _tradeService.MyShips.Select(ToMyShipRow).ToList();
             txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻 | UEX船データ: {_tradeService.Ships.Count} 件";
             txtTradeStatus.Text = $"価格 {_tradeService.PriceCount:N0} 件 | 船 {_tradeService.Ships.Count} 件 | 所持船 {_tradeService.MyShips.Count} 隻 | 更新: {_tradeService.LastPriceUpdate:HH:mm} (強制取得)";
             ChatService.SetTradeService(_tradeService);
@@ -4028,6 +5098,7 @@ public class UpgradeShipRow
     public string PledgeId { get; set; } = "";
     public string PledgeName { get; set; } = "";
     public string Name { get; set; } = "";              // 元の船名
+    public string InstanceKey { get; set; } = "";       // HangarShipInstance.InstanceKey ("{pledge_id}|{ship_name}[#N]")。ヘッダ行・CCU 行は空
     public string CurrentName { get; set; } = "";       // 適用後の船名
     public string InsuranceDisplay { get; set; } = "";
     public string Focus { get; set; } = "";             // Ship Matrix: focus
@@ -4040,11 +5111,75 @@ public class UpgradeShipRow
     public bool CanUpgrade { get; set; }
     public string OnSaleDisplay { get; set; } = "";     // RSI ストア: "販売中" / "Warbond 販売中" / ""
     public bool OnSaleWarbond { get; set; }             // Warbond 版が販売中
+    public int SameTypeCount { get; set; }              // 正規化名が同じ保有船の数 (自分を含む)
+    public string OriginDisplay { get; set; } = "";     // 由来 ("パック: ..." / "単品: ..." / "CCU 適用済 ← ..." / "VIP 特典")
+    public string PledgeShipNames { get; set; } = "";   // 同 pledge の同梱機
+    // ツールチップ。船行は TooltipFactory (HangarService.BuildShipTooltip) を初回アクセス時に評価してキャッシュする
+    // (WPF の ToolTip バインドはツールチップ表示時に評価される)。ヘッダ行・CCU 行は文字列を直接セット
+    private string? _tooltip;
+    private Func<string>? _tooltipFactory;
+    public Func<string>? TooltipFactory
+    {
+        get => _tooltipFactory;
+        set { _tooltipFactory = value; _tooltip = null; }
+    }
+    public string Tooltip
+    {
+        get => _tooltip ??= _tooltipFactory?.Invoke() ?? "";
+        set { _tooltip = value; _tooltipFactory = null; }
+    }
+    public string StoreUpgradeDisplay { get; set; } = "";   // "購入可 (N)" / "Warbond あり (N)" / ""
+    public string UpgradableDisplay { get; set; } = "";     // CanUpgrade ? "○" : ""
 
+    // Packages の展開表示: 同 pledge に 2 機以上ある pledge は「ヘッダ行 + 子行」
+    public bool IsGroupHeader { get; set; }                 // pledge をまとめるヘッダ行 (船ではない)
+    public string GroupPledgeId { get; set; } = "";         // ヘッダ／子行が属する pledge
+    public bool IsExpanded { get; set; }                    // ヘッダ用: 子行を表示中か
+    public bool IsChild { get; set; }                       // グループの子行
+    public string DisplayName { get; set; } = "";           // 船名列の表示 (ヘッダ: "pledge名 (N機)" / 子: "　└ 船名" / 単独: 船名)
+    public string ToggleLabel => IsGroupHeader ? (IsExpanded ? "−" : "+") : "";   // 非ヘッダは空 → ボタン非表示
+    public bool MarkEnabled => !IsGroupHeader && !IsCcu;
+    public bool LoadoutEnabled => !IsGroupHeader && !IsCcu; // 「装備」ボタン: ヘッダ行・CCU 行は船ではないので無効
+
+    // アップグレード権利 (CCU) を保有船グリッドに差し込んだ行。船行の直後 (使用可 / 使用中) または
+    // 末尾の「使用不可のアップグレード権利」グループの子 (使用不可 / 使用不可 (売却))
+    public bool IsCcu { get; set; }
+    public string CcuPledgeId { get; set; } = "";           // CCU の pledge id (PledgeId にも同じ値を入れる: Sell は pledge 単位)
+    public string CcuState { get; set; } = "";              // 使用可 / 使用中 / 売却予定 / 使用不可 / 使用不可 (売却)
+    public UpgradeShipRow? CcuParent { get; set; }          // 適用先 (使用可) / 適用元 (使用中) の船行。使用不可は null
+    public bool CcuIsLastApplied { get; set; }              // 使用中: 親の AppliedCcuIds の末尾か (末尾以外は Undo 不可)
+    public bool IsCcuUnusable => IsCcu && CcuState.StartsWith("使用不可", StringComparison.Ordinal);
+    public string PriceDisplay { get; set; } = "";          // 船行: pledge の melt 額 (子行は空) / CCU 行: 支払額
+    public string DiscountDisplay { get; set; } = "";       // CCU 行: 割引率
+    public string WarbondDisplay { get; set; } = "";        // CCU 行: "Warbond" / ""
+    public string ToShipSaleDisplay { get; set; } = "";     // CCU 行: 先船の RSI ストア販売状況 ("Warbond" / "販売中" / "")
+
+    // ボタンの有効状態 (船行・CCU 行で共通のプロパティ名にして XAML の IsEnabled にバインド)
+    public bool UpgradeEnabled => IsCcu
+        ? CcuState == "使用可" && CcuParent != null
+        : !IsGroupHeader && !IsSold && CanUpgrade;
+    public bool UndoEnabled => IsCcu
+        ? CcuState == "使用中" && CcuIsLastApplied && CcuParent != null
+        : HasApplied;
+
+    // Sell (melt 予定)。pledge 単位 (R-02)
+    public bool IsSold { get; set; }
+    public string SellLabel => IsSold ? "Unsell" : "Sell";
+    public bool SellEnabled { get; set; }                   // Meltable かつ pledge id あり (R-09)
+    public bool Meltable { get; set; } = true;              // pledge の meltable
+    public long PledgeValueCents { get; set; }              // pledge の melt 額
+    public string? SellToolTip => !Meltable ? "melt 不可"
+        : IsCcu && CcuState == "使用中" ? "適用中のため Undo 後に売却できます"
+        : null;
+
+    public string SameTypeDisplay => SameTypeCount >= 2 ? $"×{SameTypeCount}" : "";
     public bool HasApplied => AppliedCcuIds.Count > 0;
-    public string AppliedDisplay => HasApplied ? $"→ {CurrentName}" : "-";
-    // 使える権利が無く、適用もしていない船 = 連鎖のない船
-    public bool IsDeadEnd => !HasApplied && !CanUpgrade;
+    // CCU 行は状態を出す (使用中は先船も添える: "使用中 → <先船>"。CCU 行の CurrentName は ToShip)
+    public string AppliedDisplay => IsCcu
+        ? (CcuState == "使用中" ? $"使用中 → {CurrentName}" : CcuState)
+        : HasApplied ? $"→ {CurrentName}" : "-";
+    // 使える権利が無く、適用もしていない船 = 連鎖のない船 (ヘッダ行・CCU 行は対象外)
+    public bool IsDeadEnd => !IsGroupHeader && !IsCcu && !HasApplied && !CanUpgrade;
     public string MarkDisplay => Mark switch
     {
         HangarShipMark.Keep => "要る",
@@ -4052,6 +5187,114 @@ public class UpgradeShipRow
         HangarShipMark.Hold => "保留",
         _ => "",
     };
+}
+
+// 所持船 (交易用) グリッドの 1 行。MyShipEntry の写し + 同期済み保有船 (Hangar) との照合結果。
+// 交易タブ (cmbTradeShip) は MyShipEntry をそのまま使うので、こちらは表示専用
+public class MyShipRow
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+    public string Manufacturer { get; set; } = "";
+    public int Scu { get; set; }
+    public string Notes { get; set; } = "";
+    public string AddedAt { get; set; } = "";
+    public string DisplayName => Scu > 0 ? $"{Name} ({Scu} SCU)" : Name;
+
+    public int HangarCount { get; set; }                    // 正規化名が一致する同期済み保有船の数 (0 = 未同期)
+    public string HangarCountDisplay => HangarCount == 0 ? "未同期" : $"×{HangarCount}";
+    public string HangarOriginDisplay { get; set; } = "";   // 一致した保有船の由来を " / " 連結
+    public bool HangarCanUpgrade { get; set; }              // 一致した保有船のいずれかに使える権利がある
+    public string HangarUpgradableDisplay { get; set; } = "";
+    public string HangarSaleDisplay { get; set; } = "";     // "Warbond 販売中" / "販売中" / ""
+    public string HangarStoreUpgradeDisplay { get; set; } = "";
+    // ツールチップ。TooltipFactory を初回アクセス時に評価してキャッシュする (UpgradeShipRow と同じ)
+    private string? _tooltip;
+    private Func<string>? _tooltipFactory;
+    public Func<string>? TooltipFactory
+    {
+        get => _tooltipFactory;
+        set { _tooltipFactory = value; _tooltip = null; }
+    }
+    public string Tooltip
+    {
+        get => _tooltip ??= _tooltipFactory?.Invoke() ?? "";
+        set { _tooltip = value; _tooltipFactory = null; }
+    }
+    public override string ToString() => DisplayName;
+}
+
+// 装備サブタブ「現在の装備」の船セレクタ 1 件。ShipKey は ship_loadouts のキー
+// ("{pledge_id}|{ship_name}" = アップグレード管理の保有船インスタンス / "my|{my_ships.id}" = 所持船のみの船)
+public class LoadoutShipChoice
+{
+    public string ShipKey { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string? Manufacturer { get; set; }       // Ship Matrix のメーカー名 (ResolveShipRecordName 用)
+    public string Display { get; set; } = "";
+    public string? Record { get; set; }             // ships.record_name (初回参照時に解決してキャッシュ)
+    public override string ToString() => Display;
+}
+
+// 装備グリッドの ComboBox の選択肢。IsDefault = 「(デフォルトに戻す)」
+public class LoadoutChoice
+{
+    public bool IsDefault { get; set; }
+    public string ItemRecord { get; set; } = "";
+    public string Display { get; set; } = "";
+    public override string ToString() => Display;
+}
+
+// 装備グリッドの 1 行 = ShipPortLoadout + 選択肢
+public class LoadoutRow : ShipPortLoadout
+{
+    public List<LoadoutChoice> Candidates { get; set; } = new();
+    public LoadoutChoice? SelectedChoice { get; set; }
+    public bool HasCandidates => Candidates.Count > 1;      // 「(デフォルトに戻す)」以外に候補があるか
+}
+
+// 所持コンポーネント (dgMyComponents) の表示行。MyComponent を包み、Usable の変更を OnUsableChanged 経由で DB へ書き戻す
+// (DataGridCheckBoxColumn の CellEditEnding / CurrentCellChanged には依存しない)
+public class MyComponentRow : INotifyPropertyChanged
+{
+    public MyComponent Model { get; }
+    public Action<MyComponentRow>? OnUsableChanged { get; set; }
+
+    public MyComponentRow(MyComponent model) => Model = model;
+
+    public int Id => Model.Id;
+    public string ItemRecord => Model.ItemRecord;
+    public string ItemName => Model.ItemName;
+    public string ItemType => Model.ItemType;
+    public string TypeDisplay => Model.TypeDisplay;
+    public string SizeDisplay => Model.SizeDisplay;
+    public string GradeDisplay => Model.GradeDisplay;
+    public int Quantity => Model.Quantity;
+    public string Notes => Model.Notes;
+    public string AddedAt => Model.AddedAt;
+
+    public bool Usable
+    {
+        get => Model.Usable;
+        set
+        {
+            if (Model.Usable == value) return;
+            Model.Usable = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Usable)));
+            OnUsableChanged?.Invoke(this);
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+}
+
+// 所持コンポーネント追加パネルの候補 1 件 (EquipmentItem + 解決済み表示名)
+public class CompCandidate
+{
+    public EquipmentItem Item { get; set; } = new();
+    public string Name { get; set; } = "";
+    public string Display { get; set; } = "";
+    public override string ToString() => Display;
 }
 
 public class UpgradeCcuRow
@@ -4078,16 +5321,43 @@ public class PlanRow
     public string Reason { get; set; } = "";
 }
 
-// melt シミュレーションの pledge 1 行。Selected は DataGrid の two-way 更新で書き戻される
-public class MeltPledgeRow
+// melt シミュレーションの pledge 1 行。Selected は DataGrid の two-way 更新で書き戻され、
+// PropertyChanged で MainWindow._soldPledgeIds と双方向に同期する
+public class MeltPledgeRow : INotifyPropertyChanged
 {
-    public bool Selected { get; set; }
+    private bool _selected;
+    public bool Selected
+    {
+        get => _selected;
+        set
+        {
+            if (_selected == value) return;
+            _selected = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Selected)));
+        }
+    }
+    public event PropertyChangedEventHandler? PropertyChanged;
     public string PledgeId { get; set; } = "";
     public string Name { get; set; } = "";
     public string ValueDisplay { get; set; } = "";
     public string InsuranceDisplay { get; set; } = "";
     public string Ships { get; set; } = "";
     public bool Meltable { get; set; } = true;
+
+    // チェック可否。Meltable かつ適用中 (AppliedCcuIds に含まれる) の CCU pledge でない。RecomputeUpgradeSim が更新する
+    private bool _canSelect = true;
+    public bool CanSelect
+    {
+        get => _canSelect;
+        set
+        {
+            if (_canSelect == value) return;
+            _canSelect = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanSelect)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectToolTip)));
+        }
+    }
+    public string? SelectToolTip => Meltable && !CanSelect ? "適用中のため Undo 後に売却できます" : null;
 }
 
 // 販売中の船 (RSI ストア) グリッドの 1 行

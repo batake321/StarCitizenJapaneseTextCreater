@@ -19,10 +19,10 @@ public static class DatabaseBackupService
     private static readonly string[] GlossaryTables = ["glossary"];
     private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
-    private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "store_skus"];
+    private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "store_skus", "my_components", "ship_loadouts"];
 
     // 個人資産テーブル。バックアップ側にデータがある場合のみ反映する (ship_matrix は公開データなので含めない)
-    private static readonly string[] PersonalTables = ["my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks"];
+    private static readonly string[] PersonalTables = ["my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "my_components", "ship_loadouts"];
 
     public static string[] GetTables(BackupCategory category) => category switch
     {
@@ -77,6 +77,8 @@ public static class DatabaseBackupService
                                     DELETE FROM hangar_meta;
                                     DELETE FROM hangar_nameable_ships;
                                     DELETE FROM hangar_ship_marks;
+                                    DELETE FROM my_components;
+                                    DELETE FROM ship_loadouts;
                                     """;
                                 cmd.ExecuteNonQuery();
                             }
@@ -264,7 +266,8 @@ public static class DatabaseBackupService
                 insurance TEXT DEFAULT 'Unknown',
                 created_at TEXT DEFAULT '',
                 fetched_at TEXT DEFAULT '',
-                config_value_cents INTEGER DEFAULT 0
+                config_value_cents INTEGER DEFAULT 0,
+                availability TEXT DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS hangar_items (
                 pledge_id TEXT NOT NULL,
@@ -322,31 +325,64 @@ public static class DatabaseBackupService
                 stock_level TEXT,
                 available INTEGER,
                 thumbnail TEXT,
-                fetched_at TEXT
+                fetched_at TEXT,
+                native_discounted_cents INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS my_components (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_record TEXT NOT NULL,
+                item_name TEXT DEFAULT '',
+                item_type TEXT DEFAULT '',
+                size INTEGER DEFAULT 0,
+                grade INTEGER DEFAULT 0,
+                quantity INTEGER DEFAULT 1,
+                usable INTEGER DEFAULT 1,
+                notes TEXT DEFAULT '',
+                added_at TEXT DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE IF NOT EXISTS ship_loadouts (
+                ship_key TEXT NOT NULL,
+                port_name TEXT NOT NULL,
+                item_record TEXT NOT NULL,
+                PRIMARY KEY (ship_key, port_name)
             );
             """;
         cmd.ExecuteNonQuery();
 
-        // 旧スキーマ (config_value_cents 列なし) の hangar_pledges に列を追加する (HangarService.MigratePledgesSchema と同等)。
+        // 旧スキーマ (config_value_cents / availability 列なし) の hangar_pledges に列を追加する (HangarService.MigratePledgesSchema と同等)。
         // 新形式バックアップを旧 DB に取り込む際の列不足を防ぐ
-        var hasConfigValue = false;
+        var cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         using (var check = conn.CreateCommand())
         {
             check.CommandText = "PRAGMA table_info(hangar_pledges)";
             using var r = check.ExecuteReader();
-            while (r.Read())
-            {
-                if (string.Equals(r.GetString(1), "config_value_cents", StringComparison.OrdinalIgnoreCase))
-                {
-                    hasConfigValue = true;
-                    break;
-                }
-            }
+            while (r.Read()) cols.Add(r.GetString(1));
         }
-        if (!hasConfigValue)
+        if (!cols.Contains("config_value_cents"))
         {
             using var alter = conn.CreateCommand();
             alter.CommandText = "ALTER TABLE hangar_pledges ADD COLUMN config_value_cents INTEGER DEFAULT 0";
+            alter.ExecuteNonQuery();
+        }
+        if (!cols.Contains("availability"))
+        {
+            using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE hangar_pledges ADD COLUMN availability TEXT DEFAULT ''";
+            alter.ExecuteNonQuery();
+        }
+
+        // 旧スキーマ (native_discounted_cents 列なし) の store_skus に列を追加する (HangarService.MigrateStoreSchema と同等)
+        var storeCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var check = conn.CreateCommand())
+        {
+            check.CommandText = "PRAGMA table_info(store_skus)";
+            using var r = check.ExecuteReader();
+            while (r.Read()) storeCols.Add(r.GetString(1));
+        }
+        if (!storeCols.Contains("native_discounted_cents"))
+        {
+            using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE store_skus ADD COLUMN native_discounted_cents INTEGER DEFAULT 0";
             alter.ExecuteNonQuery();
         }
     }

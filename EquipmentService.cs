@@ -1,6 +1,7 @@
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 
 namespace StarCitizenJapaneseTextCreater;
@@ -12,13 +13,21 @@ public class EquipmentService : IDisposable
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
     private static readonly TimeSpan CacheTtl = TimeSpan.FromHours(24);
 
-    private static readonly Dictionary<string, (string displayName, int[] uexCategoryIds)> ComponentCategories = new()
+    // 装備カテゴリ。Key は items.item_type (船舶武器 WeaponGun のみ items に無く item_index から引く)。表示順はこの並び。
+    // uexCategoryIds は UEX の購入場所検索用 (不明なカテゴリは空 → 既定カテゴリで検索)
+    private const string WeaponGunType = "WeaponGun";
+    private static readonly List<(string Key, string DisplayName, int[] UexCategoryIds)> ComponentCategories = new()
     {
-        ["SCItemShieldGeneratorParams"] = ("シールド", new[] { 23 }),
-        ["SCItemPowerPlantParams"] = ("パワープラント", new[] { 21 }),
-        ["SCItemQuantumDriveParams"] = ("量子ドライブ", new[] { 22 }),
-        ["SCItemCoolerParams"] = ("クーラー", new[] { 19 }),
-        ["SCItemWeaponComponentParams"] = ("船舶武器", new[] { 32, 33, 34, 35 }),
+        ("PowerPlant", "パワープラント", new[] { 21 }),
+        ("Shield", "シールド", new[] { 23 }),
+        ("QuantumDrive", "量子ドライブ", new[] { 22 }),
+        ("Cooler", "クーラー", new[] { 19 }),
+        ("Radar", "レーダー", Array.Empty<int>()),
+        ("MissileLauncher", "ミサイルラック", Array.Empty<int>()),
+        ("FuelTank", "燃料タンク", Array.Empty<int>()),
+        ("QuantumFuelTank", "量子燃料タンク", Array.Empty<int>()),
+        ("FuelIntake", "燃料インテーク", Array.Empty<int>()),
+        (WeaponGunType, "船舶武器", new[] { 32, 33, 34, 35 }),
     };
 
     private static readonly Dictionary<string, (string stat1Label, string stat2Label)> StatLabels = new()
@@ -53,48 +62,83 @@ public class EquipmentService : IDisposable
         cmd.ExecuteNonQuery();
     }
 
+    // 装備カテゴリ (Key = items.item_type / "WeaponGun") と件数。件数 0 のカテゴリは返さない。
+    // 件数は GetShipComponents と同じ除外 (PLACEHOLDER 名・空名) を適用した後のもの
     public List<EquipmentCategory> GetShipComponentCategories()
     {
         var categories = new List<EquipmentCategory>();
-        foreach (var (compType, (displayName, _)) in ComponentCategories)
+        foreach (var (key, displayName, _) in ComponentCategories)
         {
-            using var cmd = _conn.CreateCommand();
-            cmd.CommandText = "SELECT COUNT(*) FROM items WHERE component_type = @ct";
-            cmd.Parameters.AddWithValue("@ct", compType);
-            var count = (int)(long)(cmd.ExecuteScalar() ?? 0L);
+            var count = GetShipComponents(key).Count;
             if (count > 0)
-                categories.Add(new EquipmentCategory { Key = compType, DisplayName = displayName, Count = count });
+                categories.Add(new EquipmentCategory { Key = key, DisplayName = displayName, Count = count });
         }
         return categories;
     }
 
-    public List<EquipmentItem> GetShipComponents(string componentType, string? search = null, int? sizeFilter = null)
+    // 表示名が未ローカライズのプレースホルダ (item_index.name "<= PLACEHOLDER =>" / items.name "@LOC_PLACEHOLDER") または空
+    private static bool IsPlaceholderName(string? name)
     {
+        var n = (name ?? "").Trim();
+        return n.Length == 0
+            || n.Equals("<= PLACEHOLDER =>", StringComparison.Ordinal)
+            || n.Equals("@LOC_PLACEHOLDER", StringComparison.Ordinal);
+    }
+
+    // item_index の武器 (WeaponGun) は Size 列が無いので record_name の "_S{n}" (末尾または "_" の前。大文字小文字無視) から補完する。
+    // 例: BEHR_LaserCannon_S3 → 3、RSI_BallisticCannon_S5_Meteor_Bespoke → 5。表記が無ければ 0。
+    // 0 始まり ("_S01" 等) は Size 表記とみなさない
+    private static readonly Regex RecordSizeRegex = new(@"_S([1-9]\d?)(?=_|$)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static int SizeFromRecordName(string? recordName)
+    {
+        if (string.IsNullOrEmpty(recordName)) return 0;
+        var m = RecordSizeRegex.Match(recordName);
+        return m.Success && int.TryParse(m.Groups[1].Value, out var n) ? n : 0;
+    }
+
+    // itemType (items.item_type) で絞った装備一覧。"WeaponGun" は item_index から (Grade 無し。Size は record_name から補完。sizeFilter は適用しない)。
+    // 表示名は item_index.name を優先し、無ければ items.name (GetItemByRecord と同じ解決)。
+    // 表示名がプレースホルダ ("<= PLACEHOLDER =>" / "@LOC_PLACEHOLDER") または空のものは候補から除外する
+    public List<EquipmentItem> GetShipComponents(string itemType, string? search = null, int? sizeFilter = null)
+    {
+        if (itemType == WeaponGunType) return GetShipWeapons(search);
+
         using var cmd = _conn.CreateCommand();
-        var conditions = new List<string> { "component_type = @ct" };
-        cmd.Parameters.AddWithValue("@ct", componentType);
+        var conditions = new List<string> { "i.item_type = @ct" };
+        cmd.Parameters.AddWithValue("@ct", itemType);
 
         if (!string.IsNullOrWhiteSpace(search))
         {
-            conditions.Add("(name LIKE @q OR manufacturer LIKE @q OR record_name LIKE @q)");
+            conditions.Add("(i.name LIKE @q OR i.manufacturer LIKE @q OR i.record_name LIKE @q OR COALESCE(x.name, '') LIKE @q)");
             cmd.Parameters.AddWithValue("@q", $"%{search}%");
         }
         if (sizeFilter.HasValue)
         {
-            conditions.Add("size = @sz");
+            conditions.Add("i.size = @sz");
             cmd.Parameters.AddWithValue("@sz", sizeFilter.Value);
         }
 
-        cmd.CommandText = $"SELECT record_name, name, item_type, size, grade, manufacturer, component_type, component_json FROM items WHERE {string.Join(" AND ", conditions)} ORDER BY size DESC, grade DESC, name";
+        // item_index.record_name は一意でない可能性があるため相関サブクエリで 1 件に絞る
+        cmd.CommandText = $"""
+            SELECT i.record_name, i.name, i.item_type, i.size, i.grade, i.manufacturer, i.component_type, i.component_json, x.name
+            FROM items i
+            LEFT JOIN (SELECT record_name, MIN(name) AS name FROM item_index WHERE name IS NOT NULL AND name != '' GROUP BY record_name) x
+                   ON x.record_name = i.record_name
+            WHERE {string.Join(" AND ", conditions)}
+            ORDER BY i.size DESC, i.grade DESC, COALESCE(x.name, i.name)
+            """;
         using var reader = cmd.ExecuteReader();
 
         var items = new List<EquipmentItem>();
         while (reader.Read())
         {
+            var rawName = reader.IsDBNull(1) ? reader.GetString(0) : reader.GetString(1);
+            var indexName = reader.IsDBNull(8) ? "" : reader.GetString(8);
             var item = new EquipmentItem
             {
                 RecordName = reader.GetString(0),
-                Name = reader.IsDBNull(1) ? reader.GetString(0) : reader.GetString(1),
+                Name = indexName.Length > 0 ? indexName : rawName,
                 ItemType = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 Size = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
                 Grade = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
@@ -102,8 +146,46 @@ public class EquipmentService : IDisposable
                 ComponentType = reader.IsDBNull(6) ? "" : reader.GetString(6),
                 ComponentJson = reader.IsDBNull(7) ? "" : reader.GetString(7),
             };
+            if (IsPlaceholderName(item.Name)) continue;
             ParseStats(item);
             items.Add(item);
+        }
+        return items;
+    }
+
+    // 船舶武器 (item_index の item_type = 'WeaponGun')。Grade は無い。Size は record_name の "_S{n}" から補完 (無ければ 0)。
+    // 表示名がプレースホルダ・空のものは除外
+    private List<EquipmentItem> GetShipWeapons(string? search)
+    {
+        using var cmd = _conn.CreateCommand();
+        var conditions = new List<string> { "item_type = @ct" };
+        cmd.Parameters.AddWithValue("@ct", WeaponGunType);
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            conditions.Add("(name LIKE @q OR manufacturer LIKE @q OR record_name LIKE @q)");
+            cmd.Parameters.AddWithValue("@q", $"%{search}%");
+        }
+        cmd.CommandText = $"SELECT record_name, name, item_type, sub_type, manufacturer FROM item_index WHERE {string.Join(" AND ", conditions)} ORDER BY name, record_name";
+        using var reader = cmd.ExecuteReader();
+
+        var items = new List<EquipmentItem>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        while (reader.Read())
+        {
+            var rec = reader.IsDBNull(0) ? "" : reader.GetString(0);
+            var name = reader.IsDBNull(1) ? "" : reader.GetString(1);
+            // プレースホルダ名の行を先に落としてから重複排除する (同一 record に実名行があれば拾えるように)
+            if (rec.Length == 0 || IsPlaceholderName(name)) continue;
+            if (!seen.Add(rec)) continue;
+            items.Add(new EquipmentItem
+            {
+                RecordName = rec,
+                Name = name,
+                ItemType = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                SubType = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                Manufacturer = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                Size = SizeFromRecordName(rec),
+            });
         }
         return items;
     }
@@ -178,6 +260,101 @@ public class EquipmentService : IDisposable
         return ports;
     }
 
+    // record 名 1 件を items から引く (ツールチップ / 装備インベントリ用)。
+    // ship_ports.equipped_item は "POWR_AEGS_S01_Regulus_SCItem" 形式、items.record_name / item_index.record_name は
+    // "EntityClassDefinition.POWR_AEGS_S01_Regulus_SCItem" 形式なので、そのまま → "EntityClassDefinition." 前置 →
+    // "_SCItem" の有無を反転したもの (+前置) の順に照合する。
+    // 表示名は items.name がローカライズキー (@item_Name...) のため、同 record の item_index.name を優先し、無ければ items.name。
+    // items に無く item_index にだけある record (船舶武器など) は名前・種別 (+ record_name の "_S{n}" から補完した Size。Grade = 0) で返す。
+    // 表示名がプレースホルダ ("<= PLACEHOLDER =>" / "@LOC_PLACEHOLDER") または空のときは null にせず record 名を表示名にする。解決できなければ null
+    private readonly Dictionary<string, EquipmentItem?> _itemByRecordCache = new(StringComparer.Ordinal);
+
+    public EquipmentItem? GetItemByRecord(string record)
+    {
+        var key = (record ?? "").Trim();
+        if (key.Length == 0) return null;
+        if (_itemByRecordCache.TryGetValue(key, out var cached)) return cached;
+
+        EquipmentItem? result = null;
+        foreach (var cand in RecordCandidates(key))
+        {
+            result = QueryItemByRecord(cand) ?? QueryItemIndexByRecord(cand);
+            if (result != null) break;
+        }
+        if (result != null && IsPlaceholderName(result.Name)) result.Name = result.RecordName;
+        _itemByRecordCache[key] = result;
+        return result;
+    }
+
+    private static IEnumerable<string> RecordCandidates(string record)
+    {
+        const string prefix = "EntityClassDefinition.";
+        const string suffix = "_SCItem";
+        var bases = new List<string> { record };
+        if (record.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            bases.Add(record[..^suffix.Length]);
+        else
+            bases.Add(record + suffix);
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var b in bases)
+        {
+            if (seen.Add(b)) yield return b;
+            if (!b.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var withPrefix = prefix + b;
+                if (seen.Add(withPrefix)) yield return withPrefix;
+            }
+        }
+    }
+
+    private EquipmentItem? QueryItemByRecord(string recordName)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = @"SELECT i.record_name, i.name, i.item_type, i.size, i.grade, i.manufacturer, i.component_type, i.component_json, x.name
+                            FROM items i LEFT JOIN item_index x ON x.record_name = i.record_name
+                            WHERE i.record_name = @rn LIMIT 1";
+        cmd.Parameters.AddWithValue("@rn", recordName);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+
+        var rawName = reader.IsDBNull(1) ? reader.GetString(0) : reader.GetString(1);
+        var indexName = reader.IsDBNull(8) ? "" : reader.GetString(8);
+        var item = new EquipmentItem
+        {
+            RecordName = reader.GetString(0),
+            Name = indexName.Length > 0 ? indexName : rawName,
+            ItemType = reader.IsDBNull(2) ? "" : reader.GetString(2),
+            Size = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+            Grade = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+            Manufacturer = reader.IsDBNull(5) ? "" : reader.GetString(5),
+            ComponentType = reader.IsDBNull(6) ? "" : reader.GetString(6),
+            ComponentJson = reader.IsDBNull(7) ? "" : reader.GetString(7),
+        };
+        ParseStats(item);
+        return item;
+    }
+
+    private EquipmentItem? QueryItemIndexByRecord(string recordName)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT record_name, name, item_type, sub_type, manufacturer FROM item_index WHERE record_name = @rn LIMIT 1";
+        cmd.Parameters.AddWithValue("@rn", recordName);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+
+        var rec = reader.IsDBNull(0) ? recordName : reader.GetString(0);
+        return new EquipmentItem
+        {
+            RecordName = rec,
+            Name = reader.IsDBNull(1) || reader.GetString(1).Length == 0 ? rec : reader.GetString(1),
+            ItemType = reader.IsDBNull(2) ? "" : reader.GetString(2),
+            SubType = reader.IsDBNull(3) ? "" : reader.GetString(3),
+            Manufacturer = reader.IsDBNull(4) ? "" : reader.GetString(4),
+            Size = SizeFromRecordName(rec),
+        };
+    }
+
     public string? FindShipRecordName(string shipName)
     {
         using var cmd = _conn.CreateCommand();
@@ -215,8 +392,11 @@ public class EquipmentService : IDisposable
         return sizes;
     }
 
+    // カテゴリ Key → ship_ports.item_type。Key は item_type そのもの (ComponentCategories にあるものはそのまま返す)。
+    // 旧 Key (SCItem…Params) も互換のため受ける
     private static string ComponentTypeToPortType(string componentType)
     {
+        if (ComponentCategories.Any(c => c.Key == componentType)) return componentType;
         return componentType switch
         {
             "SCItemShieldGeneratorParams" => "Shield",
@@ -360,8 +540,9 @@ public class EquipmentService : IDisposable
         try
         {
             int[] categoryIds;
-            if (componentType != null && ComponentCategories.TryGetValue(componentType, out var catInfo))
-                categoryIds = catInfo.uexCategoryIds;
+            var catInfo = componentType != null ? ComponentCategories.FirstOrDefault(c => c.Key == componentType) : default;
+            if (catInfo.Key != null && catInfo.UexCategoryIds.Length > 0)
+                categoryIds = catInfo.UexCategoryIds;
             else
                 categoryIds = new[] { 18, 17 };
 
@@ -513,6 +694,9 @@ public class ShipPortInfo
         "Avionics" => "アビオニクス",
         "LifeSupport" => "ライフサポート",
         "CounterMeasure" => "カウンターメジャー",
+        "FuelTank" => "燃料タンク",
+        "QuantumFuelTank" => "量子燃料タンク",
+        "FuelIntake" => "燃料インテーク",
         _ => ItemType
     };
 }
