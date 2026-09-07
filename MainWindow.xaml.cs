@@ -2760,8 +2760,10 @@ public partial class MainWindow : Window
             _hangarService.InvalidateCaches();
             LoadUpgradeData();
 
-            // 同期した保有船を所持船にも反映する (既存の所持船行は変更・削除しない)
-            var added = ImportHangarShipsIntoMyShips(confirm: false);
+            // 同期した保有船を所持船にも反映する (既存の所持船行は変更・削除しない)。
+            // ImportHangarShipsIntoMyShips は直前の LoadUpgradeData が更新した _hangarShips に依存するので順序は変えず、
+            // 二重読込を避けるため中の RefreshMyShips では LoadUpgradeData を再実行しない (reloadUpgrade: false)
+            var added = ImportHangarShipsIntoMyShips(confirm: false, reloadUpgrade: false);
             if (added > 0)
             {
                 Log($"[Ship] 同期に伴い所持船へ {added} 件追加");
@@ -2788,7 +2790,8 @@ public partial class MainWindow : Window
         RecomputeUpgradeSim();
     }
 
-    private void LoadUpgradeData()
+    // 戻り値: 正常終了なら true、途中で例外に入った (RecomputeUpgradeSim → RefreshMyShipRows に達しなかった可能性がある) なら false
+    private bool LoadUpgradeData()
     {
         try
         {
@@ -2909,6 +2912,45 @@ public partial class MainWindow : Window
                     foreach (var r in rows) entries.Add((r.Name, new List<UpgradeShipRow> { r }));
                 }
             }
+            // Hangar (pledge) に一致しない所持船 (my_ships) も保有船として行にする (ゲーム内購入 / 手入力)。
+            // 正規化名が GetShipInstances のどれとも一致しないものだけ。CCU 適用・Sell は不可、装備は設定可
+            var hangarNorms = new HashSet<string>(
+                ships.Select(s => _hangarService.NormalizeShipName(s.Name)), StringComparer.OrdinalIgnoreCase);
+            foreach (var my in _tradeService.MyShips)
+            {
+                if (hangarNorms.Contains(_hangarService.NormalizeShipName(my.Name))) continue;
+                var inGame = IsInGameNotes(my.Notes);
+                var myId = my.Id;
+                var myName = my.Name;
+                var matrix = _hangarService.ResolveShip(myName);
+                var row = new UpgradeShipRow
+                {
+                    PledgeId = "",
+                    PledgeName = "",
+                    Name = myName,
+                    InstanceKey = $"my|{myId}",
+                    CurrentName = myName,
+                    DisplayName = myName,
+                    InsuranceDisplay = "",
+                    Focus = matrix?.Focus ?? "",
+                    Type = matrix?.Type ?? "",
+                    Status = matrix?.ProductionStatus ?? "",
+                    IsUnresolved = matrix == null,
+                    OriginDisplay = inGame ? "ゲーム内購入" : "手入力 (未同期)",
+                    IsInGame = inGame,
+                    IsManual = !inGame,
+                    MyShipId = myId,
+                    CanUpgrade = false,
+                    SellEnabled = false,
+                    // 未同期の所持船と同じツールチップ経路 (Ship Matrix の情報 + "my|{id}" の装備)
+                    TooltipFactory = () =>
+                    {
+                        var tmp = new HangarShipInstance { Name = myName, Matrix = matrix };
+                        return _hangarService.BuildShipTooltip(tmp, _hangarEquip, $"my|{myId}");
+                    },
+                };
+                entries.Add((row.Name, new List<UpgradeShipRow> { row }));
+            }
             _upgradeShips = entries.OrderBy(e => e.Key).SelectMany(e => e.Rows).ToList();
 
             // melt シミュレーション用の pledge 一覧 (Selected は _soldPledgeIds と双方向に同期)
@@ -2935,6 +2977,17 @@ public partial class MainWindow : Window
             // Ship Matrix で解決できない船名は無言で捨てず、ステータス行で警告する
             // (RecomputeUpgradeSim が txtUpgradeStatus を組み立てる際に ApplyUnresolvedWarning で付加する)
             _unresolvedNames = _hangarService.GetUnresolvedNames();
+            // 所持船由来の行 (IsNonPledge) で Ship Matrix に解決できない船名も加える (重複排除)
+            {
+                var seen = new HashSet<string>(_unresolvedNames, StringComparer.OrdinalIgnoreCase);
+                foreach (var s in _upgradeShips.Where(s => s.IsNonPledge))
+                {
+                    var n = (s.Name ?? "").Trim();
+                    if (n.Length == 0) continue;
+                    if (_hangarService.ResolveShip(n) != null) continue;
+                    if (seen.Add(n)) _unresolvedNames.Add(n);
+                }
+            }
 
             RecomputeUpgradeSim();
 
@@ -2961,10 +3014,12 @@ public partial class MainWindow : Window
             RefreshMyComponents();
             RefreshLoadoutShipCombo();
             _upgradeDataLoadedOnce = true;
+            return true;
         }
         catch (Exception ex)
         {
             txtUpgradeStatus.Text = $"読み込みエラー: {ex.Message}";
+            return false;
         }
     }
 
@@ -3009,7 +3064,7 @@ public partial class MainWindow : Window
         // 現在保有型 (正規化) ごとの船数 (売却予定の船は除く)。同じ未使用 CCU が同型船 N 機の下に重複表示されるとき
         // 「(他 N-1 機でも使用可)」を CCU 行の表示名に付けるために使う
         var heldCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        foreach (var s in _upgradeShips.Where(s => !s.IsGroupHeader && !s.IsSold))
+        foreach (var s in _upgradeShips.Where(s => !s.IsGroupHeader && !s.IsSold && !s.IsNonPledge))
         {
             var n = _hangarService.NormalizeShipName(s.CurrentName);
             heldCounts[n] = heldCounts.TryGetValue(n, out var cnt) ? cnt + 1 : 1;
@@ -3025,6 +3080,7 @@ public partial class MainWindow : Window
         foreach (var s in _upgradeShips)
         {
             if (s.IsGroupHeader) continue;
+            if (s.IsNonPledge) continue;   // Hangar 未一致の所持船 (ゲーム内購入 / 手入力) には CCU を帰属させない
             var current = _hangarService.NormalizeShipName(s.CurrentName);
             bool FromMatches(UpgradeCcuRow r) =>
                 ccuById.TryGetValue(r.PledgeId, out var c)
@@ -3229,9 +3285,10 @@ public partial class MainWindow : Window
             }
         }
 
-        // 比較は名寄せ後 (Ship Matrix の正式名) で行う。表示は元の文字列のまま。売却 (melt 予定) の船は保有から除く
+        // 比較は名寄せ後 (Ship Matrix の正式名) で行う。表示は元の文字列のまま。売却 (melt 予定) の船は保有から除く。
+        // Hangar 未一致の所持船 (ゲーム内購入 / 手入力) は CCU の適用可否判定に使わないので除く
         var heldCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        foreach (var s in shipRows.Where(s => !s.IsSold))
+        foreach (var s in shipRows.Where(s => !s.IsSold && !s.IsNonPledge))
         {
             var n = _hangarService.NormalizeShipName(s.CurrentName);
             heldCounts[n] = heldCounts.TryGetValue(n, out var cnt) ? cnt + 1 : 1;
@@ -3249,11 +3306,13 @@ public partial class MainWindow : Window
         foreach (var s in shipRows)
         {
             var current = _hangarService.NormalizeShipName(s.CurrentName);
-            // 未使用かつ売却予定 (Sell / melt パネル) でない CCU だけが候補 (下の _upgradeCcus の usable 判定と同じ条件)
-            s.CanUpgrade = !s.IsSold && _allCcus.Any(c => !used.Contains(c.PledgeId)
+            // 未使用かつ売却予定 (Sell / melt パネル) でない CCU だけが候補 (下の _upgradeCcus の usable 判定と同じ条件)。
+            // CCU は pledge の船にしか使えないので Hangar 未一致の所持船 (IsNonPledge) は常に不可
+            s.CanUpgrade = !s.IsSold && !s.IsNonPledge && _allCcus.Any(c => !used.Contains(c.PledgeId)
                 && !(!string.IsNullOrEmpty(c.PledgeId) && _soldPledgeIds.Contains(c.PledgeId))
                 && _hangarService.NormalizeShipName(c.FromShip).Equals(current, StringComparison.OrdinalIgnoreCase));
-            s.IsDuplicate = !s.IsSold && heldCounts.TryGetValue(current, out var cnt) && cnt >= 2;
+            // Hangar 未一致の所持船 (IsNonPledge) は heldCounts に数えていないので重複判定もしない (常に false)
+            s.IsDuplicate = !s.IsSold && !s.IsNonPledge && heldCounts.TryGetValue(current, out var cnt) && cnt >= 2;
 
             // RSI ストアでの販売状況 (保有船名で照合)
             var warbond = _hangarService.FindStoreShipWarbond(s.Name);
@@ -3529,6 +3588,7 @@ public partial class MainWindow : Window
     {
         if (sender is not ComboBox combo || combo.DataContext is not UpgradeShipRow row) return;
         if (row.IsGroupHeader) return;   // ヘッダ行は船ではないのでマークを保存しない
+        if (row.IsNonPledge) return;     // 所持船由来の行は pledge ではないため保存キーが無い
         var selected = combo.SelectedItem as string ?? "";
         if (selected == row.MarkDisplay) return;
 
@@ -3563,7 +3623,7 @@ public partial class MainWindow : Window
             _hangarService.SetCacheDir(WorkDir);
             var applied = new HashSet<string>(_upgradeShips.SelectMany(s => s.AppliedCcuIds), StringComparer.OrdinalIgnoreCase);
             var ships = _upgradeShips
-                .Where(r => !r.IsGroupHeader && !r.IsSold)
+                .Where(r => !r.IsGroupHeader && !r.IsSold && !r.IsNonPledge)   // Hangar 未一致の所持船は CCU の対象外
                 .Select(r =>
                 {
                     _pledgeById.TryGetValue(r.PledgeId, out var p);
@@ -3687,14 +3747,26 @@ public partial class MainWindow : Window
         }
     }
 
-    private void RefreshMyShips()
+    // reloadUpgrade=false のときは LoadUpgradeData を呼ばない (HangarSync_Click のように直前に LoadUpgradeData 済みの場合の二重読込回避)。
+    // reloadUpgrade=true のときは所持船グリッドの ItemsSource をここでは設定せず、LoadUpgradeData → RecomputeUpgradeSim → RefreshMyShipRows の
+    // 再設定に任せる (二重設定の回避)。ただし LoadUpgradeData が途中で例外に入って false を返した場合は
+    // RefreshMyShipRows に達していない可能性があるので、従来どおりここで代入する (取りこぼし防止)
+    private void RefreshMyShips(bool reloadUpgrade = true)
     {
         _tradeService.SetCacheDir(WorkDir);
         _tradeService.LoadMyShips();
-        dgMyShips.ItemsSource = null;
-        dgMyShips.ItemsSource = _tradeService.MyShips.Select(ToMyShipRow).ToList();
+        if (!reloadUpgrade)
+        {
+            dgMyShips.ItemsSource = null;
+            dgMyShips.ItemsSource = _tradeService.MyShips.Select(ToMyShipRow).ToList();
+        }
         txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻";
         RefreshCommodityShipCombo();
+        if (reloadUpgrade && !LoadUpgradeData())   // 所持船由来の行 (IsNonPledge) をアップグレード管理へ即時反映 (削除済みの行を残さない)。正常終了時は所持船グリッドも内部で再設定される
+        {
+            dgMyShips.ItemsSource = null;
+            dgMyShips.ItemsSource = _tradeService.MyShips.Select(ToMyShipRow).ToList();
+        }
     }
 
     // DB を読み直さず、現在の _tradeService.MyShips を表示行に写し直す (同期状態・シミュレーション状態の反映用)
@@ -3726,6 +3798,12 @@ public partial class MainWindow : Window
 
         row.HangarCount = matched.Count;
         row.HangarOriginDisplay = string.Join(" / ", matched.Select(s => s.OriginDisplay).Where(o => !string.IsNullOrEmpty(o)));
+        // Hangar に一致しない船で、メモが "[ゲーム内購入]" で始まるものは aUEC 購入 (未同期ではない)
+        if (matched.Count == 0 && IsInGameNotes(e.Notes))
+        {
+            row.IsInGame = true;
+            row.HangarOriginDisplay = "ゲーム内購入";
+        }
         row.HangarCanUpgrade = matched.Any(s => s.CanUpgrade);
         row.HangarUpgradableDisplay = row.HangarCanUpgrade ? "○" : "";
         row.HangarSaleDisplay = _hangarService.FindStoreShipWarbond(e.Name) != null ? "Warbond 販売中"
@@ -3752,12 +3830,12 @@ public partial class MainWindow : Window
         return row;
     }
 
-    // 所持船名 (正規化名) に一致する保有船行を _upgradeShips の表示順で返す (ヘッダ行・CCU 行は除く)
+    // 所持船名 (正規化名) に一致する保有船行を _upgradeShips の表示順で返す (ヘッダ行・CCU 行・所持船由来の行 (IsNonPledge) は除く)
     private List<UpgradeShipRow> MatchHangarRowsForMyShip(string shipName)
     {
         var norm = _hangarService.NormalizeShipName(shipName);
         return _upgradeShips
-            .Where(s => !s.IsGroupHeader && !s.IsCcu
+            .Where(s => !s.IsGroupHeader && !s.IsCcu && !s.IsNonPledge
                 && _hangarService.NormalizeShipName(s.Name).Equals(norm, StringComparison.OrdinalIgnoreCase))
             .ToList();
     }
@@ -3795,8 +3873,9 @@ public partial class MainWindow : Window
     private void ImportHangarShips_Click(object sender, RoutedEventArgs e) => ImportHangarShipsIntoMyShips(confirm: true);
 
     // 同期済み保有船を所持船へ追加する。confirm=true のときだけ確認ダイアログを出す。追加件数を返す。
-    // 既存の所持船行は変更・削除しない (手入力の保護)
-    private int ImportHangarShipsIntoMyShips(bool confirm)
+    // 既存の所持船行は変更・削除しない (手入力の保護)。
+    // reloadUpgrade は最後の RefreshMyShips に渡す (HangarSync_Click は直前に LoadUpgradeData 済みなので false)
+    private int ImportHangarShipsIntoMyShips(bool confirm, bool reloadUpgrade = true)
     {
         if (_hangarShips.Count == 0)
         {
@@ -3847,7 +3926,7 @@ public partial class MainWindow : Window
             Log($"[Ship] 追加 (Hangar 反映): {s.Name} ({scu} SCU) {s.OriginDisplay}");
         }
 
-        RefreshMyShips();
+        RefreshMyShips(reloadUpgrade);
         txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻 | Hangar から {toAdd.Count} 件追加";
         return toAdd.Count;
     }
@@ -4185,31 +4264,15 @@ public partial class MainWindow : Window
         if (btn.DataContext is UpgradeShipRow up)
         {
             if (up.IsGroupHeader) return;
-            target = FindLoadoutShipChoice(up.InstanceKey);
+            target = up.IsNonPledge
+                ? FindOrAddMyLoadoutShipChoice(up.MyShipId, up.Name)   // 所持船由来の行 ("my|{id}")
+                : FindLoadoutShipChoice(up.InstanceKey);
         }
         else if (btn.DataContext is MyShipRow my)
         {
             var hangarRow = FindHangarRowForMyShip(my);
             if (hangarRow != null) target = FindLoadoutShipChoice(hangarRow.InstanceKey);
-            if (target == null)
-            {
-                var key = $"my|{my.Id}";
-                target = FindLoadoutShipChoice(key);
-                if (target == null)
-                {
-                    var matrix = _hangarService.ResolveShip(my.Name);
-                    target = new LoadoutShipChoice
-                    {
-                        ShipKey = key,
-                        Name = my.Name,
-                        Manufacturer = matrix?.ManufacturerName,
-                        Display = $"{my.Name} — 所持船",
-                    };
-                    _extraLoadoutShips.Add(target);
-                    RefreshLoadoutShipCombo();
-                    target = FindLoadoutShipChoice(key);
-                }
-            }
+            target ??= FindOrAddMyLoadoutShipChoice(my.Id, my.Name);
         }
         if (target == null) return;
 
@@ -4221,6 +4284,25 @@ public partial class MainWindow : Window
     private LoadoutShipChoice? FindLoadoutShipChoice(string shipKey)
         => (cmbLoadoutShip.ItemsSource as IEnumerable<LoadoutShipChoice>)
             ?.FirstOrDefault(i => i.ShipKey.Equals(shipKey, StringComparison.Ordinal));
+
+    // 所持船のみの船 ("my|{my_ships.id}") の船セレクタ項目を返す。無ければ _extraLoadoutShips に加えてセレクタを埋め直してから返す
+    private LoadoutShipChoice? FindOrAddMyLoadoutShipChoice(int myShipId, string shipName)
+    {
+        var key = $"my|{myShipId}";
+        var target = FindLoadoutShipChoice(key);
+        if (target != null) return target;
+
+        var matrix = _hangarService.ResolveShip(shipName);
+        _extraLoadoutShips.Add(new LoadoutShipChoice
+        {
+            ShipKey = key,
+            Name = shipName,
+            Manufacturer = matrix?.ManufacturerName,
+            Display = $"{shipName} — 所持船",
+        });
+        RefreshLoadoutShipCombo();
+        return FindLoadoutShipChoice(key);
+    }
 
     private void RefreshCommodityShipCombo()
     {
@@ -4299,7 +4381,7 @@ public partial class MainWindow : Window
 
         var mfr = txtAddShipMfr.Text.Trim();
         int.TryParse(txtAddShipScu.Text.Trim(), out var scu);
-        var notes = txtAddShipNotes.Text.Trim();
+        var notes = ApplyInGameMarker(txtAddShipNotes.Text.Trim(), chkAddShipInGame.IsChecked == true);
 
         // UEX データから SCU を補完
         if (scu == 0)
@@ -4318,7 +4400,26 @@ public partial class MainWindow : Window
         txtAddShipMfr.Text = "";
         txtAddShipScu.Text = "0";
         txtAddShipNotes.Text = "";
-        Log($"[Ship] 追加: {name} ({scu} SCU)");
+        chkAddShipInGame.IsChecked = false;
+        Log($"[Ship] 追加: {name} ({scu} SCU){(IsInGameNotes(notes) ? " [ゲーム内購入]" : "")}");
+    }
+
+    // 所持船メモの「ゲーム内購入 (aUEC)」接頭辞。my_ships.notes の先頭に付けて由来を記録する (スキーマは変えない)
+    private const string InGameNotesMarker = "[ゲーム内購入]";
+
+    private static bool IsInGameNotes(string? notes)
+        => !string.IsNullOrEmpty(notes) && notes.StartsWith(InGameNotesMarker, StringComparison.Ordinal);
+
+    // 接頭辞を外したメモ本文 (接頭辞が無ければそのまま)
+    private static string StripInGameMarker(string? notes)
+        => IsInGameNotes(notes) ? notes!.Substring(InGameNotesMarker.Length).TrimStart() : (notes ?? "");
+
+    // メモ本文に接頭辞を付け直す (既に付いていても二重には付けない。inGame=false なら外す)
+    private static string ApplyInGameMarker(string? notes, bool inGame)
+    {
+        var body = StripInGameMarker(notes);
+        if (!inGame) return body;
+        return body.Length == 0 ? InGameNotesMarker : $"{InGameNotesMarker} {body}";
     }
 
     private void DeleteMyShip_Click(object sender, RoutedEventArgs e)
@@ -4338,7 +4439,9 @@ public partial class MainWindow : Window
         txtAddShipName.Text = ship.Name;
         txtAddShipMfr.Text = ship.Manufacturer;
         txtAddShipScu.Text = ship.Scu.ToString();
-        txtAddShipNotes.Text = ship.Notes;
+        // 「ゲーム内購入」は notes の接頭辞からチェックボックスへ復元し、メモ欄には本文だけを出す (保存時に ApplyInGameMarker で付け直す)
+        chkAddShipInGame.IsChecked = IsInGameNotes(ship.Notes);
+        txtAddShipNotes.Text = StripInGameMarker(ship.Notes);
         txtMyShipStatus.Text = $"編集中: {ship.Name} — 入力欄を変更して [追加] で新規 or 下の更新ボタンで上書き";
     }
 
@@ -4348,9 +4451,10 @@ public partial class MainWindow : Window
         var name = txtAddShipName.Text.Trim();
         if (string.IsNullOrEmpty(name)) return;
         int.TryParse(txtAddShipScu.Text.Trim(), out var scu);
-        _tradeService.UpdateMyShip(ship.Id, name, txtAddShipMfr.Text.Trim(), scu, txtAddShipNotes.Text.Trim());
+        var notes = ApplyInGameMarker(txtAddShipNotes.Text.Trim(), chkAddShipInGame.IsChecked == true);
+        _tradeService.UpdateMyShip(ship.Id, name, txtAddShipMfr.Text.Trim(), scu, notes);
         RefreshMyShips();
-        Log($"[Ship] 更新: {name} ({scu} SCU)");
+        Log($"[Ship] 更新: {name} ({scu} SCU){(IsInGameNotes(notes) ? " [ゲーム内購入]" : "")}");
     }
 
     // === Commodity Trade ===
@@ -4659,6 +4763,85 @@ public partial class MainWindow : Window
         {
             btnStoreRefresh.IsEnabled = true;
         }
+    }
+
+    // 「装備データを再抽出」: Data.p4k から船と装備 (item_index) だけを再抽出する (GameDataExtractor.RebuildEquipmentDataAsync)。
+    // 初期装備 (デフォルトロードアウト) を正しく取り直すために使う。完了後は装備 DB (_hangarEquip) を開き直して再読込する
+    private async void RebuildEquipment_Click(object sender, RoutedEventArgs e)
+    {
+        if (MessageBox.Show("Data.p4k から船と装備のデータを再抽出します（数分）。続けますか？", "装備データを再抽出",
+                MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+
+        btnRebuildEquipment.IsEnabled = false;
+        SetUpgradeActionButtonsEnabled(false);   // 再抽出中は同期・再読み込み・ストア更新・リセットも止める (finally で戻す)
+        txtUpgradeStatus.Text = "装備データを再抽出中...";
+        txtUpgradeStatus.ToolTip = null;
+        var progress = new Progress<string>(msg => txtUpgradeStatus.Text = msg);
+
+        // 抽出先 (gamedata_cache.db) を開いている装備 DB 接続は先に閉じる (再抽出後に LoadUpgradeData が開き直す)
+        _hangarEquip?.Dispose();
+        _hangarEquip = null;
+
+        string result;
+        bool rebuilt = false;
+        try
+        {
+            // InitGameDataExtractor と同じ引数で生成する。再抽出専用のインスタンスなので終了時に接続を閉じる
+            var workDir = App.Config.WorkingDirectory;
+            if (string.IsNullOrEmpty(workDir)) workDir = AppDomain.CurrentDomain.BaseDirectory;
+            using var extractor = new GameDataExtractor(workDir);
+            await Task.Run(() => extractor.RebuildEquipmentDataAsync(progress, CancellationToken.None));
+            rebuilt = true;
+            result = "装備データを再抽出しました";
+            Log("[Hangar] 装備データを再抽出しました");
+        }
+        catch (Exception ex)
+        {
+            Log($"[Hangar] 装備データ再抽出エラー: {ex}");
+            result = $"装備データ再抽出エラー: {ex.Message}";
+            MessageBox.Show($"装備データの再抽出に失敗しました: {ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+
+        try
+        {
+            _hangarService.InvalidateCaches();
+            if (rebuilt)
+            {
+                // 再抽出でポート構成 (PortKey) が変わった船に備え、存在しないポートキーの ship_loadouts 行を削除する
+                var gamedataPath = Path.Combine(WorkDir, "gamedata_cache.db");
+                if (File.Exists(gamedataPath))
+                {
+                    try
+                    {
+                        _hangarService.SetCacheDir(WorkDir);
+                        using var equip = new EquipmentService(gamedataPath);
+                        var pruned = _hangarService.PruneLoadouts(equip);
+                        if (pruned > 0) Log($"[Hangar] 存在しないポートの装備設定 {pruned} 件を削除しました");
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"[Hangar] 装備設定 (ship_loadouts) の整理に失敗: {ex.Message}");
+                    }
+                }
+            }
+            LoadUpgradeData();   // _hangarEquip が null なので gamedata_cache.db を開き直す
+            txtUpgradeStatus.Text += $" | {result}";
+        }
+        finally
+        {
+            btnRebuildEquipment.IsEnabled = true;
+            SetUpgradeActionButtonsEnabled(true);
+        }
+    }
+
+    // 装備データ再抽出中に止める操作ボタン (My Hangar と同期 ×2 / 再読み込み / ストア情報を更新 / シミュレーションをリセット) の有効・無効
+    private void SetUpgradeActionButtonsEnabled(bool enabled)
+    {
+        btnSync.IsEnabled = enabled;
+        btnSyncMyShips.IsEnabled = enabled;
+        btnUpgradeReload.IsEnabled = enabled;
+        btnStoreRefresh.IsEnabled = enabled;
+        btnUpgradeReset.IsEnabled = enabled;
     }
 
     private void StoreFilter_Changed(object sender, RoutedEventArgs e)
@@ -5114,6 +5297,13 @@ public class UpgradeShipRow
     public int SameTypeCount { get; set; }              // 正規化名が同じ保有船の数 (自分を含む)
     public string OriginDisplay { get; set; } = "";     // 由来 ("パック: ..." / "単品: ..." / "CCU 適用済 ← ..." / "VIP 特典")
     public string PledgeShipNames { get; set; } = "";   // 同 pledge の同梱機
+
+    // Hangar (pledge) に一致しない所持船 (my_ships) を保有船グリッドに出した行。InstanceKey は "my|{my_ships.id}"。
+    // CCU は pledge の船にしか使えないので CanUpgrade=false / Sell 不可。装備 (ship_loadouts) は設定できる
+    public bool IsInGame { get; set; }                  // メモが "[ゲーム内購入]" で始まる所持船 (aUEC 購入)
+    public bool IsManual { get; set; }                  // 上記以外の Hangar 未一致の所持船 (手入力・未同期)
+    public bool IsNonPledge => IsInGame || IsManual;
+    public int MyShipId { get; set; }                   // my_ships.id (IsNonPledge の行のみ。「装備」ボタンで "my|{id}" の船を開く)
     // ツールチップ。船行は TooltipFactory (HangarService.BuildShipTooltip) を初回アクセス時に評価してキャッシュする
     // (WPF の ToolTip バインドはツールチップ表示時に評価される)。ヘッダ行・CCU 行は文字列を直接セット
     private string? _tooltip;
@@ -5138,7 +5328,7 @@ public class UpgradeShipRow
     public bool IsChild { get; set; }                       // グループの子行
     public string DisplayName { get; set; } = "";           // 船名列の表示 (ヘッダ: "pledge名 (N機)" / 子: "　└ 船名" / 単独: 船名)
     public string ToggleLabel => IsGroupHeader ? (IsExpanded ? "−" : "+") : "";   // 非ヘッダは空 → ボタン非表示
-    public bool MarkEnabled => !IsGroupHeader && !IsCcu;
+    public bool MarkEnabled => !IsGroupHeader && !IsCcu && !IsNonPledge;   // 所持船由来の行は pledge ではないためマークの保存キーが無い
     public bool LoadoutEnabled => !IsGroupHeader && !IsCcu; // 「装備」ボタン: ヘッダ行・CCU 行は船ではないので無効
 
     // アップグレード権利 (CCU) を保有船グリッドに差し込んだ行。船行の直後 (使用可 / 使用中) または
@@ -5168,7 +5358,8 @@ public class UpgradeShipRow
     public bool SellEnabled { get; set; }                   // Meltable かつ pledge id あり (R-09)
     public bool Meltable { get; set; } = true;              // pledge の meltable
     public long PledgeValueCents { get; set; }              // pledge の melt 額
-    public string? SellToolTip => !Meltable ? "melt 不可"
+    public string? SellToolTip => IsNonPledge ? "pledge ではないため melt 対象外"
+        : !Meltable ? "melt 不可"
         : IsCcu && CcuState == "使用中" ? "適用中のため Undo 後に売却できます"
         : null;
 
@@ -5202,8 +5393,9 @@ public class MyShipRow
     public string DisplayName => Scu > 0 ? $"{Name} ({Scu} SCU)" : Name;
 
     public int HangarCount { get; set; }                    // 正規化名が一致する同期済み保有船の数 (0 = 未同期)
-    public string HangarCountDisplay => HangarCount == 0 ? "未同期" : $"×{HangarCount}";
-    public string HangarOriginDisplay { get; set; } = "";   // 一致した保有船の由来を " / " 連結
+    public bool IsInGame { get; set; }                      // Hangar 未一致で、メモが "[ゲーム内購入]" で始まる (aUEC 購入の船。未同期とは表示しない)
+    public string HangarCountDisplay => HangarCount > 0 ? $"×{HangarCount}" : IsInGame ? "" : "未同期";
+    public string HangarOriginDisplay { get; set; } = "";   // 一致した保有船の由来を " / " 連結 (Hangar 未一致のゲーム内購入は "ゲーム内購入")
     public bool HangarCanUpgrade { get; set; }              // 一致した保有船のいずれかに使える権利がある
     public string HangarUpgradableDisplay { get; set; } = "";
     public string HangarSaleDisplay { get; set; } = "";     // "Warbond 販売中" / "販売中" / ""

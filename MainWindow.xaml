@@ -734,6 +734,9 @@
                             <TextBlock Text="候補:" Grid.Column="3" VerticalAlignment="Center" Margin="0,0,4,0"/>
                             <ComboBox x:Name="cmbAddShip" Grid.Column="4" Grid.ColumnSpan="4" MinWidth="280"
                                       DisplayMemberPath="DisplayName" SelectionChanged="AddShip_Selected" Margin="0,0,8,0"/>
+                            <CheckBox x:Name="chkAddShipInGame" Content="ゲーム内購入 (aUEC)" Grid.Column="8" Grid.ColumnSpan="2"
+                                      VerticalAlignment="Center" Margin="0,0,8,0"
+                                      ToolTip="pledge ではなくゲーム内で aUEC 購入した船として登録します (メモの先頭に [ゲーム内購入] が付きます)"/>
 
                             <!-- Row 1: 詳細入力 -->
                             <TextBlock Text="船名:" Grid.Row="1" VerticalAlignment="Center" Margin="0,4,4,0"/>
@@ -751,7 +754,7 @@
 
                     <!-- 操作ボタン -->
                     <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,0">
-                        <Button Content="My Hangar と同期" Click="HangarSync_Click" Padding="12,6" Margin="0,0,8,0" Background="#1976D2" Foreground="White" FontWeight="Bold"/>
+                        <Button x:Name="btnSyncMyShips" Content="My Hangar と同期" Click="HangarSync_Click" Padding="12,6" Margin="0,0,8,0" Background="#1976D2" Foreground="White" FontWeight="Bold"/>
                         <Button Content="同期した船を所持船に反映" Click="ImportHangarShips_Click" Padding="12,4" Margin="0,0,8,0"
                                 ToolTip="My Hangar と同期した保有船のうち、所持船に無いものを追加します"/>
                         <Button Content="選択を更新" Click="UpdateMyShip_Click" Padding="12,4" Margin="0,0,4,0"/>
@@ -771,11 +774,13 @@
                             </Grid.RowDefinitions>
 
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-                                <Button Content="My Hangar と同期" Click="HangarSync_Click" Padding="12,6" Margin="0,0,8,0"
+                                <Button x:Name="btnSync" Content="My Hangar と同期" Click="HangarSync_Click" Padding="12,6" Margin="0,0,8,0"
                                         Background="#1976D2" Foreground="White" FontWeight="Bold"/>
-                                <Button Content="再読み込み" Click="UpgradeReload_Click" Padding="12,6" Margin="0,0,8,0"/>
-                                <Button Content="シミュレーションをリセット" Click="UpgradeReset_Click" Padding="12,6" Margin="0,0,8,0"/>
+                                <Button x:Name="btnUpgradeReload" Content="再読み込み" Click="UpgradeReload_Click" Padding="12,6" Margin="0,0,8,0"/>
+                                <Button x:Name="btnUpgradeReset" Content="シミュレーションをリセット" Click="UpgradeReset_Click" Padding="12,6" Margin="0,0,8,0"/>
                                 <Button x:Name="btnStoreRefresh" Content="ストア情報を更新" Click="StoreRefresh_Click" Padding="12,6" Margin="0,0,8,0"/>
+                                <Button x:Name="btnRebuildEquipment" Content="装備データを再抽出" Click="RebuildEquipment_Click" Padding="12,6" Margin="0,0,8,0"
+                                        ToolTip="Data.p4k から船と装備 (item_index) のデータだけを再抽出します (数分)。初期装備 (デフォルトロードアウト) を正しく取り直すときに使います"/>
                                 <TextBlock x:Name="txtUpgradeStatus" VerticalAlignment="Center" Foreground="#666"/>
                             </StackPanel>
 
@@ -797,6 +802,16 @@
                                                     </DataTrigger>
                                                     <DataTrigger Binding="{Binding IsDuplicate}" Value="True">
                                                         <Setter Property="Background" Value="#FFF8E1"/>
+                                                    </DataTrigger>
+                                                    <!-- Hangar に一致しない所持船 (ゲーム内購入 / 手入力): pledge ではないので控えめな色
+                                                         (IsDeadEnd の灰より後ろに置いて優先、IsUnresolved の赤より前に置いて未解決の警告は残す) -->
+                                                    <DataTrigger Binding="{Binding IsInGame}" Value="True">
+                                                        <Setter Property="Foreground" Value="#555"/>
+                                                        <Setter Property="Background" Value="#FAFAFA"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding IsManual}" Value="True">
+                                                        <Setter Property="Foreground" Value="#555"/>
+                                                        <Setter Property="Background" Value="#FAFAFA"/>
                                                     </DataTrigger>
                                                     <DataTrigger Binding="{Binding IsUnresolved}" Value="True">
                                                         <Setter Property="Foreground" Value="#D32F2F"/>
@@ -970,11 +985,11 @@
                                                                     Click="UpgradeUndo_Click" Padding="6,2" Margin="2"
                                                                     MinWidth="48" FontSize="11"/>
                                                             <Button Content="{Binding SellLabel}" IsEnabled="{Binding SellEnabled}"
-                                                                    ToolTip="{Binding SellToolTip}"
+                                                                    ToolTip="{Binding SellToolTip}" ToolTipService.ShowOnDisabled="True"
                                                                     Click="UpgradeSell_Click" Padding="6,2" Margin="2"
                                                                     MinWidth="56" FontSize="11"/>
                                                             <Button Content="装備" IsEnabled="{Binding LoadoutEnabled}"
-                                                                    ToolTip="装備タブでこの船の装備を確認・設定します"
+                                                                    ToolTip="装備タブでこの船の装備を確認・設定します" ToolTipService.ShowOnDisabled="True"
                                                                     Click="OpenLoadout_Click" Padding="6,2" Margin="2"
                                                                     MinWidth="48" FontSize="11"/>
                                                         </StackPanel>

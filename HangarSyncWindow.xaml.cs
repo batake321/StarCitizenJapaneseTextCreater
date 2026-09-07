@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows;
@@ -26,9 +28,28 @@ public partial class HangarSyncWindow : Window
     private static readonly Regex BuybackTokensRegex =
         new(@"You\s+have\s+(\d+)\s+opportunit", RegexOptions.IgnoreCase);
 
+    // ログイン情報 (Cookie) の暗号化保存先。DPAPI (CurrentUser) で保護するため、このユーザーアカウントのみ復号できる
+    private const string SessionFileName = "hangar_session.dat";
+    private static readonly byte[] SessionEntropy = Encoding.UTF8.GetBytes("SCJTC.HangarSession.v1");
+
     private readonly string _workDir;
     private readonly HangarService _hangar = new();
     private CancellationTokenSource? _cts;
+
+    private string SessionFilePath => Path.Combine(_workDir, SessionFileName);
+
+    // 暗号化ファイルに保存する Cookie 1 件分
+    private sealed class SavedCookie
+    {
+        public string Name { get; set; } = "";
+        public string Value { get; set; } = "";
+        public string Domain { get; set; } = "";
+        public string Path { get; set; } = "/";
+        public DateTime Expires { get; set; }
+        public bool IsHttpOnly { get; set; }
+        public bool IsSecure { get; set; }
+        public CoreWebView2CookieSameSiteKind SameSite { get; set; }
+    }
 
     public HangarSyncWindow(string workDir)
     {
@@ -36,6 +57,9 @@ public partial class HangarSyncWindow : Window
         _workDir = workDir;
         _hangar.SetCacheDir(workDir);
         _hangar.OnProgress += Log;
+
+        // 保存済みのログイン情報があれば「保持する」を ON で初期化
+        chkKeepLogin.IsChecked = File.Exists(SessionFilePath);
 
         Loaded += HangarSyncWindow_Loaded;
         Closing += HangarSyncWindow_Closing;
@@ -52,6 +76,22 @@ public partial class HangarSyncWindow : Window
             var env = await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
             await webView.EnsureCoreWebView2Async(env);
             Log("WebView2 を初期化しました。");
+
+            var core = webView.CoreWebView2;
+            if (core != null)
+            {
+                // 前回異常終了などでプロファイルに残った平文 Cookie を消してから、暗号化ファイルから復元する
+                try
+                {
+                    core.CookieManager.DeleteAllCookies();
+                }
+                catch (Exception ex)
+                {
+                    Log($"Cookie の削除に失敗しました: {ex.Message}");
+                }
+                RestoreSession(core);
+            }
+
             txtStatus.Text = "準備完了";
         }
         catch (Exception ex)
@@ -62,17 +102,188 @@ public partial class HangarSyncWindow : Window
         }
     }
 
+    // Cookie の取得が非同期のため、いったん Close を取り消して保存処理を待ち、完了後に改めて Close する
+    private bool _closeReady;
+    private bool _closeInProgress;
+
     private void HangarSyncWindow_Closing(object? sender, CancelEventArgs e)
+    {
+        if (_closeReady) return;
+        e.Cancel = true;
+        if (_closeInProgress) return;
+        _closeInProgress = true;
+        _ = SaveSessionAndCloseAsync();
+    }
+
+    private async Task SaveSessionAndCloseAsync()
     {
         try
         {
-            if (chkKeepLogin.IsChecked != true)
-                webView.CoreWebView2?.CookieManager.DeleteAllCookies();
+            await SaveOrClearSessionAsync();
+        }
+        catch (Exception ex)
+        {
+            Log($"ログイン情報の保存処理に失敗しました: {ex.Message}");
+        }
+        finally
+        {
+            _closeReady = true;
+            Close();
+        }
+    }
+
+    // === ログイン情報 (Cookie) の暗号化保存・復元 ===
+
+    // 保持 ON: RSI の Cookie を DPAPI で暗号化して hangar_session.dat に保存し、プロファイル側の Cookie は必ず削除する
+    // 保持 OFF: Cookie を削除し、hangar_session.dat があれば削除する
+    private async Task SaveOrClearSessionAsync()
+    {
+        var keep = chkKeepLogin.IsChecked == true;
+
+        if (keep)
+        {
+            await SaveSessionAsync(deleteProfileCookies: true);
+        }
+        else
+        {
+            try
+            {
+                if (File.Exists(SessionFilePath))
+                {
+                    File.Delete(SessionFilePath);
+                    Log("保存されていたログイン情報を削除しました。");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"ログイン情報ファイルの削除に失敗しました: {ex.Message}");
+            }
+
+            // 保持 OFF でも、プロファイル側には平文 Cookie を残さない
+            DeleteProfileCookies();
+        }
+    }
+
+    // RSI の Cookie を DPAPI で暗号化して hangar_session.dat に保存する。
+    // deleteProfileCookies = true のときは保存後にプロファイル側の Cookie を削除する (ウィンドウ終了時)。
+    // false のときは保存のみ (同期中の途中保存。異常終了時の取りこぼし対策)
+    private async Task SaveSessionAsync(bool deleteProfileCookies)
+    {
+        var core = webView.CoreWebView2;
+
+        if (core != null)
+        {
+            try
+            {
+                // Path 違い・サブドメインの Cookie も含めるため全件取得し、RSI ドメインのものだけを保存対象にする
+                var allCookies = await core.CookieManager.GetCookiesAsync(null);
+                var cookies = allCookies.Where(c => IsRsiDomain(c.Domain));
+                var saved = cookies.Select(c => new SavedCookie
+                {
+                        Name = c.Name,
+                        Value = c.Value,
+                        Domain = c.Domain,
+                        Path = c.Path,
+                        Expires = c.Expires,
+                        IsHttpOnly = c.IsHttpOnly,
+                        IsSecure = c.IsSecure,
+                        SameSite = c.SameSite,
+                    }).ToList();
+
+                if (saved.Count == 0)
+                {
+                    // 取得できた Cookie が 0 件なら空のセッションファイルは作らない (既存があれば削除)
+                    if (File.Exists(SessionFilePath)) File.Delete(SessionFilePath);
+                    Log("保存する Cookie がありません。");
+                }
+                else
+                {
+                    var plain = JsonSerializer.SerializeToUtf8Bytes(saved);
+                    var enc = ProtectedData.Protect(plain, SessionEntropy, DataProtectionScope.CurrentUser);
+                    File.WriteAllBytes(SessionFilePath, enc);
+                    Log($"ログイン情報を暗号化して保存しました ({saved.Count} 件): {SessionFilePath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"ログイン情報の保存に失敗しました: {ex.Message}");
+            }
+        }
+
+        if (deleteProfileCookies)
+        {
+            // 保存後、プロファイル側には平文 Cookie を残さない
+            DeleteProfileCookies();
+        }
+    }
+
+    // Cookie の Domain が robertsspaceindustries.com またはそのサブドメインか (先頭の "." は無視、大文字小文字無視)
+    private static bool IsRsiDomain(string? domain)
+    {
+        if (string.IsNullOrEmpty(domain)) return false;
+        var d = domain.TrimStart('.');
+        return d.EndsWith("robertsspaceindustries.com", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // プロファイル側の Cookie をすべて削除する
+    private void DeleteProfileCookies()
+    {
+        try
+        {
+            webView.CoreWebView2?.CookieManager.DeleteAllCookies();
         }
         catch (Exception ex)
         {
             Log($"Cookie の削除に失敗しました: {ex.Message}");
         }
+    }
+
+    // hangar_session.dat があれば復号して Cookie を復元する。復号失敗 (別ユーザー・別 PC・破損) はファイルを削除して通常のログイン待ちへ
+    private void RestoreSession(CoreWebView2 core)
+    {
+        var path = SessionFilePath;
+        if (!File.Exists(path)) return;
+
+        List<SavedCookie> cookies;
+        try
+        {
+            var enc = File.ReadAllBytes(path);
+            var plain = ProtectedData.Unprotect(enc, SessionEntropy, DataProtectionScope.CurrentUser);
+            cookies = JsonSerializer.Deserialize<List<SavedCookie>>(plain) ?? new List<SavedCookie>();
+        }
+        catch (Exception ex)
+        {
+            Log($"保存されたログイン情報を復号できませんでした ({ex.Message})。ファイルを削除して通常のログインに戻ります。");
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception ex2)
+            {
+                Log($"ログイン情報ファイルの削除に失敗しました: {ex2.Message}");
+            }
+            return;
+        }
+
+        int restored = 0;
+        foreach (var c in cookies)
+        {
+            try
+            {
+                var cookie = core.CookieManager.CreateCookie(c.Name, c.Value, c.Domain, c.Path);
+                cookie.Expires = c.Expires;
+                cookie.IsHttpOnly = c.IsHttpOnly;
+                cookie.IsSecure = c.IsSecure;
+                cookie.SameSite = c.SameSite;
+                core.CookieManager.AddOrUpdateCookie(cookie);
+                restored++;
+            }
+            catch (Exception ex)
+            {
+                Log($"Cookie の復元に失敗しました ({c.Name}): {ex.Message}");
+            }
+        }
+        Log($"保存されたログイン情報を復元しました ({restored} / {cookies.Count} 件)。");
     }
 
     // === 抽出スクリプト ===
@@ -217,6 +428,13 @@ public partial class HangarSyncWindow : Window
                 }
             }
             Log("認証を確認しました。");
+
+            // 保持 ON なら、認証確認直後にも暗号化保存しておく (同期中の異常終了で Closing が走らず取りこぼすのを防ぐ)。
+            // ここでは保存のみで、プロファイル側の Cookie は削除しない (巡回に必要)
+            if (chkKeepLogin.IsChecked == true)
+            {
+                await SaveSessionAsync(deleteProfileCookies: false);
+            }
 
             // --- 2. ページ巡回 (1ページ10件固定・逐次・重複 id で終了判定)。各ページは取得直後に解析する ---
             var fetchedAt = DateTime.Now.ToString("o");

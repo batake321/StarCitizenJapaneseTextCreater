@@ -21,6 +21,7 @@ public class EquipmentService : IDisposable
         ("PowerPlant", "パワープラント", new[] { 21 }),
         ("Shield", "シールド", new[] { 23 }),
         ("QuantumDrive", "量子ドライブ", new[] { 22 }),
+        ("JumpDrive", "ジャンプドライブ", Array.Empty<int>()),
         ("Cooler", "クーラー", new[] { 19 }),
         ("Radar", "レーダー", Array.Empty<int>()),
         ("MissileLauncher", "ミサイルラック", Array.Empty<int>()),
@@ -39,12 +40,30 @@ public class EquipmentService : IDisposable
         ["SCItemWeaponComponentParams"] = ("発射速度", ""),
     };
 
+    // item_index.size 列の有無 (再抽出前の旧 DB には無い。読み取り専用接続なので ALTER はここでは行わない)
+    private readonly bool _hasItemIndexSize;
+
     public EquipmentService(string gamedataCacheDbPath)
     {
         _conn = new SqliteConnection($"Data Source={gamedataCacheDbPath};Mode=ReadOnly");
         _conn.Open();
+        _hasItemIndexSize = HasColumn("item_index", "size");
         _cacheDbPath = Path.Combine(Path.GetDirectoryName(gamedataCacheDbPath) ?? ".", "equipment_cache.db");
         InitCacheDb();
+    }
+
+    private bool HasColumn(string table, string column)
+    {
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = $"PRAGMA table_info({table})";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        catch { }
+        return false;
     }
 
     private void InitCacheDb()
@@ -86,9 +105,9 @@ public class EquipmentService : IDisposable
     }
 
     // item_index の武器 (WeaponGun) は Size 列が無いので record_name の "_S{n}" (末尾または "_" の前。大文字小文字無視) から補完する。
-    // 例: BEHR_LaserCannon_S3 → 3、RSI_BallisticCannon_S5_Meteor_Bespoke → 5。表記が無ければ 0。
-    // 0 始まり ("_S01" 等) は Size 表記とみなさない
-    private static readonly Regex RecordSizeRegex = new(@"_S([1-9]\d?)(?=_|$)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // 例: BEHR_LaserCannon_S3 → 3、RSI_BallisticCannon_S5_Meteor_Bespoke → 5、POWR_AEGS_S01_Regulus → 1。表記が無ければ 0。
+    // GameDataExtractor.InferSizeFromEntityName (EntitySizeRegex) と同一規則
+    private static readonly Regex RecordSizeRegex = new(@"_S(\d{1,2})(?=_|$)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static int SizeFromRecordName(string? recordName)
     {
@@ -239,6 +258,8 @@ public class EquipmentService : IDisposable
         return list;
     }
 
+    // 船の全ポート行。子ポート行 (port_name が "{親port}/{子port}"。ジンバル配下の実武器・ミサイルラック配下のミサイル等) も含めて返す。
+    // 親子関係は ShipPortInfo.IsChild / ParentPortName で判定する
     public List<ShipPortInfo> GetShipPorts(string shipRecordName)
     {
         using var cmd = _conn.CreateCommand();
@@ -308,24 +329,30 @@ public class EquipmentService : IDisposable
         }
     }
 
+    // ship_ports.equipped_item は entityClassReference 由来の小文字 basename (klwe_laserrepeater_s3 等) のことがあり、
+    // record_name (EntityClassDefinition.KLWE_LaserRepeater_S3) と大文字小文字が一致しないため COLLATE NOCASE で照合する
     private EquipmentItem? QueryItemByRecord(string recordName)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = @"SELECT i.record_name, i.name, i.item_type, i.size, i.grade, i.manufacturer, i.component_type, i.component_json, x.name
+        var sizeExpr = _hasItemIndexSize ? "COALESCE(x.size, 0)" : "0";
+        cmd.CommandText = $@"SELECT i.record_name, i.name, i.item_type, i.size, i.grade, i.manufacturer, i.component_type, i.component_json, x.name, {sizeExpr}
                             FROM items i LEFT JOIN item_index x ON x.record_name = i.record_name
-                            WHERE i.record_name = @rn LIMIT 1";
+                            WHERE i.record_name = @rn COLLATE NOCASE LIMIT 1";
         cmd.Parameters.AddWithValue("@rn", recordName);
         using var reader = cmd.ExecuteReader();
         if (!reader.Read()) return null;
 
         var rawName = reader.IsDBNull(1) ? reader.GetString(0) : reader.GetString(1);
         var indexName = reader.IsDBNull(8) ? "" : reader.GetString(8);
+        var itemsSize = reader.IsDBNull(3) ? 0 : reader.GetInt32(3);
+        var indexSize = reader.IsDBNull(9) ? 0 : reader.GetInt32(9);
         var item = new EquipmentItem
         {
             RecordName = reader.GetString(0),
             Name = indexName.Length > 0 ? indexName : rawName,
             ItemType = reader.IsDBNull(2) ? "" : reader.GetString(2),
-            Size = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+            // items.size を優先し、0 なら item_index.size、それも 0 なら record 名から補完
+            Size = itemsSize > 0 ? itemsSize : indexSize > 0 ? indexSize : SizeFromRecordName(reader.GetString(0)),
             Grade = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
             Manufacturer = reader.IsDBNull(5) ? "" : reader.GetString(5),
             ComponentType = reader.IsDBNull(6) ? "" : reader.GetString(6),
@@ -335,15 +362,19 @@ public class EquipmentService : IDisposable
         return item;
     }
 
+    // item_index から 1 件。Size は item_index.size (AttachDef.Size 由来。列が無い旧 DB / 0 のときは record 名の "_S{n}" から補完)。
+    // record_name の照合は COLLATE NOCASE (QueryItemByRecord と同じ理由)
     private EquipmentItem? QueryItemIndexByRecord(string recordName)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT record_name, name, item_type, sub_type, manufacturer FROM item_index WHERE record_name = @rn LIMIT 1";
+        var sizeExpr = _hasItemIndexSize ? "COALESCE(size, 0)" : "0";
+        cmd.CommandText = $"SELECT record_name, name, item_type, sub_type, manufacturer, {sizeExpr} FROM item_index WHERE record_name = @rn COLLATE NOCASE LIMIT 1";
         cmd.Parameters.AddWithValue("@rn", recordName);
         using var reader = cmd.ExecuteReader();
         if (!reader.Read()) return null;
 
         var rec = reader.IsDBNull(0) ? recordName : reader.GetString(0);
+        var indexSize = reader.IsDBNull(5) ? 0 : reader.GetInt32(5);
         return new EquipmentItem
         {
             RecordName = rec,
@@ -351,7 +382,7 @@ public class EquipmentService : IDisposable
             ItemType = reader.IsDBNull(2) ? "" : reader.GetString(2),
             SubType = reader.IsDBNull(3) ? "" : reader.GetString(3),
             Manufacturer = reader.IsDBNull(4) ? "" : reader.GetString(4),
-            Size = SizeFromRecordName(rec),
+            Size = indexSize > 0 ? indexSize : SizeFromRecordName(rec),
         };
     }
 
@@ -676,20 +707,36 @@ public class EquipmentItem
 
 public class ShipPortInfo
 {
+    // ship_ports.port_name。子ポート行は "{親port}/{子port}" (例 hardpoint_weapon_left_nose/hardpoint_class_2)
     public string PortName { get; set; } = "";
     public string ItemType { get; set; } = "";
     public int Size { get; set; }
     public string EquippedItem { get; set; } = "";
+    // 子ポート行か (port_name に "/" を含む)
+    public bool IsChild => PortName.Contains('/');
+    // 直接の親ポートの port_name (最後の "/" より前)。最上位ポートは ""
+    public string ParentPortName
+    {
+        get
+        {
+            var i = PortName.LastIndexOf('/');
+            return i < 0 ? "" : PortName[..i];
+        }
+    }
     public string SizeDisplay => Size > 0 ? $"S{Size}" : "-";
     public string TypeDisplay => ItemType switch
     {
         "WeaponGun" => "武器",
+        "WeaponMount" => "ジンバル/マウント",
         "Shield" => "シールド",
         "PowerPlant" => "パワープラント",
         "QuantumDrive" => "量子ドライブ",
+        "JumpDrive" => "ジャンプドライブ",
         "Cooler" => "クーラー",
-        "MissileLauncher" => "ミサイル",
+        "MissileLauncher" => "ミサイルラック",
+        "Missile" => "ミサイル",
         "Turret" => "タレット",
+        "WeaponRack" => "武器ラック",
         "Radar" => "レーダー",
         "Avionics" => "アビオニクス",
         "LifeSupport" => "ライフサポート",

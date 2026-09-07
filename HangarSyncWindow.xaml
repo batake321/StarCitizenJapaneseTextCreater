@@ -22,7 +22,7 @@
                     Padding="12,6" Margin="8,0,0,0"/>
             <CheckBox Content="ログイン状態を保持する" x:Name="chkKeepLogin"
                       VerticalAlignment="Center" Margin="12,0,0,0"/>
-            <TextBlock Text="Cookie は WorkDir 内に平文で保存されます"
+            <TextBlock Text="ログイン情報は Windows のデータ保護 API (DPAPI) で暗号化して保存します (このユーザーアカウントのみ復号可)"
                        Foreground="#888" FontSize="11"
                        VerticalAlignment="Center" Margin="8,0,0,0"/>
             <TextBlock x:Name="txtStatus" VerticalAlignment="Center" Margin="12,0,0,0" Foreground="#666"/>

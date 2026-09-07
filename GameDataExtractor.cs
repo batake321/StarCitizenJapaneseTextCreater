@@ -8,7 +8,7 @@ using Microsoft.Data.Sqlite;
 
 namespace StarCitizenJapaneseTextCreater;
 
-public class GameDataExtractor
+public class GameDataExtractor : IDisposable
 {
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(5) };
     private const string StarBreakerVersion = "v0.2.2";
@@ -49,50 +49,143 @@ public class GameDataExtractor
         return candidates.FirstOrDefault(File.Exists);
     }
 
+    // ship_ports の現行 DDL (EnsureDb の初回作成と MigrateShipPortsTable の再作成で共用)
+    private const string ShipPortsDdl = """
+            CREATE TABLE IF NOT EXISTS ship_ports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ship_record_name TEXT NOT NULL,
+                port_name TEXT,
+                item_type TEXT,
+                size INTEGER,
+                equipped_item TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_ship_ports_ship ON ship_ports(ship_record_name);
+            CREATE INDEX IF NOT EXISTS idx_ship_ports_type ON ship_ports(item_type);
+        """;
+
+    // 旧スキーマの ship_ports (FOREIGN KEY 付き / equipped_item 列なし) を既存行を保持したまま現行 DDL に移行する。
+    // 手順: ship_ports → ship_ports_old にリネーム → 現行 DDL で ship_ports 作成 → 行をコピー → ship_ports_old を DROP (1 トランザクション)。
+    // 他テーブル (missions / items / knowledge / item_vectors 等) には触れない。DB ファイルは削除しない。id 列は再採番される
+    private void MigrateShipPortsTable()
+    {
+        if (_db == null) return;
+        string schema;
+        using (var chk = _db.CreateCommand())
+        {
+            chk.CommandText = "SELECT sql FROM sqlite_master WHERE type='table' AND name='ship_ports'";
+            schema = chk.ExecuteScalar() as string ?? "";
+        }
+        if (schema.Length == 0) return;   // 未作成 (呼び出し側の CREATE TABLE IF NOT EXISTS に任せる)
+        if (!schema.Contains("FOREIGN KEY", StringComparison.OrdinalIgnoreCase)
+            && schema.Contains("equipped_item", StringComparison.OrdinalIgnoreCase)) return;
+
+        using var tx = _db.BeginTransaction();
+        using var cmd = _db.CreateCommand();
+        cmd.Transaction = tx;
+
+        // 前回異常終了で ship_ports_old が残っている場合は先に片付ける
+        cmd.CommandText = "DROP TABLE IF EXISTS ship_ports_old";
+        cmd.ExecuteNonQuery();
+
+        cmd.CommandText = "ALTER TABLE ship_ports RENAME TO ship_ports_old";
+        cmd.ExecuteNonQuery();
+
+        // RENAME でもインデックス名は旧テーブル側に残るため、先に落とさないと新テーブルの CREATE INDEX IF NOT EXISTS が no-op になる
+        cmd.CommandText = "DROP INDEX IF EXISTS idx_ship_ports_ship; DROP INDEX IF EXISTS idx_ship_ports_type;";
+        cmd.ExecuteNonQuery();
+
+        cmd.CommandText = ShipPortsDdl;
+        cmd.ExecuteNonQuery();
+
+        // 旧テーブルに equipped_item 列があるかを PRAGMA table_info で判定
+        bool hasEquippedItem = false;
+        cmd.CommandText = "PRAGMA table_info(ship_ports_old)";
+        using (var r = cmd.ExecuteReader())
+        {
+            while (r.Read())
+            {
+                if (string.Equals(r.GetString(1), "equipped_item", StringComparison.OrdinalIgnoreCase))
+                {
+                    hasEquippedItem = true;
+                    break;
+                }
+            }
+        }
+
+        var equippedExpr = hasEquippedItem ? "equipped_item" : "NULL AS equipped_item";
+        cmd.CommandText = "INSERT INTO ship_ports (ship_record_name, port_name, item_type, size, equipped_item) "
+                        + $"SELECT ship_record_name, port_name, item_type, size, {equippedExpr} FROM ship_ports_old";
+        var copied = cmd.ExecuteNonQuery();
+
+        cmd.CommandText = "DROP TABLE ship_ports_old";
+        cmd.ExecuteNonQuery();
+
+        tx.Commit();
+        StatusChanged?.Invoke($"ship_ports テーブルを現行スキーマへ移行しました ({copied} 件を保持)");
+    }
+
     private void EnsureDb()
     {
         if (_db != null)
         {
             try
             {
-                using var chk = _db.CreateCommand();
-                chk.CommandText = "SELECT sql FROM sqlite_master WHERE name='ship_ports'";
-                var s = chk.ExecuteScalar() as string ?? "";
-                if (!s.Contains("equipped_item", StringComparison.OrdinalIgnoreCase))
-                {
-                    _db.Close(); _db.Dispose(); _db = null;
-                    SqliteConnection.ClearAllPools();
-                    File.Delete(DbPath);
-                }
-                else
-                {
-                    MigrateWikiColumns();
-                    return;
-                }
+                MigrateShipPortsTable();
+                MigrateWikiColumns();
+                MigrateItemIndexSizeColumn();
+                return;
             }
-            catch { _db = null; }
-        }
-        if (File.Exists(DbPath))
-        {
-            try
-            {
-                using var testConn = new SqliteConnection($"Data Source={DbPath};Mode=ReadOnly");
-                testConn.Open();
-                using var testCmd = testConn.CreateCommand();
-                testCmd.CommandText = "SELECT sql FROM sqlite_master WHERE name='ship_ports'";
-                var schema = testCmd.ExecuteScalar() as string ?? "";
-                testConn.Close();
-                if (schema.Contains("FOREIGN KEY", StringComparison.OrdinalIgnoreCase) ||
-                    !schema.Contains("equipped_item", StringComparison.OrdinalIgnoreCase))
-                {
-                    SqliteConnection.ClearAllPools();
-                    File.Delete(DbPath);
-                }
-            }
-            catch { try { File.Delete(DbPath); } catch { } }
+            catch { try { _db?.Dispose(); } catch { } _db = null; }
         }
         _db = new SqliteConnection($"Data Source={DbPath}");
-        _db.Open();
+        string? corruptReason = null;
+        SqliteException? corruptEx = null;   // 退避に失敗したとき再スローする元の例外 (quick_check 不一致の場合は null)
+        try
+        {
+            _db.Open();
+            using var qc = _db.CreateCommand();
+            qc.CommandText = "PRAGMA quick_check";
+            // quick_check は例外を投げずに "ok" 以外の文字列 (例 "*** in database main ***") を返すことがあるので、
+            // その場合も破損とみなして退避経路に入れる
+            var qcResult = qc.ExecuteScalar()?.ToString();
+            if (qcResult != "ok") corruptReason = $"quick_check: {qcResult}";
+        }
+        catch (SqliteException ex)
+        {
+            // 退避対象のファイルが無ければそのまま例外を上げる
+            if (!File.Exists(DbPath)) throw;
+            corruptReason = ex.Message;
+            corruptEx = ex;
+        }
+        if (corruptReason != null)
+        {
+            // 開けない/破損した DB は削除せず .corrupt-yyyyMMdd_HHmmss へリネーム退避してから新規作成する
+            // (-journal / -wal / -shm も同じ接尾辞で一緒に退避)
+            _db.Dispose();
+            _db = null;
+            SqliteConnection.ClearAllPools();
+            var suffix = $".corrupt-{DateTime.Now:yyyyMMdd_HHmmss}";
+            var quarantined = DbPath + suffix;
+            try
+            {
+                File.Move(DbPath, quarantined);
+                foreach (var ext in new[] { "-journal", "-wal", "-shm" })
+                {
+                    var side = DbPath + ext;
+                    if (File.Exists(side)) File.Move(side, side + suffix);
+                }
+            }
+            catch (Exception moveEx)
+            {
+                // 退避できなかった (他プロセスが開いている等) 場合は無言で新規作成へ進まず、通知してから元の破損理由で例外を上げる
+                StatusChanged?.Invoke($"gamedata_cache.db を開けなかったため ({corruptReason}) {Path.GetFileName(quarantined)} へ退避しようとしましたが、退避に失敗しました (ファイルが使用中の可能性): {moveEx.Message}");
+                if (corruptEx != null) throw corruptEx;
+                throw new IOException($"gamedata_cache.db ({corruptReason}) の退避に失敗しました (ファイルが使用中の可能性): {moveEx.Message}", moveEx);
+            }
+            StatusChanged?.Invoke($"gamedata_cache.db を開けなかったため ({corruptReason}) {Path.GetFileName(quarantined)} へ退避し、新規作成します");
+            _db = new SqliteConnection($"Data Source={DbPath}");
+            _db.Open();
+        }
 
         using var cmd = _db.CreateCommand();
         cmd.CommandText = """
@@ -117,17 +210,7 @@ public class GameDataExtractor
                 extracted_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_ships_name ON ships(name COLLATE NOCASE);
-
-            CREATE TABLE IF NOT EXISTS ship_ports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ship_record_name TEXT NOT NULL,
-                port_name TEXT,
-                item_type TEXT,
-                size INTEGER,
-                equipped_item TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_ship_ports_ship ON ship_ports(ship_record_name);
-            CREATE INDEX IF NOT EXISTS idx_ship_ports_type ON ship_ports(item_type);
+            """ + ShipPortsDdl + """
 
             CREATE TABLE IF NOT EXISTS items (
                 record_name TEXT PRIMARY KEY,
@@ -192,7 +275,8 @@ public class GameDataExtractor
                 sub_type TEXT,
                 manufacturer TEXT,
                 name_ja TEXT,
-                extracted_at TEXT NOT NULL
+                extracted_at TEXT NOT NULL,
+                size INTEGER DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_item_index_name ON item_index(name COLLATE NOCASE);
             CREATE INDEX IF NOT EXISTS idx_item_index_type ON item_index(item_type);
@@ -211,6 +295,35 @@ public class GameDataExtractor
             );
         """;
         cmd.ExecuteNonQuery();
+        MigrateShipPortsTable();   // 旧スキーマの ship_ports (CREATE TABLE IF NOT EXISTS では作り直されない) を現行 DDL に移行
+        MigrateItemIndexSizeColumn();
+    }
+
+    public void Dispose()
+    {
+        _db?.Dispose();
+        _db = null;
+    }
+
+    // 既存 DB の item_index に size 列が無ければ追加する (CREATE TABLE IF NOT EXISTS では既存テーブルに列が足されないため)
+    private void MigrateItemIndexSizeColumn()
+    {
+        if (_db == null) return;
+        try
+        {
+            using var chk = _db.CreateCommand();
+            chk.CommandText = "PRAGMA table_info(item_index)";
+            using var reader = chk.ExecuteReader();
+            while (reader.Read())
+            {
+                if (string.Equals(reader.GetString(1), "size", StringComparison.OrdinalIgnoreCase)) return;
+            }
+            reader.Close();
+            using var alt = _db.CreateCommand();
+            alt.CommandText = "ALTER TABLE item_index ADD COLUMN size INTEGER DEFAULT 0";
+            alt.ExecuteNonQuery();
+        }
+        catch { }
     }
 
     public string? GetCachedVersion()
@@ -387,6 +500,96 @@ public class GameDataExtractor
         return current != stored;
     }
 
+    // 装備データ (item_index / ships / ship_ports) だけを再抽出する。全体インデックス (BuildStructuredIndexAsync) とは別扱いで、
+    // missions / commodities / items / knowledge / item_vectors / gamedata_cache 等は触らず、gamedata_meta の indexed_at も更新しない
+    // (代わりに equipment_rebuilt_at を保存する)。item_index_fts は item_index から作り直す。
+    // 進捗は progress と StatusChanged の両方へ流す
+    public async Task RebuildEquipmentDataAsync(IProgress<string>? progress = null, CancellationToken ct = default)
+    {
+        var p4kPath = FindDataP4k()
+            ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
+
+        await EnsureStarBreakerAsync();
+        EnsureDb();
+
+        Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
+        if (relay != null) StatusChanged += relay;
+        try
+        {
+            var sw = Stopwatch.StartNew();
+            var now = DateTime.UtcNow.ToString("o");
+            StatusChanged?.Invoke("装備データ (item_index / ships / ship_ports) を再構築中...");
+
+            // 抽出が途中で失敗しても 3 表が空のまま残らないよう、DELETE の前に同 DB 内へバックアップ表を作る
+            // (成功・失敗いずれでも finally で DROP する)
+            using (var cmd = _db!.CreateCommand())
+            {
+                cmd.CommandText = string.Join(" ", EquipmentTables.Select(t =>
+                    $"DROP TABLE IF EXISTS {t}_bak; CREATE TABLE {t}_bak AS SELECT * FROM {t};"));
+                cmd.ExecuteNonQuery();
+            }
+
+            try
+            {
+                using (var cmd = _db.CreateCommand())
+                {
+                    cmd.CommandText = "DELETE FROM item_index; DELETE FROM ship_ports; DELETE FROM ships;";
+                    cmd.ExecuteNonQuery();
+                }
+
+                int indexCount = await ExtractItemIndexAsync(p4kPath, now, ct);
+
+                // 全体インデックス構築 (MainWindow の BuildIndexAsync 後) と同じく translations.db から item_index.name_ja を埋める
+                // (translations.db は gamedata_cache.db と同じ作業ディレクトリ)。PopulateJapaneseNames が内部で RebuildFts5Index を呼ぶので
+                // item_index_fts もここで item_index から作り直される
+                StatusChanged?.Invoke("日本語名をマッピング中...");
+                PopulateJapaneseNames(Path.Combine(Path.GetDirectoryName(DbPath) ?? "", "translations.db"));
+
+                int shipCount = await ExtractShipsAsync(p4kPath, now, ct);
+
+                SetMeta("equipment_rebuilt_at", now);
+                sw.Stop();
+                StatusChanged?.Invoke($"装備データ再構築完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}");
+            }
+            catch
+            {
+                // 失敗時はバックアップから 3 表を復元し、item_index_fts も復元後の item_index に合わせる
+                StatusChanged?.Invoke("装備データの再抽出に失敗したため、再抽出前のデータへ復元中...");
+                using (var cmd = _db.CreateCommand())
+                {
+                    cmd.CommandText = string.Join(" ", EquipmentTables.Select(t =>
+                        $"DELETE FROM {t}; INSERT INTO {t} SELECT * FROM {t}_bak;"));
+                    cmd.ExecuteNonQuery();
+                }
+                RebuildFts5Index();
+                throw;
+            }
+            finally
+            {
+                using var cmd = _db.CreateCommand();
+                cmd.CommandText = string.Join(" ", EquipmentTables.Select(t => $"DROP TABLE IF EXISTS {t}_bak;"));
+                cmd.ExecuteNonQuery();
+            }
+
+            // ここに到達するのは成功時のみ (失敗時は上の catch で再スロー済み)。
+            // DELETE した旧 3 表とバックアップ表 (ships.raw_json の複製約 315MB を含む) のページが freelist に残って DB が肥大するため VACUUM で回収する。
+            // VACUUM はトランザクション内では実行できないので、トランザクション外 (各抽出メソッドの tx は Commit 済み) で実行する
+            StatusChanged?.Invoke("DB を最適化中...");
+            using (var cmd = _db.CreateCommand())
+            {
+                cmd.CommandText = "VACUUM";
+                cmd.ExecuteNonQuery();
+            }
+        }
+        finally
+        {
+            if (relay != null) StatusChanged -= relay;
+        }
+    }
+
+    // RebuildEquipmentDataAsync が作り直す 3 表 (バックアップ表 "{name}_bak" の対象)
+    private static readonly string[] EquipmentTables = ["item_index", "ship_ports", "ships"];
+
     public bool HasStructuredData()
     {
         EnsureDb();
@@ -407,11 +610,16 @@ public class GameDataExtractor
     private static readonly string[] VehicleManufacturerPrefixes =
         ["AEGS", "ANVL", "ARGO", "BANU", "CNOU", "CRUS", "DRAK", "GAMA", "GATA", "GRIN", "KRIG", "MISC", "MRAI", "ORIG", "RSI", "TMBL", "VNCL", "XIAN", "ESPR"];
 
+    // starbreaker の --filter は大文字小文字を区別するため、船舶武器・ジンバル系は大文字メーカーコードも列挙する
+    // (BEHR_LaserCannon_S3 / Mount_Gimbal_S3 / WeaponMount_* 等)
     private static readonly string[] ItemPrefixes =
         ["behr", "klwe", "ksar", "lbco", "gmni", "hdso", "jofl", "grin", "apar", "crus", "aegs", "anvl", "argo", "cnou", "drak", "krig", "misc", "mrai", "orig", "rsi", "tmbl", "xian", "espr",
-         "POWR", "SHLD", "COOL", "QDRV", "MISL", "MRCK", "RADR", "COMP", "INTK", "HTNK", "QTNK", "ARMR", "LFSP", "RELAY",
-         "powr", "shld", "cool", "qdrv", "misl", "mrck", "radr", "comp", "intk", "htnk", "qtnk", "armr", "lfsp", "relay",
-         "GODI", "WETK", "TYDT", "GRNP", "FSKI", "godi", "wetk", "tydt", "grnp", "fski"];
+         "BEHR", "KLWE", "GMNI", "HDSO", "JOFL", "APAR", "LBCO", "KSAR", "GATS", "AMRS", "JOKR", "Mount_Gimbal", "WeaponMount",
+         "POWR", "SHLD", "COOL", "QDRV", "JDRV", "MISL", "MRCK", "RADR", "COMP", "INTK", "HTNK", "QTNK", "ARMR", "LFSP", "RELAY",
+         "powr", "shld", "cool", "qdrv", "jdrv", "misl", "mrck", "radr", "comp", "intk", "htnk", "qtnk", "armr", "lfsp", "relay",
+         "GODI", "WETK", "TYDT", "GRNP", "FSKI", "godi", "wetk", "tydt", "grnp", "fski",
+         // ship_ports.equipped_item に出るが item_index で未解決だったプレフィックス (武器ラック / メーカー / マウント / 爆弾系)
+         "Weapon_Rack", "MXOX", "KRON", "GLSN", "HRST", "UMNT", "TOAG", "KBAR", "ASAD", "RPOD", "GMNT", "BMBRCK", "BOMB"];
 
     private async Task<int> ExtractItemIndexAsync(string p4kPath, string now, CancellationToken ct)
     {
@@ -439,7 +647,7 @@ public class GameDataExtractor
         int count = 0;
         using var tx = _db!.BeginTransaction();
         using var cmd = _db.CreateCommand();
-        cmd.CommandText = "INSERT OR IGNORE INTO item_index(uuid, record_name, name, name_ja, item_type, sub_type, manufacturer, extracted_at) VALUES(@uuid, @rn, @nm, @ja, @it, @st, @mf, @ea)";
+        cmd.CommandText = "INSERT OR IGNORE INTO item_index(uuid, record_name, name, name_ja, item_type, sub_type, manufacturer, size, extracted_at) VALUES(@uuid, @rn, @nm, @ja, @it, @st, @mf, @sz, @ea)";
         var pUuid = cmd.Parameters.Add("@uuid", SqliteType.Text);
         var pRn = cmd.Parameters.Add("@rn", SqliteType.Text);
         var pNm = cmd.Parameters.Add("@nm", SqliteType.Text);
@@ -447,11 +655,13 @@ public class GameDataExtractor
         var pIt = cmd.Parameters.Add("@it", SqliteType.Text);
         var pSt = cmd.Parameters.Add("@st", SqliteType.Text);
         var pMf = cmd.Parameters.Add("@mf", SqliteType.Text);
+        var pSz = cmd.Parameters.Add("@sz", SqliteType.Integer);
         var pEa = cmd.Parameters.Add("@ea", SqliteType.Text);
 
+        // --filter は大文字小文字を区別するので、重複排除も大小区別 (Ordinal) で行う ("BEHR_*" と "behr_*" は別クエリ)
         var allPrefixes = VehicleManufacturerPrefixes.Select(p => $"EntityClassDefinition.{p}_*")
             .Concat(ItemPrefixes.Select(p => $"EntityClassDefinition.{p}_*"))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Distinct(StringComparer.Ordinal)
             .ToList();
 
         for (int i = 0; i < allPrefixes.Count; i++)
@@ -477,6 +687,7 @@ public class GameDataExtractor
                     if (!root.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("Components", out var components)) continue;
 
                     string name = "", itemType = "", subType = "", manufacturer = "";
+                    int size = 0;
                     foreach (var comp in components.EnumerateArray())
                     {
                         var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
@@ -485,6 +696,7 @@ public class GameDataExtractor
                             itemType = ad.TryGetProperty("Type", out var it2) ? it2.GetString() ?? "" : "";
                             subType = ad.TryGetProperty("SubType", out var st2) ? st2.GetString() ?? "" : "";
                             manufacturer = ad.TryGetProperty("Manufacturer", out var mf2) ? mf2.GetString() ?? "" : "";
+                            size = ad.TryGetProperty("Size", out var sz2) && sz2.ValueKind == JsonValueKind.Number && sz2.TryGetInt32(out var szv) ? szv : 0;
                             if (ad.TryGetProperty("Localization", out var loc))
                                 name = loc.TryGetProperty("Name", out var n) ? n.GetString() ?? "" : "";
                             break;
@@ -492,6 +704,8 @@ public class GameDataExtractor
                     }
 
                     if (string.IsNullOrEmpty(itemType) || itemType == "UNDEFINED") continue;
+                    // AttachDef.Size が無い (0) ときは record 名の "_S{n}" (末尾または "_" の前) から補完
+                    if (size <= 0) size = InferSizeFromEntityName(recordName);
 
                     string nameJa = "";
                     if (name.StartsWith("@") && name.Length > 1)
@@ -513,7 +727,7 @@ public class GameDataExtractor
 
                     pUuid.Value = uuid; pRn.Value = recordName; pNm.Value = name;
                     pJa.Value = string.IsNullOrEmpty(nameJa) ? DBNull.Value : nameJa;
-                    pIt.Value = itemType; pSt.Value = subType; pMf.Value = manufacturer; pEa.Value = now;
+                    pIt.Value = itemType; pSt.Value = subType; pMf.Value = manufacturer; pSz.Value = size; pEa.Value = now;
                     cmd.ExecuteNonQuery();
                     count++;
                 }
@@ -592,11 +806,63 @@ public class GameDataExtractor
         return "";
     }
 
+    // エンティティ名の "_S{n}" (末尾または "_" の前。大文字小文字無視) から Size を推定する。
+    // 例: POWR_AEGS_S01_Regulus_SCItem → 1、klwe_laserrepeater_s3 → 3、mount_gimbal_s3 → 3。表記が無ければ 0
+    private static readonly System.Text.RegularExpressions.Regex EntitySizeRegex =
+        new(@"_S(\d{1,2})(?=_|$)", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
     private static int InferSizeFromEntityName(string entityName)
     {
         if (string.IsNullOrEmpty(entityName)) return 0;
-        var match = System.Text.RegularExpressions.Regex.Match(entityName, @"_S(\d+)_");
-        return match.Success ? int.Parse(match.Groups[1].Value) : 0;
+        var match = EntitySizeRegex.Match(entityName);
+        return match.Success && int.TryParse(match.Groups[1].Value, out var n) ? n : 0;
+    }
+
+    // ロードアウト entry のエンティティ名。entityClassName が空なら entityClassReference
+    // ("file://./../../libs/foundry/records/entities/scitem/.../klwe_laserrepeater_s3.json") の basename (拡張子 .json 除く) を採用する。
+    // DB には "EntityClassDefinition." を付けず basename のまま保存する (既存データと同じ形式)
+    private static string ResolveLoadoutEntityName(JsonElement entry)
+    {
+        var entityName = entry.TryGetProperty("entityClassName", out var en) && en.ValueKind == JsonValueKind.String ? en.GetString() ?? "" : "";
+        if (!string.IsNullOrEmpty(entityName)) return entityName;
+        var reference = entry.TryGetProperty("entityClassReference", out var er) && er.ValueKind == JsonValueKind.String ? er.GetString() ?? "" : "";
+        if (string.IsNullOrEmpty(reference)) return "";
+        var slash = reference.LastIndexOf('/');
+        var basename = slash >= 0 ? reference[(slash + 1)..] : reference;
+        if (basename.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) basename = basename[..^5];
+        return basename;
+    }
+
+    // 装備エンティティ名による item_type の上書き。ジンバル/マウント → WeaponMount、ミサイル → Missile、
+    // ジャンプドライブ (jdrv_*) → JumpDrive、武器ラック (weapon_rack_*) → WeaponRack、タレット → Turret。
+    // 該当しなければ inheritedType (最上位祖先ポート名から推定した型) をそのまま返す
+    private static string OverridePortTypeByEntity(string entityName, string inheritedType)
+    {
+        if (string.IsNullOrEmpty(entityName)) return inheritedType;
+        var lower = entityName.ToLowerInvariant();
+        if (lower.StartsWith("mount_gimbal") || lower.StartsWith("weaponmount")) return "WeaponMount";
+        if (lower.StartsWith("missile") || lower.StartsWith("misl_")) return "Missile";
+        if (lower.StartsWith("jdrv_")) return "JumpDrive";
+        if (lower.StartsWith("weapon_rack_")) return "WeaponRack";
+        if (lower.Contains("_turret")) return "Turret";
+        return inheritedType;
+    }
+
+    // 画面・HUD・コントローラ・座席アクセスは装備ではないので ship_ports に保存しない (最上位ポート・子行の両方に適用)。
+    // エンティティ名 (basename、小文字化) が screen / display / _hud / controller_weapon / radar_display / seataccess / _access_ のいずれかを含むもの
+    // (Carrack の anvl_carrack_seataccess_turret_* = 座席アクセス 等)、
+    // またはエンティティ名が空で port 名が Screen_* / Display_* のもの (Display_HUD 等)
+    private static readonly string[] NonEquipmentEntityFragments = ["screen", "display", "_hud", "controller_weapon", "radar_display", "seataccess", "_access_", "_interior"];
+
+    private static bool IsNonEquipmentEntry(string portName, string entityName)
+    {
+        if (!string.IsNullOrEmpty(entityName))
+        {
+            var lower = entityName.ToLowerInvariant();
+            return NonEquipmentEntityFragments.Any(f => lower.Contains(f));
+        }
+        return portName.StartsWith("Screen_", StringComparison.OrdinalIgnoreCase)
+            || portName.StartsWith("Display_", StringComparison.OrdinalIgnoreCase);
     }
 
     private static int ParseAndInsertShips(string rawJson, string now,
@@ -646,12 +912,11 @@ public class GameDataExtractor
                 pSz.Value = size; pRj.Value = block; pEa.Value = now;
                 shipCmd.ExecuteNonQuery();
 
-                var loadoutEntries = new List<(string portName, string entityName)>();
+                var loadoutEntries = new List<(string portName, string itemType, string entityName)>();
                 CollectLoadoutEntries(components, loadoutEntries);
 
-                foreach (var (portName, entityName) in loadoutEntries)
+                foreach (var (portName, portType, entityName) in loadoutEntries)
                 {
-                    var portType = InferPortType(portName);
                     if (string.IsNullOrEmpty(portType)) continue;
                     var portSize = InferSizeFromEntityName(entityName);
                     ppSrn.Value = recordName; ppPn.Value = portName; ppIt.Value = portType; ppSz.Value = portSize;
@@ -665,32 +930,56 @@ public class GameDataExtractor
         return count;
     }
 
-    private static void CollectLoadoutEntries(JsonElement components, List<(string portName, string entityName)> results)
+    private static void CollectLoadoutEntries(JsonElement components, List<(string portName, string itemType, string entityName)> results)
     {
         foreach (var comp in components.EnumerateArray())
         {
             if (!comp.TryGetProperty("_Type_", out var t)) continue;
             if (t.GetString() != "SEntityComponentDefaultLoadoutParams") continue;
             if (!comp.TryGetProperty("loadout", out var loadout)) continue;
-            CollectEntriesFromLoadout(loadout, results);
+            CollectEntriesFromLoadout(loadout, "", "", results);
             break;
         }
     }
 
-    private static void CollectEntriesFromLoadout(JsonElement loadout, List<(string portName, string entityName)> results)
+    // デフォルトロードアウトの entries を再帰的に集める。
+    // - 最上位ポートは EquipmentPortPrefixes に一致するものだけ対象。祖先が対象なら子孫 (ジンバル配下の実武器、ミサイルラック配下のミサイル等) も全て保存する。
+    // - 子孫行の port_name は "{親port}/{子port}" (例 hardpoint_weapon_left_nose/hardpoint_class_2)。
+    // - item_type は最上位祖先ポート名から InferPortType で決め、子孫に継承する。ただしエンティティ名が
+    //   mount_gimbal/weaponmount → WeaponMount、missile/misl_ → Missile、jdrv_ → JumpDrive、weapon_rack_ → WeaponRack、
+    //   "_turret" を含む → Turret に上書き (OverridePortTypeByEntity)。
+    // - 画面・HUD・コントローラ・座席アクセス (IsNonEquipmentEntry) は装備ではないので最上位・子行とも保存しない。
+    // parentPath = 親までの port_name (最上位は "")、ancestorType = 最上位祖先ポート名から推定した型 (最上位は "")
+    private static void CollectEntriesFromLoadout(JsonElement loadout, string parentPath, string ancestorType,
+        List<(string portName, string itemType, string entityName)> results)
     {
         if (!loadout.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array) return;
         foreach (var entry in entries.EnumerateArray())
         {
-            var portName = entry.TryGetProperty("itemPortName", out var pn) ? pn.GetString() ?? "" : "";
-            var entityName = entry.TryGetProperty("entityClassName", out var en) ? en.GetString() ?? "" : "";
-            if (!string.IsNullOrEmpty(portName) &&
-                EquipmentPortPrefixes.Any(p => portName.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+            var portName = entry.TryGetProperty("itemPortName", out var pn) && pn.ValueKind == JsonValueKind.String ? pn.GetString() ?? "" : "";
+            if (string.IsNullOrEmpty(portName)) continue;
+
+            string path, baseType;
+            if (parentPath.Length == 0)
             {
-                results.Add((portName, entityName));
+                if (!EquipmentPortPrefixes.Any(p => portName.StartsWith(p, StringComparison.OrdinalIgnoreCase))) continue;
+                path = portName;
+                baseType = InferPortType(portName);
             }
+            else
+            {
+                path = parentPath + "/" + portName;
+                baseType = ancestorType;
+            }
+
+            var entityName = ResolveLoadoutEntityName(entry);
+            // 画面・HUD・コントローラ・座席アクセス (装備ではない) は最上位・子行とも保存しない (配下の loadout も辿らない)
+            if (IsNonEquipmentEntry(portName, entityName)) continue;
+            var itemType = OverridePortTypeByEntity(entityName, baseType);
+            results.Add((path, itemType, entityName));
+
             if (entry.TryGetProperty("loadout", out var subLoadout) && subLoadout.ValueKind == JsonValueKind.Object)
-                CollectEntriesFromLoadout(subLoadout, results);
+                CollectEntriesFromLoadout(subLoadout, path, baseType, results);
         }
     }
 

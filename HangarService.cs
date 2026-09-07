@@ -1255,23 +1255,100 @@ public class HangarService
     public List<ShipPortLoadout> GetShipLoadout(string shipKey, string shipRecordName, EquipmentService equip)
         => BuildShipLoadout(shipKey, equip.GetShipPorts(shipRecordName), equip);
 
+    // 子ポート行 (port_name = "{親port}/{子port}") も含めて集計する。ただしジンバル/マウント
+    // (エンティティ名の basename が mount_ / weaponmount で始まる行、または item_type = WeaponMount) の行は表示から除き、
+    // その直下の子行で WeaponGun / Turret 型の実体 (Carrack のタレット配下 hardpoint_class_2 の klwe_laserrepeater_s4 等) は
+    // item_type / TypeDisplay を WeaponGun / 武器 として返す。
+    // タレット本体 (anvl_carrack_scitem_turret_* / *_turret_s3。item_type = Turret) はそのまま「タレット」(ツールチップでは種別ごとに 1 行に集約)。
+    // ジャンプドライブ (JumpDrive) / 武器ラック (WeaponRack) もそのまま種別ごとに出る。
+    // ミサイルラック配下のミサイル (Missile) はそのまま「ミサイル」。PortKey は port_name ("/" 入り) をそのまま使う
+    private const string WeaponMountType = "WeaponMount";
+    private const string WeaponGunPortType = "WeaponGun";
+    private const string TurretPortType = "Turret";
+
+    // エンティティ名 (ship_ports.equipped_item = basename) がジンバル/マウントか
+    private static bool IsMountEntity(string? entityName)
+    {
+        if (string.IsNullOrEmpty(entityName)) return false;
+        var lower = entityName.ToLowerInvariant();
+        return lower.StartsWith("mount_") || lower.StartsWith("weaponmount");
+    }
+
+    // エンティティ名に "turret" を含むか (タレット本体の判定用。大文字小文字無視)
+    private static bool IsTurretEntity(string? entityName)
+        => !string.IsNullOrEmpty(entityName) && entityName.Contains("turret", StringComparison.OrdinalIgnoreCase);
+
+    // エンティティ名に "turret" または "mount" を含むか (タレット直下の子行が武器かの判定用。大文字小文字無視)
+    private static bool IsTurretOrMountEntity(string? entityName)
+        => !string.IsNullOrEmpty(entityName)
+           && (entityName.Contains("turret", StringComparison.OrdinalIgnoreCase) || entityName.Contains("mount", StringComparison.OrdinalIgnoreCase));
+
+    private const string MissilePortType = "Missile";
+    private const string MissileLauncherPortType = "MissileLauncher";
+
+    // タレット直下の子行がミサイル / ミサイルラックか (武器へ変換せず従来の種別のまま表示するための判定)。
+    // item_type が Missile / MissileLauncher、またはエンティティ名が mrck_ / misl_ で始まる・"missile" を含むもの (大文字小文字無視)。
+    // ロケットポッド (rpod_) は該当しないので武器扱いのまま
+    private static bool IsMissileOrRackChild(string? itemType, string? entityName)
+    {
+        if (itemType == MissilePortType || itemType == MissileLauncherPortType) return true;
+        if (string.IsNullOrEmpty(entityName)) return false;
+        return entityName.StartsWith("mrck_", StringComparison.OrdinalIgnoreCase)
+            || entityName.StartsWith("misl_", StringComparison.OrdinalIgnoreCase)
+            || entityName.Contains("missile", StringComparison.OrdinalIgnoreCase);
+    }
+
     private List<ShipPortLoadout> BuildShipLoadout(string shipKey, List<ShipPortInfo> ports, EquipmentService equip)
     {
         var overrides = LoadLoadout(shipKey);
         var result = new List<ShipPortLoadout>();
         var portSeq = new Dictionary<string, int>(StringComparer.Ordinal);   // 同名ポートの出現回数 (PortKey の採番)
+
+        // ジンバル/マウントの port_name (親がマウントかの判定用)
+        var mountPorts = new HashSet<string>(StringComparer.Ordinal);
+        // タレット本体 (item_type = Turret かつエンティティ名に "turret" を含む) の port_name (親がタレット本体かの判定用)
+        var turretPorts = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var p in ports)
+        {
+            var name = p.PortName ?? "";
+            if (name.Length == 0) continue;
+            if (p.ItemType == WeaponMountType || IsMountEntity(p.EquippedItem)) mountPorts.Add(name);
+            else if (p.ItemType == TurretPortType && IsTurretEntity(p.EquippedItem)) turretPorts.Add(name);
+        }
+
         foreach (var p in ports)
         {
             if (string.IsNullOrEmpty(p.ItemType)) continue;
             var portName = p.PortName ?? "";
+            if (mountPorts.Contains(portName)) continue;   // ジンバル/マウント自体は表示しない
+
+            var itemType = p.ItemType;
+            var typeDisplay = p.TypeDisplay;
+            if (p.IsChild && mountPorts.Contains(p.ParentPortName)
+                && (itemType == WeaponGunPortType || itemType == TurretPortType))
+            {
+                // ジンバル/マウント配下の実武器 (継承型が WeaponGun / Turret) → 武器
+                itemType = WeaponGunPortType;
+                typeDisplay = new ShipPortInfo { ItemType = WeaponGunPortType }.TypeDisplay;
+            }
+            else if (p.IsChild && turretPorts.Contains(p.ParentPortName) && !IsTurretOrMountEntity(p.EquippedItem)
+                && !IsMissileOrRackChild(itemType, p.EquippedItem))
+            {
+                // タレット本体直下の武器 (マウントを介さず直接付く。Javelin の hardpoint_turret_*/hardpoint_weapon_* = BEHR_JavelinBallisticCannon_S7 等)。
+                // 子のエンティティ名が turret / mount を含むもの (入れ子のタレット・マウント) は除く。タレット本体行は「タレット」のまま。
+                // ミサイル / ミサイルラック (Starlancer TAC のミサイルタレット配下の mrck_*/misl_* 等) も除き、従来の種別 (ミサイル / ミサイルラック) のまま
+                itemType = WeaponGunPortType;
+                typeDisplay = new ShipPortInfo { ItemType = WeaponGunPortType }.TypeDisplay;
+            }
+
             portSeq[portName] = portSeq.TryGetValue(portName, out var seq) ? seq + 1 : 1;
             var portKey = portSeq[portName] == 1 ? portName : $"{portName}#{portSeq[portName]}";
             var row = new ShipPortLoadout
             {
                 PortName = portName,
                 PortKey = portKey,
-                ItemType = p.ItemType,
-                TypeDisplay = p.TypeDisplay,
+                ItemType = itemType,
+                TypeDisplay = typeDisplay,
                 PortSize = p.Size,
                 DefaultItemRecord = p.EquippedItem ?? "",
             };
@@ -1291,6 +1368,78 @@ public class HangarService
             result.Add(row);
         }
         return result;
+    }
+
+    // 装備データ再抽出 (RebuildEquipmentDataAsync) 後に、ship_loadouts のうち現在のポートキー (GetShipLoadout の PortKey) に
+    // 存在しない行を削除する。ship_key ごとに船を解決し (GetShipInstances の InstanceKey、"my|{my_ships.id}" は my_ships の船名)、
+    // record (ships.record_name) が解決できて ship_ports が 1 件以上ある船だけを対象にする
+    // (船を解決できない / record 未解決 / ポート未収録の ship_key の行は判定できないので残す)。戻り値は削除した行数
+    public int PruneLoadouts(EquipmentService equip)
+    {
+        if (_dbPath == null || !File.Exists(_dbPath)) return 0;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+
+        var rows = new List<(string Key, string Port)>();
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.CommandText = "SELECT ship_key, port_name FROM ship_loadouts";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                if (r.IsDBNull(0) || r.IsDBNull(1)) continue;
+                rows.Add((r.GetString(0), r.GetString(1)));
+            }
+        }
+        if (rows.Count == 0) return 0;
+
+        var instances = new Dictionary<string, HangarShipInstance>(StringComparer.Ordinal);
+        foreach (var s in GetShipInstances())
+            if (!string.IsNullOrEmpty(s.InstanceKey)) instances.TryAdd(s.InstanceKey, s);
+
+        // 所持船 ("my|{id}") の船名。my_ships は TradeService が同じ trade_cache.db に作る表 (無ければ空)
+        var myShipNames = new Dictionary<int, string>();
+        try
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT id, name FROM my_ships";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                if (!r.IsDBNull(0) && !r.IsDBNull(1)) myShipNames[r.GetInt32(0)] = r.GetString(1);
+        }
+        catch { }
+
+        int deleted = 0;
+        foreach (var g in rows.GroupBy(x => x.Key, StringComparer.Ordinal))
+        {
+            string? name = null, manufacturer = null;
+            if (instances.TryGetValue(g.Key, out var inst))
+            {
+                name = inst.Name;
+                manufacturer = inst.Matrix?.ManufacturerName;
+            }
+            else if (g.Key.StartsWith("my|", StringComparison.Ordinal)
+                     && int.TryParse(g.Key[3..], out var myId) && myShipNames.TryGetValue(myId, out var myName))
+            {
+                name = myName;
+                manufacturer = ResolveShip(myName)?.ManufacturerName;   // FindOrAddMyLoadoutShipChoice と同じ解決
+            }
+            if (string.IsNullOrEmpty(name)) continue;
+
+            var record = ResolveShipRecordName(name, manufacturer);
+            if (record == null) continue;
+            var ports = equip.GetShipPorts(record);
+            if (ports.Count == 0) continue;
+            var validKeys = new HashSet<string>(BuildShipLoadout(g.Key, ports, equip).Select(p => p.PortKey), StringComparer.Ordinal);
+
+            foreach (var (key, port) in g)
+            {
+                if (validKeys.Contains(port)) continue;
+                Exec(db, "DELETE FROM ship_loadouts WHERE ship_key = @k AND port_name = @p", ("@k", key), ("@p", port));
+                deleted++;
+            }
+        }
+        return deleted;
     }
 
     // 保有船 1 機のツールチップ文字列。Ship Matrix / 由来 / 同梱機 / 保険 / 装備 (ポート種別ごとに 1 行)。
