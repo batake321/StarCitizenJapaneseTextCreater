@@ -19,10 +19,12 @@ public partial class HangarSyncWindow : Window
     private const int MaxPages = 60;   // 1ページ10件なので600 pledge まで。無限ループ防止
 
     // セレクタ未確定時のフォールバック (innerText 全体に適用)
+    // 実ページの文言 (2026-09-07 確認): Billing は "$0.00 USD" の直後に "STORE CREDITS"、
+    // Buy Back は "You have <strong>2</strong> opportunity to buy back ..."
     private static readonly Regex StoreCreditRegex =
-        new(@"Store Credit[^$]{0,80}\$\s*([\d,]+\.\d{2})", RegexOptions.IgnoreCase);
+        new(@"\$\s*([\d,]+\.\d{2})\s*USD\s*STORE\s+CREDITS", RegexOptions.IgnoreCase);
     private static readonly Regex BuybackTokensRegex =
-        new(@"(\d+)\s*(?:Buy\s*Back|buy-back|token)", RegexOptions.IgnoreCase);
+        new(@"You\s+have\s+(\d+)\s+opportunit", RegexOptions.IgnoreCase);
 
     private readonly string _workDir;
     private readonly HangarService _hangar = new();

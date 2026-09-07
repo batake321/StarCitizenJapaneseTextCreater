@@ -364,11 +364,10 @@ public class HangarService
         try
         {
             using var doc = JsonDocument.Parse(raw);
+            // 船を含まない pledge (ペイント・装備・CCU 等) では配列以外 (null / {} など) が入る。
+            // 実アカウント 82 pledge で確認済みの正常系なので、警告は出さず空リストにする
             if (doc.RootElement.ValueKind != JsonValueKind.Array)
-            {
-                OnProgress?.Invoke($"nameable-ships が配列ではありません (pledge: {pledge.Name}) → 無視します");
                 return list;
-            }
             foreach (var el in doc.RootElement.EnumerateArray())
             {
                 if (el.ValueKind != JsonValueKind.Object) continue;

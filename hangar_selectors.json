@@ -13,8 +13,8 @@
   "itemTitle": ".title",
   "itemKind": ".kind",
   "itemLiner": ".liner",
-  "buybackTokens": "",
-  "storeCredit": "",
+  "buybackTokens": ".buy-back-warning strong",
+  "storeCredit": ".credits .credit-line:not(.uec) em",
   "storeGraphqlUrl": "https://robertsspaceindustries.com/graphql",
   "storeCategories": {
     "72": "Standalone Ships",
