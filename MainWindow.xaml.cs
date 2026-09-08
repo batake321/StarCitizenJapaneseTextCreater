@@ -93,7 +93,9 @@ public partial class MainWindow : Window
         txtVoiceVoxUrl.Text = config.VoiceVoxUrl;
         txtVoiceVoxSpeaker.Text = config.VoiceVoxSpeakerId.ToString();
         chkWebAutoStart.IsChecked = config.WebServerAutoStart;
+        chkEquipClassMarks.IsChecked = App.Config.EquipmentClassMarks;
         chkMissionRepMarks.IsChecked = App.Config.MissionReputationMarks;
+        chkBlueprintMarks.IsChecked = App.Config.BlueprintMissionMarks;
         var mfs = config.MissionDetailFontSize;
         if (mfs < 8 || mfs > 30) mfs = 14;
         txtMissionFontSize.Text = mfs.ToString();
@@ -503,7 +505,8 @@ public partial class MainWindow : Window
 
                     var merged = IniMerger.Merge(english, japanese, TranslatedPath,
                         App.Config.ForceEnglishPatterns, DbPath, glossary,
-                        Path.Combine(WorkDir, "gamedata_cache.db"), App.Config.MissionReputationMarks);
+                        Path.Combine(WorkDir, "gamedata_cache.db"), App.Config.MissionReputationMarks,
+                        App.Config.EquipmentClassMarks, App.Config.BlueprintMissionMarks);
                     GlobalIniParser.Write(OutputPath, merged);
                     Log($"出力: {OutputPath} ({new FileInfo(OutputPath).Length:N0} bytes)");
 
@@ -581,9 +584,13 @@ public partial class MainWindow : Window
         catch { return false; }
     }
 
-    private void MissionRepMarks_Changed(object sender, RoutedEventArgs e)
+    // ゲーム内テキストに付ける印のオン／オフ。次の [3. 反映] から反映される
+    private void InGameMarks_Changed(object sender, RoutedEventArgs e)
     {
+        if (chkEquipClassMarks == null || chkMissionRepMarks == null || chkBlueprintMarks == null) return;   // XAML 読込中
+        App.Config.EquipmentClassMarks = chkEquipClassMarks.IsChecked == true;
         App.Config.MissionReputationMarks = chkMissionRepMarks.IsChecked == true;
+        App.Config.BlueprintMissionMarks = chkBlueprintMarks.IsChecked == true;
         SaveConfigToFile();
     }
 
@@ -1531,6 +1538,8 @@ public partial class MainWindow : Window
                 App.Config.TradeSellSystem,
                 App.Config.UexApiKey,
                 App.Config.MissionDetailFontSize,
+                App.Config.EquipmentClassMarks,
+                App.Config.BlueprintMissionMarks,
                 App.Config.MissionReputationMarks,
             };
 

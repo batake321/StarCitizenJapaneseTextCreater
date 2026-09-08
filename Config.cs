@@ -32,6 +32,10 @@ public class AppConfig
     // UI
     public double MissionDetailFontSize { get; set; } = 14;
 
+    // 装備名の後ろに分類の印 [軍1C] を付けるか
+    public bool EquipmentClassMarks { get; set; } = true;
+    // 設計図がもらえるミッション名の後ろに [BP] を付けるか
+    public bool BlueprintMissionMarks { get; set; } = true;
     // ミッション名の後ろに派閥と貢献度 (BP) を付けるか
     public bool MissionReputationMarks { get; set; } = false;
 

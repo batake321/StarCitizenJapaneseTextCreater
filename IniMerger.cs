@@ -14,7 +14,9 @@ public static class IniMerger
         string? dbPath = null,
         List<(string English, string Japanese)>? glossary = null,
         string? gamedataDbPath = null,
-        bool missionReputationMarks = false)
+        bool missionReputationMarks = false,
+        bool equipmentClassMarks = true,
+        bool blueprintMissionMarks = true)
     {
         var forceRegex = forceEnglishPatterns.Select(p => new Regex(p)).ToList();
 
@@ -144,18 +146,24 @@ public static class IniMerger
 
         // 装備名に分類の印 (例: "Bracer <EM4>[軍1C]</EM4>")、設計図がもらえるミッション名に "[BP]" を付ける。
         // ",P" 複製・"@" 前置複製より前に行うこと (印を付けたあとの値を複製に載せるため)
-        var componentMarks = AnnotateComponentNames(english, merged);
-        if (componentMarks > 0)
-            Console.WriteLine($"    Component class marks: {componentMarks}");
+        if (equipmentClassMarks)
+        {
+            var componentMarks = AnnotateComponentNames(english, merged);
+            if (componentMarks > 0)
+                Console.WriteLine($"    Component class marks: {componentMarks}");
+        }
         if (missionReputationMarks && !string.IsNullOrEmpty(gamedataDbPath))
         {
             var repMarks = AnnotateMissionReputation(english, merged, gamedataDbPath);
             if (repMarks > 0)
                 Console.WriteLine($"    Mission reputation marks: {repMarks}");
         }
-        var blueprintMarks = AnnotateBlueprintMissions(english, merged);
-        if (blueprintMarks > 0)
-            Console.WriteLine($"    Blueprint mission marks: {blueprintMarks}");
+        if (blueprintMissionMarks)
+        {
+            var blueprintMarks = AnnotateBlueprintMissions(english, merged);
+            if (blueprintMarks > 0)
+                Console.WriteLine($"    Blueprint mission marks: {blueprintMarks}");
+        }
 
         // Strip ",P" suffix variants — game references keys without the parameter tag
         int paramStripped = 0;
