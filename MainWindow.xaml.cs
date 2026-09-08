@@ -2693,8 +2693,8 @@ public partial class MainWindow : Window
         var parts = new List<string>();
         if (!string.IsNullOrWhiteSpace(itemName)) parts.Add(itemName);
         if (!string.IsNullOrWhiteSpace(itemRecord)) parts.Add(itemRecord);
-        var purchase = _hangarEquip != null && !string.IsNullOrWhiteSpace(itemName)
-            ? _hangarEquip.GetPurchaseLocationText(itemName)
+        var purchase = _hangarEquip != null && (!string.IsNullOrWhiteSpace(itemName) || !string.IsNullOrWhiteSpace(itemRecord))
+            ? _hangarEquip.GetPurchaseLocationText(itemName, itemRecord)
             : "";
         if (purchase.Length > 0) parts.Add("\n" + purchase);
         return string.Join("\n", parts);

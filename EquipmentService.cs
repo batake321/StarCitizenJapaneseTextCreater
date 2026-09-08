@@ -13,9 +13,13 @@ public class EquipmentService : IDisposable
 
     // 購入先のオンメモリ索引。ツールチップは UI スレッドから同期で引かれるので、DB を読まずにここだけを見る
     // (プリフェッチの書き込みとロック競合させない)。索引は作り直して参照ごと差し替えるので、読み側にロックは要らない。
-    // キーは item_name (DB の照合と同じく大文字小文字を区別する)。値は price 昇順
-    private volatile Dictionary<string, List<(string Location, double Price)>> _priceIndex = new(StringComparer.Ordinal);
+    // キーは item_name (UEX の英語名。大文字小文字は区別しない)。値は price 昇順
+    private volatile Dictionary<string, List<(string Location, double Price)>> _priceIndex = new(StringComparer.OrdinalIgnoreCase);
     private volatile bool _pricePrefetched;      // uex_prefetch_state に記録があるか (「取得中…」と「登録がありません」の出し分け)
+
+    // record_name (EntityClassDefinition. を除いた部分) から英語のアイテム名を引く索引。
+    // 画面の表示名は日本語なので、UEX (英語名) と照合するときにこちらも試す
+    private volatile Dictionary<string, string> _englishNameByRecord = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
     private static readonly TimeSpan CacheTtl = TimeSpan.FromHours(24);
@@ -686,7 +690,7 @@ public class EquipmentService : IDisposable
             using var db = new SqliteConnection($"Data Source={_cacheDbPath};Mode=ReadOnly");
             db.Open();
 
-            var index = new Dictionary<string, List<(string Location, double Price)>>(StringComparer.Ordinal);
+            var index = new Dictionary<string, List<(string Location, double Price)>>(StringComparer.OrdinalIgnoreCase);
             using (var cmd = db.CreateCommand())
             {
                 cmd.CommandText = "SELECT item_name, location, price FROM uex_item_prices";
@@ -710,19 +714,69 @@ public class EquipmentService : IDisposable
 
             _priceIndex = index;
             _pricePrefetched = prefetched;
+            _englishNameByRecord = LoadEnglishNameIndex();
         }
         catch { }
     }
 
-    // ツールチップ用。オンメモリ索引だけを見る同期メソッド (DB もネットワークも触らないので UI スレッドから呼んでよい)。
-    // 索引にあれば購入場所の一覧、無ければプリフェッチ済みかどうかで「登録がありません」/「取得中…」を返す
-    public string GetPurchaseLocationText(string itemName)
+    // translations.db から "item_Name<record>" のキーを読み、record → 英語名の索引を作る。
+    // キーの ",P" は落とし、"_SCItem" の有無どちらでも引けるように両方の綴りで登録する
+    private Dictionary<string, string> LoadEnglishNameIndex()
     {
-        if (string.IsNullOrWhiteSpace(itemName)) return "";
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var transPath = Path.Combine(Path.GetDirectoryName(_cacheDbPath) ?? ".", "translations.db");
+            if (!File.Exists(transPath)) return map;
+
+            using var db = new SqliteConnection($"Data Source={transPath};Mode=ReadOnly");
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT key, english FROM translations WHERE key LIKE 'item_Name%' AND english IS NOT NULL AND english <> ''";
+            using var reader = cmd.ExecuteReader();
+            const string prefix = "item_Name";
+            const string scItem = "_SCItem";
+            while (reader.Read())
+            {
+                var key = reader.GetString(0);
+                if (!key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                var rec = key[prefix.Length..];
+                if (rec.EndsWith(",P", StringComparison.Ordinal)) rec = rec[..^2];
+                if (rec.Length == 0) continue;
+                var en = reader.GetString(1);
+                map.TryAdd(rec, en);
+                var alt = rec.EndsWith(scItem, StringComparison.OrdinalIgnoreCase) ? rec[..^scItem.Length] : rec + scItem;
+                map.TryAdd(alt, en);
+            }
+        }
+        catch { }
+        return map;
+    }
+
+    // record_name から英語のアイテム名を引く。引けなければ null
+    private string? ResolveEnglishItemName(string? itemRecord)
+    {
+        var rec = (itemRecord ?? "").Trim();
+        if (rec.Length == 0) return null;
+        const string prefix = "EntityClassDefinition.";
+        if (rec.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) rec = rec[prefix.Length..];
+        return _englishNameByRecord.TryGetValue(rec, out var en) ? en : null;
+    }
+
+    // ツールチップ用。オンメモリ索引だけを見る同期メソッド (DB もネットワークも触らないので UI スレッドから呼んでよい)。
+    // 画面の表示名は日本語のことがあるので、見つからなければ record から引いた英語名でも探す
+    public string GetPurchaseLocationText(string itemName, string? itemRecord = null)
+    {
+        var display = (itemName ?? "").Trim();
+        var english = ResolveEnglishItemName(itemRecord);
+        if (display.Length == 0 && string.IsNullOrEmpty(english)) return "";
 
         var lines = new List<string> { "■ 購入場所 (UEX)" };
-        if (_priceIndex.TryGetValue(itemName, out var locations) && locations.Count > 0)
+        foreach (var name in new[] { display, english })
         {
+            if (string.IsNullOrEmpty(name)) continue;
+            if (!_priceIndex.TryGetValue(name, out var locations) || locations.Count == 0) continue;
+
             foreach (var (loc, price) in locations.Take(10))
                 lines.Add($"  {loc} — {price:N0} aUEC");
             if (locations.Count > 10)
