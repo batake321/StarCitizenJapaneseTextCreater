@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 470" width="900" height="470" role="img" aria-labelledby="t d">
+  <title id="t">アプリ画面のタブ構成</title>
+  <desc id="d">上部の GamePath バーと、翻訳・翻訳エディタ・用語集・プロファイル・コモディティ・船舶管理・価格キャプチャ・ミッション・チャット・設定の 10 タブ。船舶管理の中にさらに所持船・アップグレード管理・装備の 3 タブがあります。</desc>
+  <style>
+    .f { font-family: "Segoe UI","Yu Gothic UI",Meiryo,sans-serif; }
+    .lbl { font-size: 15px; fill: #dbe4ee; }
+    .sm  { font-size: 12px; fill: #93a7bd; }
+    .tt  { font-size: 13px; fill: #93a7bd; }
+    .hd  { font-size: 13px; fill: #7f95ab; letter-spacing: .08em; }
+  </style>
+
+  <rect x="20" y="16" width="860" height="438" rx="12" fill="#141c26" stroke="#2a3a4d"/>
+  <path d="M20 28a12 12 0 0 1 12-12h836a12 12 0 0 1 12 12v26H20z" fill="#1b2634"/>
+  <circle cx="44" cy="35" r="5" fill="#3b4c60"/>
+  <circle cx="62" cy="35" r="5" fill="#3b4c60"/>
+  <circle cx="80" cy="35" r="5" fill="#3b4c60"/>
+  <text class="f tt" x="102" y="40">Star Citizen Japanese Text Creator</text>
+  <line x1="20" y1="54" x2="880" y2="54" stroke="#2a3a4d"/>
+
+  <!-- toolbar -->
+  <text class="f sm" x="44" y="83">GamePath:</text>
+  <rect x="118" y="66" width="330" height="26" rx="4" fill="#0d141d" stroke="#33465c"/>
+  <text class="f sm" x="128" y="83">C:\Program Files\Roberts Space Industries\StarCitizen\LIVE</text>
+  <rect x="458" y="66" width="92" height="26" rx="4" fill="#0d141d" stroke="#33465c"/>
+  <text class="f sm" x="468" y="83">LIVE ▾</text>
+  <rect x="560" y="66" width="76" height="26" rx="4" fill="#22303f" stroke="#3d506d"/>
+  <text class="f sm" x="576" y="83">参照...</text>
+  <rect x="646" y="66" width="86" height="26" rx="4" fill="#123146" stroke="#38bdf8"/>
+  <text class="f sm" x="662" y="83" fill="#8fd6ff">AI 設定</text>
+  <text class="f sm" x="748" y="83" fill="#6f8399">← 常に表示</text>
+  <line x1="20" y1="104" x2="880" y2="104" stroke="#22303f"/>
+
+  <!-- tab rows -->
+  <text class="f hd" x="44" y="128">TABS</text>
+
+  <g class="f lbl">
+    <rect x="50" y="140" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="124" y="164" text-anchor="middle">翻訳</text>
+    <rect x="213" y="140" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="287" y="164" text-anchor="middle">翻訳エディタ</text>
+    <rect x="376" y="140" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="450" y="164" text-anchor="middle">用語集</text>
+    <rect x="539" y="140" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="613" y="164" text-anchor="middle">プロファイル</text>
+    <rect x="702" y="140" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="776" y="164" text-anchor="middle">コモディティ</text>
+
+    <rect x="50" y="190" width="148" height="38" rx="6" fill="#123146" stroke="#38bdf8" stroke-width="2"/><text x="124" y="214" text-anchor="middle" fill="#bfe6ff">船舶管理</text>
+    <rect x="213" y="190" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="287" y="214" text-anchor="middle">価格キャプチャ</text>
+    <rect x="376" y="190" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="450" y="214" text-anchor="middle">ミッション</text>
+    <rect x="539" y="190" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="613" y="214" text-anchor="middle">チャット</text>
+    <rect x="702" y="190" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="776" y="214" text-anchor="middle">設定</text>
+  </g>
+
+  <!-- sub tabs -->
+  <path d="M124 228 L124 252" stroke="#38bdf8" stroke-width="2" fill="none"/>
+  <path d="M124 252 L790 252" stroke="#38bdf8" stroke-width="2" fill="none" opacity=".35"/>
+  <path d="M124 252 L124 268 M330 252 L330 268 M560 252 L560 268" stroke="#38bdf8" stroke-width="2" fill="none" opacity=".6"/>
+
+  <g class="f lbl">
+    <rect x="54" y="268" width="140" height="34" rx="6" fill="#101d2a" stroke="#2f6f96"/><text x="124" y="290" text-anchor="middle" fill="#bfe6ff">所持船</text>
+    <rect x="230" y="268" width="200" height="34" rx="6" fill="#101d2a" stroke="#2f6f96"/><text x="330" y="290" text-anchor="middle" fill="#bfe6ff">アップグレード管理</text>
+    <rect x="466" y="268" width="188" height="34" rx="6" fill="#101d2a" stroke="#2f6f96"/><text x="560" y="290" text-anchor="middle" fill="#bfe6ff">装備</text>
+  </g>
+  <text class="f sm" x="672" y="290">← 船舶管理タブの中のタブ</text>
+
+  <line x1="50" y1="326" x2="850" y2="326" stroke="#22303f"/>
+
+  <!-- separate windows -->
+  <text class="f hd" x="50" y="352">別ウィンドウで開く画面</text>
+  <g class="f sm">
+    <rect x="50" y="364" width="150" height="30" rx="6" fill="#1c1830" stroke="#5b4b8a"/><text x="125" y="384" text-anchor="middle" fill="#cfc2f5">AI 設定</text>
+    <rect x="214" y="364" width="180" height="30" rx="6" fill="#1c1830" stroke="#5b4b8a"/><text x="304" y="384" text-anchor="middle" fill="#cfc2f5">キーバインド エディタ</text>
+    <rect x="408" y="364" width="150" height="30" rx="6" fill="#1c1830" stroke="#5b4b8a"/><text x="483" y="384" text-anchor="middle" fill="#cfc2f5">記憶管理</text>
+    <rect x="572" y="364" width="170" height="30" rx="6" fill="#1c1830" stroke="#5b4b8a"/><text x="657" y="384" text-anchor="middle" fill="#cfc2f5">My Hangar 同期</text>
+  </g>
+  <g class="f sm">
+    <text x="50" y="420">それぞれ [AI 設定] / プロファイルタブの [詳細設定] / チャットタブの [記憶管理] /</text>
+    <text x="50" y="438">船舶管理タブの [My Hangar と同期] から開きます。</text>
+  </g>
+</svg>

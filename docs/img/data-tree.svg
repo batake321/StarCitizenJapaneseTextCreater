@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 330" width="900" height="330" role="img" aria-labelledby="t d">
+  <title id="t">データの保存先</title>
+  <desc id="d">Working Directory の中に translations.db、gamedata_cache.db、saves/characters、saves/controls、output/global.ini、chat_debug.log が置かれます。</desc>
+  <style>
+    .f  { font-family: "Segoe UI","Yu Gothic UI",Meiryo,sans-serif; }
+    .ti { font-size: 15.5px; fill: #e6eef7; font-weight: 600; }
+    .sm { font-size: 12.5px; fill: #93a7bd; }
+    .mono { font-family: Consolas,"Courier New",monospace; font-size: 13.5px; fill: #8fd6ff; }
+    .monod { font-family: Consolas,"Courier New",monospace; font-size: 13.5px; fill: #ffd98a; }
+  </style>
+
+  <text class="f sm" x="30" y="30">保存先は 設定タブ &gt; 基本設定 の [Working Directory] で変更できます</text>
+
+  <rect x="30" y="46" width="840" height="262" rx="12" fill="#141c26" stroke="#2a3a4d"/>
+
+  <text class="f monod" x="52" y="78">📁 Working Directory</text>
+
+  <path d="M62 88 L62 268" stroke="#3a4c60" stroke-width="1.5" fill="none"/>
+
+  <g>
+    <path d="M62 106 L82 106" stroke="#3a4c60" stroke-width="1.5"/>
+    <text class="f mono" x="90" y="111">translations.db</text>
+    <text class="f sm" x="330" y="111">翻訳データベース (SQLite) — 翻訳テキスト・用語集</text>
+  </g>
+  <g>
+    <path d="M62 140 L82 140" stroke="#3a4c60" stroke-width="1.5"/>
+    <text class="f mono" x="90" y="145">gamedata_cache.db</text>
+    <text class="f sm" x="330" y="145">ゲームデータキャッシュ — ゲームデータ・ナレッジ (記憶)</text>
+  </g>
+  <g>
+    <path d="M62 174 L82 174" stroke="#3a4c60" stroke-width="1.5"/>
+    <text class="f monod" x="90" y="179">saves/characters/</text>
+    <text class="f sm" x="330" y="179">キャラクターデザインのバックアップ</text>
+  </g>
+  <g>
+    <path d="M62 208 L82 208" stroke="#3a4c60" stroke-width="1.5"/>
+    <text class="f monod" x="90" y="213">saves/controls/</text>
+    <text class="f sm" x="330" y="213">キーバインド設定のバックアップ</text>
+  </g>
+  <g>
+    <path d="M62 242 L82 242" stroke="#3a4c60" stroke-width="1.5"/>
+    <text class="f monod" x="90" y="247">output/global.ini</text>
+    <text class="f sm" x="330" y="247">統合済みの翻訳ファイル（[3. 反映] でゲームへコピー）</text>
+  </g>
+  <g>
+    <path d="M62 268 L82 268 " stroke="#3a4c60" stroke-width="1.5"/>
+    <text class="f mono" x="90" y="281">chat_debug.log</text>
+    <text class="f sm" x="330" y="281">チャット機能のデバッグログ</text>
+  </g>
+</svg>

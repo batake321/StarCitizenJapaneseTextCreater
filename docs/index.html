@@ -1,0 +1,740 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>マニュアル — Star Citizen Japanese Text Creator</title>
+<meta name="description" content="Star Citizen Japanese Text Creator の使い方マニュアル。翻訳の当て方から AI チャット、船舶管理、Web チャットまで図解で解説します。">
+<link rel="stylesheet" href="manual.css">
+</head>
+<body>
+
+<div class="layout">
+
+  <aside class="side">
+    <a class="brand" href="index.html">Star Citizen<br>Japanese Text Creator
+      <span>使い方マニュアル</span>
+    </a>
+    <input type="checkbox" id="navtoggle" class="side-toggle">
+    <label for="navtoggle" class="side-toggle-label">目次を開く</label>
+
+    <nav>
+      <div class="grp">はじめに</div>
+      <a href="#about">1. このアプリでできること</a>
+      <a href="#install">2. 動作要件とインストール</a>
+      <a href="#screen">3. 画面の見かた</a>
+      <a href="#quickstart">4. 最短セットアップ</a>
+
+      <div class="grp">日本語化</div>
+      <a href="#translate">5. 翻訳タブ</a>
+      <a href="#ai">6. AI 設定</a>
+      <a href="#editor">7. 翻訳エディタ</a>
+      <a href="#glossary">8. 用語集</a>
+
+      <div class="grp">設定の保存・操作</div>
+      <a href="#profile">9. プロファイル</a>
+      <a href="#keybind">10. キーバインドエディタ</a>
+
+      <div class="grp">ゲームを遊ぶための道具</div>
+      <a href="#commodity">11. コモディティ（交易）</a>
+      <a href="#ships">12. 船舶管理</a>
+      <a href="#capture">13. 価格キャプチャ</a>
+      <a href="#mission">14. ミッション</a>
+
+      <div class="grp">AI チャット</div>
+      <a href="#chat">15. AI チャット</a>
+      <a href="#webchat">16. Web チャット・スマホ</a>
+      <a href="#knowledge">17. ナレッジ（記憶）</a>
+
+      <div class="grp">その他</div>
+      <a href="#settings">18. 設定タブ</a>
+      <a href="#data">19. データの保存先</a>
+      <a href="#faq">20. 困ったときは</a>
+    </nav>
+  </aside>
+
+  <main>
+
+    <div class="hero">
+      <h1>Star Citizen Japanese Text Creator<br>使い方マニュアル</h1>
+      <p class="lead">Star Citizen のゲーム内テキストを日本語にして、ついでに交易・所持船・ミッション調べまで面倒を見る Windows アプリです。<br>このページでは、初めて起動したところから一通り使えるようになるまでを図解で説明します。</p>
+      <div class="pills">
+        <span class="pill">Windows 10 / 11</span>
+        <span class="pill">.NET 8.0</span>
+        <span class="pill">翻訳データベース同梱</span>
+        <span class="pill">AI 翻訳は任意</span>
+      </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="about"><span class="num">1</span>このアプリでできること</h2>
+
+    <p>大きく分けて 3 つのことができます。どれか 1 つだけ使っても構いません。</p>
+
+    <div class="cards">
+      <div class="card">
+        <h4>ゲームを日本語にする</h4>
+        <p>ゲームの <code>Data.p4k</code> からテキストを取り出し、翻訳データベースの日本語を当ててゲームに書き戻します。AI に翻訳させることもできます。</p>
+      </div>
+      <div class="card">
+        <h4>遊ぶための情報を引く</h4>
+        <p>交易ルートの計算、所持船とアップグレード権利の管理、装備の登録、ミッション一覧の検索ができます。</p>
+      </div>
+      <div class="card">
+        <h4>AI に日本語で質問する</h4>
+        <p>ゲームデータや外部 API を AI に調べさせて日本語で答えさせます。ブラウザ・スマホからも使え、音声で読み上げさせることもできます。</p>
+      </div>
+    </div>
+
+    <div class="note tip">
+      <p><strong>翻訳データはアプリに同梱されています。</strong>AI の API キーを持っていなくても、インストールして <span class="btn">3. 反映</span> を押すだけでゲームは日本語になります。AI 翻訳は「まだ訳されていない部分を自分で埋めたいとき」に使う機能です。</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="install"><span class="num">2</span>動作要件とインストール</h2>
+
+    <h3>動作要件</h3>
+    <ul>
+      <li>Windows 10 / 11</li>
+      <li><a href="https://dotnet.microsoft.com/download/dotnet/8.0" rel="noreferrer">.NET 8.0 Runtime</a>（デスクトップランタイム）</li>
+      <li>Star Citizen がインストールされていること</li>
+      <li><b>AI 翻訳や AI チャットを使う場合のみ</b>（いずれか 1 つ以上）
+        <ul>
+          <li><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/API_Key_取得_Claude.md">Claude API キー</a> / <a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/API_Key_取得_Gemini.md">Gemini API キー</a> / <a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/API_Key_取得_OpenAI.md">OpenAI (ChatGPT) API キー</a></li>
+          <li><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/Ollama_Install.md">Ollama</a> ＋ <a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/Gemma4_e4b_Install.md">Gemma e4b</a> または <a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/Gemma4_e2b_Install.md">e2b</a>（ローカル実行・無料）</li>
+        </ul>
+      </li>
+      <li><b>音声読み上げを使う場合のみ（任意）</b> — <a href="https://voicevox.hiroshiba.jp/" rel="noreferrer">VoiceVox</a>（無料の音声合成エンジン）</li>
+      <li><b>My Hangar 同期を使う場合のみ</b> — WebView2 ランタイム（Evergreen）。Windows 10 / 11 には通常インストール済みです</li>
+    </ul>
+
+    <h3>ダウンロード</h3>
+
+    <table>
+      <thead><tr><th>もの</th><th>中身</th><th>リンク</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><b>アプリ本体 (zip)</b></td>
+          <td>展開するだけで動きます。翻訳データベース同梱</td>
+          <td><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/latest" rel="noreferrer">最新リリース</a></td>
+        </tr>
+        <tr>
+          <td><b>インストーラー (exe)</b></td>
+          <td>インストール形式が良い方はこちら（公開されているのは v1.15.0）</td>
+          <td><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.15.0/SCJPTextCreator-v1.15.0-Setup.exe" rel="noreferrer">SCJPTextCreator-v1.15.0-Setup.exe</a></td>
+        </tr>
+        <tr>
+          <td><b>翻訳データベース (zip)</b></td>
+          <td>Patch 4.10 対応 (2026/9/6)。アプリの <span class="btn">インポート (復元)</span> から取り込みます</td>
+          <td><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.17.0/sc_japanese_backup_20260906_181410.zip" rel="noreferrer">sc_japanese_backup_20260906_181410.zip</a></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="note tip">
+      <p><strong>アプリ本体だけで足ります。</strong>v1.14.5 以降は翻訳データベースが本体に同梱されているので、翻訳DB の zip を別途取り込む必要はありません。上の 3 つ目は、同梱版より新しい翻訳データを先に試したいとき用です。</p>
+    </div>
+
+    <h3>インストール</h3>
+    <ol class="steps">
+      <li>上の表から <b>アプリ本体 (zip)</b> をダウンロードします。</li>
+      <li>好きな場所に展開します。<b>zip 版はインストール作業なしで動きます。</b></li>
+      <li>展開したフォルダの中の実行ファイルを起動します。</li>
+    </ol>
+
+    <div class="note warn">
+      <p><strong>アプリを新しいバージョンに入れ替えたときは、翻訳タブの <span class="btn">3. 反映</span> を一度実行してください。</strong>同梱の翻訳データベースがローカルのものより新しい場合、起動時に自動で差分マージされますが（未翻訳のレコードだけを更新し、手動で直した翻訳は保護されます）、ゲーム側のファイルに書き出すのは <span class="btn">3. 反映</span> の役目です。</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="screen"><span class="num">3</span>画面の見かた</h2>
+
+    <p>ウィンドウの上には常に <b>GamePath バー</b>（ゲームのインストール先・チャンネル切替・<span class="btn">AI 設定</span>）があり、その下に 10 個のタブが並びます。<span class="tab">船舶管理</span> だけは、中にさらに 3 つのタブを持っています。</p>
+
+    <figure class="scroll-x">
+      <img class="diagram" src="img/tabs-map.svg" alt="アプリのタブ構成図。上部の GamePath バーの下に、翻訳・翻訳エディタ・用語集・プロファイル・コモディティ・船舶管理・価格キャプチャ・ミッション・チャット・設定の 10 タブが並び、船舶管理の中に所持船・アップグレード管理・装備の 3 タブがある。" width="900" height="470">
+      <figcaption>タブの並びと、別ウィンドウで開く 4 つの画面</figcaption>
+    </figure>
+
+    <table>
+      <thead><tr><th>タブ</th><th>何をするところか</th></tr></thead>
+      <tbody>
+        <tr><td><span class="tab">翻訳</span></td><td>抽出・翻訳・反映。日本語化の本体（→ <a href="#translate">5</a>）</td></tr>
+        <tr><td><span class="tab">翻訳エディタ</span></td><td>訳文の検索・手直し・CSV 入出力（→ <a href="#editor">7</a>）</td></tr>
+        <tr><td><span class="tab">用語集</span></td><td>固有名詞などの訳し方を固定する（→ <a href="#glossary">8</a>）</td></tr>
+        <tr><td><span class="tab">プロファイル</span></td><td>キャラクターデザインとキーバインドの保存・復元（→ <a href="#profile">9</a>）</td></tr>
+        <tr><td><span class="tab">コモディティ</span></td><td>交易ルートの検索と価格の確認（→ <a href="#commodity">11</a>）</td></tr>
+        <tr><td><span class="tab">船舶管理</span></td><td>所持船・アップグレード権利・装備（→ <a href="#ships">12</a>）</td></tr>
+        <tr><td><span class="tab">価格キャプチャ</span></td><td>ゲーム画面のターミナルを読み取って UEX へ送る（→ <a href="#capture">13</a>）</td></tr>
+        <tr><td><span class="tab">ミッション</span></td><td>ミッションの一覧と詳細を調べる（→ <a href="#mission">14</a>）</td></tr>
+        <tr><td><span class="tab">チャット</span></td><td>AI に日本語で質問する（→ <a href="#chat">15</a>）</td></tr>
+        <tr><td><span class="tab">設定</span></td><td>保存先・サーバー・データベース管理（→ <a href="#settings">18</a>）</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ============================================================ -->
+    <h2 id="quickstart"><span class="num">4</span>最短セットアップ</h2>
+
+    <p>まずはここだけやれば、ゲームが日本語になります。</p>
+
+    <figure class="scroll-x">
+      <img class="diagram" src="img/flow-setup.svg" alt="初回セットアップの 5 ステップ図。展開、GamePath の確認、AI 設定、翻訳タブで抽出・翻訳・反映、ゲームの起動。" width="900" height="250">
+      <figcaption>初回セットアップの流れ</figcaption>
+    </figure>
+
+    <ol class="steps">
+      <li>アプリを起動します。上部の <b>GamePath</b> に Star Citizen のインストール先が自動で入っていることを確認します。空欄なら <span class="btn">参照...</span> から選んでください（RSI Launcher のログから自動検出を試みます）。</li>
+      <li>右隣のコンボボックスで <b>LIVE / PTU など、日本語化したいチャンネル</b>を選びます。</li>
+      <li><span class="tab">翻訳</span> タブで <span class="btn">1. 抽出</span> → <span class="btn">3. 反映</span> の順に押します。<b>同梱の翻訳データだけで良ければ <span class="btn">2. 翻訳</span> は不要です。</b></li>
+      <li>Star Citizen を起動して、日本語になっていれば完了です。</li>
+    </ol>
+
+    <p>自分で AI に翻訳させたい場合は、<span class="btn">2. 翻訳</span> の前に <a href="#ai">AI 設定</a> で API キーを登録してください。</p>
+
+    <!-- ============================================================ -->
+    <h2 id="translate"><span class="num">5</span>翻訳タブ — 抽出・翻訳・反映</h2>
+
+    <p>日本語化はこのタブの 3 つのボタンを<b>左から順に押すだけ</b>です。それぞれが何をしているかを図にすると、こうなります。</p>
+
+    <figure class="scroll-x">
+      <img class="diagram" src="img/flow-translate.svg" alt="翻訳の流れ図。Data.p4k から 1. 抽出 で翻訳データベースへ取り込み、2. 翻訳 で AI バックエンドに訳させ、3. 反映 でゲームフォルダの global.ini に書き出す。" width="900" height="360">
+      <figcaption>3 つのボタンとデータの流れ</figcaption>
+    </figure>
+
+    <figure>
+      <img src="img/Translate2.png" alt="翻訳タブの画面。1. 抽出 / 2. 翻訳 / 3. 反映 のボタンと、進捗バー、黒背景のログ表示。" loading="lazy" width="1086" height="743">
+      <figcaption>翻訳タブ</figcaption>
+    </figure>
+
+    <table>
+      <thead><tr><th>ボタン</th><th>やっていること</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="btn">1. 抽出</span></td>
+          <td>ゲームの <code>Data.p4k</code>（ZIP64 + ZStd 圧縮）から英語と日本語の <code>global.ini</code> を取り出し、翻訳データベースに登録します。</td>
+        </tr>
+        <tr>
+          <td><span class="btn">2. 翻訳</span></td>
+          <td>まだ訳されていない行を、<a href="#ai">AI 設定</a>でチェックを入れたバックエンドに翻訳させます。複数にチェックを入れると同時に走らせます。</td>
+        </tr>
+        <tr>
+          <td><span class="btn">3. 反映</span></td>
+          <td>翻訳データベースの内容を <code>global.ini</code> にまとめ、ゲームフォルダの <code>data/Localization/japanese_(japan)/global.ini</code> にコピーします。あわせて <code>user.cfg</code> の <code>g_language</code> も書き換えます。</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>処理中は <span class="btn">中止</span> ボタンが現れ、下のログ欄に進行状況が流れます。ログは <span class="btn">ログ保存</span> でファイルに残せます。</p>
+
+    <div class="note">
+      <p><b>書き出し先の言語フォルダ名</b>は <span class="tab">設定</span> タブの <b>Output Language</b> で変えられます。既定は <code>japanese_(japan)</code> です。</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="ai"><span class="num">6</span>AI 設定 — 翻訳バックエンドの登録</h2>
+
+    <p>上部バーの <span class="btn">AI 設定</span>（または <span class="tab">設定</span> タブの <span class="btn">AI 設定を開く</span>）で、翻訳とチャットに使う AI を登録します。</p>
+
+    <figure>
+      <img src="img/AIsetting.png" alt="AI 設定ダイアログ。バックエンドの一覧とチェックボックス、API キー・モデル・バッチサイズの入力欄。" loading="lazy" width="707" height="635">
+      <figcaption>AI 設定ダイアログ</figcaption>
+    </figure>
+
+    <ol class="steps">
+      <li><span class="btn">バックエンド追加</span> で行を増やします。</li>
+      <li>種類（Claude / Gemini / OpenAI / Ollama）、API キー、モデル名を入れます。</li>
+      <li>翻訳に<b>使いたいものだけ</b>チェックを入れます。</li>
+      <li><span class="btn">保存</span> で閉じます。</li>
+    </ol>
+
+    <div class="note warn">
+      <p><strong>チェックボックスは「翻訳に使うかどうか」の選択です。</strong>チェックを入れたバックエンドが同時に走ります。チャットで使うバックエンドは、チャットタブ側のコンボボックスで別に選びます。</p>
+    </div>
+
+    <table>
+      <thead><tr><th>バックエンド</th><th>性格</th><th>必要なもの</th></tr></thead>
+      <tbody>
+        <tr><td><b>Claude</b> (Anthropic)</td><td>高品質な翻訳</td><td>API キー（<a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/API_Key_取得_Claude.md">取得方法</a>）</td></tr>
+        <tr><td><b>Gemini</b> (Google)</td><td>高速・大量処理向き</td><td>API キー（<a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/API_Key_取得_Gemini.md">取得方法</a>）</td></tr>
+        <tr><td><b>OpenAI</b> (ChatGPT)</td><td>高品質・バランス型</td><td>API キー（<a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/API_Key_取得_OpenAI.md">取得方法</a>）</td></tr>
+        <tr><td><b>Ollama</b> (ローカル)</td><td>無料・オフライン対応</td><td><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/Ollama_Install.md">Ollama</a> ＋ モデル</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ============================================================ -->
+    <h2 id="editor"><span class="num">7</span>翻訳エディタ — 訳文の確認と手直し</h2>
+
+    <p>AI の訳が気に入らないときや、特定の語を探したいときに使います。</p>
+
+    <figure>
+      <img src="img/TransEditor.png" alt="翻訳エディタの画面。検索欄と絞り込みのコンボボックス、Key / English / Japanese の一覧表。" loading="lazy" width="1086" height="743">
+      <figcaption>翻訳エディタ</figcaption>
+    </figure>
+
+    <h3>探す</h3>
+    <ul>
+      <li><b>検索欄</b>に語を入れて <span class="btn">検索</span>。<span class="btn">部分一致</span>（既定でオン）を外すと完全一致になります。</li>
+      <li>検索欄の右に並ぶコンボボックスで<b>検索対象</b>を <b>全フィールド / Key / English / Japanese</b> から選べます（画面上にラベルはありません）。</li>
+      <li>その隣の<b>ソース絞り込み</b>で、訳がどこから来たのかで絞れます。
+        <ul>
+          <li><code>official</code> — ゲーム同梱の公式日本語</li>
+          <li><code>ai</code> — AI が訳したもの</li>
+          <li><code>manual</code> — 手で直したもの</li>
+          <li><code>csv</code> — CSV から取り込んだもの</li>
+          <li><code>glossary</code> — 用語集の一括置換によるもの</li>
+          <li><code>original</code> — 原文のままにしたもの</li>
+          <li><code>untranslated</code> — まだ訳されていないもの</li>
+        </ul>
+      </li>
+      <li>さらに右のコンボボックスでは、どの AI が訳したかで絞り込めます。</li>
+      <li>件数が多いときは <span class="btn">◀ 前</span> <span class="btn">次 ▶</span> でページを送ります。</li>
+    </ul>
+
+    <h3>直す</h3>
+    <ul>
+      <li>一覧の <b>Japanese</b> 列を直接書き換えると、そのレコードは <code>manual</code> になり、以降の再翻訳や同梱 DB のマージで<b>上書きされません</b>。</li>
+      <li><span class="btn">選択した翻訳を削除 (再翻訳用)</span> — 訳文を消して未翻訳に戻します。次の <span class="btn">2. 翻訳</span> で訳し直されます。</li>
+      <li><span class="btn">全て原文</span> — 選んだ行を英語のまま表示させます。訳すとかえって分かりにくい用語に使います。</li>
+      <li><span class="btn">CSV Export</span> / <span class="btn">CSV Import</span> — 表計算ソフトでまとめて直したいときに。</li>
+    </ul>
+
+    <!-- ============================================================ -->
+    <h2 id="glossary"><span class="num">8</span>用語集 — 訳し方を固定する</h2>
+
+    <p>船名・地名・企業名など、<b>毎回同じ訳になってほしい語</b>を登録します。以降の AI 翻訳はこの対訳を守るようになります。</p>
+
+    <figure>
+      <img src="img/kaywards.png" alt="用語集タブの画面。English と Japanese の入力欄、追加/更新ボタン、登録済み用語の一覧。" loading="lazy" width="1086" height="743">
+      <figcaption>用語集</figcaption>
+    </figure>
+
+    <ul>
+      <li><b>English:</b> と <b>Japanese:</b> に入れて <span class="btn">追加/更新</span>。</li>
+      <li><span class="btn">一括置換 (翻訳済みテキストに適用)</span> — <b>すでに訳し終わっている</b>テキストにも、登録した対訳を当て直します。用語を後から追加したときに使います。</li>
+      <li><span class="btn">全選択</span> と <span class="btn">選択削除</span> でまとめて消せます。</li>
+      <li><span class="btn">CSV Export</span> / <span class="btn">CSV Import</span> で用語集の持ち出し・持ち込みができます。</li>
+    </ul>
+
+    <div class="note tip">
+      <p><strong>英語のまま残したい語は用語集ではなく <span class="btn">全て原文</span> を使います。</strong>用語集は AI に「この英語はこの日本語で訳して」と指示するための仕組みなので、英語のまま残したい語は <a href="#editor">翻訳エディタ</a>でその行を選んで <span class="btn">全て原文</span> を押すほうが確実です。</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="profile"><span class="num">9</span>プロファイル — バックアップと復元</h2>
+
+    <p>パッチのたびに消えがちな<b>キャラクターデザイン</b>と<b>キーバインド設定</b>を、名前を付けて保存しておけます。</p>
+
+    <figure>
+      <img src="img/Profile.png" alt="プロファイルタブの画面。キャラクターデザインとキーバインド/コントロール設定の 2 つのグループ。" loading="lazy" width="1086" height="743">
+      <figcaption>プロファイル</figcaption>
+    </figure>
+
+    <table>
+      <thead><tr><th>ボタン</th><th>動き</th></tr></thead>
+      <tbody>
+        <tr><td><span class="btn">ゲームから保存</span></td><td>今ゲームに入っている設定を読み取って、プロファイルとして保存します。</td></tr>
+        <tr><td><span class="btn">外部から取込</span></td><td>他の場所にあるファイル（フォルダを指定）を取り込みます。</td></tr>
+        <tr><td><span class="btn">コピー</span></td><td>選んだプロファイルを複製します。試す前の退避に。</td></tr>
+        <tr><td><span class="btn">ゲームに反映</span></td><td>選んだプロファイルをゲーム側に書き戻します。</td></tr>
+        <tr><td><span class="btn">詳細設定</span></td><td>キーバインド側のみ。<a href="#keybind">キーバインドエディタ</a>を開きます。</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ============================================================ -->
+    <h2 id="keybind"><span class="num">10</span>キーバインドエディタ</h2>
+
+    <p>プロファイルタブの <span class="btn">詳細設定</span> から開きます。<b>機能別 / キーボード / マウス / コントローラー / HOTAS</b> の 5 タブに分かれています。</p>
+
+    <h3>機能別タブ — 一覧から探して割り当てる</h3>
+
+    <figure>
+      <img src="img/Keybind_Function.png" alt="キーバインドエディタの機能別タブ。カテゴリごとに機能名と割り当てが一覧表示されている。" loading="lazy" width="1186" height="773">
+      <figcaption>機能別タブ</figcaption>
+    </figure>
+
+    <ul>
+      <li>入力種別のコンボボックスで <b>全入力 / キーボード / マウス / ゲームパッド / HOTAS / 未割当のみ / 変更済みのみ</b> に絞り込めます。</li>
+      <li>行をダブルクリックすると割り当てダイアログが開きます。</li>
+      <li>翻訳データベースと連動しているので、機能名を日本語で読めます。</li>
+    </ul>
+
+    <h3>デバイス別タブ — 絵の上で確認する</h3>
+
+    <figure>
+      <img src="img/Keybind_Keyboard2.png" alt="キーバインドエディタのキーボードタブ。キーボードの図の上に、各キーへの割り当てが色分けで表示されている。" loading="lazy" width="1186" height="773">
+      <figcaption>キーボードタブ。マウス・ゲームパッド (Xbox)・HOTAS (VKB Gladiator NXT 左右) も同じように図で確認できます</figcaption>
+    </figure>
+
+    <ul>
+      <li>キーや軸の上に、いま何が割り当たっているかが表示されます。</li>
+      <li><b>activation mode</b>（押した瞬間 / 長押し / ダブルタップ など）が色分けされます。</li>
+      <li>キーをクリックすると、その場で割り当てを変更できます。</li>
+      <li><span class="btn">印刷</span> でチートシートとして紙に出せます。<span class="btn">エクスポート</span> / <span class="btn">インポート</span> で設定の持ち運びもできます。</li>
+      <li>変更したら <span class="btn">保存</span> を忘れずに。</li>
+    </ul>
+
+    <!-- ============================================================ -->
+    <h2 id="commodity"><span class="num">11</span>コモディティ — 交易ルートを探す</h2>
+
+    <p>UEX の価格データを元に、<b>どこで何を買ってどこで売れば一番儲かるか</b>を計算します。</p>
+
+    <h3>ルートを探す</h3>
+    <ol class="steps">
+      <li><b>船:</b> を選ぶと <b>積載 (SCU)</b> が自動で入ります（<a href="#ships">所持船</a>に登録した船が候補に出ます）。</li>
+      <li><b>予算 (aUEC)</b>、<b>買い星系:</b> / <b>売り星系:</b>（全て / Stanton / Pyro / Nyx）を指定します。</li>
+      <li>必要なら <span class="btn">コモディティ選択 (全て)</span> で扱う商品を絞ります。</li>
+      <li>絞り込みのチェックを調整します。
+        <ul>
+          <li><span class="btn">地上小規模拠点を除く</span>（既定でオン）— 着陸が面倒な小拠点を候補から外します</li>
+          <li><span class="btn">外部積込対応のみ (Hull C等)</span> — 外部グリッドに積む船向け</li>
+          <li><span class="btn">在庫不足ルートを除く</span> — 在庫が足りない拠点を外します</li>
+        </ul>
+      </li>
+      <li><span class="btn">ルート検索</span> を押します。価格が古いと感じたら <span class="btn">価格更新</span> で取り直します。</li>
+    </ol>
+
+    <h3>拠点ごとに見る</h3>
+    <p>結果の行を選ぶと <b>購入場所 (安い順)</b> と <b>売却場所 (高い順)</b> の詳細が開き、差益と相手先がわかります。閉じるときは <span class="btn">✕</span> を押します。</p>
+
+    <div class="note">
+      <p>価格は UEX に集まったプレイヤーの報告です。実際のゲーム内価格と食い違うことがあります。ずれを見つけたら <a href="#capture">価格キャプチャ</a> から報告できます。</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="ships"><span class="num">12</span>船舶管理 — 所持船・アップグレード・装備</h2>
+
+    <p>このタブの中に <span class="tab">所持船</span> <span class="tab">アップグレード管理</span> <span class="tab">装備</span> の 3 つがあります。</p>
+
+    <h3>所持船 — 持っている船を登録する</h3>
+    <p>ここに登録した船は、<a href="#commodity">コモディティ</a>タブの船セレクタにも出てきます。</p>
+    <ul>
+      <li><b>手で追加する場合</b> — <b>船を追加</b> の <b>検索:</b> に船名を入れて <span class="btn">検索</span>、候補から選んで <span class="btn">追加</span>。aUEC で買った船は <span class="btn">ゲーム内購入 (aUEC)</span> にチェックを入れます。</li>
+      <li><b>まとめて取り込む場合</b> — <span class="btn">My Hangar と同期</span>（下で説明）のあと <span class="btn">同期した船を所持船に反映</span>。<b>手で入れた分は保護されます。</b></li>
+      <li>各行の <span class="btn">アップグレード</span> / <span class="btn">装備</span> ボタンから、それぞれのタブへ飛べます。</li>
+    </ul>
+
+    <h3>My Hangar 同期 — RSI アカウントから読み取る</h3>
+
+    <figure class="scroll-x">
+      <img class="diagram" src="img/flow-hangar.svg" alt="My Hangar 同期の流れ図。同期を開始すると内蔵ブラウザが開き、自分でログインすると、pledge・船・保険・CCU を読み取って所持船タブとアップグレード管理タブに反映される。" width="900" height="380">
+      <figcaption>My Hangar 同期の流れ</figcaption>
+    </figure>
+
+    <ol class="steps">
+      <li><span class="btn">My Hangar と同期</span> を押すと「My Hangar 同期」ウィンドウが開きます。</li>
+      <li>内蔵ブラウザ (WebView2) に RSI のページが出るので、<b>そこでご自身でログイン</b>します。</li>
+      <li><span class="btn">同期開始</span> で、保有 pledge・船・保険・アップグレード権利 (CCU) を読み取ります。</li>
+      <li>次回から入力を省きたい場合は <span class="btn">ログイン状態を保持する</span> にチェックを入れます。</li>
+    </ol>
+
+    <div class="note warn">
+      <p><strong>アプリは ID / パスワードを扱いません。</strong>ページ上のクリックや送信も行わず、表示されている内容を読み取るだけです。<span class="btn">ログイン状態を保持する</span> を使う場合、ログイン情報は Windows のデータ保護 API (DPAPI) で暗号化して保存されます（このユーザーアカウントでしか復号できません）。</p>
+    </div>
+
+    <h3>アップグレード管理 — CCU と melt を試算する</h3>
+    <p>保有している船と、使えるアップグレード権利 (CCU) の対応を一覧します。<b>実際に RSI 側で何かを実行するわけではなく、手元でのシミュレーションです。</b></p>
+    <ul>
+      <li><span class="btn">Upgrade</span> で権利を当ててみて、連鎖させ、<span class="btn">Undo</span> で戻せます。<span class="btn">シミュレーションをリセット</span> で全部戻します。</li>
+      <li>権利（CCU）の色は <b>緑 = いま使える</b>、<b>紫 = このシミュレーションで適用中</b>、<b>灰 = 使用不可</b>（元の船を持っていない、または売却予定にした船が起点）です。船の行が灰色になっているものは、使える権利が無く適用もしていない船です。</li>
+      <li><span class="btn">Sell</span> で pledge 単位の売却 (melt) を試算します。現在の Store Credit、売却で得られる Credit、失う機体、<b>LTI 喪失警告</b>、Buy Back の残トークンが表示されます。</li>
+      <li><b>販売中の船 (RSI ストア)</b> を開くと、いま売られている船・パック・アップグレードが見られます。<span class="btn">Warbond のみ</span> で絞り込めます。情報が古ければ <span class="btn">ストア情報を更新</span>。</li>
+      <li><b>プランナー / melt シミュレーション</b> では、船ごとに「要る / 要らない / 保留」を付けて <span class="btn">提案を計算</span> したり、目標価格から逆算したりできます。</li>
+    </ul>
+
+    <h3>装備 — 持っているコンポーネントと船の装備</h3>
+    <ul>
+      <li><b>所持コンポーネント</b> に、パワープラント / シールド / クーラー / 量子ドライブ / 船舶武器などを、<b>使用可</b>のチェックや数量を含めて登録します。</li>
+      <li><b>現在の装備</b> で船を選び、ポートごとに何を積んでいるかを設定します。<b>設定していないポートは初期装備が表示されます。</b></li>
+      <li><span class="btn">全てデフォルトに戻す</span> で初期装備に戻せます。</li>
+      <li>設定した内容は、船名にマウスを乗せたときのツールチップにも反映されます。</li>
+    </ul>
+
+    <div class="note">
+      <p>装備データが古いと感じたら、<span class="tab">アップグレード管理</span> の <span class="btn">装備データを再抽出</span> を押します。「Data.p4k から船と装備のデータを再抽出します（数分）」と確認が出ます。<b>初回は実行しておくことをおすすめします。</b></p>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="capture"><span class="num">13</span>価格キャプチャ — 画面を読んで UEX に送る</h2>
+
+    <p>ゲーム内の取引ターミナルを画面ごと読み取り、文字認識 (OCR) して <a href="https://uexcorp.space/" rel="noreferrer">UEX</a> に価格を報告する機能です。読み取りと確認まではそのまま使えますが、<b>UEX へ送信するには 設定タブで UEX API キーを登録しておく必要があります。</b></p>
+
+    <ol class="steps">
+      <li>ゲームでターミナルを開いた状態にします。</li>
+      <li><span class="btn">手動キャプチャ (画面全体)</span> を押すか、<kbd>PrintScreen</kbd> を押します（<span class="btn">PrintScreenホットキー有効</span> は既定でオンです。切りたいときはチェックを外します）。クリップボードやファイルからの読み取りもできます。</li>
+      <li>認識結果を確認します。<b>ターミナル:</b>（場所）、<b>モード:</b>（<b>BUY</b> / <b>SELL</b>）、<b>信頼度:</b> が表示されます。</li>
+      <li>内容が正しければ <span class="btn">UEXに送信</span>。必要に応じて <span class="btn">スクリーンショットも送信</span> にチェックを入れます。</li>
+    </ol>
+
+    <div class="note warn">
+      <p><strong>認識結果は必ず目で確認してください。</strong>OCR は読み違えます。誤った価格を送るとほかのプレイヤーの判断を狂わせます。</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="mission"><span class="num">14</span>ミッション — 依頼を調べる</h2>
+
+    <p><code>Data.p4k</code> から取り出したミッション情報を、カテゴリ別に一覧・検索できます。</p>
+
+    <ol class="steps">
+      <li>初回は <span class="btn">ミッション読み込み</span>（緑のボタン）を押します。</li>
+      <li>左の<b>カテゴリ</b>から種類を選びます。</li>
+      <li><b>組合:</b> <b>ランク:</b> で絞り込み、検索欄で名前や依頼者から探します。
+        <ul><li>そのまま語を入れると部分一致で探せます。先頭または末尾に <code>*</code> を付けると、その位置での一致に絞り込めます。英語名・日本語名・依頼者のほか、説明文や組合・ランクなども検索対象です。</li></ul>
+      </li>
+      <li>一覧（<b>名前 / 難易度 / 報酬 (aUEC) / 場所</b>）から行をクリックすると、右に詳細が出ます。報酬・レピュテーション要件と報酬・前提ミッション・敵構成・制限時間などが読めます。</li>
+    </ol>
+
+    <p>Wiki 側のミッション情報も取り込みたい場合は、<span class="tab">設定</span> タブの <span class="btn">Wiki ミッション取得</span> を実行します。文字が小さい・大きいと感じたら、設定タブの <b>ミッション詳細フォントサイズ</b>（既定 14pt）で調整できます。</p>
+
+    <!-- ============================================================ -->
+    <h2 id="chat"><span class="num">15</span>AI チャット — 日本語で質問する</h2>
+
+    <p>Star Citizen について、AI に日本語で聞けます。単に AI の知識で答えさせるだけでなく、<b>データベースや外部 API を調べさせて</b>答えさせることもできます。</p>
+
+    <figure>
+      <img src="img/chat.png" alt="チャットタブの画面。AI バックエンドの選択、スキル使用のチェックボックス、会話の吹き出し表示と入力欄。" loading="lazy" width="1086" height="743">
+      <figcaption>AI チャット</figcaption>
+    </figure>
+
+    <ul>
+      <li><b>AI バックエンド:</b> で、どの AI に答えさせるかを選びます（<a href="#ai">AI 設定</a>で登録したもの）。</li>
+      <li><span class="btn">スキル使用 (API/DB検索)</span>（既定でオン）— AI が船・装備・ロケーション・交易価格などを自分で調べてから答えます。オフにすると AI の知識だけで答えます。</li>
+      <li><b>📡 外部AI相談:</b> — チェックを入れた別の AI にも同じ質問を投げ、答えを突き合わせられます。</li>
+      <li><span class="btn">履歴クリア</span> で会話をリセット、<span class="btn">全体コピー</span> で会話をまとめてクリップボードへ。</li>
+      <li><span class="btn">記憶管理</span> は <a href="#knowledge">ナレッジ</a>の画面を開きます。</li>
+    </ul>
+
+    <div class="note tip">
+      <p><strong>ヒント:</strong> ロケーション検索（ステーションや都市の精錬所・ハンガー・エレベーターの場所など）は専用タブではなく、このチャットの<b>スキル</b>として動きます。「Area18 の精錬所はどこ？」のように普通に聞いてください。</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="webchat"><span class="num">16</span>Web チャット — ブラウザ・スマホから使う</h2>
+
+    <p>PC 上のアプリが Web サーバーになり、<b>同じ Wi-Fi のスマホのブラウザ</b>からチャットできます。ゲームを全画面で遊びながら、手元のスマホで質問する、という使い方ができます。</p>
+
+    <figure class="scroll-x">
+      <img class="diagram" src="img/flow-webchat.svg" alt="Web チャットの構成図。PC 上のアプリが HTTP 8099 と HTTPS 8100 で待ち受け、同じ Wi-Fi のスマホのブラウザから接続する。VoiceVox は PC 上の 50021 番。" width="900" height="340">
+      <figcaption>Web チャットの構成</figcaption>
+    </figure>
+
+    <figure>
+      <img src="img/web.png" alt="スマホのブラウザで表示した Web チャット画面。会話の吹き出しと、マイクボタン・スピーカーボタン。" loading="lazy" width="1356" height="1108">
+      <figcaption>ブラウザから見た Web チャット</figcaption>
+    </figure>
+
+    <h3>起動する</h3>
+    <ol class="steps">
+      <li><span class="tab">設定</span> タブで <b>HTTP ポート:</b>（既定 <code>8099</code>）と <b>HTTPS:</b>（既定 <code>8100</code>）を確認します。</li>
+      <li><span class="btn">サーバー起動</span> を押します。HTTP と HTTPS が同時に立ち上がります。</li>
+      <li>初回のみ <b>UAC プロンプト</b>が出ます。<b>はい</b> を押すと、証明書のインストール・HTTPS ポートの登録・ファイアウォールの開放を自動で行います。続けて <b>証明書インストール確認</b>が 3 回出るので、すべて <b>はい</b> を押します。</li>
+      <li>ブラウザで次の URL を開きます。
+        <ul>
+          <li>PC から: <code>http://localhost:8099/</code></li>
+          <li>スマホなど LAN 内の機械から: <code>http://192.168.x.x:8099/</code></li>
+          <li><b>スマホでマイクを使う場合: <code>https://192.168.x.x:8100/</code></b></li>
+        </ul>
+      </li>
+    </ol>
+
+    <div class="note">
+      <p><b><code>192.168.x.x</code> の調べ方:</b> PC でコマンドプロンプトか PowerShell を開いて <code>ipconfig</code> を実行します。「Wi-Fi」または「イーサネット」の <b>IPv4 アドレス</b>（例 <code>192.168.1.15</code>）がこの PC のアドレスです。アプリの画面にも表示されます。スマホは同じ Wi-Fi につないでください。</p>
+    </div>
+
+    <h3>スマホでマイクを使う</h3>
+
+    <p>ブラウザは <code>localhost</code> 以外の HTTP ではマイクを許可しません。<b>音声入力を使うときだけ</b>、次の手順で HTTPS 側 (8100) を使えるようにします。<b>マイクを使わないなら <code>http://192.168.x.x:8099/</code> のままで構いません。</b></p>
+
+    <ol class="steps">
+      <li>スマホのブラウザで <code>http://192.168.x.x:8099/cert</code> を開きます。</li>
+      <li><b>［証明書をダウンロード］</b>をタップしてインストールします。
+        <ul>
+          <li><b>iPhone</b>: 設定 → 一般 → VPN とデバイス管理 → プロファイルをインストール → 設定 → 一般 → 情報 → 証明書信頼設定 → 有効化</li>
+          <li><b>Android</b>: 設定 → セキュリティ → 証明書のインストール → CA 証明書 → ダウンロードしたファイルを選択</li>
+        </ul>
+      </li>
+      <li><code>https://192.168.x.x:8100/</code> を開きます。マイクが使えるようになります。</li>
+    </ol>
+
+    <div class="note warn">
+      <p><strong>「この接続ではプライバシーが保護されません」と出たとき。</strong>自己署名証明書を使っているためで、異常ではありません。<b>詳細設定</b>（iPhone Safari なら <b>詳細を表示</b>）から続行してください。一度許可すれば、同じブラウザでは次から出ません。通信自体は暗号化されています。</p>
+      <p>証明書はこの PC 専用の自己署名証明書で、外部の認証局は使いません。不要になったらスマホから削除してください。ファイアウォールには「SC Japanese Assistant HTTP」「SC Japanese Assistant HTTPS」というルール名で登録されます。</p>
+    </div>
+
+    <h3>音声で読み上げさせる</h3>
+    <ul>
+      <li>PC で <a href="https://voicevox.hiroshiba.jp/" rel="noreferrer">VoiceVox</a> を起動しておきます（無料）。既定の接続先は <code>http://localhost:50021</code> です。</li>
+      <li>画面下の入力バーにある<b>スピーカーボタン</b>を押すと読み上げが<b>オン</b>になります。オフのときは 🔈、オンにすると<b>緑色の 🔊</b> に変わります。押さないかぎり読み上げません。</li>
+      <li>オンのときは、質問を送ると「おまちください」、回答が来ると「お待たせしました」と AI が作った要約を読み上げます。</li>
+      <li>画面右上の歯車アイコンから話者（キャラクター）を変えられます。アプリの設定タブの <b>VoiceVox 話者ID</b> でも指定できます。</li>
+    </ul>
+
+    <!-- ============================================================ -->
+    <h2 id="knowledge"><span class="num">17</span>ナレッジ（記憶）— AI に覚えさせる</h2>
+
+    <p>AI が知らないこと（最新のバグ、コミュニティ用語、自分だけの Tips）を教えて覚えさせる機能です。覚えた内容はチャットの回答に反映されます。チャットタブの <span class="btn">記憶管理</span> から開きます。</p>
+
+    <figure>
+      <img src="img/memory.png" alt="記憶管理ウィンドウ。カテゴリ別に保存された記憶の一覧。" loading="lazy" width="786" height="513">
+      <figcaption>記憶管理</figcaption>
+    </figure>
+
+    <ul>
+      <li><b>保存</b> — チャットで「〜を覚えて」と伝えるか、この画面から直接登録します。</li>
+      <li><b>カテゴリ</b> — <b>バグ / 用語 / Tips / 一般</b> で分類でき、フィルタで絞り込めます。</li>
+      <li><b>削除</b> — <span class="btn">全選択</span> <span class="btn">選択解除</span> <span class="btn">選択を削除</span> でまとめて整理できます。</li>
+    </ul>
+
+    <div class="note tip">
+      <p><strong>バグ情報を覚えさせておくと便利です。</strong>例:「エレベーターに乗ると落ちることがあるので、乗る前に一度しゃがむと回避しやすい」。</p>
+    </div>
+
+    <h3>Discord とのやりとり</h3>
+
+    <figure>
+      <img src="img/memory2.png" alt="記憶管理ウィンドウ下部の Discord から取り込みパネル。テキストを貼り付けて取り込むための入力欄。" loading="lazy" width="786" height="513">
+      <figcaption>Discord から取り込み</figcaption>
+    </figure>
+
+    <ul>
+      <li><span class="btn">選択を Discord にコピー</span> — 選んだ記憶を、カテゴリ別にまとめた Discord 用のマークダウンとしてクリップボードにコピーします。そのまま貼り付けて共有できます。</li>
+      <li><b>Discord から取り込み</b>（画面下部を展開）— Discord やテキストファイルからコピーした内容を貼り付けて <span class="btn">取り込み</span> を押すと一括登録できます。行頭の <code>- </code> や <code>[bug]</code> のようなタグは自動で認識されます。</li>
+    </ul>
+
+    <!-- ============================================================ -->
+    <h2 id="settings"><span class="num">18</span>設定タブ</h2>
+
+    <figure>
+      <img src="img/Setting.png" alt="設定タブの画面。基本設定、API キー、ゲームデータ連携、Web チャットサーバー、データベースの各グループ。" loading="lazy" width="1086" height="1185">
+      <figcaption>設定タブ</figcaption>
+    </figure>
+
+    <table>
+      <thead><tr><th>グループ</th><th>内容</th></tr></thead>
+      <tbody>
+        <tr><td><b>基本設定</b></td><td><b>GamePath</b>、<b>Working Directory</b>（データの保存先）、<b>Output Language</b>（書き出す言語フォルダ名。既定 <code>japanese_(japan)</code>）</td></tr>
+        <tr><td><b>Star Citizen API (チャット用)</b></td><td>チャットのスキルが使う <b>SC API Key</b></td></tr>
+        <tr><td><b>UEX 価格送信 (Screen Capture)</b></td><td><a href="#capture">価格キャプチャ</a>で使う <b>UEX API Key</b></td></tr>
+        <tr><td><b>ゲームデータ連携 (Data.p4k)</b></td><td><span class="btn">インデックス構築</span>（<code>Data.p4k</code> から船・武器・コンポーネント情報を取り込む）／<span class="btn">ベクトル検索構築</span>／<span class="btn">Wiki ミッション取得</span></td></tr>
+        <tr><td><b>Web チャットサーバー</b></td><td>HTTP / HTTPS ポート、VoiceVox の URL と話者 ID、<span class="btn">サーバー起動</span>、<span class="btn">自動起動</span></td></tr>
+        <tr><td><b>AI バックエンド状態</b></td><td><span class="btn">AI 設定を開く</span></td></tr>
+        <tr><td><b>表示設定</b></td><td>ミッション詳細フォントサイズ（既定 14pt）</td></tr>
+        <tr><td><b>データベース</b></td><td><span class="btn">エクスポート (バックアップ)</span>／<span class="btn">インポート (復元)</span>／<span class="btn">所持船舶データを含める</span>／<span class="btn">翻訳DBクリア (全翻訳データ削除)</span></td></tr>
+      </tbody>
+    </table>
+
+    <p>変更したら最後に <span class="btn">設定を保存</span> を押してください。</p>
+
+    <div class="note warn">
+      <p><strong>インポート (復元) の前に。</strong>バックアップを取り込むと、ファイル選択のあと「インポート選択」ダイアログが出て、何を復元するかを選べます。<span class="btn">所持船舶データを含める</span> のチェックを外してエクスポートすると、所持船・pledge・CCU・マークといった個人データを除いたバックアップになります。人に配るときはこちらを使ってください。</p>
+    </div>
+
+    <div class="note warn">
+      <p><strong><span class="btn">翻訳DBクリア (全翻訳データ削除)</span> は、手で直した訳もすべて消します。</strong>実行前に <span class="btn">エクスポート (バックアップ)</span> を取っておくことを強くおすすめします。</p>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="data"><span class="num">19</span>データの保存先</h2>
+
+    <p>アプリが作るファイルはすべて <b>Working Directory</b> の中にまとまっています。バックアップしたいときはこのフォルダごとコピーしてください。</p>
+
+    <figure class="scroll-x">
+      <img class="diagram" src="img/data-tree.svg" alt="Working Directory の中身。translations.db、gamedata_cache.db、saves/characters/、saves/controls/、output/global.ini、chat_debug.log。" width="900" height="330">
+      <figcaption>Working Directory の中身</figcaption>
+    </figure>
+
+    <!-- ============================================================ -->
+    <h2 id="faq"><span class="num">20</span>困ったときは</h2>
+
+    <details>
+      <summary>ゲームが日本語にならない</summary>
+      <p>次の順に確認してください。</p>
+      <ol>
+        <li>上部の <b>GamePath</b> が、いま遊んでいるチャンネル（LIVE / PTU など）を指しているか。</li>
+        <li><span class="tab">翻訳</span> タブで <span class="btn">3. 反映</span> を実行したか。<b>アプリを更新したあとは毎回必要です。</b></li>
+        <li>ゲームフォルダに <code>data/Localization/japanese_(japan)/global.ini</code> ができているか。</li>
+        <li>ゲームフォルダの <code>user.cfg</code> に <code>g_language = japanese_(japan)</code> の行があるか。</li>
+      </ol>
+    </details>
+
+    <details>
+      <summary>パッチが来たら英語に戻った</summary>
+      <p>ゲーム側のファイルがパッチで置き換わったためです。<span class="btn">1. 抽出</span> → <span class="btn">3. 反映</span> をもう一度実行してください。新しく追加されたテキストを訳したい場合は、間に <span class="btn">2. 翻訳</span> を挟みます。</p>
+    </details>
+
+    <details>
+      <summary>訳がおかしい / 訳さないでほしい語がある</summary>
+      <p><a href="#editor">翻訳エディタ</a>でその行を直接書き換えると <code>manual</code> になり、再翻訳や同梱 DB のマージでは上書きされません。毎回同じ語を直しているなら、<a href="#glossary">用語集</a>に登録して <span class="btn">一括置換 (翻訳済みテキストに適用)</span> を実行するほうが早いです。ただし<b>一括置換だけは例外で、手で直した行も置き換えます</b>。英語のままにしたい語は、翻訳エディタでその行を選んで <span class="btn">全て原文</span> を押してください。</p>
+    </details>
+
+    <details>
+      <summary>スマホからつながらない</summary>
+      <ol>
+        <li>PC とスマホが<b>同じ Wi-Fi</b> につながっているか確認します。</li>
+        <li>設定タブで <span class="btn">サーバー起動</span> を押したか、初回の UAC プロンプトで <b>はい</b> を選んだか確認します。</li>
+        <li>PC で <code>ipconfig</code> を実行して IPv4 アドレスを確認し、そのアドレスでアクセスします。</li>
+        <li>マイクを使うなら <code>https://</code> と <b>8100</b> 番であることを確認します。</li>
+      </ol>
+    </details>
+
+    <details>
+      <summary>スマホでマイクのボタンが反応しない</summary>
+      <p>HTTP（8099）で開いている可能性が高いです。ブラウザはセキュアな接続でないとマイクを許可しません。<a href="#webchat">スマホでマイクを使う</a>の手順で <code>http://192.168.x.x:8099/cert</code> から証明書を入れたうえで、<code>https://192.168.x.x:8100/</code> で開き直してください。証明書の警告は <b>詳細設定</b> から続行します。それでもだめな場合は、ブラウザのサイト設定でマイクがブロックされていないか確認します。</p>
+    </details>
+
+    <details>
+      <summary>船の初期装備が表示されない / 古い</summary>
+      <p><span class="tab">船舶管理</span> &gt; <span class="tab">アップグレード管理</span> の <span class="btn">装備データを再抽出</span> を実行してください。数分かかります。初回は実行しておくことをおすすめします。</p>
+    </details>
+
+    <details>
+      <summary>My Hangar 同期でログインできない</summary>
+      <p>内蔵ブラウザ内で RSI にログインしてから <span class="btn">ログイン完了 → 再試行</span> を押してください。WebView2 ランタイム（Evergreen）が入っていない環境では内蔵ブラウザが表示されません。Windows 10 / 11 には通常入っていますが、入っていない場合は Microsoft から導入してください。</p>
+    </details>
+
+    <details>
+      <summary>翻訳データを全部やり直したい</summary>
+      <p><span class="tab">設定</span> タブの <span class="btn">翻訳DBクリア (全翻訳データ削除)</span> を実行してから、<span class="btn">1. 抽出</span> をやり直します。<b>手で直した訳も消えます。</b>実行前に <span class="btn">エクスポート (バックアップ)</span> を取ってください。</p>
+    </details>
+
+    <footer>
+      <p>
+        <a href="https://github.com/batake321/StarCitizenJapaneseTextCreater">GitHub リポジトリ</a> ・
+        <a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/releases">ダウンロード</a> ・
+        <a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/issues">不具合の報告</a>
+      </p>
+      <p>Star Citizen® と Roberts Space Industries® は Cloud Imperium Rights LLC の登録商標です。本アプリは非公式のファンメイドツールであり、Cloud Imperium Games とは関係ありません。</p>
+    </footer>
+
+  </main>
+</div>
+
+<script>
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll('.side nav a'));
+  var map = {};
+  var targets = [];
+  links.forEach(function (a) {
+    var id = a.getAttribute('href').slice(1);
+    var el = document.getElementById(id);
+    if (el) { map[id] = a; targets.push(el); }
+  });
+  if (!('IntersectionObserver' in window) || !targets.length) return;
+
+  var visible = {};
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) { visible[e.target.id] = e.isIntersecting; });
+    var current = null;
+    for (var i = 0; i < targets.length; i++) {
+      if (visible[targets[i].id]) { current = targets[i].id; break; }
+    }
+    if (!current) return;
+    links.forEach(function (a) { a.classList.remove('on'); });
+    if (map[current]) map[current].classList.add('on');
+  }, { rootMargin: '0px 0px -70% 0px', threshold: 0 });
+
+  targets.forEach(function (t) { io.observe(t); });
+})();
+</script>
+
+</body>
+</html>

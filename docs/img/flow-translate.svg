@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 360" width="900" height="360" role="img" aria-labelledby="t d">
+  <title id="t">翻訳の流れ</title>
+  <desc id="d">Data.p4k から「1. 抽出」で翻訳データベースへ、「2. 翻訳」で AI バックエンドに訳させ、「3. 反映」でゲームフォルダへ global.ini を書き出します。</desc>
+  <style>
+    .f  { font-family: "Segoe UI","Yu Gothic UI",Meiryo,sans-serif; }
+    .ti { font-size: 17px; fill: #e6eef7; font-weight: 600; }
+    .sm { font-size: 12.5px; fill: #93a7bd; }
+    .st { font-size: 15px; fill: #ffd98a; font-weight: 600; }
+    .mono { font-family: Consolas,"Courier New",monospace; font-size: 12.5px; fill: #8fd6ff; }
+  </style>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#7f97ad"/>
+    </marker>
+  </defs>
+
+  <!-- A: Data.p4k -->
+  <rect x="30" y="60" width="200" height="110" rx="10" fill="#16202c" stroke="#33465c"/>
+  <text class="f ti" x="130" y="95" text-anchor="middle">Data.p4k</text>
+  <text class="f sm" x="130" y="119" text-anchor="middle">ゲームのインストール先</text>
+  <text class="f sm" x="130" y="139" text-anchor="middle">英語 / 日本語の</text>
+  <text class="f mono" x="130" y="158" text-anchor="middle">global.ini</text>
+
+  <!-- B: DB -->
+  <rect x="350" y="60" width="200" height="110" rx="10" fill="#123146" stroke="#38bdf8" stroke-width="2"/>
+  <text class="f ti" x="450" y="95" text-anchor="middle" fill="#bfe6ff">翻訳データベース</text>
+  <text class="f mono" x="450" y="118" text-anchor="middle">translations.db</text>
+  <text class="f sm" x="450" y="140" text-anchor="middle">原文と訳文をここに保存</text>
+  <text class="f sm" x="450" y="158" text-anchor="middle">用語集も同じファイル</text>
+
+  <!-- C: game -->
+  <rect x="670" y="60" width="200" height="110" rx="10" fill="#16202c" stroke="#33465c"/>
+  <text class="f ti" x="770" y="95" text-anchor="middle">ゲームフォルダ</text>
+  <text class="f mono" x="770" y="118" text-anchor="middle">data/Localization/</text>
+  <text class="f mono" x="770" y="136" text-anchor="middle">japanese_(japan)/global.ini</text>
+  <text class="f sm" x="770" y="158" text-anchor="middle">user.cfg も自動で書き換え</text>
+
+  <!-- arrows -->
+  <line x1="230" y1="115" x2="344" y2="115" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar)"/>
+  <text class="f st" x="287" y="102" text-anchor="middle">1. 抽出</text>
+  <line x1="550" y1="115" x2="664" y2="115" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar)"/>
+  <text class="f st" x="607" y="102" text-anchor="middle">3. 反映</text>
+
+  <!-- AI -->
+  <line x1="430" y1="170" x2="430" y2="238" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="470" y1="238" x2="470" y2="170" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar)"/>
+  <text class="f st" x="450" y="210" text-anchor="middle">2. 翻訳</text>
+
+  <rect x="290" y="240" width="320" height="86" rx="10" fill="#1c1830" stroke="#5b4b8a"/>
+  <text class="f sm" x="450" y="264" text-anchor="middle" fill="#cfc2f5">AI バックエンド（AI 設定で登録）</text>
+  <g class="f sm">
+    <rect x="306" y="278" width="70" height="30" rx="6" fill="#241f3d" stroke="#6d5bad"/><text x="341" y="298" text-anchor="middle" fill="#e0d7ff">Claude</text>
+    <rect x="384" y="278" width="70" height="30" rx="6" fill="#241f3d" stroke="#6d5bad"/><text x="419" y="298" text-anchor="middle" fill="#e0d7ff">Gemini</text>
+    <rect x="462" y="278" width="70" height="30" rx="6" fill="#241f3d" stroke="#6d5bad"/><text x="497" y="298" text-anchor="middle" fill="#e0d7ff">OpenAI</text>
+    <rect x="540" y="278" width="58" height="30" rx="6" fill="#241f3d" stroke="#6d5bad"/><text x="569" y="298" text-anchor="middle" fill="#e0d7ff">Ollama</text>
+  </g>
+
+  <text class="f sm" x="670" y="264">複数を有効にすると同時に走らせて</text>
+  <text class="f sm" x="670" y="284">翻訳できます。</text>
+  <text class="f sm" x="670" y="312">アプリ更新後は「3. 反映」だけ</text>
+  <text class="f sm" x="670" y="332">実行すれば OK です。</text>
+
+  <text class="f sm" x="30" y="30">3 つのボタンを左から順に押すだけです</text>
+</svg>

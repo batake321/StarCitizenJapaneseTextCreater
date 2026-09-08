@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 250" width="900" height="250" role="img" aria-labelledby="t d">
+  <title id="t">初回セットアップの流れ</title>
+  <desc id="d">ダウンロードして展開、GamePath の確認、AI 設定、翻訳タブで抽出・翻訳・反映、ゲームを起動という 5 ステップです。</desc>
+  <style>
+    .f  { font-family: "Segoe UI","Yu Gothic UI",Meiryo,sans-serif; }
+    .no { font-size: 15px; fill: #0b1017; font-weight: 700; }
+    .ti { font-size: 14.5px; fill: #e6eef7; font-weight: 600; }
+    .sm { font-size: 12px; fill: #93a7bd; }
+  </style>
+  <defs>
+    <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#7f97ad"/>
+    </marker>
+  </defs>
+
+  <g>
+    <rect x="20" y="50" width="160" height="130" rx="10" fill="#16202c" stroke="#33465c"/>
+    <circle cx="46" cy="76" r="14" fill="#38bdf8"/><text class="f no" x="46" y="81" text-anchor="middle">1</text>
+    <text class="f ti" x="70" y="81">展開</text>
+    <text class="f sm" x="36" y="112">zip をダウンロード</text>
+    <text class="f sm" x="36" y="131">して好きな場所に</text>
+    <text class="f sm" x="36" y="150">展開し、exe を起動</text>
+  </g>
+  <line x1="180" y1="115" x2="190" y2="115" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar2)"/>
+
+  <g>
+    <rect x="196" y="50" width="160" height="130" rx="10" fill="#16202c" stroke="#33465c"/>
+    <circle cx="222" cy="76" r="14" fill="#38bdf8"/><text class="f no" x="222" y="81" text-anchor="middle">2</text>
+    <text class="f ti" x="246" y="81">GamePath</text>
+    <text class="f sm" x="212" y="112">上部バーの表示を</text>
+    <text class="f sm" x="212" y="131">確認。空なら</text>
+    <text class="f sm" x="212" y="150">[参照...] で指定</text>
+  </g>
+  <line x1="356" y1="115" x2="366" y2="115" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar2)"/>
+
+  <g>
+    <rect x="372" y="50" width="160" height="130" rx="10" fill="#16202c" stroke="#33465c"/>
+    <circle cx="398" cy="76" r="14" fill="#38bdf8"/><text class="f no" x="398" y="81" text-anchor="middle">3</text>
+    <text class="f ti" x="422" y="81">AI 設定</text>
+    <text class="f sm" x="388" y="112">[AI 設定] で</text>
+    <text class="f sm" x="388" y="131">API キーを登録し</text>
+    <text class="f sm" x="388" y="150">チェックを入れる</text>
+  </g>
+  <line x1="532" y1="115" x2="542" y2="115" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar2)"/>
+
+  <g>
+    <rect x="548" y="50" width="160" height="130" rx="10" fill="#123146" stroke="#38bdf8" stroke-width="2"/>
+    <circle cx="574" cy="76" r="14" fill="#38bdf8"/><text class="f no" x="574" y="81" text-anchor="middle">4</text>
+    <text class="f ti" x="598" y="81" fill="#bfe6ff">翻訳タブ</text>
+    <text class="f sm" x="564" y="112" fill="#a9d6ef">[1. 抽出]</text>
+    <text class="f sm" x="564" y="131" fill="#a9d6ef">[2. 翻訳]</text>
+    <text class="f sm" x="564" y="150" fill="#a9d6ef">[3. 反映] の順に</text>
+  </g>
+  <line x1="708" y1="115" x2="718" y2="115" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar2)"/>
+
+  <g>
+    <rect x="724" y="50" width="160" height="130" rx="10" fill="#16202c" stroke="#33465c"/>
+    <circle cx="750" cy="76" r="14" fill="#56c271"/><text class="f no" x="750" y="81" text-anchor="middle">5</text>
+    <text class="f ti" x="774" y="81">起動</text>
+    <text class="f sm" x="740" y="112">Star Citizen を</text>
+    <text class="f sm" x="740" y="131">起動して日本語に</text>
+    <text class="f sm" x="740" y="150">なっていれば完了</text>
+  </g>
+
+  <text class="f sm" x="20" y="30">最短でここまで — 翻訳データベースはアプリに同梱されているので、いきなり [3. 反映] でも日本語になります</text>
+  <text class="f sm" x="20" y="215">※ AI 翻訳を使わず同梱の翻訳データだけで良ければ、3 は飛ばして構いません。</text>
+  <text class="f sm" x="20" y="235">※ アプリを新しいバージョンに入れ替えたあとも、翻訳タブの [3. 反映] を一度実行してください。</text>
+</svg>
