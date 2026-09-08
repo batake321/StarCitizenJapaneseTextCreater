@@ -593,6 +593,11 @@ public class HangarService
                 production_note TEXT,
                 fetched_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS ship_loaners (
+                ship_name TEXT NOT NULL,
+                loaner_name TEXT NOT NULL,
+                PRIMARY KEY (ship_name, loaner_name)
+            );
             CREATE TABLE IF NOT EXISTS store_skus (
                 id TEXT PRIMARY KEY,
                 product_id TEXT,
@@ -1734,6 +1739,9 @@ public class HangarService
     private const string ShipMatrixUrl = "https://robertsspaceindustries.com/ship-matrix/index";
     private static readonly TimeSpan ShipMatrixTtl = TimeSpan.FromHours(24);
 
+    private const string LoanersUrl = "https://api.uexcorp.space/2.0/vehicles_loaners";
+    private static readonly TimeSpan LoanersTtl = TimeSpan.FromHours(24);
+
     private static readonly HttpClient Http = CreateHttpClient();
 
     private static HttpClient CreateHttpClient()
@@ -1749,6 +1757,7 @@ public class HangarService
     private Dictionary<string, string>? _aliasCache;
     private Dictionary<string, long>? _priceCache;
     private List<StoreSku>? _storeCache;
+    private Dictionary<string, List<string>>? _loanerCache;
 
     // Matrix / エイリアス / 価格表 / ストアのキャッシュを破棄する (別インスタンスで Matrix を更新した後などに呼ぶ)
     public void InvalidateCaches()
@@ -1759,6 +1768,7 @@ public class HangarService
         _aliasCache = null;
         _priceCache = null;
         _storeCache = null;
+        _loanerCache = null;
     }
 
     // RefreshShipMatrixAsync / RefreshStoreAsync の同時実行を直列化する (起動時バックグラウンドと「ストア情報を更新」の競合防止)。
@@ -1874,6 +1884,132 @@ public class HangarService
         _knownShipNamesByLength = null;
         OnProgress?.Invoke($"Ship Matrix を取得しました: {entries.Count:N0} 件");
         return (entries.Count, true);
+    }
+
+    // ローナー機 (その船を持っていると借りられる機体) を UEX から取得して ship_loaners を全置換する。
+    // API キーは不要。取得できた組み合わせの件数を返す
+    public async Task<int> RefreshLoanersAsync(bool force = false)
+    {
+        if (_dbPath == null) return 0;
+
+        using (var db = new SqliteConnection($"Data Source={_dbPath}"))
+        {
+            InitDb(db);
+            var fetchedAtRaw = GetMeta(db, "loaners_fetched_at");
+            if (!force
+                && DateTime.TryParse(fetchedAtRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var fetchedAt)
+                && DateTime.Now - fetchedAt.ToLocalTime() < LoanersTtl)
+            {
+                var cached = (int)ScalarLong(db, "SELECT COUNT(*) FROM ship_loaners");
+                if (cached > 0)
+                {
+                    OnProgress?.Invoke($"ローナー機はキャッシュを使用します: {cached:N0} 件 (取得: {fetchedAtRaw})");
+                    return cached;
+                }
+            }
+        }
+
+        var json = await Http.GetStringAsync(LoanersUrl);
+
+        var pairs = new List<(string Ship, string Loaner)>();
+        using (var doc = JsonDocument.Parse(json))
+        {
+            var root = doc.RootElement;
+            if (!GetStr(root, "status").Equals("ok", StringComparison.OrdinalIgnoreCase))
+            {
+                OnProgress?.Invoke("ローナー機の取得に失敗しました (status != ok)。既存データを維持します。");
+                return 0;
+            }
+            if (!root.TryGetProperty("data", out var dataEl) || dataEl.ValueKind != JsonValueKind.Array)
+            {
+                OnProgress?.Invoke("ローナー機の data が配列ではありません。既存データを維持します。");
+                return 0;
+            }
+
+            foreach (var el in dataEl.EnumerateArray())
+            {
+                if (el.ValueKind != JsonValueKind.Object) continue;
+                var ship = GetStr(el, "name").Trim();
+                if (ship.Length == 0) continue;
+                if (!el.TryGetProperty("loaners", out var loanersEl) || loanersEl.ValueKind != JsonValueKind.Array) continue;
+
+                foreach (var loanerEl in loanersEl.EnumerateArray())
+                {
+                    if (loanerEl.ValueKind != JsonValueKind.Object) continue;
+                    var loaner = GetStr(loanerEl, "name").Trim();
+                    if (loaner.Length == 0) continue;
+                    pairs.Add((ship, loaner));
+                }
+            }
+        }
+
+        if (pairs.Count == 0)
+        {
+            OnProgress?.Invoke("ローナー機が 0 件でした。既存データを維持します。");
+            return 0;
+        }
+
+        var now = DateTime.Now.ToString("o");
+        using (var db = new SqliteConnection($"Data Source={_dbPath}"))
+        {
+            InitDb(db);
+            using (var tx = db.BeginTransaction())
+            {
+                using (var delCmd = db.CreateCommand())
+                {
+                    delCmd.Transaction = tx;
+                    delCmd.CommandText = "DELETE FROM ship_loaners";
+                    delCmd.ExecuteNonQuery();
+                }
+                using (var insCmd = db.CreateCommand())
+                {
+                    insCmd.Transaction = tx;
+                    insCmd.CommandText = "INSERT OR IGNORE INTO ship_loaners (ship_name, loaner_name) VALUES (@s, @l)";
+                    var insShip = insCmd.Parameters.Add("@s", SqliteType.Text);
+                    var insLoaner = insCmd.Parameters.Add("@l", SqliteType.Text);
+                    foreach (var (ship, loaner) in pairs)
+                    {
+                        insShip.Value = ship;
+                        insLoaner.Value = loaner;
+                        insCmd.ExecuteNonQuery();
+                    }
+                }
+                tx.Commit();   // 例外時はここに来ないので DELETE ごとロールバックされ、既存データは残る
+            }
+            SetMeta(db, "loaners_fetched_at", now);
+        }
+
+        _loanerCache = null;
+        OnProgress?.Invoke($"ローナー機を取得しました: {pairs.Count:N0} 件");
+        return pairs.Count;
+    }
+
+    // 正規化した船名 → その船で借りられる機体名の一覧。キャッシュする (InvalidateCaches で破棄)
+    public Dictionary<string, List<string>> LoadLoaners()
+    {
+        if (_loanerCache != null) return _loanerCache;
+
+        var dict = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        if (_dbPath == null || !File.Exists(_dbPath)) return _loanerCache = dict;
+
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT ship_name, loaner_name FROM ship_loaners";
+        using (var r = cmd.ExecuteReader())
+        {
+            while (r.Read())
+            {
+                var ship = r.IsDBNull(0) ? "" : r.GetString(0);
+                var loaner = r.IsDBNull(1) ? "" : r.GetString(1);
+                if (ship.Length == 0 || loaner.Length == 0) continue;
+
+                var key = NormalizeShipName(ship);
+                if (!dict.TryGetValue(key, out var list)) dict[key] = list = new List<string>();
+                if (!list.Contains(loaner, StringComparer.OrdinalIgnoreCase)) list.Add(loaner);
+            }
+        }
+        return _loanerCache = dict;
     }
 
     private static bool IsTruthy(JsonElement el) => el.ValueKind switch

@@ -19,7 +19,7 @@ public static class DatabaseBackupService
     private static readonly string[] GlossaryTables = ["glossary"];
     private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
-    private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "store_skus", "my_components", "ship_loadouts"];
+    private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "ship_loaners", "store_skus", "my_components", "ship_loadouts"];
 
     // 個人資産テーブル。バックアップ側にデータがある場合のみ反映する (ship_matrix は公開データなので含めない)
     private static readonly string[] PersonalTables = ["my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "my_components", "ship_loadouts"];

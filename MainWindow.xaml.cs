@@ -4116,6 +4116,10 @@ public partial class MainWindow : Window
             : _hangarService.FindStoreShip(e.Name) != null ? "販売中" : "";
         row.HangarStoreUpgradeDisplay = StoreUpgradeDisplayFor(e.Name);
 
+        // ローナー機 (LoadLoaners は HangarService 側でキャッシュされるので行ごとに呼んでも DB は読み直さない)
+        if (_hangarService.LoadLoaners().TryGetValue(_hangarService.NormalizeShipName(e.Name), out var loaners))
+            row.LoanerDisplay = string.Join(" / ", loaners);
+
         // ツールチップは初回表示時に生成 (所持船→保有船インスタンスの選び方は OpenLoadout_Click と同じ FindHangarRowForMyShip)
         var hangarRow = FindHangarRowForMyShip(row);
         if (hangarRow != null)
@@ -5073,7 +5077,24 @@ public partial class MainWindow : Window
             Log($"[Hangar] ストア取得エラー: {ex}");
         }
 
-        if (!matrixFetched && !storeFetched && _upgradeDataLoadedOnce)
+        // ローナー機 (UEX)。所持船グリッドの「ローナー」列に出す。
+        // 取得結果が変わったときだけ再読込対象にする (TTL 内のキャッシュ利用では再読込しない)
+        var loanersFetched = false;
+        try
+        {
+            loanersFetched = await Task.Run(async () =>
+            {
+                var before = _hangarService.LoadLoaners().Count;
+                await _hangarService.RefreshLoanersAsync();
+                return _hangarService.LoadLoaners().Count != before;
+            });
+        }
+        catch (Exception ex)
+        {
+            Log($"[Hangar] ローナー取得エラー: {ex}");
+        }
+
+        if (!matrixFetched && !storeFetched && !loanersFetched && _upgradeDataLoadedOnce)
         {
             Log("[Hangar] Ship Matrix / ストアは共にキャッシュ利用のため再読込を省略");
             return;
@@ -5764,6 +5785,7 @@ public class MyShipRow
     public string HangarUpgradableDisplay { get; set; } = "";
     public string HangarSaleDisplay { get; set; } = "";     // "Warbond 販売中" / "販売中" / ""
     public string HangarStoreUpgradeDisplay { get; set; } = "";
+    public string LoanerDisplay { get; set; } = "";   // その船で借りられる機体 (" / " 連結)。無ければ空
     // ツールチップ。TooltipFactory を初回アクセス時に評価してキャッシュする (UpgradeShipRow と同じ)
     private string? _tooltip;
     private Func<string>? _tooltipFactory;

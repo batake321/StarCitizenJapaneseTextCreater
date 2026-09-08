@@ -658,6 +658,18 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
+                            <DataGridTextColumn Header="ローナー" Binding="{Binding LoanerDisplay}" Width="180">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="VerticalAlignment" Value="Center"/>
+                                        <Setter Property="Foreground" Value="#666"/>
+                                        <Setter Property="ToolTip" Value="{Binding LoanerDisplay}"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding LoanerDisplay}" Value=""><Setter Property="ToolTip" Value="{x:Null}"/></DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
                             <DataGridTextColumn Header="保有数" Binding="{Binding HangarCountDisplay}" Width="70">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
