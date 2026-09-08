@@ -32,6 +32,9 @@ public class AppConfig
     // UI
     public double MissionDetailFontSize { get; set; } = 14;
 
+    // ミッション名の後ろに派閥と貢献度 (BP) を付けるか
+    public bool MissionReputationMarks { get; set; } = false;
+
     // UEX Capture
     public string UexApiKey { get; set; } = "";
     public string PreferredOcrEngine { get; set; } = "Windows OCR";

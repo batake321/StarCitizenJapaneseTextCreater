@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.Data.Sqlite;
 
 namespace StarCitizenJapaneseTextCreater;
 
@@ -11,7 +12,9 @@ public static class IniMerger
         string translatedJsonlPath,
         List<string> forceEnglishPatterns,
         string? dbPath = null,
-        List<(string English, string Japanese)>? glossary = null)
+        List<(string English, string Japanese)>? glossary = null,
+        string? gamedataDbPath = null,
+        bool missionReputationMarks = false)
     {
         var forceRegex = forceEnglishPatterns.Select(p => new Regex(p)).ToList();
 
@@ -144,6 +147,12 @@ public static class IniMerger
         var componentMarks = AnnotateComponentNames(english, merged);
         if (componentMarks > 0)
             Console.WriteLine($"    Component class marks: {componentMarks}");
+        if (missionReputationMarks && !string.IsNullOrEmpty(gamedataDbPath))
+        {
+            var repMarks = AnnotateMissionReputation(english, merged, gamedataDbPath);
+            if (repMarks > 0)
+                Console.WriteLine($"    Mission reputation marks: {repMarks}");
+        }
         var blueprintMarks = AnnotateBlueprintMissions(english, merged);
         if (blueprintMarks > 0)
             Console.WriteLine($"    Blueprint mission marks: {blueprintMarks}");
@@ -290,6 +299,95 @@ public static class IniMerger
                 annotated++;
             }
         }
+        return annotated;
+    }
+
+    // ミッション名の後ろに派閥と貢献度を付ける。例: "拠点掃討 <EM4>[Headhunters +1000]</EM4>"
+    // 派閥名は faction_reputation.display_key (ロケールキー) を merged / english から引く。
+    // 表示文字列どうしの突き合わせは一切しない (日本語化されていても正しく紐付くようにするため)。
+    // 同じ名前キーを複数のミッションが共有していることが多いので、
+    // 値が割れるときは "+50/100/200" と並記し、派閥が割れるときは派閥名を出さない
+    private static int AnnotateMissionReputation(Dictionary<string, string> english, Dictionary<string, string> merged, string gamedataDbPath)
+    {
+        if (string.IsNullOrEmpty(gamedataDbPath) || !File.Exists(gamedataDbPath)) return 0;
+
+        var annotated = 0;
+        try
+        {
+            // ミッションごとの最大貢献度と、その最大値の行の派閥キー
+            var missionBest = new Dictionary<string, (long Amount, string? FactionKey)>(StringComparer.Ordinal);
+            // 名前キーごとの、配下ミッション
+            var titleMissions = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+
+            using (var db = new SqliteConnection($"Data Source={gamedataDbPath};Mode=ReadOnly"))
+            {
+                db.Open();
+                using var cmd = db.CreateCommand();
+                cmd.CommandText = """
+                    SELECT mr.title_key, mr.mission_record, fr.display_key, ra.amount
+                    FROM mission_reputation mr
+                    LEFT JOIN faction_reputation fr ON fr.record_name = mr.faction_record
+                    LEFT JOIN reputation_reward_amount ra ON ra.record_name = mr.amount_record
+                    WHERE ra.amount > 0
+                    """;
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    var titleKey = r.IsDBNull(0) ? "" : r.GetString(0);
+                    var missionRecord = r.IsDBNull(1) ? "" : r.GetString(1);
+                    var factionKey = r.IsDBNull(2) ? null : r.GetString(2);
+                    var amount = r.IsDBNull(3) ? 0L : r.GetInt64(3);
+                    if (titleKey.Length == 0 || missionRecord.Length == 0 || amount <= 0) continue;
+
+                    // 同点なら最初のものを残す
+                    if (!missionBest.TryGetValue(missionRecord, out var best) || amount > best.Amount)
+                        missionBest[missionRecord] = (amount, factionKey);
+
+                    if (!titleMissions.TryGetValue(titleKey, out var set))
+                        titleMissions[titleKey] = set = new HashSet<string>(StringComparer.Ordinal);
+                    set.Add(missionRecord);
+                }
+            }
+
+            foreach (var (titleKey, missions) in titleMissions)
+            {
+                var amounts = new SortedSet<long>();
+                var factionKeys = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var m in missions)
+                {
+                    if (!missionBest.TryGetValue(m, out var best)) continue;
+                    amounts.Add(best.Amount);
+                    if (!string.IsNullOrEmpty(best.FactionKey)) factionKeys.Add(best.FactionKey);
+                }
+                if (amounts.Count == 0) continue;
+
+                var amountText = "+" + string.Join("/", amounts);
+
+                // 派閥はちょうど 1 つに定まるときだけ出す。名前はロケールキーで引く (文字列比較はしない)
+                string? faction = null;
+                if (factionKeys.Count == 1)
+                {
+                    var dk = factionKeys.First();
+                    if (merged.TryGetValue(dk, out var fv) && !string.IsNullOrWhiteSpace(fv)) faction = fv;
+                    else if (merged.TryGetValue(dk + ",P", out fv) && !string.IsNullOrWhiteSpace(fv)) faction = fv;
+                    else if (english.TryGetValue(dk, out fv) && !string.IsNullOrWhiteSpace(fv)) faction = fv;
+                    else if (english.TryGetValue(dk + ",P", out fv) && !string.IsNullOrWhiteSpace(fv)) faction = fv;
+                }
+
+                var mark = faction != null
+                    ? $" {EmphasisOpen}[{faction} {amountText}]{EmphasisClose}"
+                    : $" {EmphasisOpen}[{amountText}]{EmphasisClose}";
+
+                foreach (var k in new[] { titleKey, titleKey + ",P" })
+                {
+                    if (!merged.TryGetValue(k, out var title) || string.IsNullOrWhiteSpace(title)) continue;
+                    if (title.Contains(EmphasisOpen + "[", StringComparison.Ordinal)) continue;   // 既に印が付いている
+                    merged[k] = title + mark;
+                    annotated++;
+                }
+            }
+        }
+        catch { }
         return annotated;
     }
 }

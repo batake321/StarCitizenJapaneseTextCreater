@@ -293,6 +293,25 @@ public class GameDataExtractor : IDisposable
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS faction_reputation (
+                record_name TEXT PRIMARY KEY,
+                display_key TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS reputation_reward_amount (
+                record_name TEXT PRIMARY KEY,
+                amount INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS mission_reputation (
+                mission_record TEXT NOT NULL,
+                title_key TEXT NOT NULL,
+                faction_record TEXT NOT NULL,
+                amount_record TEXT NOT NULL,
+                scope_record TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_mission_reputation_title ON mission_reputation(title_key);
         """;
         cmd.ExecuteNonQuery();
         MigrateShipPortsTable();   // 旧スキーマの ship_ports (CREATE TABLE IF NOT EXISTS では作り直されない) を現行 DDL に移行
@@ -548,6 +567,8 @@ public class GameDataExtractor : IDisposable
                 int shipCount = await ExtractShipsAsync(p4kPath, now, ct);
 
                 SetMeta("equipment_rebuilt_at", now);
+                try { await RebuildMissionReputationAsync(progress, ct); }
+                catch (Exception ex) { StatusChanged?.Invoke($"評判報酬の取り込みに失敗しました: {ex.Message}"); }
                 sw.Stop();
                 StatusChanged?.Invoke($"装備データ再構築完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}");
             }
@@ -589,6 +610,222 @@ public class GameDataExtractor : IDisposable
 
     // RebuildEquipmentDataAsync が作り直す 3 表 (バックアップ表 "{name}_bak" の対象)
     private static readonly string[] EquipmentTables = ["item_index", "ship_ports", "ships"];
+
+    // ミッションの評判報酬 (派閥・貢献度) を DCB から取り込む。
+    // 全件インデックス構築とは独立していて、starbreaker の 3 クエリだけで済む (実測で合計 30 秒程度)。
+    // faction_reputation / reputation_reward_amount / mission_reputation を作り直し、mission_reputation の行数を返す
+    public async Task<int> RebuildMissionReputationAsync(IProgress<string>? progress = null, CancellationToken ct = default)
+    {
+        var p4kPath = FindDataP4k()
+            ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
+
+        await EnsureStarBreakerAsync();
+        EnsureDb();
+
+        Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
+        if (relay != null) StatusChanged += relay;
+        try
+        {
+            var sw = Stopwatch.StartNew();
+
+            // 派閥 (FactionReputation)
+            StatusChanged?.Invoke("派閥データを取得中...");
+            var factionJson = await RunDcbQueryRawAsync(p4kPath, "FactionReputation", "*", ct);
+            var factions = new List<(string Record, string DisplayKey)>();
+            foreach (var block in SplitJsonBlocks(factionJson))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(block);
+                    var root = doc.RootElement;
+                    var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+                    if (string.IsNullOrEmpty(recordName)) continue;
+                    if (!root.TryGetProperty("_RecordValue_", out var rv)) continue;
+
+                    var displayName = GetStr(rv, "displayName");
+                    if (string.IsNullOrEmpty(displayName)) continue;
+                    var displayKey = displayName.StartsWith('@') ? displayName[1..] : displayName;
+                    if (string.IsNullOrEmpty(displayKey)) continue;
+                    if (displayKey.Equals("LOC_PLACEHOLDER", StringComparison.OrdinalIgnoreCase)) continue;
+
+                    factions.Add((RecordBaseName(recordName), displayKey));
+                }
+                catch { }
+            }
+
+            // 貢献度の値 (SReputationRewardAmount)
+            ct.ThrowIfCancellationRequested();
+            StatusChanged?.Invoke("貢献度の値を取得中...");
+            var amountJson = await RunDcbQueryRawAsync(p4kPath, "SReputationRewardAmount", "*", ct);
+            var amounts = new List<(string Record, int Amount)>();
+            foreach (var block in SplitJsonBlocks(amountJson))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(block);
+                    var root = doc.RootElement;
+                    var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+                    if (string.IsNullOrEmpty(recordName)) continue;
+                    if (!root.TryGetProperty("_RecordValue_", out var rv)) continue;
+                    if (!rv.TryGetProperty("reputationAmount", out var amt) || amt.ValueKind != JsonValueKind.Number) continue;
+                    if (!amt.TryGetInt32(out var amountValue)) continue;
+
+                    amounts.Add((RecordBaseName(recordName), amountValue));
+                }
+                catch { }
+            }
+
+            // ミッションの評判報酬 (MissionBrokerEntry)
+            ct.ThrowIfCancellationRequested();
+            StatusChanged?.Invoke("ミッションの評判報酬を取得中...");
+
+            // title は ExtractMissionsAsync が missions.title に入れるのと同じ取り方 (英語ロケールで解決、無ければ @ を外したキー) にする
+            var locDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var gamePath = App.Config.GamePath;
+            var enIniPath = Path.Combine(gamePath, "data", "Localization", "english", "global.ini");
+            if (!File.Exists(enIniPath))
+                enIniPath = Path.Combine(Path.GetDirectoryName(gamePath) ?? "", "data", "Localization", "english", "global.ini");
+            if (File.Exists(enIniPath))
+                locDict = GlobalIniParser.Parse(enIniPath);
+
+            var missionJson = await RunDcbQueryRawAsync(p4kPath, "MissionBrokerEntry", "*", ct);
+            var rows = new List<(string MissionRecord, string TitleKey, string Faction, string Amount, string Scope)>();
+            var missionRecords = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var block in SplitJsonBlocks(missionJson))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(block);
+                    var root = doc.RootElement;
+                    var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+                    if (string.IsNullOrEmpty(recordName)) continue;
+                    if (!root.TryGetProperty("_RecordValue_", out var rv)) continue;
+
+                    var titleKey = ResolveLoc(GetStr(rv, "title"), locDict);
+                    if (string.IsNullOrEmpty(titleKey)) continue;
+                    if (titleKey.Equals("LOC_UNINITIALIZED", StringComparison.OrdinalIgnoreCase)
+                        || titleKey.Equals("LOC_PLACEHOLDER", StringComparison.OrdinalIgnoreCase)
+                        || titleKey.Equals("loc_testName", StringComparison.OrdinalIgnoreCase)) continue;
+
+                    if (!rv.TryGetProperty("missionResultReputationRewards", out var rewards)
+                        || rewards.ValueKind != JsonValueKind.Array) continue;
+
+                    foreach (var reward in rewards.EnumerateArray())
+                    {
+                        if (reward.ValueKind != JsonValueKind.Object) continue;
+                        if (!reward.TryGetProperty("reputationAmounts", out var repAmounts)
+                            || repAmounts.ValueKind != JsonValueKind.Array) continue;
+
+                        foreach (var entry in repAmounts.EnumerateArray())
+                        {
+                            if (entry.ValueKind != JsonValueKind.Object) continue;
+                            var faction = RefBaseName(GetStr(entry, "factionReputation"));
+                            var amount = RefBaseName(GetStr(entry, "reward"));
+                            var scope = RefBaseName(GetStr(entry, "reputationScope"));
+                            if (string.IsNullOrEmpty(faction) || string.IsNullOrEmpty(amount) || string.IsNullOrEmpty(scope)) continue;
+
+                            rows.Add((recordName, titleKey, faction, amount, scope));
+                            missionRecords.Add(recordName);
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            // 3 表をまとめて 1 トランザクションで作り直す
+            ct.ThrowIfCancellationRequested();
+            using (var tx = _db!.BeginTransaction())
+            {
+                using (var del = _db.CreateCommand())
+                {
+                    del.Transaction = tx;
+                    del.CommandText = "DELETE FROM mission_reputation; DELETE FROM faction_reputation; DELETE FROM reputation_reward_amount;";
+                    del.ExecuteNonQuery();
+                }
+
+                using (var cmd = _db.CreateCommand())
+                {
+                    cmd.Transaction = tx;
+                    cmd.CommandText = "INSERT OR REPLACE INTO faction_reputation(record_name,display_key) VALUES(@rn,@dk)";
+                    var pRn = cmd.Parameters.Add("@rn", SqliteType.Text);
+                    var pDk = cmd.Parameters.Add("@dk", SqliteType.Text);
+                    foreach (var (record, displayKey) in factions)
+                    {
+                        pRn.Value = record;
+                        pDk.Value = displayKey;
+                        cmd.ExecuteNonQuery();
+                    }
+                }
+
+                using (var cmd = _db.CreateCommand())
+                {
+                    cmd.Transaction = tx;
+                    cmd.CommandText = "INSERT OR REPLACE INTO reputation_reward_amount(record_name,amount) VALUES(@rn,@am)";
+                    var pRn = cmd.Parameters.Add("@rn", SqliteType.Text);
+                    var pAm = cmd.Parameters.Add("@am", SqliteType.Integer);
+                    foreach (var (record, amount) in amounts)
+                    {
+                        pRn.Value = record;
+                        pAm.Value = amount;
+                        cmd.ExecuteNonQuery();
+                    }
+                }
+
+                using (var cmd = _db.CreateCommand())
+                {
+                    cmd.Transaction = tx;
+                    cmd.CommandText = "INSERT INTO mission_reputation(mission_record,title_key,faction_record,amount_record,scope_record) VALUES(@mr,@tk,@fr,@ar,@sr)";
+                    var pMr = cmd.Parameters.Add("@mr", SqliteType.Text);
+                    var pTk = cmd.Parameters.Add("@tk", SqliteType.Text);
+                    var pFr = cmd.Parameters.Add("@fr", SqliteType.Text);
+                    var pAr = cmd.Parameters.Add("@ar", SqliteType.Text);
+                    var pSr = cmd.Parameters.Add("@sr", SqliteType.Text);
+                    foreach (var (missionRecord, titleKey, faction, amount, scope) in rows)
+                    {
+                        pMr.Value = missionRecord;
+                        pTk.Value = titleKey;
+                        pFr.Value = faction;
+                        pAr.Value = amount;
+                        pSr.Value = scope;
+                        cmd.ExecuteNonQuery();
+                    }
+                }
+
+                tx.Commit();
+            }
+
+            SetMeta("mission_reputation_rebuilt_at", DateTime.UtcNow.ToString("o"));
+            // 取り込み時点の Data.p4k の更新日時を残す。次のパッチで p4k が変わったら取り込み直す判定に使う
+            SetMeta("mission_reputation_p4k", File.GetLastWriteTimeUtc(p4kPath).ToString("o"));
+
+            sw.Stop();
+            int factionCount = factions.Count, amountCount = amounts.Count, missionCount = missionRecords.Count, rowCount = rows.Count;
+            StatusChanged?.Invoke($"評判報酬を取り込みました - 派閥: {factionCount}, 段階: {amountCount}, ミッション: {missionCount} (行 {rowCount})");
+            return rowCount;
+        }
+        finally
+        {
+            if (relay != null) StatusChanged -= relay;
+        }
+    }
+
+    // "FactionReputation.FactionReputation_Unlawful_BitZeros" -> "factionreputation_unlawful_bitzeros"
+    private static string RecordBaseName(string recordName)
+    {
+        var idx = recordName.LastIndexOf('.');
+        var name = idx >= 0 ? recordName[(idx + 1)..] : recordName;
+        return name.ToLowerInvariant();
+    }
+
+    // "file://.../reputationrewardamount_positive_s.json" -> "reputationrewardamount_positive_s"
+    private static string RefBaseName(string reference)
+    {
+        if (string.IsNullOrEmpty(reference)) return "";
+        var idx = reference.LastIndexOf('/');
+        var name = idx >= 0 ? reference[(idx + 1)..] : reference;
+        if (name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) name = name[..^".json".Length];
+        return name.ToLowerInvariant();
+    }
 
     public bool HasStructuredData()
     {

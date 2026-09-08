@@ -10,6 +10,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media.Imaging;
+using Microsoft.Data.Sqlite;
 using Microsoft.Win32;
 
 namespace StarCitizenJapaneseTextCreater;
@@ -92,6 +93,7 @@ public partial class MainWindow : Window
         txtVoiceVoxUrl.Text = config.VoiceVoxUrl;
         txtVoiceVoxSpeaker.Text = config.VoiceVoxSpeakerId.ToString();
         chkWebAutoStart.IsChecked = config.WebServerAutoStart;
+        chkMissionRepMarks.IsChecked = App.Config.MissionReputationMarks;
         var mfs = config.MissionDetailFontSize;
         if (mfs < 8 || mfs > 30) mfs = 14;
         txtMissionFontSize.Text = mfs.ToString();
@@ -487,8 +489,21 @@ public partial class MainWindow : Window
                     english ??= GlobalIniParser.Parse(EnPath);
                     japanese ??= GlobalIniParser.Parse(JaPath);
 
+                    // 派閥・貢献度のデータが未取得なら、この反映のタイミングで取り込む (starbreaker の 3 クエリだけ。全件インデックス構築ではない)
+                    if (App.Config.MissionReputationMarks && !HasMissionReputationData())
+                    {
+                        SetProgress(65, "派閥・貢献度データを取得中...");
+                        try
+                        {
+                            using var repExtractor = new GameDataExtractor(WorkDir);
+                            await repExtractor.RebuildMissionReputationAsync(new Progress<string>(Log));
+                        }
+                        catch (Exception ex) { Log($"[Mission] 派閥・貢献度の取得に失敗: {ex.Message}"); }
+                    }
+
                     var merged = IniMerger.Merge(english, japanese, TranslatedPath,
-                        App.Config.ForceEnglishPatterns, DbPath, glossary);
+                        App.Config.ForceEnglishPatterns, DbPath, glossary,
+                        Path.Combine(WorkDir, "gamedata_cache.db"), App.Config.MissionReputationMarks);
                     GlobalIniParser.Write(OutputPath, merged);
                     Log($"出力: {OutputPath} ({new FileInfo(OutputPath).Length:N0} bytes)");
 
@@ -521,6 +536,55 @@ public partial class MainWindow : Window
             btnCancel.Visibility = Visibility.Collapsed;
             btnCancel.IsEnabled = false;
         }
+    }
+
+    // gamedata_cache.db に mission_reputation の行があるか (無ければ反映時に取り込む)
+    // 派閥・貢献度のデータが使える状態か。
+    // 行が無いとき、および取り込んだあとにゲームがパッチされた (Data.p4k の更新日時が変わった) ときは false を返し、
+    // 反映のタイミングで取り込み直させる (パッチのたびに手動で再抽出しなくても最新になる)
+    private bool HasMissionReputationData()
+    {
+        try
+        {
+            var path = Path.Combine(WorkDir, "gamedata_cache.db");
+            if (!File.Exists(path)) return false;
+            using var db = new SqliteConnection($"Data Source={path};Mode=ReadOnly");
+            db.Open();
+
+            using (var cmd = db.CreateCommand())
+            {
+                cmd.CommandText = "SELECT COUNT(*) FROM mission_reputation";
+                if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) <= 0) return false;
+            }
+
+            // 取り込み時の Data.p4k と今の Data.p4k を比べる。分からないときは取り込み済みとして扱う
+            string? storedP4k;
+            using (var cmd = db.CreateCommand())
+            {
+                cmd.CommandText = "SELECT value FROM gamedata_meta WHERE key = 'mission_reputation_p4k'";
+                storedP4k = cmd.ExecuteScalar() as string;
+            }
+            if (string.IsNullOrEmpty(storedP4k)) return false;
+
+            var gamePath = App.Config.GamePath;
+            if (string.IsNullOrEmpty(gamePath)) return true;
+            var p4k = new[]
+            {
+                Path.Combine(gamePath, "Data.p4k"),
+                Path.Combine(gamePath, "data", "Data.p4k"),
+                Path.Combine(Path.GetDirectoryName(gamePath) ?? "", "Data.p4k"),
+            }.FirstOrDefault(File.Exists);
+            if (p4k == null) return true;
+
+            return File.GetLastWriteTimeUtc(p4k).ToString("o") == storedP4k;
+        }
+        catch { return false; }
+    }
+
+    private void MissionRepMarks_Changed(object sender, RoutedEventArgs e)
+    {
+        App.Config.MissionReputationMarks = chkMissionRepMarks.IsChecked == true;
+        SaveConfigToFile();
     }
 
     private void OnBatchTranslated(List<(string Key, string Japanese, string Translator)> items)
@@ -1467,6 +1531,7 @@ public partial class MainWindow : Window
                 App.Config.TradeSellSystem,
                 App.Config.UexApiKey,
                 App.Config.MissionDetailFontSize,
+                App.Config.MissionReputationMarks,
             };
 
             var json = JsonSerializer.Serialize(config, new JsonSerializerOptions

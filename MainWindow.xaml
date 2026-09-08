@@ -42,6 +42,10 @@
                         <Button x:Name="btnCancel" Content="中止" Padding="14,6" Margin="16,4,4,4"
                                 Background="#D94A4A" Foreground="White" FontWeight="Bold"
                                 Click="Cancel_Click" Visibility="Collapsed"/>
+                        <CheckBox x:Name="chkMissionRepMarks" Content="ミッション名に派閥と貢献度を付ける"
+                                  VerticalAlignment="Center" Margin="16,4,4,4"
+                                  Checked="MissionRepMarks_Changed" Unchecked="MissionRepMarks_Changed"
+                                  ToolTip="3. 反映 のときに、ミッション名の後ろへ [派閥 +貢献度] を付けます"/>
                     </WrapPanel>
 
                     <!-- Progress area -->
