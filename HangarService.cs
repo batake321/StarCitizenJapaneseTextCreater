@@ -313,6 +313,9 @@ public class HangarService
 
     public void SetCacheDir(string dir)
     {
+        // 作業ディレクトリが変わったら、前のディレクトリの DB から読んだキャッシュを捨てる。
+        // Ship Matrix・別名・価格・ストアはディレクトリごとに別物なので、持ち越すと古い方の内容で解決してしまう
+        if (!string.Equals(_cacheDir, dir, StringComparison.OrdinalIgnoreCase)) InvalidateCaches();
         _cacheDir = dir;
         _dbPath = Path.Combine(dir, "trade_cache.db");
     }

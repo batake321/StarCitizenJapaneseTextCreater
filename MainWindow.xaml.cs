@@ -1482,8 +1482,17 @@ public partial class MainWindow : Window
 
     private void SaveSettings_Click(object sender, RoutedEventArgs e)
     {
+        var prevWorkDir = App.Config.WorkingDirectory;
         App.Config.GamePath = txtSettingsGamePath.Text.Trim();
         App.Config.WorkingDirectory = txtWorkDir.Text.Trim();
+        // 作業ディレクトリが変わったら、前のディレクトリの gamedata_cache.db を掴んだままの装備サービスを捨てる
+        // (次に必要になったときに新しいディレクトリで作り直され、購入先の一括取得もやり直される)
+        if (!string.Equals(prevWorkDir, App.Config.WorkingDirectory, StringComparison.OrdinalIgnoreCase))
+        {
+            _hangarEquip?.Dispose();
+            _hangarEquip = null;
+            _uexPrefetchStarted = false;
+        }
         App.Config.OutputLanguage = txtOutputLang.Text.Trim();
         App.Config.ScApiKey = txtScApiKey.Text.Trim();
         if (int.TryParse(txtWebPort.Text.Trim(), out var port)) App.Config.WebServerPort = port;
