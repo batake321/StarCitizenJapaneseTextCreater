@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 360" width="900" height="360" role="img" aria-labelledby="t d">
   <title id="t">翻訳の流れ</title>
-  <desc id="d">Data.p4k から「1. 抽出」で翻訳データベースへ、「2. 翻訳」で AI バックエンドに訳させ、「3. 反映」でゲームフォルダへ global.ini を書き出します。</desc>
+  <desc id="d">翻訳データベースには訳文がすでに入っているため、ふだんは「3. 反映」だけでゲームフォルダへ global.ini が書き出されます。「1. 抽出」はパッチ後にゲームのテキストを取り直すとき、「2. 翻訳」で AI に訳させるのは任意です。</desc>
   <style>
     .f  { font-family: "Segoe UI","Yu Gothic UI",Meiryo,sans-serif; }
     .ti { font-size: 17px; fill: #e6eef7; font-weight: 600; }
@@ -25,8 +25,8 @@
   <rect x="350" y="60" width="200" height="110" rx="10" fill="#123146" stroke="#38bdf8" stroke-width="2"/>
   <text class="f ti" x="450" y="95" text-anchor="middle" fill="#bfe6ff">翻訳データベース</text>
   <text class="f mono" x="450" y="118" text-anchor="middle">translations.db</text>
-  <text class="f sm" x="450" y="140" text-anchor="middle">原文と訳文をここに保存</text>
-  <text class="f sm" x="450" y="158" text-anchor="middle">用語集も同じファイル</text>
+  <text class="f sm" x="450" y="140" text-anchor="middle">訳文はすでに入っています</text>
+  <text class="f sm" x="450" y="158" text-anchor="middle">(同梱 / Patch 4.10 対応)</text>
 
   <!-- C: game -->
   <rect x="670" y="60" width="200" height="110" rx="10" fill="#16202c" stroke="#33465c"/>
@@ -42,12 +42,13 @@
   <text class="f st" x="607" y="102" text-anchor="middle">3. 反映</text>
 
   <!-- AI -->
-  <line x1="430" y1="170" x2="430" y2="238" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar)"/>
-  <line x1="470" y1="238" x2="470" y2="170" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar)"/>
-  <text class="f st" x="450" y="210" text-anchor="middle">2. 翻訳</text>
+  <line x1="430" y1="170" x2="430" y2="238" stroke="#7f97ad" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+  <line x1="470" y1="238" x2="470" y2="170" stroke="#7f97ad" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+  <text class="f st" x="450" y="206" text-anchor="middle" fill="#93a7bd">2. 翻訳</text>
+  <text class="f sm" x="450" y="224" text-anchor="middle">任意</text>
 
-  <rect x="290" y="240" width="320" height="86" rx="10" fill="#1c1830" stroke="#5b4b8a"/>
-  <text class="f sm" x="450" y="264" text-anchor="middle" fill="#cfc2f5">AI バックエンド（AI 設定で登録）</text>
+  <rect x="290" y="240" width="320" height="86" rx="10" fill="#1c1830" stroke="#5b4b8a" stroke-dasharray="5 4"/>
+  <text class="f sm" x="450" y="264" text-anchor="middle" fill="#cfc2f5">AI バックエンド（使わなくても日本語になります）</text>
   <g class="f sm">
     <rect x="306" y="278" width="70" height="30" rx="6" fill="#241f3d" stroke="#6d5bad"/><text x="341" y="298" text-anchor="middle" fill="#e0d7ff">Claude</text>
     <rect x="384" y="278" width="70" height="30" rx="6" fill="#241f3d" stroke="#6d5bad"/><text x="419" y="298" text-anchor="middle" fill="#e0d7ff">Gemini</text>
@@ -55,10 +56,10 @@
     <rect x="540" y="278" width="58" height="30" rx="6" fill="#241f3d" stroke="#6d5bad"/><text x="569" y="298" text-anchor="middle" fill="#e0d7ff">Ollama</text>
   </g>
 
-  <text class="f sm" x="670" y="264">複数を有効にすると同時に走らせて</text>
-  <text class="f sm" x="670" y="284">翻訳できます。</text>
-  <text class="f sm" x="670" y="312">アプリ更新後は「3. 反映」だけ</text>
-  <text class="f sm" x="670" y="332">実行すれば OK です。</text>
+  <text class="f sm" x="670" y="264">[2. 翻訳] を使うのは、同梱の翻訳が</text>
+  <text class="f sm" x="670" y="284">まだ無い新パッチを自分で訳すときと、</text>
+  <text class="f sm" x="670" y="304">訳を書き換えたいときだけです。</text>
+  <text class="f sm" x="670" y="330" fill="#ffd98a">パッチ直後は [1. 抽出] → [3. 反映]。</text>
 
-  <text class="f sm" x="30" y="30">3 つのボタンを左から順に押すだけです</text>
+  <text class="f sm" x="30" y="30">ふだん押すのは [3. 反映] だけです</text>
 </svg>

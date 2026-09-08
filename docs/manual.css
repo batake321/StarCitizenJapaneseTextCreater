@@ -50,6 +50,25 @@ code {
   word-break: break-all;
 }
 
+pre {
+  background: #0d141d;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 8px 0;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 13.5px;
+  color: #9fdcff;
+  word-break: normal;
+  white-space: pre;
+}
+
 kbd {
   font-family: var(--font);
   font-size: .88em;
@@ -112,6 +131,7 @@ kbd {
 }
 .side nav a:hover { color: var(--text-strong); background: var(--bg-soft); text-decoration: none; }
 .side nav a.on { color: #bfe6ff; border-left-color: var(--accent); background: var(--accent-soft); }
+.side nav a.sub { padding-left: 26px; font-size: 13px; }
 
 main { padding: 34px 0 120px; min-width: 0; }
 

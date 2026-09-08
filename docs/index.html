@@ -28,6 +28,7 @@
       <div class="grp">日本語化</div>
       <a href="#translate">5. 翻訳タブ</a>
       <a href="#ai">6. AI 設定</a>
+      <a href="#ollama" class="sub">Ollama + Gemma4</a>
       <a href="#editor">7. 翻訳エディタ</a>
       <a href="#glossary">8. 用語集</a>
 
@@ -61,7 +62,7 @@
       <div class="pills">
         <span class="pill">Windows 10 / 11</span>
         <span class="pill">.NET 8.0</span>
-        <span class="pill">翻訳データベース同梱</span>
+        <span class="pill">翻訳済み DB 同梱 (Patch 4.10 対応)</span>
         <span class="pill">AI 翻訳は任意</span>
       </div>
     </div>
@@ -87,7 +88,14 @@
     </div>
 
     <div class="note tip">
-      <p><strong>翻訳データはアプリに同梱されています。</strong>AI の API キーを持っていなくても、インストールして <span class="btn">3. 反映</span> を押すだけでゲームは日本語になります。AI 翻訳は「まだ訳されていない部分を自分で埋めたいとき」に使う機能です。</p>
+      <p><strong>翻訳はもう終わっています。AI に翻訳させる必要はありません。</strong></p>
+      <p>訳し終わった翻訳データベースがアプリに同梱されています（現在の同梱版は <b>Patch 4.10 対応</b>）。
+      4.10 を遊んでいるなら、<b>API キーも AI の設定も要らず</b>、<span class="btn">3. 反映</span> を押すだけで日本語になります。</p>
+      <p><span class="btn">2. 翻訳</span>（AI 翻訳）を使うのは、次の 2 つの場合だけです。</p>
+      <ul>
+        <li><b>同梱の翻訳データがまだ対応していない新しいパッチ</b>が来て、増えた分を自分で訳したいとき</li>
+        <li><b>訳の言い回しを自分好みに変えたい</b>とき</li>
+      </ul>
     </div>
 
     <!-- ============================================================ -->
@@ -101,7 +109,7 @@
       <li><b>AI 翻訳や AI チャットを使う場合のみ</b>（いずれか 1 つ以上）
         <ul>
           <li><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/API_Key_取得_Claude.md">Claude API キー</a> / <a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/API_Key_取得_Gemini.md">Gemini API キー</a> / <a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/API_Key_取得_OpenAI.md">OpenAI (ChatGPT) API キー</a></li>
-          <li><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/Ollama_Install.md">Ollama</a> ＋ <a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/Gemma4_e4b_Install.md">Gemma e4b</a> または <a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/Gemma4_e2b_Install.md">e2b</a>（ローカル実行・無料）</li>
+          <li><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/Ollama_Install.md">Ollama</a> ＋ <b>Gemma4</b>（ローカル実行・無料。おすすめは <code>gemma4:e2b</code> / <code>gemma4:e4b</code>。→ <a href="#ollama">設定方法</a>）</li>
         </ul>
       </li>
       <li><b>音声読み上げを使う場合のみ（任意）</b> — <a href="https://voicevox.hiroshiba.jp/" rel="noreferrer">VoiceVox</a>（無料の音声合成エンジン）</li>
@@ -132,7 +140,7 @@
     </table>
 
     <div class="note tip">
-      <p><strong>アプリ本体だけで足ります。</strong>v1.14.5 以降は翻訳データベースが本体に同梱されているので、翻訳DB の zip を別途取り込む必要はありません。上の 3 つ目は、同梱版より新しい翻訳データを先に試したいとき用です。</p>
+      <p><strong>アプリ本体だけで足ります。</strong>v1.14.5 以降は<b>訳し終わった翻訳データベース</b>が本体に同梱されているので、翻訳DB の zip を別途取り込む必要はありません。上の 3 つ目は、本体より新しい翻訳データを先に試したいとき用です。</p>
     </div>
 
     <h3>インストール</h3>
@@ -185,16 +193,33 @@
     <ol class="steps">
       <li>アプリを起動します。上部の <b>GamePath</b> に Star Citizen のインストール先が自動で入っていることを確認します。空欄なら <span class="btn">参照...</span> から選んでください（RSI Launcher のログから自動検出を試みます）。</li>
       <li>右隣のコンボボックスで <b>LIVE / PTU など、日本語化したいチャンネル</b>を選びます。</li>
-      <li><span class="tab">翻訳</span> タブで <span class="btn">1. 抽出</span> → <span class="btn">3. 反映</span> の順に押します。<b>同梱の翻訳データだけで良ければ <span class="btn">2. 翻訳</span> は不要です。</b></li>
+      <li><span class="tab">翻訳</span> タブで <span class="btn">3. 反映</span> を押します。<b>これだけです。</b>ゲームからのテキスト取り出しも中で自動的に行われるので、<span class="btn">1. 抽出</span> も <span class="btn">2. 翻訳</span> も押す必要はありません。</li>
       <li>Star Citizen を起動して、日本語になっていれば完了です。</li>
     </ol>
 
-    <p>自分で AI に翻訳させたい場合は、<span class="btn">2. 翻訳</span> の前に <a href="#ai">AI 設定</a> で API キーを登録してください。</p>
+    <p><b>ここまでで AI の設定は一切要りません。</b>同梱の翻訳データ（Patch 4.10 対応）がそのまま当たります。新しいパッチで増えた分を自分で訳したい、あるいは訳を書き換えたいという段になって初めて、<a href="#ai">AI 設定</a> と <span class="btn">2. 翻訳</span> の出番です。</p>
 
     <!-- ============================================================ -->
     <h2 id="translate"><span class="num">5</span>翻訳タブ — 抽出・翻訳・反映</h2>
 
-    <p>日本語化はこのタブの 3 つのボタンを<b>左から順に押すだけ</b>です。それぞれが何をしているかを図にすると、こうなります。</p>
+    <p>ボタンは 3 つ並んでいますが、<b>ふだん押すのは <span class="btn">3. 反映</span> だけ</b>です。まず「どれを押せばいいのか」から書きます。</p>
+
+    <table>
+      <thead><tr><th>こんなとき</th><th>押すボタン</th></tr></thead>
+      <tbody>
+        <tr><td>初めて日本語にする</td><td><span class="btn">3. 反映</span> だけ</td></tr>
+        <tr><td>アプリを新しいバージョンに入れ替えた</td><td><span class="btn">3. 反映</span> だけ</td></tr>
+        <tr><td>ゲームにパッチが来て英語に戻った</td><td><span class="btn">1. 抽出</span> → <span class="btn">3. 反映</span></td></tr>
+        <tr><td>新しいパッチで増えた未翻訳を自分で訳したい<br>訳の言い回しを変えたい</td><td><span class="btn">1. 抽出</span> → <span class="btn">2. 翻訳</span> → <span class="btn">3. 反映</span></td></tr>
+      </tbody>
+    </table>
+
+    <div class="note tip">
+      <p><strong><span class="btn">3. 反映</span> は、必要なら抽出も中でやってくれます。</strong>ゲームから取り出したファイルがまだ無ければ、反映の処理の中で自動的に取り出してから書き出します。だから初回は <span class="btn">3. 反映</span> だけで済みます。</p>
+      <p>ゲームにパッチが当たったあとだけは、すでに取り出したファイルが残っているために自動では取り直しません。このときは <span class="btn">1. 抽出</span> を先に押して、新しいテキストを取り込んでください。</p>
+    </div>
+
+    <p>それぞれが何をしているかを図にすると、こうなります。</p>
 
     <figure class="scroll-x">
       <img class="diagram" src="img/flow-translate.svg" alt="翻訳の流れ図。Data.p4k から 1. 抽出 で翻訳データベースへ取り込み、2. 翻訳 で AI バックエンドに訳させ、3. 反映 でゲームフォルダの global.ini に書き出す。" width="900" height="360">
@@ -211,15 +236,15 @@
       <tbody>
         <tr>
           <td><span class="btn">1. 抽出</span></td>
-          <td>ゲームの <code>Data.p4k</code>（ZIP64 + ZStd 圧縮）から英語と日本語の <code>global.ini</code> を取り出し、翻訳データベースに登録します。</td>
+          <td>ゲームの <code>Data.p4k</code>（ZIP64 + ZStd 圧縮）から英語と日本語の <code>global.ini</code> を<b>取り直して</b>翻訳データベースに登録します。パッチでゲーム側のテキストが変わったときに押します。</td>
         </tr>
         <tr>
           <td><span class="btn">2. 翻訳</span></td>
-          <td>まだ訳されていない行を、<a href="#ai">AI 設定</a>でチェックを入れたバックエンドに翻訳させます。複数にチェックを入れると同時に走らせます。</td>
+          <td><b>ふだんは押しません。</b>まだ訳されていない行を、<a href="#ai">AI 設定</a>でチェックを入れたバックエンドに翻訳させます（複数にチェックを入れると同時に走ります）。同梱の翻訳データが対応しているパッチなら、そもそも未翻訳の行がほとんど無いので押す必要がありません。</td>
         </tr>
         <tr>
           <td><span class="btn">3. 反映</span></td>
-          <td>翻訳データベースの内容を <code>global.ini</code> にまとめ、ゲームフォルダの <code>data/Localization/japanese_(japan)/global.ini</code> にコピーします。あわせて <code>user.cfg</code> の <code>g_language</code> も書き換えます。</td>
+          <td><b>ふだん押すのはこれです。</b>翻訳データベースの内容を <code>global.ini</code> にまとめ、ゲームフォルダの <code>data/Localization/japanese_(japan)/global.ini</code> にコピーします。あわせて <code>user.cfg</code> の <code>g_language</code> も書き換えます。取り出し済みのファイルが無ければ、この中で抽出も行われます。</td>
         </tr>
       </tbody>
     </table>
@@ -232,6 +257,10 @@
 
     <!-- ============================================================ -->
     <h2 id="ai"><span class="num">6</span>AI 設定 — 翻訳バックエンドの登録</h2>
+
+    <div class="note tip">
+      <p><strong>日本語にしたいだけなら、この章は飛ばして構いません。</strong>翻訳データは同梱されているので、AI の登録なしで <span class="btn">3. 反映</span> だけで日本語になります。ここが必要になるのは、<b>新しいパッチの未翻訳を自分で訳したいとき</b>と、<b><a href="#chat">AI チャット</a>を使いたいとき</b>です。</p>
+    </div>
 
     <p>上部バーの <span class="btn">AI 設定</span>（または <span class="tab">設定</span> タブの <span class="btn">AI 設定を開く</span>）で、翻訳とチャットに使う AI を登録します。</p>
 
@@ -257,9 +286,61 @@
         <tr><td><b>Claude</b> (Anthropic)</td><td>高品質な翻訳</td><td>API キー（<a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/API_Key_取得_Claude.md">取得方法</a>）</td></tr>
         <tr><td><b>Gemini</b> (Google)</td><td>高速・大量処理向き</td><td>API キー（<a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/API_Key_取得_Gemini.md">取得方法</a>）</td></tr>
         <tr><td><b>OpenAI</b> (ChatGPT)</td><td>高品質・バランス型</td><td>API キー（<a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/API_Key_取得_OpenAI.md">取得方法</a>）</td></tr>
-        <tr><td><b>Ollama</b> (ローカル)</td><td>無料・オフライン対応</td><td><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/Ollama_Install.md">Ollama</a> ＋ モデル</td></tr>
+        <tr><td><b>Ollama</b> (ローカル)</td><td>無料・オフライン対応。API キー不要</td><td><a href="#ollama">Ollama ＋ Gemma4</a>（下で説明）</td></tr>
       </tbody>
     </table>
+
+    <h3 id="ollama">Ollama（ローカル・無料）で翻訳させる</h3>
+
+    <p>API キーを使いたくない場合は、自分の PC で動く <b>Ollama</b> を使えます。モデルは <b>Gemma4 の <code>e2b</code> / <code>e4b</code></b> がおすすめです。</p>
+
+    <table>
+      <thead><tr><th>モデル</th><th>性格</th><th>ファイル<br>サイズ</th><th>推奨 VRAM</th><th>推奨 RAM</th><th>手順</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>gemma4:e2b</code></td>
+          <td><b>軽量・高速</b><br>まずはこちら</td>
+          <td>7.2GB</td><td>8GB 以上</td><td>12GB 以上</td>
+          <td><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/Gemma4_e2b_Install.md">e2b インストール手順</a></td>
+        </tr>
+        <tr>
+          <td><code>gemma4:e4b</code></td>
+          <td><b>高品質</b><br>VRAM に余裕があれば</td>
+          <td>9.6GB</td><td>12GB 以上</td><td>16GB 以上</td>
+          <td><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/Gemma4_e4b_Install.md">e4b インストール手順</a></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <ol class="steps">
+      <li><b>Ollama をインストールします。</b><br>
+        <a href="https://ollama.com/download" rel="noreferrer">https://ollama.com/download</a>
+        からインストーラーをダウンロードして実行します（<a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/blob/main/docs/Ollama_Install.md">詳しい手順</a>）。</li>
+      <li><b>モデルをダウンロードします。</b>コマンドプロンプトか PowerShell で次のどちらかを実行します。
+        <pre><code>ollama pull gemma4:e2b</code></pre>
+        <pre><code>ollama pull gemma4:e4b</code></pre>
+      </li>
+      <li><b><span class="btn">AI 設定</span> に入力します。</b>
+        <table>
+          <thead><tr><th>項目</th><th>入力値</th></tr></thead>
+          <tbody>
+            <tr><td>Type</td><td><b>Ollama</b></td></tr>
+            <tr><td>Model</td><td><code>gemma4:e2b</code> または <code>gemma4:e4b</code>（ダウンロードした方）</td></tr>
+            <tr><td>Base URL</td><td><code>http://127.0.0.1:11434</code>（同じ PC で動かす場合）</td></tr>
+            <tr><td>Batch</td><td>既定値のままで構いません</td></tr>
+          </tbody>
+        </table>
+      </li>
+      <li>チェックボックスをオンにして <span class="btn">保存</span> します。</li>
+    </ol>
+
+    <div class="note warn">
+      <p><strong>ゲームをしながらの翻訳には向きません。</strong>Ollama は GPU の VRAM を使います。Star Citizen も VRAM を大量に使うため、<b>ゲームプレイ中に翻訳やチャットを実行するとゲームのパフォーマンスが落ちることがあります</b>。ゲーム中は避けるか、軽い <code>gemma4:e2b</code> を使うか、別 PC の Ollama に接続してください（Base URL を <code>http://192.168.x.x:11434</code> に変えます）。Claude / Gemini などのクラウド API なら VRAM への影響はありません。</p>
+    </div>
+
+    <div class="note">
+      <p><b>翻訳がパースエラーで失敗する場合</b>（ログに「パース失敗 (0行)」と出る場合）は、Ollama のコンテキスト長不足が原因のことがあります。環境変数 <code>OLLAMA_NUM_CTX=8192</code> を設定するか、Batch を 1〜5 に減らすと改善することがあります。</p>
+    </div>
 
     <!-- ============================================================ -->
     <h2 id="editor"><span class="num">7</span>翻訳エディタ — 訳文の確認と手直し</h2>
@@ -658,7 +739,7 @@
 
     <details>
       <summary>パッチが来たら英語に戻った</summary>
-      <p>ゲーム側のファイルがパッチで置き換わったためです。<span class="btn">1. 抽出</span> → <span class="btn">3. 反映</span> をもう一度実行してください。新しく追加されたテキストを訳したい場合は、間に <span class="btn">2. 翻訳</span> を挟みます。</p>
+      <p>ゲーム側のファイルがパッチで置き換わったためです。<span class="btn">1. 抽出</span> → <span class="btn">3. 反映</span> をもう一度実行してください。<b>これだけで日本語に戻ります。</b>同梱の翻訳データが対応しているパッチなら <span class="btn">2. 翻訳</span> は不要です。同梱版がまだ対応していない新しいパッチで、増えた英語を自分で訳したい場合にだけ、間に <span class="btn">2. 翻訳</span> を挟みます。</p>
     </details>
 
     <details>
