@@ -740,9 +740,14 @@
 
                             <!-- Row 1: 詳細入力 -->
                             <TextBlock Text="船名:" Grid.Row="1" VerticalAlignment="Center" Margin="0,4,4,0"/>
-                            <TextBox x:Name="txtAddShipName" Grid.Row="1" Grid.Column="1" Margin="0,4,8,0" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="cmbAddShipName" Grid.Row="1" Grid.Column="1" Margin="0,4,8,0" VerticalAlignment="Center"
+                                      IsEditable="True" IsTextSearchEnabled="False" StaysOpenOnEdit="True" MaxDropDownHeight="260"
+                                      TextBoxBase.TextChanged="AddShipName_TextChanged" LostFocus="AddShipName_LostFocus"
+                                      ToolTip="3 文字以上入力すると候補が出ます。船名からメーカーを自動で入れます"/>
                             <TextBlock Text="メーカー:" Grid.Row="1" Grid.Column="3" VerticalAlignment="Center" Margin="0,4,4,0"/>
-                            <TextBox x:Name="txtAddShipMfr" Grid.Row="1" Grid.Column="4" Margin="0,4,8,0" VerticalAlignment="Center" MinWidth="120"/>
+                            <ComboBox x:Name="cmbAddShipMfr" Grid.Row="1" Grid.Column="4" Margin="0,4,8,0" VerticalAlignment="Center"
+                                      MinWidth="120" IsEditable="True" IsTextSearchEnabled="True"
+                                      ToolTip="一覧から選ぶか、直接入力できます (空のままでも船名から自動で判別します)"/>
                             <TextBlock Text="SCU:" Grid.Row="1" Grid.Column="6" VerticalAlignment="Center" Margin="0,4,4,0"/>
                             <TextBox x:Name="txtAddShipScu" Grid.Row="1" Grid.Column="7" Text="0" Margin="0,4,8,0" VerticalAlignment="Center"/>
                             <TextBlock Text="メモ:" Grid.Row="1" Grid.Column="8" VerticalAlignment="Center" Margin="0,4,4,0"/>
@@ -759,6 +764,9 @@
                                 ToolTip="My Hangar と同期した保有船のうち、所持船に無いものを追加します"/>
                         <Button Content="選択を更新" Click="UpdateMyShip_Click" Padding="12,4" Margin="0,0,4,0"/>
                         <Button Content="選択を削除" Click="DeleteMyShip_Click" Padding="12,4" Margin="0,0,8,0" Foreground="#D32F2F"/>
+                        <Button Content="ワイプ" Click="ShipWipe_Click" Padding="12,4" Margin="0,0,8,0"
+                                Foreground="White" Background="#B71C1C" FontWeight="Bold"
+                                ToolTip="サーバーワイプで無くなる船を選んでまとめて削除します"/>
                         <TextBlock x:Name="txtMyShipStatus" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
                     </StackPanel>
                 </Grid>
@@ -1241,7 +1249,8 @@
                                                     <Style TargetType="TextBlock">
                                                         <Setter Property="VerticalAlignment" Value="Center"/>
                                                         <Setter Property="FontWeight" Value="Bold"/>
-                                                        <Setter Property="ToolTip" Value="{Binding ItemRecord}"/>
+                                                        <Setter Property="ToolTip" Value=" "/>
+                                                        <EventSetter Event="ToolTipOpening" Handler="ComponentTooltip_Opening"/>
                                                     </Style>
                                                 </DataGridTextColumn.ElementStyle>
                                             </DataGridTextColumn>
@@ -1378,17 +1387,25 @@
                                                 <DataGridTextColumn.ElementStyle>
                                                     <Style TargetType="TextBlock">
                                                         <Setter Property="VerticalAlignment" Value="Center"/>
-                                                        <Setter Property="ToolTip" Value="{Binding DefaultItemRecord}"/>
+                                                        <Setter Property="ToolTip" Value=" "/>
+                                                        <EventSetter Event="ToolTipOpening" Handler="LoadoutDefaultTooltip_Opening"/>
                                                     </Style>
                                                 </DataGridTextColumn.ElementStyle>
                                             </DataGridTextColumn>
-                                            <DataGridTextColumn Header="現在" Binding="{Binding CurrentItemName}" Width="170">
+                                            <DataGridTextColumn Header="現在" Binding="{Binding EffectiveItemName}" Width="170">
                                                 <DataGridTextColumn.ElementStyle>
                                                     <Style TargetType="TextBlock">
                                                         <Setter Property="VerticalAlignment" Value="Center"/>
-                                                        <Setter Property="FontWeight" Value="Bold"/>
-                                                        <Setter Property="Foreground" Value="#1565C0"/>
-                                                        <Setter Property="ToolTip" Value="{Binding CurrentItemRecord}"/>
+                                                        <Setter Property="Foreground" Value="#666"/>
+                                                        <Setter Property="ToolTip" Value=" "/>
+                                                        <EventSetter Event="ToolTipOpening" Handler="LoadoutCurrentTooltip_Opening"/>
+                                                        <Style.Triggers>
+                                                            <!-- 設定済みポートだけ太字・青。未設定ポートは初期装備を控えめな色で出す -->
+                                                            <DataTrigger Binding="{Binding IsCustom}" Value="True">
+                                                                <Setter Property="FontWeight" Value="Bold"/>
+                                                                <Setter Property="Foreground" Value="#1565C0"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
                                                     </Style>
                                                 </DataGridTextColumn.ElementStyle>
                                             </DataGridTextColumn>
@@ -1410,7 +1427,14 @@
                                                                   SelectionChanged="LoadoutItem_Changed"
                                                                   IsEnabled="{Binding HasCandidates}"
                                                                   ToolTip="所持コンポーネントのうち同じ種別・ポート Size 以下・使用可のものが候補になります"
-                                                                  FontSize="11" Margin="2" VerticalAlignment="Center"/>
+                                                                  FontSize="11" Margin="2" VerticalAlignment="Center">
+                                                            <ComboBox.ItemContainerStyle>
+                                                                <Style TargetType="ComboBoxItem">
+                                                                    <Setter Property="ToolTip" Value=" "/>
+                                                                    <EventSetter Event="ToolTipOpening" Handler="LoadoutChoiceTooltip_Opening"/>
+                                                                </Style>
+                                                            </ComboBox.ItemContainerStyle>
+                                                        </ComboBox>
                                                     </DataTemplate>
                                                 </DataGridTemplateColumn.CellTemplate>
                                             </DataGridTemplateColumn>

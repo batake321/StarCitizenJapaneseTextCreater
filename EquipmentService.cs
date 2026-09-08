@@ -10,6 +10,13 @@ public class EquipmentService : IDisposable
 {
     private readonly SqliteConnection _conn;
     private readonly string _cacheDbPath;
+
+    // 購入先のオンメモリ索引。ツールチップは UI スレッドから同期で引かれるので、DB を読まずにここだけを見る
+    // (プリフェッチの書き込みとロック競合させない)。索引は作り直して参照ごと差し替えるので、読み側にロックは要らない。
+    // キーは item_name (DB の照合と同じく大文字小文字を区別する)。値は price 昇順
+    private volatile Dictionary<string, List<(string Location, double Price)>> _priceIndex = new(StringComparer.Ordinal);
+    private volatile bool _pricePrefetched;      // uex_prefetch_state に記録があるか (「取得中…」と「登録がありません」の出し分け)
+
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
     private static readonly TimeSpan CacheTtl = TimeSpan.FromHours(24);
 
@@ -50,6 +57,7 @@ public class EquipmentService : IDisposable
         _hasItemIndexSize = HasColumn("item_index", "size");
         _cacheDbPath = Path.Combine(Path.GetDirectoryName(gamedataCacheDbPath) ?? ".", "equipment_cache.db");
         InitCacheDb();
+        ReloadPriceIndex();
     }
 
     private bool HasColumn(string table, string column)
@@ -77,6 +85,13 @@ public class EquipmentService : IDisposable
             price REAL NOT NULL,
             fetched_at TEXT NOT NULL,
             PRIMARY KEY (item_name, location)
+        )";
+        cmd.ExecuteNonQuery();
+
+        // 一括取得の完了時刻。「未取得」と「購入先の登録が無い」を区別するために持つ
+        cmd.CommandText = @"CREATE TABLE IF NOT EXISTS uex_prefetch_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            fetched_at TEXT NOT NULL
         )";
         cmd.ExecuteNonQuery();
     }
@@ -529,6 +544,196 @@ public class EquipmentService : IDisposable
         return sb.ToString();
     }
 
+    // 購入先の一括取得で対象にする UEX の section (装備に関係するものだけ)
+    private static readonly string[] UexEquipmentSections =
+        { "Systems", "Vehicle Weapons", "Avionics", "Propulsion", "Utility", "Personal Weapons" };
+
+    // 購入先の一括取得。UEX のカテゴリ一覧を取り、装備に関係する section のカテゴリごとに
+    // items_prices?id_category={id} を 1 回ずつ呼んで uex_item_prices を作り直す (per-item 取得より桁違いに少ない回数で済む)。
+    // 完了したら uex_prefetch_state に時刻を記録する (「未取得」と「購入先の登録が無い」を区別するため)。
+    // 戻り値は保存した item_name の数。失敗は例外を投げずに握りつぶし、途中まで保存した分は残す
+    public async Task<int> PrefetchPurchaseLocationsAsync(Action<string>? onStatus = null, CancellationToken ct = default)
+    {
+        var categoryIds = new List<int>();
+        try
+        {
+            var catResp = await Http.GetStringAsync("https://api.uexcorp.space/2.0/categories", ct);
+            using var catDoc = JsonDocument.Parse(catResp);
+            var root = catDoc.RootElement;
+            var status = root.TryGetProperty("status", out var st) ? st.GetString() ?? "" : "";
+            if (!status.Equals("ok", StringComparison.OrdinalIgnoreCase)) return 0;
+            if (!root.TryGetProperty("data", out var catData) || catData.ValueKind != JsonValueKind.Array) return 0;
+
+            foreach (var c in catData.EnumerateArray())
+            {
+                var section = c.TryGetProperty("section", out var se) ? se.GetString() ?? "" : "";
+                if (!UexEquipmentSections.Contains(section, StringComparer.Ordinal)) continue;
+                if (!c.TryGetProperty("id", out var idEl) || idEl.ValueKind != JsonValueKind.Number) continue;
+                if (idEl.TryGetInt32(out var id)) categoryIds.Add(id);
+            }
+        }
+        catch { return 0; }
+
+        var savedNames = new HashSet<string>(StringComparer.Ordinal);
+        var total = categoryIds.Count;
+        var done = 0;
+        var okCategories = 0;
+
+        foreach (var catId in categoryIds)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var resp = await Http.GetStringAsync($"https://api.uexcorp.space/2.0/items_prices?id_category={catId}", ct);
+                using var doc = JsonDocument.Parse(resp);
+                if (doc.RootElement.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
+                {
+                    var rows = new List<(string itemName, string location, double price)>();
+                    foreach (var p in data.EnumerateArray())
+                    {
+                        var itemName = p.TryGetProperty("item_name", out var inm) ? inm.GetString() ?? "" : "";
+                        if (string.IsNullOrWhiteSpace(itemName)) continue;
+                        if (!p.TryGetProperty("price_buy", out var pb) || pb.ValueKind != JsonValueKind.Number) continue;
+                        if (!pb.TryGetDouble(out var buy) || buy <= 0) continue;
+
+                        var terminal = p.TryGetProperty("terminal_name", out var tn) ? tn.GetString() ?? "" : "";
+                        var city = p.TryGetProperty("city_name", out var cn) ? cn.GetString() ?? "" : "";
+                        var planet = p.TryGetProperty("planet_name", out var pn) ? pn.GetString() ?? "" : "";
+                        var star = p.TryGetProperty("star_system_name", out var sn) ? sn.GetString() ?? "" : "";
+                        var location = string.Join(" > ", new[] { star, planet, city, terminal }.Where(s => !string.IsNullOrEmpty(s)));
+                        rows.Add((itemName, location, buy));
+                    }
+
+                    if (rows.Count > 0)
+                    {
+                        SavePrefetchedCategory(rows);
+                        foreach (var r in rows) savedNames.Add(r.itemName);
+                    }
+                    okCategories++;
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch { }
+
+            done++;
+            onStatus?.Invoke($"購入先を取得中… {done}/{total}");
+        }
+
+        if (okCategories > 0)
+        {
+            try
+            {
+                using var db = new SqliteConnection($"Data Source={_cacheDbPath}");
+                db.Open();
+                using var cmd = db.CreateCommand();
+                cmd.CommandText = "INSERT OR REPLACE INTO uex_prefetch_state (id, fetched_at) VALUES (1, @t)";
+                cmd.Parameters.AddWithValue("@t", DateTime.UtcNow.ToString("o"));
+                cmd.ExecuteNonQuery();
+            }
+            catch { }
+        }
+
+        ReloadPriceIndex();
+        return savedNames.Count;
+    }
+
+    // プリフェッチ 1 カテゴリ分をまとめて保存する。そのカテゴリに出てきた item_name の行だけ入れ替える
+    private void SavePrefetchedCategory(List<(string itemName, string location, double price)> rows)
+    {
+        using var db = new SqliteConnection($"Data Source={_cacheDbPath}");
+        db.Open();
+        using var tx = db.BeginTransaction();
+
+        using (var delCmd = db.CreateCommand())
+        {
+            delCmd.Transaction = tx;
+            delCmd.CommandText = "DELETE FROM uex_item_prices WHERE item_name = @n";
+            var delName = delCmd.Parameters.Add("@n", SqliteType.Text);
+            foreach (var name in rows.Select(r => r.itemName).Distinct(StringComparer.Ordinal))
+            {
+                delName.Value = name;
+                delCmd.ExecuteNonQuery();
+            }
+        }
+
+        var now = DateTime.UtcNow.ToString("o");
+        using (var insCmd = db.CreateCommand())
+        {
+            insCmd.Transaction = tx;
+            insCmd.CommandText = "INSERT OR REPLACE INTO uex_item_prices (item_name, location, price, fetched_at) VALUES (@n, @l, @p, @t)";
+            var insName = insCmd.Parameters.Add("@n", SqliteType.Text);
+            var insLoc = insCmd.Parameters.Add("@l", SqliteType.Text);
+            var insPrice = insCmd.Parameters.Add("@p", SqliteType.Real);
+            insCmd.Parameters.AddWithValue("@t", now);
+            foreach (var (itemName, location, price) in rows)
+            {
+                insName.Value = itemName;
+                insLoc.Value = location;
+                insPrice.Value = price;
+                insCmd.ExecuteNonQuery();
+            }
+        }
+
+        tx.Commit();
+    }
+
+    // equipment_cache.db の購入先を丸ごと読んでオンメモリ索引を作り直す。
+    // 呼ぶのは ctor (プリフェッチ開始前なので競合しない) と PrefetchPurchaseLocationsAsync の完了時 (バックグラウンドスレッド) だけ
+    private void ReloadPriceIndex()
+    {
+        try
+        {
+            using var db = new SqliteConnection($"Data Source={_cacheDbPath};Mode=ReadOnly");
+            db.Open();
+
+            var index = new Dictionary<string, List<(string Location, double Price)>>(StringComparer.Ordinal);
+            using (var cmd = db.CreateCommand())
+            {
+                cmd.CommandText = "SELECT item_name, location, price FROM uex_item_prices";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    if (reader.IsDBNull(0)) continue;
+                    var name = reader.GetString(0);
+                    if (!index.TryGetValue(name, out var list)) index[name] = list = new List<(string Location, double Price)>();
+                    list.Add((reader.IsDBNull(1) ? "" : reader.GetString(1), reader.IsDBNull(2) ? 0 : reader.GetDouble(2)));
+                }
+            }
+            foreach (var list in index.Values) list.Sort((a, b) => a.Price.CompareTo(b.Price));
+
+            bool prefetched;
+            using (var stateCmd = db.CreateCommand())
+            {
+                stateCmd.CommandText = "SELECT COUNT(*) FROM uex_prefetch_state WHERE id = 1";
+                prefetched = Convert.ToInt64(stateCmd.ExecuteScalar() ?? 0L) > 0;
+            }
+
+            _priceIndex = index;
+            _pricePrefetched = prefetched;
+        }
+        catch { }
+    }
+
+    // ツールチップ用。オンメモリ索引だけを見る同期メソッド (DB もネットワークも触らないので UI スレッドから呼んでよい)。
+    // 索引にあれば購入場所の一覧、無ければプリフェッチ済みかどうかで「登録がありません」/「取得中…」を返す
+    public string GetPurchaseLocationText(string itemName)
+    {
+        if (string.IsNullOrWhiteSpace(itemName)) return "";
+
+        var lines = new List<string> { "■ 購入場所 (UEX)" };
+        if (_priceIndex.TryGetValue(itemName, out var locations) && locations.Count > 0)
+        {
+            foreach (var (loc, price) in locations.Take(10))
+                lines.Add($"  {loc} — {price:N0} aUEC");
+            if (locations.Count > 10)
+                lines.Add($"  他 {locations.Count - 10} 件");
+            return string.Join("\n", lines);
+        }
+
+        lines.Add(_pricePrefetched ? "  購入先の登録がありません" : "  取得中…");
+        return string.Join("\n", lines);
+    }
+
     public (string? text, bool fromCache) GetCachedPurchaseLocations(string itemName)
     {
         try
@@ -643,6 +848,7 @@ public class EquipmentService : IDisposable
             using var tx = db.BeginTransaction();
 
             using var delCmd = db.CreateCommand();
+            delCmd.Transaction = tx;
             delCmd.CommandText = "DELETE FROM uex_item_prices WHERE item_name = @n";
             delCmd.Parameters.AddWithValue("@n", itemName);
             delCmd.ExecuteNonQuery();
@@ -651,6 +857,7 @@ public class EquipmentService : IDisposable
             foreach (var (loc, price) in locations)
             {
                 using var insCmd = db.CreateCommand();
+                insCmd.Transaction = tx;
                 insCmd.CommandText = "INSERT INTO uex_item_prices (item_name, location, price, fetched_at) VALUES (@n, @l, @p, @t)";
                 insCmd.Parameters.AddWithValue("@n", itemName);
                 insCmd.Parameters.AddWithValue("@l", loc);

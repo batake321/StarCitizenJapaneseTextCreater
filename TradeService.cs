@@ -956,6 +956,31 @@ public class TradeService
         LoadMyShips();
     }
 
+    // メーカーだけをまとめて更新する (接続を 1 回だけ開き、1 トランザクションで書いて、最後に 1 度だけ読み直す)。
+    // 更新した行数を返す
+    public int UpdateMyShipManufacturers(IReadOnlyList<(int Id, string Manufacturer)> updates)
+    {
+        if (_dbPath == null || updates.Count == 0) return 0;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var tx = db.BeginTransaction();
+        using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "UPDATE my_ships SET manufacturer=@m WHERE id=@id";
+        var pm = cmd.Parameters.Add("@m", SqliteType.Text);
+        var pid = cmd.Parameters.Add("@id", SqliteType.Integer);
+        var n = 0;
+        foreach (var (id, manufacturer) in updates)
+        {
+            pm.Value = manufacturer;
+            pid.Value = id;
+            n += cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        LoadMyShips();
+        return n;
+    }
+
     public void DeleteMyShip(int id)
     {
         if (_dbPath == null) return;

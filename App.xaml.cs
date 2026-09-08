@@ -61,7 +61,7 @@ public partial class App : Application
 
         // 同梱DBをWorkDirにマージ（同梱版が新しければ差分インポート）
         var baseDir = AppContext.BaseDirectory;
-        foreach (var dbName in new[] { "translations.db", "gamedata_cache.db" })
+        foreach (var dbName in new[] { "translations.db", "gamedata_cache.db", "equipment_cache.db" })
         {
             var src = Path.Combine(baseDir, dbName);
             var dest = Path.Combine(Config.WorkingDirectory, dbName);

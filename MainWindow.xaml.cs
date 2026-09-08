@@ -47,6 +47,7 @@ public partial class MainWindow : Window
     private bool _upgradeDataLoadedOnce;               // LoadUpgradeData が一度でも正常終了した (起動時に一度も呼ばれない経路を塞ぐ)
     private List<HangarShipInstance> _hangarShips = new();   // 同期済み保有船 (GetShipInstances の結果)
     private EquipmentService? _hangarEquip;            // ツールチップの装備表示用 (gamedata_cache.db が無ければ null)
+    private bool _uexPrefetchStarted;                                // 購入先の一括取得はセッション中 1 回だけ走らせる
     private Dictionary<string, HangarPledge> _pledgeById = new(StringComparer.Ordinal);   // LoadPledges を id で引く
     private HashSet<string> _soldPledgeIds = new(StringComparer.OrdinalIgnoreCase);   // Sell (melt 予定) にした pledge。pledge 単位 (R-02)。CCU 側の pledge id 比較 (OrdinalIgnoreCase) と揃える
     private HashSet<string> _expandedPledgeIds = new(StringComparer.Ordinal);  // 保有船グリッドで展開中のグループ (pledge)
@@ -56,6 +57,7 @@ public partial class MainWindow : Window
     private List<MyComponentRow> _myComponentRows = new();           // dgMyComponents の表示行 (Usable の変更を DB へ書き戻す)
     private List<LoadoutShipChoice> _extraLoadoutShips = new();      // 所持船側から開いた "my|{id}" キーの船 (GetShipInstances に無いもの)
     private bool _suppressLoadoutEvents;                             // cmbLoadoutShip の ItemsSource 再設定中は SelectionChanged を無視
+    private bool _suppressAddShipNameEvents;                         // 船名欄をプログラムから設定する間は候補の絞り込み・メーカー自動入力を止める
     private bool _compTypeComboPopulated;                            // cmbCompType は 1 度だけ埋める
 
     // 保有船グリッド「マーク」列の選択肢 (UpgradeShipRow.MarkDisplay と対応)
@@ -2684,6 +2686,55 @@ public partial class MainWindow : Window
         fe.ToolTip = text;
     }
 
+    // 装備アイテムのツールチップ。1 行目にアイテム名、2 行目に record 名、そのあとに購入先 (UEX のローカルキャッシュ)。
+    // ネットワークは触らない (取得は起動時のバックグラウンド一括取得のみ)
+    private string BuildItemTooltip(string itemName, string itemRecord)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(itemName)) parts.Add(itemName);
+        if (!string.IsNullOrWhiteSpace(itemRecord)) parts.Add(itemRecord);
+        var purchase = _hangarEquip != null && !string.IsNullOrWhiteSpace(itemName)
+            ? _hangarEquip.GetPurchaseLocationText(itemName)
+            : "";
+        if (purchase.Length > 0) parts.Add("\n" + purchase);
+        return string.Join("\n", parts);
+    }
+
+    private static void ApplyTooltip(object sender, ToolTipEventArgs e, string text)
+    {
+        if (sender is not FrameworkElement fe) return;
+        if (string.IsNullOrWhiteSpace(text)) { e.Handled = true; return; }
+        fe.ToolTip = text;
+    }
+
+    // dgLoadout「デフォルト」列
+    private void LoadoutDefaultTooltip_Opening(object sender, ToolTipEventArgs e)
+    {
+        var row = (sender as FrameworkElement)?.DataContext as LoadoutRow;
+        ApplyTooltip(sender, e, row == null ? "" : BuildItemTooltip(row.DefaultItemName, row.DefaultItemRecord));
+    }
+
+    // dgLoadout「現在」列 (未設定ポートは初期装備が出ているので、その購入先を出す)
+    private void LoadoutCurrentTooltip_Opening(object sender, ToolTipEventArgs e)
+    {
+        var row = (sender as FrameworkElement)?.DataContext as LoadoutRow;
+        ApplyTooltip(sender, e, row == null ? "" : BuildItemTooltip(row.EffectiveItemName, row.EffectiveItemRecord));
+    }
+
+    // dgMyComponents「名称」列
+    private void ComponentTooltip_Opening(object sender, ToolTipEventArgs e)
+    {
+        var row = (sender as FrameworkElement)?.DataContext as MyComponentRow;
+        ApplyTooltip(sender, e, row == null ? "" : BuildItemTooltip(row.ItemName, row.ItemRecord));
+    }
+
+    // 「装備を設定」ComboBox の各項目
+    private void LoadoutChoiceTooltip_Opening(object sender, ToolTipEventArgs e)
+    {
+        var choice = (sender as FrameworkElement)?.DataContext as LoadoutChoice;
+        ApplyTooltip(sender, e, choice == null ? "" : BuildItemTooltip(choice.ItemName, choice.ItemRecord));
+    }
+
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
         _captureService?.Dispose();
@@ -2811,6 +2862,25 @@ public partial class MainWindow : Window
                     try { _hangarEquip = new EquipmentService(gamedataPath); }
                     catch (Exception ex) { Log($"[Hangar] 装備DBを開けませんでした: {ex.Message}"); }
                 }
+            }
+
+            // 購入先 (UEX) をバックグラウンドで一括取得しておく (ツールチップはローカルキャッシュだけを同期で読む)
+            if (_hangarEquip != null && !_uexPrefetchStarted)
+            {
+                _uexPrefetchStarted = true;
+                var equip = _hangarEquip;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        var n = await equip.PrefetchPurchaseLocationsAsync();
+                        Dispatcher.Invoke(() => Log($"[Equip] 購入先 (UEX) を取得: {n} 件"));
+                    }
+                    catch (Exception ex)
+                    {
+                        Dispatcher.Invoke(() => Log($"[Equip] 購入先 (UEX) の取得に失敗: {ex.Message}"));
+                    }
+                });
             }
 
             var pledges = _hangarService.LoadPledges();
@@ -3755,6 +3825,9 @@ public partial class MainWindow : Window
     {
         _tradeService.SetCacheDir(WorkDir);
         _tradeService.LoadMyShips();
+        FillMissingMyShipManufacturers();   // メーカーが空の行を Ship Matrix から埋める (まとめて 1 回で書き、内部で読み直す)
+        PopulateShipMfrCombo();             // 「船を追加」のメーカー候補
+        PopulateShipNameCombo();            // 「船を追加」の船名候補 (3 文字以上で絞り込み)
         if (!reloadUpgrade)
         {
             dgMyShips.ItemsSource = null;
@@ -3767,6 +3840,156 @@ public partial class MainWindow : Window
             dgMyShips.ItemsSource = null;
             dgMyShips.ItemsSource = _tradeService.MyShips.Select(ToMyShipRow).ToList();
         }
+    }
+
+    // 「船を追加」のメーカー候補を Ship Matrix のメーカー名 (重複なし) で埋める。
+    // 既に埋まっているときは何もしない (ItemsSource を差し替えると入力中の文字が消えるため)
+    private void PopulateShipMfrCombo()
+    {
+        if (cmbAddShipMfr == null) return;   // XAML 読込中
+        if (cmbAddShipMfr.ItemsSource is IEnumerable<string> cur && cur.Any()) return;
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            var names = _hangarService.LoadShipMatrix()
+                .Select(s => s.ManufacturerName)
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (names.Count > 0) cmbAddShipMfr.ItemsSource = names;
+        }
+        catch (Exception ex) { Log($"[Ship] メーカー一覧の読み込みに失敗: {ex.Message}"); }
+    }
+
+    // 「船を追加」の船名候補を Ship Matrix の船名で埋める。ItemsSource は一度だけ設定し、
+    // 絞り込みは Items.Filter で行う (編集可能 ComboBox は ItemsSource を差し替えると入力中の文字が消えるため)
+    private void PopulateShipNameCombo()
+    {
+        if (cmbAddShipName == null) return;   // XAML 読込中
+        if (cmbAddShipName.ItemsSource is IEnumerable<string> cur && cur.Any()) return;
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            var names = _hangarService.LoadShipMatrix()
+                .Select(s => s.Name)
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (names.Count == 0) return;
+
+            _suppressAddShipNameEvents = true;
+            try
+            {
+                var keep = cmbAddShipName.Text;
+                cmbAddShipName.ItemsSource = names;
+                cmbAddShipName.Text = keep;
+            }
+            finally { _suppressAddShipNameEvents = false; }
+        }
+        catch (Exception ex) { Log($"[Ship] 船名候補の読み込みに失敗: {ex.Message}"); }
+    }
+
+    // 船名欄の入力。3 文字以上で候補を絞って開き、船名が Ship Matrix で解決できればメーカーを自動で入れる
+    private void AddShipName_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_suppressAddShipNameEvents) return;
+        FilterAddShipNameCandidates();
+        AutoFillShipManufacturer();
+    }
+
+    private void AddShipName_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (_suppressAddShipNameEvents) return;
+        AutoFillShipManufacturer();
+    }
+
+    // 3 文字以上のときだけ候補を絞ってドロップダウンを開く。
+    // ItemsSource は差し替えず CollectionView の Filter で絞る (入力中の文字を消さないため)。
+    // Filter で SelectedItem が外れると編集可能 ComboBox は Text を巻き戻すことがあるので、Text は退避して戻す
+    private void FilterAddShipNameCandidates()
+    {
+        if (cmbAddShipName?.ItemsSource == null) return;
+        var text = (cmbAddShipName.Text ?? "").Trim();
+        var keep = cmbAddShipName.Text;
+
+        if (text.Length < 3)
+        {
+            cmbAddShipName.Items.Filter = null;
+            cmbAddShipName.IsDropDownOpen = false;
+        }
+        else
+        {
+            cmbAddShipName.Items.Filter = o => o is string s && s.Contains(text, StringComparison.OrdinalIgnoreCase);
+            cmbAddShipName.IsDropDownOpen = cmbAddShipName.Items.Count > 0;
+        }
+
+        if (!string.Equals(cmbAddShipName.Text, keep, StringComparison.Ordinal))
+        {
+            _suppressAddShipNameEvents = true;
+            try
+            {
+                cmbAddShipName.Text = keep;
+                if (cmbAddShipName.Template?.FindName("PART_EditableTextBox", cmbAddShipName) is TextBox tb)
+                    tb.CaretIndex = keep?.Length ?? 0;
+            }
+            finally { _suppressAddShipNameEvents = false; }
+        }
+    }
+
+    // 船名から Ship Matrix でメーカーを解決してメーカー欄に入れる。
+    // 解決できないときは今入っている値を消さずそのままにする (手入力を壊さない)
+    private void AutoFillShipManufacturer()
+    {
+        if (cmbAddShipName == null || cmbAddShipMfr == null) return;
+        var name = (cmbAddShipName.Text ?? "").Trim();
+        if (name.Length == 0) return;
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            var mfr = _hangarService.ResolveShip(name)?.ManufacturerName;
+            if (!string.IsNullOrWhiteSpace(mfr)) cmbAddShipMfr.Text = mfr;
+        }
+        catch { }
+    }
+
+    // 船名欄をプログラムから設定する。候補ドロップダウンを開かず、メーカーの自動入力も走らせない
+    // (呼び出し側がメーカーを別途設定するため)
+    private void SetAddShipName(string name)
+    {
+        if (cmbAddShipName == null) return;
+        _suppressAddShipNameEvents = true;
+        try
+        {
+            if (cmbAddShipName.ItemsSource != null) cmbAddShipName.Items.Filter = null;
+            cmbAddShipName.Text = name;
+            cmbAddShipName.IsDropDownOpen = false;
+        }
+        finally { _suppressAddShipNameEvents = false; }
+    }
+
+    // メーカーが空の所持船を Ship Matrix (船名から自動判別) で埋めて my_ships に保存する。
+    // 既に入っているメーカーは上書きしない。まとめて 1 回で書くので、対象が多くても DB の読み直しは 1 回で済む
+    private void FillMissingMyShipManufacturers()
+    {
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            var updates = new List<(int Id, string Manufacturer)>();
+            foreach (var s in _tradeService.MyShips)
+            {
+                if (!string.IsNullOrWhiteSpace(s.Manufacturer)) continue;
+                var mfr = _hangarService.ResolveShip(s.Name)?.ManufacturerName;
+                if (string.IsNullOrWhiteSpace(mfr)) continue;
+                updates.Add((s.Id, mfr));
+            }
+            if (updates.Count == 0) return;
+
+            var filled = _tradeService.UpdateMyShipManufacturers(updates);
+            if (filled > 0) Log($"[Ship] メーカーを自動補完: {filled} 件");
+        }
+        catch (Exception ex) { Log($"[Ship] メーカーの自動補完に失敗: {ex.Message}"); }
     }
 
     // DB を読み直さず、現在の _tradeService.MyShips を表示行に写し直す (同期状態・シミュレーション状態の反映用)
@@ -4192,7 +4415,7 @@ public partial class MainWindow : Window
             if (c.GradeDisplay.Length > 0) parts.Add(c.GradeDisplay);
             parts.Add(c.ItemName);
             parts.Add($"×{c.Quantity}");
-            row.Candidates.Add(new LoadoutChoice { ItemRecord = c.ItemRecord, Display = string.Join(" ", parts) });
+            row.Candidates.Add(new LoadoutChoice { ItemRecord = c.ItemRecord, ItemName = c.ItemName, Display = string.Join(" ", parts) });
         }
 
         if (p.IsCustom)
@@ -4201,8 +4424,9 @@ public partial class MainWindow : Window
             if (cur == null)
             {
                 // 所持リストに無い (削除済み・使用不可にした・空スロット) 設定値はそのまま表示する
-                var label = string.IsNullOrEmpty(p.CurrentItemRecord) ? "(空スロット)" : $"{p.CurrentItemName} (所持リストに無し)";
-                cur = new LoadoutChoice { ItemRecord = p.CurrentItemRecord ?? "", Display = label };
+                var isEmptySlot = string.IsNullOrEmpty(p.CurrentItemRecord);
+                var label = isEmptySlot ? "(空スロット)" : $"{p.CurrentItemName} (所持リストに無し)";
+                cur = new LoadoutChoice { ItemRecord = p.CurrentItemRecord ?? "", ItemName = isEmptySlot ? "" : p.CurrentItemName, Display = label };
                 row.Candidates.Insert(1, cur);
             }
             row.SelectedChoice = cur;
@@ -4270,15 +4494,23 @@ public partial class MainWindow : Window
         }
         else if (btn.DataContext is MyShipRow my)
         {
-            var hangarRow = FindHangarRowForMyShip(my);
-            if (hangarRow != null) target = FindLoadoutShipChoice(hangarRow.InstanceKey);
-            target ??= FindOrAddMyLoadoutShipChoice(my.Id, my.Name);
+            target = ResolveLoadoutChoiceForMyShip(my);
         }
         if (target == null) return;
 
         tabShipManagement.SelectedItem = tabLoadout;
         cmbLoadoutShip.SelectedItem = target;   // SelectionChanged → RefreshLoadoutGrid (同じ選択なら発火しないので明示的にも更新)
         RefreshLoadoutGrid();
+    }
+
+    // 所持船 1 件に対応する装備セレクタ項目。FindHangarRowForMyShip (ツールチップと同じ選び方) の保有船インスタンス、
+    // 無ければ "my|{id}" キー。メーカー名は所持船の入力値ではなく Ship Matrix から自動解決する (所持船のメーカー欄は空のことが多い)
+    private LoadoutShipChoice? ResolveLoadoutChoiceForMyShip(MyShipRow my)
+    {
+        var hangarRow = FindHangarRowForMyShip(my);
+        LoadoutShipChoice? target = null;
+        if (hangarRow != null) target = FindLoadoutShipChoice(hangarRow.InstanceKey);
+        return target ?? FindOrAddMyLoadoutShipChoice(my.Id, my.Name);
     }
 
     private LoadoutShipChoice? FindLoadoutShipChoice(string shipKey)
@@ -4361,15 +4593,17 @@ public partial class MainWindow : Window
     {
         if (cmbAddShip.SelectedItem is ShipInfo ship)
         {
-            txtAddShipName.Text = ship.Name;
-            txtAddShipMfr.Text = ship.Manufacturer;
+            SetAddShipName(ship.Name);
+            // UEX 側にメーカーが入っていないことがあるので、空なら船名から Ship Matrix で補う
+            if (!string.IsNullOrWhiteSpace(ship.Manufacturer)) cmbAddShipMfr.Text = ship.Manufacturer;
+            else AutoFillShipManufacturer();
             txtAddShipScu.Text = ship.Scu.ToString();
         }
     }
 
     private void AddMyShip_Click(object sender, RoutedEventArgs e)
     {
-        var name = txtAddShipName.Text.Trim();
+        var name = cmbAddShipName.Text.Trim();
         if (string.IsNullOrEmpty(name))
         {
             MessageBox.Show("船名を入力してください。検索で候補を選択するか、直接入力してください。", "入力エラー");
@@ -4379,7 +4613,7 @@ public partial class MainWindow : Window
         // @vehicle_Name 解決
         name = _tradeService.ResolveVehicleName(name);
 
-        var mfr = txtAddShipMfr.Text.Trim();
+        var mfr = cmbAddShipMfr.Text.Trim();
         int.TryParse(txtAddShipScu.Text.Trim(), out var scu);
         var notes = ApplyInGameMarker(txtAddShipNotes.Text.Trim(), chkAddShipInGame.IsChecked == true);
 
@@ -4396,8 +4630,8 @@ public partial class MainWindow : Window
 
         _tradeService.AddMyShip(name, mfr, scu, notes);
         RefreshMyShips();
-        txtAddShipName.Text = "";
-        txtAddShipMfr.Text = "";
+        SetAddShipName("");
+        cmbAddShipMfr.Text = "";
         txtAddShipScu.Text = "0";
         txtAddShipNotes.Text = "";
         chkAddShipInGame.IsChecked = false;
@@ -4432,27 +4666,74 @@ public partial class MainWindow : Window
         Log($"[Ship] 削除: {ship.Name}");
     }
 
+    // ワイプ (サーバーリセット) で無くなる船を選んでまとめて削除する。
+    // 既定のチェックはゲーム内購入 (aUEC) の船だけ。pledge で持っている船はワイプで消えないので既定では外す
+    private void ShipWipe_Click(object sender, RoutedEventArgs e)
+    {
+        var rows = (dgMyShips.ItemsSource as IEnumerable<MyShipRow>)?.ToList() ?? new List<MyShipRow>();
+        if (rows.Count == 0)
+        {
+            MessageBox.Show("所持船が登録されていません。", "ワイプ");
+            return;
+        }
+
+        var dlg = new ShipWipeDialog(rows.Select(r => new WipeShipRow
+        {
+            Id = r.Id,
+            Selected = r.IsInGame,
+            Name = r.Name,
+            Manufacturer = r.Manufacturer,
+            OriginDisplay = r.HangarOriginDisplay,
+            HangarCountDisplay = r.HangarCountDisplay,
+            IsPledge = r.HangarCount > 0,
+        })) { Owner = this };
+        if (dlg.ShowDialog() != true) return;
+
+        var ids = dlg.SelectedShipIds;
+        if (ids.Count == 0) return;
+
+        var names = rows.Where(r => ids.Contains(r.Id)).Select(r => r.Name).ToList();
+        var preview = string.Join("\n", names.Take(20));
+        if (names.Count > 20) preview += $"\n… 他 {names.Count - 20} 隻";
+        if (MessageBox.Show($"所持船 {ids.Count} 隻を削除しますか？\n\n{preview}",
+                "ワイプ", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+
+        foreach (var id in ids) _tradeService.DeleteMyShip(id);
+        RefreshMyShips();
+        Log($"[Ship] ワイプ: {ids.Count} 隻を削除");
+        txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻 | ワイプで {ids.Count} 隻を削除";
+    }
+
     private void MyShip_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (dgMyShips.SelectedItem is not MyShipRow ship) return;
 
-        txtAddShipName.Text = ship.Name;
-        txtAddShipMfr.Text = ship.Manufacturer;
+        SetAddShipName(ship.Name);
+        cmbAddShipMfr.Text = ship.Manufacturer;
         txtAddShipScu.Text = ship.Scu.ToString();
         // 「ゲーム内購入」は notes の接頭辞からチェックボックスへ復元し、メモ欄には本文だけを出す (保存時に ApplyInGameMarker で付け直す)
         chkAddShipInGame.IsChecked = IsInGameNotes(ship.Notes);
         txtAddShipNotes.Text = StripInGameMarker(ship.Notes);
         txtMyShipStatus.Text = $"編集中: {ship.Name} — 入力欄を変更して [追加] で新規 or 下の更新ボタンで上書き";
+
+        // 装備サブタブの「現在の装備」もこの船に切り替える (タブは所持船のまま。装備タブを開けばこの船が出ている)
+        var target = ResolveLoadoutChoiceForMyShip(ship);
+        if (target != null)
+        {
+            cmbLoadoutShip.SelectedItem = target;   // SelectionChanged → RefreshLoadoutGrid (同じ選択なら発火しないので明示的にも更新)
+            RefreshLoadoutGrid();
+            txtMyShipStatus.Text += $" | 装備タブを「{ship.Name}」に切替";
+        }
     }
 
     private void UpdateMyShip_Click(object sender, RoutedEventArgs e)
     {
         if (dgMyShips.SelectedItem is not MyShipRow ship) return;
-        var name = txtAddShipName.Text.Trim();
+        var name = cmbAddShipName.Text.Trim();
         if (string.IsNullOrEmpty(name)) return;
         int.TryParse(txtAddShipScu.Text.Trim(), out var scu);
         var notes = ApplyInGameMarker(txtAddShipNotes.Text.Trim(), chkAddShipInGame.IsChecked == true);
-        _tradeService.UpdateMyShip(ship.Id, name, txtAddShipMfr.Text.Trim(), scu, notes);
+        _tradeService.UpdateMyShip(ship.Id, name, cmbAddShipMfr.Text.Trim(), scu, notes);
         RefreshMyShips();
         Log($"[Ship] 更新: {name} ({scu} SCU){(IsInGameNotes(notes) ? " [ゲーム内購入]" : "")}");
     }
@@ -5433,6 +5714,7 @@ public class LoadoutChoice
 {
     public bool IsDefault { get; set; }
     public string ItemRecord { get; set; } = "";
+    public string ItemName { get; set; } = "";      // 購入先ツールチップ用のアイテム表示名 ("(デフォルトに戻す)" 等の擬似項目では空)
     public string Display { get; set; } = "";
     public override string ToString() => Display;
 }

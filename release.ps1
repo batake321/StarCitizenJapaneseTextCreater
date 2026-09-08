@@ -26,7 +26,7 @@ Write-Host "Build OK" -ForegroundColor Green
 # 1.5. Bundle DB files from WorkDir
 Write-Host "=== Bundle DB ===" -ForegroundColor Cyan
 $workDir = "D:\temp"
-foreach ($db in @("translations.db", "gamedata_cache.db")) {
+foreach ($db in @("translations.db", "gamedata_cache.db", "equipment_cache.db")) {
     $src = Join-Path $workDir $db
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $PublishDir $db) -Force
@@ -49,7 +49,7 @@ git add -A
 $status = git status --porcelain
 if ($status) {
     $commitMsg = if ($Message) { $Message } else { "Release v$Version" }
-    $commitMsg += "`n`nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
+    $commitMsg += "`n`nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
     git commit -m $commitMsg
     git push origin main
     Write-Host "Push OK" -ForegroundColor Green

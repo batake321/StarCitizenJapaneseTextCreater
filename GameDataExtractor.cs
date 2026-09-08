@@ -862,7 +862,9 @@ public class GameDataExtractor : IDisposable
             return NonEquipmentEntityFragments.Any(f => lower.Contains(f));
         }
         return portName.StartsWith("Screen_", StringComparison.OrdinalIgnoreCase)
-            || portName.StartsWith("Display_", StringComparison.OrdinalIgnoreCase);
+            || portName.StartsWith("Display_", StringComparison.OrdinalIgnoreCase)
+            // 武器のリジェネプール (hardpoint_weapon_regen_pool / _turrets) は装備を挿すポートではない (ゲームデータ上も常に空)
+            || portName.Contains("regen_pool", StringComparison.OrdinalIgnoreCase);
     }
 
     private static int ParseAndInsertShips(string rawJson, string now,
