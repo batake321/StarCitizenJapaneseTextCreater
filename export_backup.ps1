@@ -14,7 +14,7 @@ Write-Host "Output: $OutputDir"
 
 # Build first
 Write-Host "Building..." -ForegroundColor Yellow
-dotnet build -c Debug --quiet $ProjectDir
+dotnet build -c Debug -v quiet $ProjectDir
 if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 
 # Run export via app's --export-backup command
