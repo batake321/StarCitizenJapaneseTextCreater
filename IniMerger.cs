@@ -139,6 +139,15 @@ public static class IniMerger
         if (dbExtras > 0)
             Console.WriteLine($"    DB-only keys added (not in extraction): {dbExtras}");
 
+        // 装備名に分類の印 (例: "Bracer <EM4>[軍1C]</EM4>")、設計図がもらえるミッション名に "[BP]" を付ける。
+        // ",P" 複製・"@" 前置複製より前に行うこと (印を付けたあとの値を複製に載せるため)
+        var componentMarks = AnnotateComponentNames(english, merged);
+        if (componentMarks > 0)
+            Console.WriteLine($"    Component class marks: {componentMarks}");
+        var blueprintMarks = AnnotateBlueprintMissions(english, merged);
+        if (blueprintMarks > 0)
+            Console.WriteLine($"    Blueprint mission marks: {blueprintMarks}");
+
         // Strip ",P" suffix variants — game references keys without the parameter tag
         int paramStripped = 0;
         foreach (var key in merged.Keys.ToList())
@@ -170,5 +179,117 @@ public static class IniMerger
         Console.WriteLine($"    @-prefixed duplicates added: {atDupes}");
 
         return merged;
+    }
+
+    // 装備名の後ろに付ける分類の印。<EM4> はゲーム自身がミッション説明で使っている強調タグ
+    // (translations の text_ui_tags_EM4_open で <EM4> と定義されている)。
+    // ゲーム側の UI スタイルがこのタグを定義していない画面では、タグがそのまま文字として出る可能性がある。
+    // その場合はこの 2 つを "" にすれば色なしの印だけになる
+    private const string EmphasisOpen = "<EM4>";
+    private const string EmphasisClose = "</EM4>";
+
+    // 装備の 5 分類。これ以外の Class の値 (Ballistic / Energy / Melee など武器のダメージ種別) は対象外
+    private static readonly Dictionary<string, string> ComponentClassKanji = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Industrial"] = "産",
+        ["Military"] = "軍",
+        ["Civilian"] = "市",
+        ["Stealth"] = "隠",
+        ["Competition"] = "競",
+    };
+
+    private static readonly Regex ItemClassRegex = new(@"Class:\s*([A-Za-z]+)", RegexOptions.Compiled);
+    private static readonly Regex ItemGradeRegex = new(@"Grade:\s*([A-Z])", RegexOptions.Compiled);
+    private static readonly Regex ItemSizeRegex = new(@"Size:\s*(\d+)", RegexOptions.Compiled);
+
+    // 英語の item_Desc に書かれている分類・サイズ・グレードを読み、merged の item_Name の後ろに印を付ける。
+    // 例: "Bracer" → "Bracer <EM4>[軍1C]</EM4>"。付けた件数を返す
+    private static int AnnotateComponentNames(Dictionary<string, string> english, Dictionary<string, string> merged)
+    {
+        // item_Desc<X> を <X> で引けるようにする (",P" は落とす)
+        var descBySuffix = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, val) in english)
+        {
+            if (!key.StartsWith("item_Desc", StringComparison.OrdinalIgnoreCase)) continue;
+            var s = key["item_Desc".Length..];
+            if (s.EndsWith(",P", StringComparison.Ordinal)) s = s[..^2];
+            if (s.Length > 0 && !descBySuffix.ContainsKey(s)) descBySuffix[s] = val;
+        }
+
+        var annotated = 0;
+        foreach (var key in merged.Keys.ToList())
+        {
+            if (!key.StartsWith("item_Name", StringComparison.OrdinalIgnoreCase)) continue;
+            var name = merged[key];
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            if (name.Contains("[産", StringComparison.Ordinal) || name.Contains("[軍", StringComparison.Ordinal)
+                || name.Contains("[市", StringComparison.Ordinal) || name.Contains("[隠", StringComparison.Ordinal)
+                || name.Contains("[競", StringComparison.Ordinal)) continue;   // 既に付いている
+
+            var s = key["item_Name".Length..];
+            if (s.EndsWith(",P", StringComparison.Ordinal)) s = s[..^2];
+            // ゲームデータ側で item_Name<X>_SCItem に対する説明が item_Desc<X> になっていることがある。
+            // 完全一致で引けないときだけ "_SCItem" の有無を入れ替えて引き直す
+            if (!descBySuffix.TryGetValue(s, out var desc) || desc == null)
+            {
+                const string scItem = "_SCItem";
+                var alt = s.EndsWith(scItem, StringComparison.OrdinalIgnoreCase) ? s[..^scItem.Length] : s + scItem;
+                if (!descBySuffix.TryGetValue(alt, out desc) || desc == null) continue;
+            }
+
+            var mark = BuildComponentMark(desc);
+            if (mark == null) continue;
+            merged[key] = $"{name} {EmphasisOpen}{mark}{EmphasisClose}";
+            annotated++;
+        }
+        return annotated;
+    }
+
+    // 説明文から "[軍1C]" を作る。装備の 5 分類でなければ null。サイズ・グレードは取れた分だけ入れる
+    private static string? BuildComponentMark(string description)
+    {
+        var cm = ItemClassRegex.Match(description);
+        if (!cm.Success || !ComponentClassKanji.TryGetValue(cm.Groups[1].Value, out var kanji)) return null;
+        var size = ItemSizeRegex.Match(description);
+        var grade = ItemGradeRegex.Match(description);
+        return $"[{kanji}{(size.Success ? size.Groups[1].Value : "")}{(grade.Success ? grade.Groups[1].Value : "")}]";
+    }
+
+    // 設計図 (Blueprint) がもらえるミッションの名前に印を付ける。例: "Small Purchase Order: ..." → "... <EM4>[BP]</EM4>"
+    // BP の数値はゲームデータに存在しないので、有無の印だけを付ける。
+    // 判定は英語の説明文に blueprint が出てくるかどうか。説明キーの "_Desc" を "_Title" に置き換えたキーが名前
+    private static int AnnotateBlueprintMissions(Dictionary<string, string> english, Dictionary<string, string> merged)
+    {
+        const string mark = "[BP]";
+        var annotated = 0;
+        foreach (var (key, desc) in english)
+        {
+            if (desc == null || desc.IndexOf("blueprint", StringComparison.OrdinalIgnoreCase) < 0) continue;
+            var baseKey = key.EndsWith(",P", StringComparison.Ordinal) ? key[..^2] : key;
+            // 説明キーから名前キーを作る。ふつうは "_Desc" → "_Title"。
+            // "_Desc" を持たないキー (TheCollector_Recipes_DrakeClipper 等) は、最後の "_" の前に "_Title" を挟んだものを試す
+            var titleKeys = new List<string>();
+            var idx = baseKey.LastIndexOf("_Desc", StringComparison.Ordinal);
+            if (idx >= 0)
+            {
+                titleKeys.Add(baseKey[..idx] + "_Title" + baseKey[(idx + "_Desc".Length)..]);
+            }
+            else
+            {
+                var us = baseKey.LastIndexOf('_');
+                if (us > 0) titleKeys.Add(baseKey[..us] + "_Title" + baseKey[us..]);
+            }
+            if (titleKeys.Count == 0) continue;
+
+            foreach (var titleKey in titleKeys)
+            foreach (var k in new[] { titleKey, titleKey + ",P" })
+            {
+                if (!merged.TryGetValue(k, out var title) || string.IsNullOrWhiteSpace(title)) continue;
+                if (title.Contains(mark, StringComparison.Ordinal)) continue;
+                merged[k] = $"{title} {EmphasisOpen}{mark}{EmphasisClose}";
+                annotated++;
+            }
+        }
+        return annotated;
     }
 }

@@ -26,7 +26,10 @@ Write-Host "Build OK" -ForegroundColor Green
 # 1.5. Bundle DB files from WorkDir
 Write-Host "=== Bundle DB ===" -ForegroundColor Cyan
 $workDir = "D:\temp"
-foreach ($db in @("translations.db", "gamedata_cache.db", "equipment_cache.db")) {
+# 同梱してよい DB はこの 3 つだけ。
+# 所持船・My Hangar・所持コンポーネント・装備の設定は trade_cache.db に入っており、これは個人データなので絶対に同梱しない
+$allowedDbs = @("translations.db", "gamedata_cache.db", "equipment_cache.db")
+foreach ($db in $allowedDbs) {
     $src = Join-Path $workDir $db
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $PublishDir $db) -Force
@@ -35,6 +38,13 @@ foreach ($db in @("translations.db", "gamedata_cache.db", "equipment_cache.db"))
         Write-Host "  Skip: $db (not found in $workDir)" -ForegroundColor Yellow
     }
 }
+
+# 許可した DB 以外が publish に紛れていたら ZIP を作らずに止める (個人データの同梱防止)
+$strayDbs = @(Get-ChildItem $PublishDir -Filter *.db -File | Where-Object { $allowedDbs -notcontains $_.Name })
+if ($strayDbs.Count -gt 0) {
+    throw "同梱してはいけない DB が publish にあります: $($strayDbs.Name -join ', ')"
+}
+Write-Host "  Personal-data check: OK (bundled DBs = $($allowedDbs -join ', '))" -ForegroundColor Green
 
 # 2. Create ZIP
 Write-Host "=== Create ZIP ===" -ForegroundColor Cyan
