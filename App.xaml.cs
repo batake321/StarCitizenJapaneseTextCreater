@@ -16,7 +16,9 @@ public partial class App : Application
         if (e.Args.Length >= 2 && e.Args[0] == "--export-backup")
         {
             RunBackupExport(e.Args[1]);
-            Shutdown(0);
+            // Shutdown() は遅延実行なので、その前に App.xaml の StartupUri が MainWindow を作ってしまい、
+            // 終了コードが 1 になる (呼び出し側のスクリプトが失敗と誤判定する)。ここで確実に終わらせる
+            Environment.Exit(0);
             return;
         }
 
@@ -113,8 +115,11 @@ public partial class App : Application
         Directory.CreateDirectory(outputDir);
 
         var outPath = Path.Combine(outputDir, "sc_japanese_backup.zip");
-        DatabaseBackupService.ExportAsync(translationDb, indexDb, outPath,
-            s => Console.WriteLine($"  {s}")).Wait();
+        // ExportAsync は内部の await に ConfigureAwait(false) が付いていないので、
+        // WPF のディスパッチャ上で Wait() すると継続がブロック中のディスパッチャへ戻ろうとしてデッドロックする
+        // (zip は書けるがプロセスが終わらず居座る)。同期コンテキストの無いスレッドプール上で待つ
+        Task.Run(() => DatabaseBackupService.ExportAsync(translationDb, indexDb, outPath,
+            s => Console.WriteLine($"  {s}"))).GetAwaiter().GetResult();
 
         if (File.Exists(outPath))
             Console.WriteLine($"Backup: {new FileInfo(outPath).Length / 1024.0:N0} KB -> {outPath}");

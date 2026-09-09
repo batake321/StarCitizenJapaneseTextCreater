@@ -198,12 +198,15 @@ public static class IniMerger
         return merged;
     }
 
-    // 装備名の後ろに付ける分類の印。<EM4> はゲーム自身がミッション説明で使っている強調タグ
+    // ミッション名の印に付ける強調タグ。ゲーム自身がミッション説明で使っている
     // (translations の text_ui_tags_EM4_open で <EM4> と定義されている)。
-    // ゲーム側の UI スタイルがこのタグを定義していない画面では、タグがそのまま文字として出る可能性がある。
-    // その場合はこの 2 つを "" にすれば色なしの印だけになる
     private const string EmphasisOpen = "<EM4>";
     private const string EmphasisClose = "</EM4>";
+
+    // 装備名にはタグを付けない。機体ロードアウトマネージャーの装備名欄はこのタグを解釈せず、
+    // <EM4> という文字がそのまま画面に出てしまうため (実機で確認済み)
+    private const string ItemEmphasisOpen = "";
+    private const string ItemEmphasisClose = "";
 
     // 装備の 5 分類。これ以外の Class の値 (Ballistic / Energy / Melee など武器のダメージ種別) は対象外
     private static readonly Dictionary<string, string> ComponentClassKanji = new(StringComparer.OrdinalIgnoreCase)
@@ -256,7 +259,7 @@ public static class IniMerger
 
             var mark = BuildComponentMark(desc);
             if (mark == null) continue;
-            merged[key] = $"{name} {EmphasisOpen}{mark}{EmphasisClose}";
+            merged[key] = $"{name} {ItemEmphasisOpen}{mark}{ItemEmphasisClose}";
             annotated++;
         }
         return annotated;
