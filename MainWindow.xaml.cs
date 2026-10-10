@@ -2266,9 +2266,12 @@ public partial class MainWindow : Window
             var useSkills = selection?.UseSkills is bool webSkills ? webSkills && backend.SupportsSkills : backend.SupportsSkills;
             ChatService.LogExternal($"Web チャット: メイン={backend.Name}/{backend.Model}, 外部相談=[{string.Join(", ", consultBackends.Select(b => b.Name))}], 検証={verifyBackend?.Name ?? "なし"}, 選択の受信={(selection?.Backend != null ? "あり" : "なし (デスクトップの選択を使用)")}");
             string response;
+            string? webReference = null;
             try
             {
+                var webToolData = ChatService.BeginToolCapture();
                 response = await ChatService.SendChatAsync(backend, history, useSkills);
+                webReference = ChatService.FormatToolCapture(webToolData);
             }
             catch (Exception ex) when (consultBackends.Count > 0)
             {
@@ -2282,7 +2285,7 @@ public partial class MainWindow : Window
                 if (_webServer?.IsRunning == true)
                     _ = _webServer.BroadcastTypingAsync("📡 外部 AI に相談中...", "わからなかったのでもう少し調べます。");
 
-                var supplements = await ChatService.ConsultExternalAIsAsync(text, response, consultBackends);
+                var supplements = await ChatService.ConsultExternalAIsAsync(text, response, consultBackends, webReference);
                 var sb = new System.Text.StringBuilder(response);
                 foreach (var (name, sup) in supplements)
                 {
@@ -2305,7 +2308,7 @@ public partial class MainWindow : Window
                     if (_webServer?.IsRunning == true)
                         _ = _webServer.BroadcastTypingAsync("🔍 検証エージェントに確認中...", verifySpeak);
 
-                    var verifyResult = await ChatService.VerifyWithExternalAIAsync(text, response, verifyBackend);
+                    var verifyResult = await ChatService.VerifyWithExternalAIAsync(text, response, verifyBackend, webReference);
                     if (!string.IsNullOrWhiteSpace(verifyResult))
                     {
                         response += $"\n\n---\n🔍 **検証 ({verifyBackend.Name}/{verifyBackend.Model})**:\n{verifyResult}";
@@ -2660,7 +2663,9 @@ public partial class MainWindow : Window
             Log($"[Chat] AI 応答生成開始: backend={backend.Name}/{backend.Model}, skills={useSkills}");
             var swAi = System.Diagnostics.Stopwatch.StartNew();
 
+            var deskToolData = ChatService.BeginToolCapture();
             var response = await ChatService.SendChatAsync(backend, _chatHistory, useSkills);
+            var deskReference = ChatService.FormatToolCapture(deskToolData);
             var primaryResponse = response; // preserve for insufficient check
             Log($"[Chat] AI 応答完了: {swAi.ElapsedMilliseconds}ms, {response.Length} chars");
 
@@ -2672,7 +2677,7 @@ public partial class MainWindow : Window
                 if (_webServer?.IsRunning == true)
                     _ = _webServer.BroadcastTypingAsync("📡 外部 AI に相談中...", consultSpeak);
 
-                var supplements = await ChatService.ConsultExternalAIsAsync(text, response, consultBackends);
+                var supplements = await ChatService.ConsultExternalAIsAsync(text, response, consultBackends, deskReference);
                 var sb = new System.Text.StringBuilder(response);
                 foreach (var (name, sup) in supplements)
                 {
@@ -2697,7 +2702,7 @@ public partial class MainWindow : Window
                     if (_webServer?.IsRunning == true)
                         _ = _webServer.BroadcastTypingAsync("🔍 検証エージェントに確認中...", verifySpeak);
 
-                    var verifyResult = await ChatService.VerifyWithExternalAIAsync(text, response, verifyBackend);
+                    var verifyResult = await ChatService.VerifyWithExternalAIAsync(text, response, verifyBackend, deskReference);
                     if (!string.IsNullOrWhiteSpace(verifyResult))
                     {
                         response += $"\n\n---\n🔍 **検証 ({verifyBackend.Name}/{verifyBackend.Model})**:\n{verifyResult}";

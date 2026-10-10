@@ -444,6 +444,8 @@ public class ChatService
             var result = await resultTask.WaitAsync(cts.Token);
             Console.WriteLine($"[Chat] スキル完了: {toolName} ({sw.ElapsedMilliseconds}ms, {result.Length} chars)");
             Log($"SKILL RESULT ({toolName}): {result[..Math.Min(500, result.Length)]}{(result.Length > 500 ? "..." : "")}");
+            if (_toolCapture.Value is { } capture)
+                lock (capture) capture.Add($"[{toolName}]\n{result}");
             return result;
         }
         catch (OperationCanceledException)
@@ -497,6 +499,25 @@ public class ChatService
 
     // 実行中のチャットのバックエンド (SendChatAsync で設定。スキルの中でカタカナ → 英語の変換に使う)
     private static readonly AsyncLocal<BackendConfig?> _currentChatBackend = new();
+
+    // メインの AI がツールで取ってきたデータを集める入れ物。外部相談・検証の AI に「参考データ」として渡す
+    private static readonly AsyncLocal<List<string>?> _toolCapture = new();
+
+    // これ以降、この流れの中で実行したツールの結果を集める。SendChatAsync の前に呼び、返ったリストを外部相談・検証に渡す
+    public static List<string> BeginToolCapture()
+    {
+        var list = new List<string>();
+        _toolCapture.Value = list;
+        return list;
+    }
+
+    // 集めたツールの結果を、外部相談・検証に渡す文字列にする (長すぎる場合は先頭だけ)
+    public static string FormatToolCapture(List<string> captured)
+    {
+        string joined;
+        lock (captured) joined = string.Join("\n\n", captured);
+        return joined.Length > 8000 ? joined[..8000] + "\n…(以下省略)" : joined;
+    }
 
     private static readonly System.Text.RegularExpressions.Regex KatakanaRegex = new(@"[\u30A0-\u30FF]");
 
@@ -3019,7 +3040,7 @@ public class ChatService
     }
 
     public static async Task<List<(string name, string response)>> ConsultExternalAIsAsync(
-        string userQuestion, string primaryAnswer, List<BackendConfig> consultBackends)
+        string userQuestion, string primaryAnswer, List<BackendConfig> consultBackends, string? referenceData = null)
     {
         var consultSystem =
             "あなたは Star Citizen（スターシチズン）というオンラインゲームに詳しい補助 AI です。\n" +
@@ -3027,6 +3048,7 @@ public class ChatService
             "質問は Star Citizen に関するものである前提で、その回答に対して補足情報・修正・別の視点があれば簡潔に日本語で回答してください。\n" +
             "ゲーム内の用語・施設・ミッション・アイテム・船舶などについて、正確な情報を提供してください。\n" +
             "重要: 別の AI の回答は、最新のゲームデータベースから取得したデータに基づいています。あなたの知識は古い可能性があるので、データにある船・アイテム・場所を「存在しない」「未実装」「コンセプト段階」などと否定しないでください。Stanton, Pyro, Nyx の3星系が実装済みです。「Nyx は未実装」「Pyro は未実装」等の古い情報を回答しないでください。\n" +
+            "参考データが付いている場合、それがゲームのデータベースから取得した正しい情報です。参考データに無い数値・事実を新たに書かないでください。参考データと食い違う修正もしないでください。データに基づかない推測（設計思想・運用・着艦できる場所など）は書かないでください。\n" +
             "回答が既に十分であれば「補足はありません」と答えてください。\n" +
             "回答は簡潔に、箇条書きを使ってください。" +
             GetKnowledgeSnippet(userQuestion);
@@ -3034,7 +3056,9 @@ public class ChatService
         var consultHistory = new List<ChatMessage>
         {
             new() { Role = "user", Content =
-                $"【ユーザーの質問】\n{userQuestion}\n\n【別のAIの回答】\n{primaryAnswer}\n\n上記の回答に対して、補足・修正・追加情報があれば教えてください。" }
+                $"【ユーザーの質問】\n{userQuestion}\n\n【別のAIの回答】\n{primaryAnswer}\n\n" +
+                (string.IsNullOrWhiteSpace(referenceData) ? "" : $"【参考データ（ゲームのデータベースから取得）】\n{referenceData}\n\n") +
+                "上記の回答に対して、補足・修正・追加情報があれば教えてください。" }
         };
 
         var tasks = consultBackends.Select(async backend =>
@@ -3136,7 +3160,7 @@ public class ChatService
     /// Calls a single verification AI to cross-check the primary response.
     /// </summary>
     public static async Task<string> VerifyWithExternalAIAsync(
-        string userQuestion, string primaryAnswer, BackendConfig verifyBackend)
+        string userQuestion, string primaryAnswer, BackendConfig verifyBackend, string? referenceData = null)
     {
         var verifySystem =
             "あなたは Star Citizen（スターシチズン）というオンラインゲームに詳しい検証エージェントです。\n" +
@@ -3144,6 +3168,7 @@ public class ChatService
             "質問は Star Citizen に関するものである前提で、その回答の正確性を検証してください。\n" +
             "ゲーム内の用語・施設・ミッション・アイテム・船舶などについて正確な知識に基づいて判断してください。\n" +
             "重要: 別の AI の回答は、最新のゲームデータベースから取得したデータに基づいています。あなたの知識は古い可能性があるので、データにある船・アイテム・場所を「存在しない」「未実装」「コンセプト段階」などと否定しないでください。Stanton, Pyro, Nyx の3星系が実装済みです。「Nyx は未実装」「Pyro は未実装」等の古い情報を回答しないでください。\n" +
+            "参考データが付いている場合、それがゲームのデータベースから取得した正しい情報です。回答の数値・事実が参考データと一致しているかを確かめてください。参考データに無い内容が回答に含まれていれば「データでは確認できない」と指摘してください。あなた自身の知識で新しい数値を足さないでください。\n" +
             "正確であれば「検証OK: 回答は正確です」と答えてください。\n" +
             "誤りや不足があれば、正しい情報を簡潔に日本語で提供してください。" +
             GetKnowledgeSnippet(userQuestion);
@@ -3151,7 +3176,9 @@ public class ChatService
         var verifyHistory = new List<ChatMessage>
         {
             new() { Role = "user", Content =
-                $"【ユーザーの質問】\n{userQuestion}\n\n【検証対象の回答】\n{primaryAnswer}\n\n上記の回答を検証してください。正確ですか？誤りや不足があれば指摘してください。" }
+                $"【ユーザーの質問】\n{userQuestion}\n\n【検証対象の回答】\n{primaryAnswer}\n\n" +
+                (string.IsNullOrWhiteSpace(referenceData) ? "" : $"【参考データ（ゲームのデータベースから取得）】\n{referenceData}\n\n") +
+                "上記の回答を検証してください。正確ですか？誤りや不足があれば指摘してください。" }
         };
 
         try
