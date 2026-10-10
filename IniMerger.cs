@@ -158,6 +158,23 @@ public static class IniMerger
         if (ruinReplaced > 0)
             Console.WriteLine($"    Replaced 廃墟 -> 廃棄された: {ruinReplaced}");
 
+        // 原文の書き間違いで「<EM4>語句<EM4>」のように閉じタグの「/」が抜けているものは、2 つ目を </EM4> にして閉じる
+        // (開き記号そのものを定義する text_ui_tags_*_open のような、タグ 1 つだけの値は触らない)
+        int emClosed = 0;
+        foreach (var key in merged.Keys.ToList())
+        {
+            var val = merged[key];
+            if (!val.Contains("<EM", StringComparison.OrdinalIgnoreCase)) continue;
+            var fixedVal = CloseUnclosedEmphasis(val);
+            if (fixedVal != val)
+            {
+                merged[key] = fixedVal;
+                emClosed++;
+            }
+        }
+        if (emClosed > 0)
+            Console.WriteLine($"    Closed unclosed <EM> tags: {emClosed}");
+
         // 装備名に分類の印 (例: "Bracer <EM4>[軍1C]</EM4>")、設計図がもらえるミッション名に "[BP]" を付ける。
         // ",P" 複製・"@" 前置複製より前に行うこと (印を付けたあとの値を複製に載せるため)
         if (equipmentClassMarks)
@@ -214,6 +231,31 @@ public static class IniMerger
 
     // ミッション名の印に付ける強調タグ。ゲーム自身がミッション説明で使っている
     // (translations の text_ui_tags_EM4_open で <EM4> と定義されている)。
+    private static readonly System.Text.RegularExpressions.Regex EmphasisTagRegex =
+        new(@"</?EM[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    // 開きタグが続けて出てきたら、2 つ目を閉じタグとみなして </EM4> に置き換える。
+    // 置き換えて開きと閉じの数がそろう場合だけ採用し、そろわないものは元のまま返す
+    private static string CloseUnclosedEmphasis(string value)
+    {
+        var matches = EmphasisTagRegex.Matches(value);
+        if (matches.Count < 2) return value;
+        var sb = new System.Text.StringBuilder();
+        int pos = 0, opens = 0, closes = 0;
+        bool isOpen = false;
+        foreach (System.Text.RegularExpressions.Match m in matches)
+        {
+            sb.Append(value, pos, m.Index - pos);
+            var t = m.Value;
+            if (t.StartsWith("</")) { sb.Append(t); isOpen = false; closes++; }
+            else if (isOpen) { sb.Append("</EM4>"); isOpen = false; closes++; }
+            else { sb.Append(t); isOpen = true; opens++; }
+            pos = m.Index + m.Length;
+        }
+        sb.Append(value, pos, value.Length - pos);
+        return opens == closes ? sb.ToString() : value;
+    }
+
     private const string EmphasisOpen = "<EM4>";
     private const string EmphasisClose = "</EM4>";
 
