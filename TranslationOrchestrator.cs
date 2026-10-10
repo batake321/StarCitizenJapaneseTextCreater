@@ -173,6 +173,14 @@ public class TranslationOrchestrator
                 _keptEnglishKeys.Add(entry.Key);
             }
             else if (resultMap != null && resultMap.TryGetValue(entry.Key, out translated) && !string.IsNullOrWhiteSpace(translated)
+                && BrokenTranslationReason(entry.English, translated) is string brokenReason)
+            {
+                // 韓国語が混じった訳・強調タグが壊れた訳は保存せず失敗扱いにする (別の AI で訳し直される)
+                fail++;
+                _failedEntries.Add(entry);
+                Console.WriteLine($"[{Now}] [{backend.Name}] {brokenReason}ため保存しません: {entry.Key}");
+            }
+            else if (resultMap != null && resultMap.TryGetValue(entry.Key, out translated) && !string.IsNullOrWhiteSpace(translated)
                 && entry.English.Length > 200 && translated.Length < entry.English.Length * 0.2)
             {
                 // 英語に比べて極端に短い訳は途中で切れたものとみなし、保存せず失敗扱いにする (別の AI で訳し直される)
@@ -230,6 +238,33 @@ public class TranslationOrchestrator
             if (item != null) entries.Add(item);
         }
         return entries;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex EmphasisTagRegex = new(@"</?EM[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    private static readonly System.Text.RegularExpressions.Regex ValidEmphasisTagRegex = new(@"^</?EM[1-4]?>$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    private static readonly System.Text.RegularExpressions.Regex HangulRegex = new(@"[가-힣]");
+
+    // 保存してはいけない訳なら理由を返す。問題なければ null
+    // ・原文に無い韓国語の文字が混じっている (AI の誤り)
+    // ・強調タグの名前が壊れている (</EMCA> など)、または開きと閉じの数が合わない
+    //   (原文の閉じ忘れを AI が補ったものは、名前が正しく数が合っているので通す)
+    internal static string? BrokenTranslationReason(string english, string translated)
+    {
+        if (HangulRegex.IsMatch(translated) && !HangulRegex.IsMatch(english))
+            return "韓国語の文字が混じっている";
+        var tags = EmphasisTagRegex.Matches(translated).Select(m => m.Value).ToList();
+        if (tags.Count > 0)
+        {
+            if (tags.Any(t => !ValidEmphasisTagRegex.IsMatch(t)))
+                return "強調タグが壊れている";
+            var opens = tags.Count(t => !t.StartsWith("</"));
+            // 原文のタグがもともと閉じていない (CIG 側の誤り) ものは、訳がそれを写していても弾かない
+            var srcTags = EmphasisTagRegex.Matches(english).Select(m => m.Value).ToList();
+            var srcOpens = srcTags.Count(t => !t.StartsWith("</"));
+            if (opens != tags.Count - opens && srcOpens == srcTags.Count - srcOpens)
+                return "強調タグの開きと閉じの数が合わない";
+        }
+        return null;
     }
 
     public static void BuildUntranslatedList(
