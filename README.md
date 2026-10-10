@@ -25,9 +25,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v1.22.0-win-x64.zip (最新 v1.22.0 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.22.0/StarCitizenJapaneseTextCreater-v1.22.0-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v1.22.1-win-x64.zip (最新 v1.22.1 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.22.1/StarCitizenJapaneseTextCreater-v1.22.1-win-x64.zip)**
 >
-> **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/11 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.22.0/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/11 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.22.1/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの [日本語化] → [実行] を行ってください。**
 
@@ -46,7 +46,18 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v1.22.0 更新内容
+### 🚀 v1.22.1 更新内容
+
+- **チャット**:
+  - 新しい Claude (Opus 5.5 など) をメインにすると毎回 400 エラーになる不具合を修正
+  - 外部AI相談のチェックが効かない (メインの AI がエラーだと相談まで進まない) 不具合を修正
+  - 外部AI相談で返事の無い AI を 60 秒で打ち切るように (いつまでも答えが出ないことがあった)
+  - 外部AI相談・検証エージェントに、メインの AI が取得したゲームデータを渡し、データに無い数値や推測を書かないように
+  - Web チャットで受け取った選択 (メイン・外部相談・検証) をログに出すように
+
+<details>
+<summary>v1.22.0 更新内容</summary>
+
 
 - **Star Citizen 4.10.2 対応**: 4.10.2 対応の翻訳DB・ゲームデータを同梱
 - **翻訳タブを簡単に**: [日本語化] を押し、オプションを選んで [実行] するだけになりました。ほかのボタンは [新しいパッチを読み取る] と [AI翻訳]。ログは「ログ」タブに移りました
@@ -69,6 +80,8 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
 - **文字化け対策**: 「廃墟」の「墟」がゲーム内で文字化けするため「廃棄された」に置き換え
 - **ベクトル検索構築**: チェックを外した AI が使われる不具合を修正
 - **Claude の外部相談**: temperature のエラーで失敗する問題に対応
+
+</details>
 
 <details>
 <summary>v1.17.0 更新内容</summary>
