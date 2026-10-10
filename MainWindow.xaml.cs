@@ -2264,7 +2264,17 @@ public partial class MainWindow : Window
             // Web 画面の Skills チェックボックスが届いたら、デスクトップ版 (chkFetchScData && SupportsSkills) と同じく
             // チェックが付いていて、かつバックエンドがスキル対応のときだけスキルを使う。届かない (古い画面) ときは従来どおり
             var useSkills = selection?.UseSkills is bool webSkills ? webSkills && backend.SupportsSkills : backend.SupportsSkills;
-            var response = await ChatService.SendChatAsync(backend, history, useSkills);
+            ChatService.LogExternal($"Web チャット: メイン={backend.Name}/{backend.Model}, 外部相談=[{string.Join(", ", consultBackends.Select(b => b.Name))}], 検証={verifyBackend?.Name ?? "なし"}, 選択の受信={(selection?.Backend != null ? "あり" : "なし (デスクトップの選択を使用)")}");
+            string response;
+            try
+            {
+                response = await ChatService.SendChatAsync(backend, history, useSkills);
+            }
+            catch (Exception ex) when (consultBackends.Count > 0)
+            {
+                // メインの AI がエラーでも、チェックした外部 AI には相談する (エラーの内容は回答の先頭に残す)
+                response = $"エラー: {ex.Message}";
+            }
             var primaryResponse = response;
 
             if (consultBackends.Count > 0)

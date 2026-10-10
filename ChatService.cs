@@ -66,6 +66,9 @@ public class ChatService
     public static string? LogDirectory { get; set; }
     public static event Action<string>? OnLog;
 
+    // ほかのクラスからチャットのログ (chat_debug.log) に書くための入口
+    public static void LogExternal(string message) => Log(message);
+
     private static void Log(string message)
     {
         var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
@@ -3191,12 +3194,15 @@ public class ChatService
         int maxIter = useTools ? 5 : 1;
         // temperature を受け付けないモデルで 400 が返ったら、以降は temperature を付けない (再送は 1 回だけ)
         bool omitTemperature = false;
+        // ツールの強制指定 (tool_choice any) を受け付けないモデルでは auto で送る。400 で拒否されたら以降も auto にする
+        bool omitForcedTool = !ClaudeAcceptsForcedToolChoice(config.Model);
         for (int iteration = 0; iteration < maxIter; iteration++)
         {
             var body = new Dictionary<string, object>
             {
                 ["model"] = config.Model,
-                ["max_tokens"] = 4096,
+                // 新しい Claude は答える前に考える分もこの上限に含まれるので、小さいと答えが空になる
+                ["max_tokens"] = 16000,
                 ["system"] = system,
                 ["messages"] = conversationMessages,
             };
@@ -3205,7 +3211,7 @@ public class ChatService
             if (useTools && tools.Count > 0)
             {
                 body["tools"] = tools;
-                body["tool_choice"] = new Dictionary<string, object> { ["type"] = iteration == 0 ? "any" : "auto" };
+                body["tool_choice"] = new Dictionary<string, object> { ["type"] = iteration == 0 && !omitForcedTool ? "any" : "auto" };
             }
 
             var json = JsonSerializer.Serialize(body, JsonOpts);
@@ -3234,6 +3240,22 @@ public class ChatService
             if (!resp.IsSuccessStatusCode)
             {
                 var err = await resp.Content.ReadAsStringAsync();
+                if ((int)resp.StatusCode == 400 && !omitForcedTool && body.ContainsKey("tool_choice") && IsClaudeForcedToolChoiceRejected(err))
+                {
+                    // ツールの強制指定を受け付けないモデルだったので、auto にして 1 回だけ再送する
+                    omitForcedTool = true;
+                    body["tool_choice"] = new Dictionary<string, object> { ["type"] = "auto" };
+                    json = JsonSerializer.Serialize(body, JsonOpts);
+                    Log($"CLAUDE: ツールの強制指定を受け付けないモデルのため auto で再送します ({config.Model})");
+                    resp.Dispose();
+                    resp = await http.PostAsync("https://api.anthropic.com/v1/messages",
+                        new StringContent(json, Encoding.UTF8, "application/json"));
+                }
+            }
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                var err = await resp.Content.ReadAsStringAsync();
                 var code = (int)resp.StatusCode;
                 if (code == 429 || code == 402 || code == 529 ||
                     err.Contains("rate_limit", StringComparison.OrdinalIgnoreCase) ||
@@ -3253,6 +3275,10 @@ public class ChatService
             var stopReason = root.TryGetProperty("stop_reason", out var sr) ? sr.GetString() ?? "" : "";
             var contentArray = root.GetProperty("content");
             Log($"CLAUDE RESPONSE: stop_reason={stopReason}, content_blocks={contentArray.GetArrayLength()}");
+
+            // 安全上の理由で答えを断られた場合は、空の返事ではなくその旨を返す
+            if (stopReason == "refusal")
+                return "⚠️ Claude がこの質問への回答を断りました。質問の言い方を変えるか、別の AI を選んでください。";
 
             if (stopReason == "tool_use")
             {
@@ -3337,6 +3363,19 @@ public class ChatService
     // temperature を受け付けると分かっている Claude モデルか
     // (claude-*-4-6、claude-haiku-4-5、claude-sonnet-4-5、Claude 3 系)。
     // それ以外 (Opus 4.7 以降、Sonnet 5 以降、Haiku 5.5、Fable など) には temperature を付けない
+    // ツールの強制指定 (tool_choice の any / tool) を受け付けるか。
+    // Claude Opus 5.5 / Sonnet 5.5 / Fable 5.1 / Mythos 5.1 は受け付けず 400 になる (Anthropic のドキュメントより)
+    internal static bool ClaudeAcceptsForcedToolChoice(string model) =>
+        !System.Text.RegularExpressions.Regex.IsMatch(model ?? "",
+            @"^claude-(?:opus-5-5|sonnet-5-5|fable-5-1|mythos-5-1)(?:$|-)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    // 400 エラー本文が「tool_choice の any / tool は非対応」という内容か
+    // (例: "tool_choice: type \"tool\" and \"any\" are not supported for this model.")
+    internal static bool IsClaudeForcedToolChoiceRejected(string errorBody) =>
+        errorBody.Contains("tool_choice", StringComparison.OrdinalIgnoreCase)
+        && errorBody.Contains("not supported", StringComparison.OrdinalIgnoreCase);
+
     internal static bool ClaudeAcceptsTemperature(string model) =>
         System.Text.RegularExpressions.Regex.IsMatch(model ?? "",
             @"^claude-(?:(?:[a-z]+-4-6|haiku-4-5|sonnet-4-5)(?:$|-)|(?:[a-z]+-)?3-)",
