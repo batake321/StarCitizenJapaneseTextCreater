@@ -58,6 +58,6 @@ public class OllamaBackend : TranslationBackend
             text = "[]";
         }
 
-        return ParseResponse(text, Name);
+        return ParseResponse(text, Name, batch);
     }
 }

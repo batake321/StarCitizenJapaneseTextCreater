@@ -65,6 +65,6 @@ public class ClaudeBackend : TranslationBackend
         using var doc = JsonDocument.Parse(respJson);
         var text = doc.RootElement.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
 
-        return ParseResponse(text, Name);
+        return ParseResponse(text, Name, batch);
     }
 }

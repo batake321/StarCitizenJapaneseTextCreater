@@ -57,6 +57,6 @@ public class GeminiBackend : TranslationBackend
             .GetProperty("parts")[0]
             .GetProperty("text").GetString() ?? "";
 
-        return ParseResponse(text, Name);
+        return ParseResponse(text, Name, batch);
     }
 }

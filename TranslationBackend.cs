@@ -23,7 +23,7 @@ public abstract class TranslationBackend
         "4. UIラベル、説明文、ミッションテキストは自然な日本語に\n" +
         "5. %ls %s ~action(xxx) @xxx ~mission(xxx) <EM4> </EM4> 等のタグやプレースホルダーはそのまま保持\n" +
         "6. 空文字・数字のみ・記号のみはそのまま返す\n" +
-        "7. \\nは改行として保持\n\n" +
+        "7. 原文中の \\n は実際の改行にせず「\\」と「n」の2文字のまま出力する（1エントリは必ず1行に収める）\n\n" +
         "入力: 1行1エントリ、タブ区切り「キー<TAB>英語テキスト」\n" +
         "出力: 1行1エントリ、タブ区切り「キー<TAB>日本語テキスト」\n" +
         "入力と同じ行数・同じキーで、タブ区切りの翻訳結果のみ出力。説明や装飾は不要。";
@@ -230,25 +230,58 @@ public abstract class TranslationBackend
 
     public abstract Task<Dictionary<string, string>?> TranslateAsync(List<TranslationEntry> batch);
 
-    protected static Dictionary<string, string>? ParseResponse(string text, string backendName = "")
+    protected static Dictionary<string, string>? ParseResponse(string text, string backendName = "", List<TranslationEntry>? batch = null)
     {
         var result = new Dictionary<string, string>();
+        var expectedKeys = batch?.Select(e => e.Key).ToHashSet();
+        // 原文に「\n」がある (複数行の) 項目だけ、続きの行をつなげる。1 行の項目に余計な説明がくっつかないようにする
+        var multiLineKeys = batch?.Where(e => e.English.Contains("\\n")).Select(e => e.Key).ToHashSet();
 
         // Strip markdown code fences
         text = StripCodeFences(text).Trim();
 
+        // AI が訳文の途中で実際に改行してしまった場合、キーで始まらない行は直前の項目の続きとしてつなげる
+        // (つながないと最初の行だけが保存され、訳が途中で切れる)
+        string? lastKey = null;
         foreach (var line in text.Split('\n'))
         {
             var trimmed = line.TrimEnd('\r').Trim();
-            if (string.IsNullOrEmpty(trimmed)) continue;
 
             var tabIdx = trimmed.IndexOf('\t');
-            if (tabIdx <= 0) continue;
+            var candidateKey = tabIdx > 0 ? trimmed[..tabIdx].Trim() : null;
+            bool isNewEntry = candidateKey != null && (expectedKeys == null || expectedKeys.Contains(candidateKey));
 
-            var key = trimmed[..tabIdx].Trim();
-            var ja = trimmed[(tabIdx + 1)..].Trim();
-            if (key.Length > 0 && ja.Length > 0)
-                result[key] = ja;
+            if (isNewEntry)
+            {
+                var ja = trimmed[(tabIdx + 1)..].Trim();
+                if (ja.Length > 0)
+                {
+                    result[candidateKey!] = ja;
+                    lastKey = candidateKey;
+                }
+                else lastKey = null;
+            }
+            else if (lastKey != null && multiLineKeys != null && multiLineKeys.Contains(lastKey))
+            {
+                // 続きの行。直前が「\」で終わっていたら「\n」の途中で改行されたものとして扱う
+                var prev = result[lastKey];
+                if (prev.EndsWith('\\'))
+                    result[lastKey] = prev[..^1] + "\\n" + (trimmed.StartsWith('n') ? trimmed[1..] : trimmed);
+                else
+                    result[lastKey] = prev + "\\n" + trimmed;
+            }
+        }
+        // 続きの行をつないだ結果、末尾に付いた余分な「\n」を取り除く (原文が「\n」で終わっているものはそのまま)
+        if (batch != null)
+        {
+            var english = batch.GroupBy(e => e.Key).ToDictionary(g => g.Key, g => g.First().English);
+            foreach (var k in result.Keys.ToList())
+            {
+                if (english.TryGetValue(k, out var en) && en.EndsWith("\\n")) continue;
+                var v = result[k];
+                while (v.EndsWith("\\n")) v = v[..^2];
+                result[k] = v;
+            }
         }
 
         if (result.Count == 0)

@@ -52,6 +52,6 @@ public class OpenAiBackend : TranslationBackend
             .GetProperty("message")
             .GetProperty("content").GetString() ?? "";
 
-        return ParseResponse(text, Name);
+        return ParseResponse(text, Name, batch);
     }
 }

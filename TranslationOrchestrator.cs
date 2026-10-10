@@ -172,6 +172,14 @@ public class TranslationOrchestrator
                 sameAsEnglish++;
                 _keptEnglishKeys.Add(entry.Key);
             }
+            else if (resultMap != null && resultMap.TryGetValue(entry.Key, out translated) && !string.IsNullOrWhiteSpace(translated)
+                && entry.English.Length > 200 && translated.Length < entry.English.Length * 0.2)
+            {
+                // 英語に比べて極端に短い訳は途中で切れたものとみなし、保存せず失敗扱いにする (別の AI で訳し直される)
+                fail++;
+                _failedEntries.Add(entry);
+                Console.WriteLine($"[{Now}] [{backend.Name}] 訳が短すぎるため保存しません: {entry.Key} (英語 {entry.English.Length} 字 / 訳 {translated.Length} 字)");
+            }
             else if (resultMap != null && resultMap.TryGetValue(entry.Key, out translated) && !string.IsNullOrWhiteSpace(translated))
             {
                 ok++;
