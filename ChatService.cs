@@ -3260,7 +3260,8 @@ public class ChatService
             if (useTools && tools.Count > 0)
             {
                 body["tools"] = tools;
-                body["tool_choice"] = new Dictionary<string, object> { ["type"] = iteration == 0 && !omitForcedTool ? "any" : "auto" };
+                // 最後の 1 回はツールを使わせず、ここまで集めたデータで答えさせる (上限で打ち切って答えが空にならないように)
+                body["tool_choice"] = new Dictionary<string, object> { ["type"] = iteration == maxIter - 1 ? "none" : iteration == 0 && !omitForcedTool ? "any" : "auto" };
             }
 
             var json = JsonSerializer.Serialize(body, JsonOpts);
@@ -3469,7 +3470,7 @@ public class ChatService
                 body["tools"] = new[] { new Dictionary<string, object> { ["function_declarations"] = functionDeclarations } };
                 body["toolConfig"] = new Dictionary<string, object>
                 {
-                    ["functionCallingConfig"] = new Dictionary<string, object> { ["mode"] = iteration == 0 ? "ANY" : "AUTO" }
+                    ["functionCallingConfig"] = new Dictionary<string, object> { ["mode"] = iteration == maxIter - 1 ? "NONE" : iteration == 0 ? "ANY" : "AUTO" }
                 };
             }
 
@@ -3602,7 +3603,7 @@ public class ChatService
             if (useTools && openAiTools.Count > 0)
             {
                 body["tools"] = openAiTools;
-                body["tool_choice"] = iteration == 0 ? "required" : "auto";
+                body["tool_choice"] = iteration == maxIter - 1 ? "none" : iteration == 0 ? "required" : "auto";
             }
 
             var json = JsonSerializer.Serialize(body, JsonOpts);
@@ -3702,7 +3703,8 @@ public class ChatService
                 ["stream"] = false,
                 ["options"] = new Dictionary<string, object> { ["temperature"] = 0.7, ["num_predict"] = 4096 },
             };
-            if (useTools && ollamaTools.Count > 0)
+            // 最後の 1 回はツールを渡さず、ここまで集めたデータで答えさせる
+            if (useTools && ollamaTools.Count > 0 && iteration < maxIter - 1)
                 body["tools"] = ollamaTools;
 
             var json = JsonSerializer.Serialize(body, JsonOpts);
