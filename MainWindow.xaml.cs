@@ -1988,7 +1988,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        var backends = App.Config.Translation.Backends.Where(b => IsChatUsable(b)).ToList();
+        // チェックを外したバックエンドは使わない
+        var backends = App.Config.Translation.Backends.Where(b => b.Enabled && IsChatUsable(b)).ToList();
         if (backends.Count == 0)
         {
             MessageBox.Show("AI バックエンドが設定されていません。", "エラー", MessageBoxButton.OK, MessageBoxImage.Warning);
