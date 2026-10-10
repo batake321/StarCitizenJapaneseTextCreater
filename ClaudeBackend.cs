@@ -63,7 +63,10 @@ public class ClaudeBackend : TranslationBackend
 
         var respJson = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(respJson);
-        var text = doc.RootElement.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
+        // 新しい Claude (Opus 5.5 など) は先頭に考えた内容 (thinking) のブロックが付くので、text のブロックだけをつなげて使う
+        var text = string.Concat(doc.RootElement.GetProperty("content").EnumerateArray()
+            .Where(b => b.TryGetProperty("type", out var t) && t.GetString() == "text")
+            .Select(b => b.GetProperty("text").GetString() ?? ""));
 
         return ParseResponse(text, Name, batch);
     }

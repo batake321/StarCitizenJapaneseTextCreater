@@ -3262,7 +3262,12 @@ public class ChatService
                 foreach (var block in contentArray.EnumerateArray())
                 {
                     var blockType = block.GetProperty("type").GetString() ?? "";
-                    if (blockType == "text")
+                    if (blockType is "thinking" or "redacted_thinking")
+                    {
+                        // 考えた内容のブロックは、次の要求にそのまま (変更せず) 返す。捨てると新しい Claude では拒否されることがある
+                        assistantContentBlocks.Add(JsonSerializer.Deserialize<object>(block.GetRawText())!);
+                    }
+                    else if (blockType == "text")
                     {
                         assistantContentBlocks.Add(new Dictionary<string, object>
                         {
