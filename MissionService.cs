@@ -1268,6 +1268,9 @@ public class MissionService : IDisposable
                 return !string.IsNullOrEmpty(TitleJa) && !IsLocKeyStatic(TitleJa) ? $"({en})" : en;
             }
         }
+        // ミッションタブの一覧に出す名前 (強調タグを消し、~mission(…) を〔〕にしたもの)。検索や分類には使わない
+        public string ListNameJa => MissionDisplayText.ToPlain(DisplayNameJa);
+        public string ListNameEn => MissionDisplayText.ToPlain(DisplayNameEn);
         public string Title { get; set; } = "";
         public string TitleHud { get; set; } = "";
         public string MissionType { get; set; } = "";
@@ -1357,5 +1360,138 @@ public class MissionService : IDisposable
         public string GroupName { get; set; } = "";
         public int ConcurrentAmount { get; set; }
         public double Weight { get; set; }
+    }
+}
+
+// ミッションタブの表示用に、ゲームの書式タグを読める形にする (DB の値・ini・チャット検索の出力には使わない)。
+//  - <EM数字> / <EM> とその閉じタグ (</EM4> のほか、翻訳に混じる </Em4> </EMCA> </EMdo> のような崩れた閉じタグも閉じとみなす) はタグだけ消す。
+//    <EM4> の中はゲームのミッション画面で強調表示される部分なので、Parse では強調 (emphasis = true) として返す。
+//    閉じタグが無いまま行が終わったら、その行の終わりで強調を終える。
+//  - ~mission(A|B) / ~mission(A) は、何が入るかを〔〕で示す (MissionDisplayText.ReplaceMissionTokens)。
+public static class MissionDisplayText
+{
+    private static readonly System.Text.RegularExpressions.Regex TagRegex =
+        new(@"<(/?)EM([A-Za-z0-9]*)>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    private static readonly System.Text.RegularExpressions.Regex MissionTokenRegex =
+        new(@"~mission\(([^)]*)\)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    // A (先頭部分。末尾の数字は外して引き、訳の後ろに付け直す。大文字小文字は区別しない) の訳。
+    // Location / Ship / Contractor / Destination / Item は利用者の指定。ほかは翻訳データの英語・日本語訳で使われ方を確認したもの
+    private static readonly Dictionary<string, string> PrimaryNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Location"] = "場所",
+        ["Ship"] = "船",
+        ["Contractor"] = "依頼主",
+        ["Destination"] = "目的地",
+        ["Item"] = "品目",
+        ["TargetName"] = "対象者名",      // "NAME: ~mission(TargetName)" (公式訳 "氏名:")、行方不明者の名前にも使われる
+        ["System"] = "星系",              // "SYSTEM: ~mission(System)" (公式訳 "システム:")
+        ["ApprovalCode"] = "承認コード",  // "APPROVAL CODE = ~mission(ApprovalCode)" (公式訳 "承認コード =")
+        ["Pickup"] = "集荷場所",          // "Package #… from ~mission(Pickup1|Address)" (公式訳 "…より")
+        ["Dropoff"] = "配達先",           // "Package #… to ~mission(Dropoff1|Address)" (公式訳 "… へ")
+        ["Creature"] = "生物",            // "an uptick in the ~mission(Creature) population"
+        ["ScripAmount"] = "スクリップ額", // "a bonus of ~mission(ScripAmount) MG Scrip"
+        ["Title"] = "タイトル",           // タイトルの文字列が "~mission(Title)" だけのもの
+    };
+
+    // B 以降の訳。Address は場所の書き方の指定なので表示しない (null)。ここに無いものが 1 つでもあれば全体を英語のまま〔〕に入れる
+    private static readonly Dictionary<string, string?> ModifierNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Address"] = null,
+        ["SignOff"] = "署名",
+        ["SerialNumber"] = "シリアル番号",
+        ["First"] = "名",                 // "locate ~mission(TargetName|First)"
+        ["Last"] = "姓",                  // "the status of ~mission(TargetName|Last)"
+    };
+
+    // ~mission(…) を〔〕の表示に置き換える
+    public static string ReplaceMissionTokens(string text)
+    {
+        if (string.IsNullOrEmpty(text) || text.IndexOf("~mission(", StringComparison.OrdinalIgnoreCase) < 0) return text;
+        return MissionTokenRegex.Replace(text, m => "〔" + DescribeToken(m.Groups[1].Value) + "〕");
+    }
+
+    // "Location|Address" → "場所"、"Contractor|SignOff" → "依頼主の署名"、"Item1|SerialNumber" → "品目1のシリアル番号"。
+    // 分からない部分があれば、Address を外した元の英語のまま ("Contractor|Timed" → "Contractor|Timed"、"Danger" → "Danger")
+    public static string DescribeToken(string inner)
+    {
+        var parts = inner.Split('|').Select(x => x.Trim()).Where(x => x.Length > 0).ToList();
+        if (parts.Count == 0) return inner;
+        var kept = new List<string> { parts[0] };
+        var modifiers = new List<string>();
+        bool known = true;
+        foreach (var part in parts.Skip(1))
+        {
+            if (ModifierNames.TryGetValue(part, out var ja))
+            {
+                if (ja == null) continue;
+                modifiers.Add(ja);
+            }
+            else known = false;
+            kept.Add(part);
+        }
+
+        var head = parts[0];
+        var digits = new string(head.Reverse().TakeWhile(char.IsDigit).Reverse().ToArray());
+        var baseName = head[..(head.Length - digits.Length)];
+        if (!known || !PrimaryNames.TryGetValue(baseName, out var primary))
+            return string.Join("|", kept);
+        // 対象者名の名・姓は "対象者の名" / "対象者の姓" と書く
+        if (baseName.Equals("TargetName", StringComparison.OrdinalIgnoreCase) && modifiers.Count == 1 && (modifiers[0] == "名" || modifiers[0] == "姓"))
+            return "対象者" + digits + "の" + modifiers[0];
+        var result = primary + digits;
+        foreach (var mod in modifiers) result += "の" + mod;
+        return result;
+    }
+
+    // 一覧の名前用: 強調タグを消し、~mission(…) を〔〕にした文字列
+    public static string ToPlain(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        return string.Concat(Parse(text).Select(x => x.text));
+    }
+
+    // 詳細表示用: (文字列, 強調するか) の並びにする。強調は <EM4> の中だけ (ほかの EM の色は未確認なのでタグを消すだけ)
+    public static List<(string text, bool emphasis)> Parse(string text)
+    {
+        var result = new List<(string text, bool emphasis)>();
+        if (string.IsNullOrEmpty(text)) return result;
+
+        bool emphasis = false;
+        int pos = 0;
+        void Emit(string chunk)
+        {
+            if (chunk.Length == 0) return;
+            // 閉じタグが無いまま改行に来たら、そこで強調を終える
+            while (emphasis && chunk.IndexOf('\n') is var nl && nl >= 0)
+            {
+                Add(chunk[..nl], true);
+                emphasis = false;
+                chunk = chunk[nl..];
+            }
+            Add(chunk, emphasis);
+        }
+        void Add(string chunk, bool emph)
+        {
+            chunk = ReplaceMissionTokens(chunk);
+            if (chunk.Length == 0) return;
+            if (result.Count > 0 && result[^1].emphasis == emph)
+                result[^1] = (result[^1].text + chunk, emph);
+            else
+                result.Add((chunk, emph));
+        }
+
+        foreach (System.Text.RegularExpressions.Match m in TagRegex.Matches(text))
+        {
+            var isClose = m.Groups[1].Value == "/";
+            var suffix = m.Groups[2].Value;
+            // 開きタグは <EM> と <EM数字> だけ。閉じタグは </EM…> をすべて閉じとみなす
+            if (!isClose && suffix.Length > 0 && !suffix.All(char.IsDigit)) continue;
+            Emit(text[pos..m.Index]);
+            pos = m.Index + m.Length;
+            emphasis = !isClose && suffix == "4";
+        }
+        Emit(text[pos..]);
+        return result;
     }
 }

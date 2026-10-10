@@ -1809,7 +1809,7 @@ public partial class MainWindow : Window
                     }
                     if (transHits.Count > 20)
                         sb.AppendLine($"\n  ...他 {transHits.Count - 20} 件");
-                    txtMissionDetail.Text = sb.ToString();
+                    SetMissionDetail(sb.ToString());
                     txtMissionSearchStatus.Text = $"0 件 (翻訳DB: {transHits.Count} 件)";
                 }
                 else
@@ -1824,6 +1824,27 @@ public partial class MainWindow : Window
         }
     }
 
+    // ミッションの詳細表示に書式タグを反映して出す。<EM4> の中はゲームのミッション画面と同じく強調色 (青系) にし、
+    // ~mission(…) は〔〕の表示にする (MissionDisplayText)。強調色はゲームの正確な色値ではなく、暗い背景で読める青
+    private static readonly System.Windows.Media.Brush MissionEmphasisBrush = CreateFrozenBrush(0x56, 0x9C, 0xD6);
+    private static System.Windows.Media.Brush CreateFrozenBrush(byte r, byte g, byte b)
+    {
+        var brush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(r, g, b));
+        brush.Freeze();
+        return brush;
+    }
+
+    private void SetMissionDetail(string text)
+    {
+        txtMissionDetail.Inlines.Clear();
+        foreach (var (chunk, emphasis) in MissionDisplayText.Parse(text))
+        {
+            var run = new System.Windows.Documents.Run(chunk);
+            if (emphasis) run.Foreground = MissionEmphasisBrush;
+            txtMissionDetail.Inlines.Add(run);
+        }
+    }
+
     private void Mission_Selected(object sender, SelectionChangedEventArgs e)
     {
         if (_missionService == null) return;
@@ -1831,7 +1852,7 @@ public partial class MainWindow : Window
 
         try
         {
-            txtMissionDetail.Text = _missionService.FormatDetail(mission);
+            SetMissionDetail(_missionService.FormatDetail(mission));
         }
         catch (Exception ex)
         {

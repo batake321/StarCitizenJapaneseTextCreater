@@ -1674,10 +1674,10 @@
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
                                             <StackPanel Margin="2,2">
-                                                <TextBlock Text="{Binding DisplayNameJa}" FontWeight="Bold" FontSize="12.5"
+                                                <TextBlock Text="{Binding ListNameJa}" FontWeight="Bold" FontSize="12.5"
                                                            Foreground="Black" TextTrimming="CharacterEllipsis"
-                                                           Visibility="{Binding DisplayNameJa, Converter={x:Static local:StringToVisConverter.Instance}}"/>
-                                                <TextBlock Text="{Binding DisplayNameEn}" Foreground="#333" FontSize="11"
+                                                           Visibility="{Binding ListNameJa, Converter={x:Static local:StringToVisConverter.Instance}}"/>
+                                                <TextBlock Text="{Binding ListNameEn}" Foreground="#333" FontSize="11"
                                                            TextTrimming="CharacterEllipsis"/>
                                             </StackPanel>
                                         </DataTemplate>
