@@ -62,7 +62,7 @@
       <div class="pills">
         <span class="pill">Windows 10 / 11</span>
         <span class="pill">.NET 8.0</span>
-        <span class="pill">翻訳済み DB 同梱 (Patch 4.10 対応)</span>
+        <span class="pill">翻訳済み DB 同梱 (Patch 4.10.2 対応)</span>
         <span class="pill">AI 翻訳は任意</span>
       </div>
     </div>
@@ -88,10 +88,9 @@
     </div>
 
     <div class="note tip">
-      <p><strong>翻訳はもう終わっています。AI に翻訳させる必要はありません。</strong></p>
-      <p>訳し終わった翻訳データベースがアプリに同梱されています（現在の同梱版は <b>Patch 4.10 対応</b>）。
-      4.10 を遊んでいるなら、<b>API キーも AI の設定も要らず</b>、<span class="btn">3. 反映</span> を押すだけで日本語になります。</p>
-      <p><span class="btn">2. 翻訳</span>（AI 翻訳）を使うのは、次の 2 つの場合だけです。</p>
+      <p><strong>翻訳だけ使うなら、簡単に使えるようにしました。</strong></p>
+      <p>翻訳済みのデータベースが初めから入れてあるので、<span class="btn">日本語化</span> ボタンを押して、ゲーム内で表示される名前に便利なオプションを付けるか選んで <span class="btn">実行</span> ボタンを押すだけです。API キーも AI の設定も要りません（同梱版は <b>Patch 4.10.2 対応</b>）。</p>
+      <p><span class="btn">AI翻訳</span> を使うのは、次の 2 つの場合だけです。</p>
       <ul>
         <li><b>同梱の翻訳データがまだ対応していない新しいパッチ</b>が来て、増えた分を自分で訳したいとき</li>
         <li><b>訳の言い回しを自分好みに変えたい</b>とき</li>
@@ -151,13 +150,13 @@
     </ol>
 
     <div class="note warn">
-      <p><strong>アプリを新しいバージョンに入れ替えたときは、翻訳タブの <span class="btn">3. 反映</span> を一度実行してください。</strong>同梱の翻訳データベースがローカルのものより新しい場合、起動時に自動で差分マージされますが（未翻訳のレコードだけを更新し、手動で直した翻訳は保護されます）、ゲーム側のファイルに書き出すのは <span class="btn">3. 反映</span> の役目です。</p>
+      <p><strong>アプリを新しいバージョンに入れ替えたときは、翻訳タブの <span class="btn">日本語化</span> → <span class="btn">実行</span> を一度行ってください。</strong>同梱の翻訳データベースがローカルのものより新しい場合、起動時に自動で差分マージされますが（未翻訳のレコードだけを更新し、手動で直した翻訳は保護されます）、ゲーム側のファイルに書き出すのは <span class="btn">日本語化</span> の役目です。</p>
     </div>
 
     <!-- ============================================================ -->
     <h2 id="screen"><span class="num">3</span>画面の見かた</h2>
 
-    <p>ウィンドウの上には常に <b>GamePath バー</b>（ゲームのインストール先・チャンネル切替・<span class="btn">AI 設定</span>）があり、その下に 10 個のタブが並びます。<span class="tab">船舶管理</span> だけは、中にさらに 3 つのタブを持っています。</p>
+    <p>ウィンドウの上には常に <b>GamePath バー</b>（ゲームのインストール先・チャンネル切替・<span class="btn">AI 設定</span>）があり、その下に 11 個のタブが並びます。<span class="tab">船舶管理</span> だけは、中にさらに 3 つのタブを持っています。</p>
 
     <figure class="scroll-x">
       <img class="diagram" src="img/tabs-map.svg" alt="アプリのタブ構成図。上部の GamePath バーの下に、翻訳・翻訳エディタ・用語集・プロファイル・コモディティ・船舶管理・価格キャプチャ・ミッション・チャット・設定の 10 タブが並び、船舶管理の中に所持船・アップグレード管理・装備の 3 タブがある。" width="900" height="470">
@@ -167,7 +166,7 @@
     <table>
       <thead><tr><th>タブ</th><th>何をするところか</th></tr></thead>
       <tbody>
-        <tr><td><span class="tab">翻訳</span></td><td>抽出・翻訳・反映。日本語化の本体（→ <a href="#translate">5</a>）</td></tr>
+        <tr><td><span class="tab">翻訳</span></td><td>ゲームを日本語にする。日本語化の本体（→ <a href="#translate">5</a>）</td></tr>
         <tr><td><span class="tab">翻訳エディタ</span></td><td>訳文の検索・手直し・CSV 入出力（→ <a href="#editor">7</a>）</td></tr>
         <tr><td><span class="tab">用語集</span></td><td>固有名詞などの訳し方を固定する（→ <a href="#glossary">8</a>）</td></tr>
         <tr><td><span class="tab">プロファイル</span></td><td>キャラクターデザインとキーバインドの保存・復元（→ <a href="#profile">9</a>）</td></tr>
@@ -177,6 +176,7 @@
         <tr><td><span class="tab">ミッション</span></td><td>ミッションの一覧と詳細を調べる（→ <a href="#mission">14</a>）</td></tr>
         <tr><td><span class="tab">チャット</span></td><td>AI に日本語で質問する（→ <a href="#chat">15</a>）</td></tr>
         <tr><td><span class="tab">設定</span></td><td>保存先・サーバー・データベース管理（→ <a href="#settings">18</a>）</td></tr>
+        <tr><td><span class="tab">ログ</span></td><td>翻訳タブの処理の記録（→ <a href="#translate">5</a>）</td></tr>
       </tbody>
     </table>
 
@@ -193,33 +193,42 @@
     <ol class="steps">
       <li>アプリを起動します。上部の <b>GamePath</b> に Star Citizen のインストール先が自動で入っていることを確認します。空欄なら <span class="btn">参照...</span> から選んでください（RSI Launcher のログから自動検出を試みます）。</li>
       <li>右隣のコンボボックスで <b>LIVE / PTU など、日本語化したいチャンネル</b>を選びます。</li>
-      <li><span class="tab">翻訳</span> タブで <span class="btn">3. 反映</span> を押します。<b>これだけです。</b>ゲームからのテキスト取り出しも中で自動的に行われるので、<span class="btn">1. 抽出</span> も <span class="btn">2. 翻訳</span> も押す必要はありません。</li>
+      <li><span class="tab">翻訳</span> タブで <span class="btn">日本語化</span> を押し、オプションを選んで <span class="btn">実行</span> を押します。<b>これだけです。</b></li>
       <li>Star Citizen を起動して、日本語になっていれば完了です。</li>
     </ol>
 
-    <p><b>ここまでで AI の設定は一切要りません。</b>同梱の翻訳データ（Patch 4.10 対応）がそのまま当たります。新しいパッチで増えた分を自分で訳したい、あるいは訳を書き換えたいという段になって初めて、<a href="#ai">AI 設定</a> と <span class="btn">2. 翻訳</span> の出番です。</p>
+    <p><b>ここまでで AI の設定は一切要りません。</b>同梱の翻訳データ（Patch 4.10.2 対応）がそのまま当たります。新しいパッチで増えた分を自分で訳したい、あるいは訳を書き換えたいという段になって初めて、<a href="#ai">AI 設定</a> と <span class="btn">AI翻訳</span> の出番です。</p>
 
     <!-- ============================================================ -->
-    <h2 id="translate"><span class="num">5</span>翻訳タブ — 抽出・翻訳・反映</h2>
+    <h2 id="translate"><span class="num">5</span>翻訳タブ</h2>
 
-    <p>ボタンは 3 つ並んでいますが、<b>ふだん押すのは <span class="btn">3. 反映</span> だけ</b>です。まず「どれを押せばいいのか」から書きます。</p>
+    <p><b>ふだん押すのは <span class="btn">日本語化</span> だけです。</b></p>
+
+    <ol class="steps">
+      <li><span class="btn">日本語化</span> を押します。</li>
+      <li>「ゲーム内で名前に以下を付けたい時は 下のオプションにチェックを付けてください」と出るので、付けたいものにチェックを入れます。</li>
+      <li><span class="btn">実行</span> を押すと、ゲームに書き出します。</li>
+    </ol>
+
+    <table>
+      <thead><tr><th>オプション</th><th>ゲーム内の表示例</th></tr></thead>
+      <tbody>
+        <tr><td>装備名の後ろに分類を付ける</td><td>Bracer [軍1C]</td></tr>
+        <tr><td>ミッション名に派閥と貢献度を付ける</td><td>トラッカーライセンス認定資格 [バウンティーハンターズ・ギルド +50]</td></tr>
+        <tr><td>ミッション名に設計図を付ける</td><td>Orison救援：小規模製造依頼 [BP]</td></tr>
+      </tbody>
+    </table>
+
+    <p>最初は 1 つ目と 3 つ目にチェックが入っています。選んだ内容は次回も残ります。チェックを外して <span class="btn">実行</span> すれば、その表示は消えます。</p>
 
     <table>
       <thead><tr><th>こんなとき</th><th>押すボタン</th></tr></thead>
       <tbody>
-        <tr><td>初めて日本語にする</td><td><span class="btn">3. 反映</span> だけ</td></tr>
-        <tr><td>アプリを新しいバージョンに入れ替えた</td><td><span class="btn">3. 反映</span> だけ</td></tr>
-        <tr><td>ゲームにパッチが来て英語に戻った</td><td><span class="btn">1. 抽出</span> → <span class="btn">3. 反映</span></td></tr>
-        <tr><td>新しいパッチで増えた未翻訳を自分で訳したい<br>訳の言い回しを変えたい</td><td><span class="btn">1. 抽出</span> → <span class="btn">2. 翻訳</span> → <span class="btn">3. 反映</span></td></tr>
+        <tr><td>初めて日本語にする<br>アプリを新しいバージョンに入れ替えた</td><td><span class="btn">日本語化</span> だけ</td></tr>
+        <tr><td>ゲームにパッチが来て英語に戻った</td><td><span class="btn">新しいパッチを読み取る</span> → <span class="btn">日本語化</span></td></tr>
+        <tr><td>新しいパッチで増えた未翻訳を自分で訳したい<br>訳の言い回しを変えたい</td><td><span class="btn">新しいパッチを読み取る</span> → <span class="btn">AI翻訳</span> → <span class="btn">日本語化</span></td></tr>
       </tbody>
     </table>
-
-    <div class="note tip">
-      <p><strong><span class="btn">3. 反映</span> は、必要なら抽出も中でやってくれます。</strong>ゲームから取り出したファイルがまだ無ければ、反映の処理の中で自動的に取り出してから書き出します。だから初回は <span class="btn">3. 反映</span> だけで済みます。</p>
-      <p>ゲームにパッチが当たったあとだけは、すでに取り出したファイルが残っているために自動では取り直しません。このときは <span class="btn">1. 抽出</span> を先に押して、新しいテキストを取り込んでください。</p>
-    </div>
-
-    <p>それぞれが何をしているかを図にすると、こうなります。</p>
 
     <figure class="scroll-x">
       <img class="diagram" src="img/flow-translate.svg" alt="翻訳の流れ図。Data.p4k から 1. 抽出 で翻訳データベースへ取り込み、2. 翻訳 で AI バックエンドに訳させ、3. 反映 でゲームフォルダの global.ini に書き出す。" width="900" height="360">
@@ -235,31 +244,29 @@
       <thead><tr><th>ボタン</th><th>やっていること</th></tr></thead>
       <tbody>
         <tr>
-          <td><span class="btn">1. 抽出</span></td>
-          <td>ゲームの <code>Data.p4k</code>（ZIP64 + ZStd 圧縮）から英語と日本語の <code>global.ini</code> を<b>取り直して</b>翻訳データベースに登録します。パッチでゲーム側のテキストが変わったときに押します。</td>
+          <td><span class="btn">日本語化</span></td>
+          <td>翻訳データベースの内容を <code>global.ini</code> にまとめ、ゲームフォルダの <code>data/Localization/japanese_(japan)/global.ini</code> にコピーします。<code>user.cfg</code> の <code>g_language</code> も書き換えます。ゲームから読み取ったファイルがまだ無ければ、先に読み取ります。</td>
         </tr>
         <tr>
-          <td><span class="btn">2. 翻訳</span></td>
-          <td><b>ふだんは押しません。</b>まだ訳されていない行を、<a href="#ai">AI 設定</a>でチェックを入れたバックエンドに翻訳させます（複数にチェックを入れると同時に走ります）。同梱の翻訳データが対応しているパッチなら、そもそも未翻訳の行がほとんど無いので押す必要がありません。</td>
+          <td><span class="btn">新しいパッチを読み取る</span></td>
+          <td>ゲームの <code>Data.p4k</code> から英語と日本語の <code>global.ini</code> を読み取り直して、翻訳データベースに登録します。パッチのあとに押します。</td>
         </tr>
         <tr>
-          <td><span class="btn">3. 反映</span></td>
-          <td><b>ふだん押すのはこれです。</b>翻訳データベースの内容を <code>global.ini</code> にまとめ、ゲームフォルダの <code>data/Localization/japanese_(japan)/global.ini</code> にコピーします。あわせて <code>user.cfg</code> の <code>g_language</code> も書き換えます。取り出し済みのファイルが無ければ、この中で抽出も行われます。</td>
+          <td><span class="btn">AI翻訳</span></td>
+          <td><b>ふだんは押しません。</b>まだ訳されていない行を、<a href="#ai">AI 設定</a>でチェックを入れた AI に翻訳させます。</td>
         </tr>
       </tbody>
     </table>
 
-    <p>処理中は <span class="btn">中止</span> ボタンが現れ、下のログ欄に進行状況が流れます。ログは <span class="btn">ログ保存</span> でファイルに残せます。</p>
+    <p>処理中は <span class="btn">中止</span> ボタンが現れ、下の進行バーと 1 行の表示で進み具合が分かります。詳しい記録は <span class="tab">ログ</span> タブ（<span class="tab">設定</span> タブの右）に出ます。<span class="btn">保存</span> でファイルに残し、<span class="btn">クリア</span> で消せます。</p>
 
     <div class="note">
       <p><b>書き出し先の言語フォルダ名</b>は <span class="tab">設定</span> タブの <b>Output Language</b> で変えられます。既定は <code>japanese_(japan)</code> です。</p>
     </div>
 
-    <h3>装備名の印 — 分類・サイズ・グレードが名前で分かる</h3>
+    <h3>装備名の分類 — 分類・サイズ・グレードが名前で分かる</h3>
 
-    <p><span class="btn">3. 反映</span> を実行すると、ゲーム内の装備名の後ろに <b>[軍1C]</b> のような印が付きます。買うときも積むときも、名前を見ただけで分類とサイズとグレードが分かります。</p>
-
-    <p><b>この印は切れます。</b><span class="btn">3. 反映</span> の並びにある <b>ゲーム内に付ける印:</b> の <b>装備名の分類 [軍1C]</b> のチェックを外して、もう一度 <span class="btn">3. 反映</span> を実行すると、印の無い状態に戻ります。</p>
+    <p><b>装備名の後ろに分類を付ける</b> にチェックを入れて <span class="btn">実行</span> すると、ゲーム内の装備名の後ろに <b>[軍1C]</b> のような印が付きます。名前を見ただけで分類とサイズとグレードが分かります。</p>
 
     <table>
       <thead><tr><th>印</th><th>ゲーム内の表記</th></tr></thead>
@@ -276,7 +283,7 @@
 
     <p>印が付くのは、分類を持つ装備 <b>472 品目</b>です。パワープラント、シールド、クーラー、量子ドライブ、レーダーなどが対象で、分類を持たない船舶武器や個人装備には付きません。</p>
 
-    <p>設計図（ブループリント）がもらえるミッションには、名前のうしろに <b>[BP]</b> が付きます。Shubin の採掘発注や Wikelo のレシピなど <b>12 件</b>です。</p>
+    <p><b>ミッション名に設計図を付ける</b> にチェックを入れると、設計図（ブループリント）がもらえるミッションの名前のうしろに <b>[BP]</b> が付きます。Shubin の採掘発注や Wikelo のレシピなど <b>12 件</b>です。</p>
 
     <div class="note">
       <p><b>装備名の印には色を付けていません。</b>機体ロードアウトマネージャーの装備名欄はゲームの強調タグを解釈せず、<code>&lt;EM4&gt;</code> という文字がそのまま見えてしまうためです。ミッション名の印だけ色が付きます。</p>
@@ -284,7 +291,7 @@
 
     <h3>ミッション名の派閥と貢献度 — 受ける前に分かる</h3>
 
-    <p><span class="btn">3. 反映</span> の並びにある <b>ゲーム内に付ける印:</b> の <b>ミッションの派閥と貢献度</b> にチェックを入れると、ミッション名の後ろに <b>[Headhunters +1000]</b> のような印が付きます。どの派閥の評価がいくつ上がる依頼なのか、受ける前に分かります。</p>
+    <p><b>ミッション名に派閥と貢献度を付ける</b> にチェックを入れて <span class="btn">実行</span> すると、ミッション名の後ろに <b>[バウンティーハンターズ・ギルド +50]</b> のような印が付きます。どの派閥の評価がいくつ上がる依頼なのか、受ける前に分かります。</p>
 
     <p>初回はデータの取り込みに 30 秒ほどかかります。<span class="btn">装備データを再抽出</span> を実行したときにも一緒に取り込まれます。</p>
 
@@ -292,15 +299,11 @@
       <p><b>同じ名前のミッションがまとめて扱われることがあります。</b>ゲーム側でミッション名が使い回されているためで、その場合は <b>[+50/100/200]</b> のように取り得る値を並べます。派閥が複数に割れるときは派閥名を出さず、値だけを出します。英語圏の同種の MOD も同じ作りです。</p>
     </div>
 
-    <div class="note">
-      <p><b>ゲーム内に付ける印は 3 つとも個別に切り替えられます。</b><b>装備名の分類 [軍1C]</b> と <b>設計図ミッション [BP]</b> は既定でオン、<b>ミッションの派閥と貢献度</b> は既定でオフです。切り替えたあとは <span class="btn">3. 反映</span> をもう一度実行してください。</p>
-    </div>
-
     <!-- ============================================================ -->
     <h2 id="ai"><span class="num">6</span>AI 設定 — 翻訳バックエンドの登録</h2>
 
     <div class="note tip">
-      <p><strong>日本語にしたいだけなら、この章は飛ばして構いません。</strong>翻訳データは同梱されているので、AI の登録なしで <span class="btn">3. 反映</span> だけで日本語になります。ここが必要になるのは、<b>新しいパッチの未翻訳を自分で訳したいとき</b>と、<b><a href="#chat">AI チャット</a>を使いたいとき</b>です。</p>
+      <p><strong>日本語にしたいだけなら、この章は飛ばして構いません。</strong>翻訳データは同梱されているので、AI の登録なしで <span class="btn">日本語化</span> → <span class="btn">実行</span> だけで日本語になります。ここが必要になるのは、<b>新しいパッチの未翻訳を自分で訳したいとき</b>と、<b><a href="#chat">AI チャット</a>を使いたいとき</b>です。</p>
     </div>
 
     <p>上部バーの <span class="btn">AI 設定</span>（または <span class="tab">設定</span> タブの <span class="btn">AI 設定を開く</span>）で、翻訳とチャットに使う AI を登録します。</p>
@@ -415,7 +418,7 @@
     <h3>直す</h3>
     <ul>
       <li>一覧の <b>Japanese</b> 列を直接書き換えると、そのレコードは <code>manual</code> になり、以降の再翻訳や同梱 DB のマージで<b>上書きされません</b>。</li>
-      <li><span class="btn">選択した翻訳を削除 (再翻訳用)</span> — 訳文を消して未翻訳に戻します。次の <span class="btn">2. 翻訳</span> で訳し直されます。</li>
+      <li><span class="btn">選択した翻訳を削除 (再翻訳用)</span> — 訳文を消して未翻訳に戻します。次の <span class="btn">AI翻訳</span> で訳し直されます。</li>
       <li><span class="btn">全て原文</span> — 選んだ行を英語のまま表示させます。訳すとかえって分かりにくい用語に使います。</li>
       <li><span class="btn">CSV Export</span> / <span class="btn">CSV Import</span> — 表計算ソフトでまとめて直したいときに。</li>
     </ul>
@@ -782,7 +785,7 @@
       <p>次の順に確認してください。</p>
       <ol>
         <li>上部の <b>GamePath</b> が、いま遊んでいるチャンネル（LIVE / PTU など）を指しているか。</li>
-        <li><span class="tab">翻訳</span> タブで <span class="btn">3. 反映</span> を実行したか。<b>アプリを更新したあとは毎回必要です。</b></li>
+        <li><span class="tab">翻訳</span> タブで <span class="btn">日本語化</span> → <span class="btn">実行</span> を行ったか。<b>アプリを更新したあとは毎回必要です。</b></li>
         <li>ゲームフォルダに <code>data/Localization/japanese_(japan)/global.ini</code> ができているか。</li>
         <li>ゲームフォルダの <code>user.cfg</code> に <code>g_language = japanese_(japan)</code> の行があるか。</li>
       </ol>
@@ -790,7 +793,7 @@
 
     <details>
       <summary>パッチが来たら英語に戻った</summary>
-      <p>ゲーム側のファイルがパッチで置き換わったためです。<span class="btn">1. 抽出</span> → <span class="btn">3. 反映</span> をもう一度実行してください。<b>これだけで日本語に戻ります。</b>同梱の翻訳データが対応しているパッチなら <span class="btn">2. 翻訳</span> は不要です。同梱版がまだ対応していない新しいパッチで、増えた英語を自分で訳したい場合にだけ、間に <span class="btn">2. 翻訳</span> を挟みます。</p>
+      <p>ゲーム側のファイルがパッチで置き換わったためです。<span class="btn">新しいパッチを読み取る</span> → <span class="btn">日本語化</span> → <span class="btn">実行</span> を行ってください。<b>これだけで日本語に戻ります。</b>増えた英語を自分で訳したい場合にだけ、間に <span class="btn">AI翻訳</span> を挟みます。</p>
     </details>
 
     <details>
@@ -831,7 +834,7 @@
 
     <details>
       <summary>翻訳データを全部やり直したい</summary>
-      <p><span class="tab">設定</span> タブの <span class="btn">翻訳DBクリア (全翻訳データ削除)</span> を実行してから、<span class="btn">1. 抽出</span> をやり直します。<b>手で直した訳も消えます。</b>実行前に <span class="btn">エクスポート (バックアップ)</span> を取ってください。</p>
+      <p><span class="tab">設定</span> タブの <span class="btn">翻訳DBクリア (全翻訳データ削除)</span> を実行してから、<span class="btn">新しいパッチを読み取る</span> を押します。<b>手で直した訳も消えます。</b>実行前に <span class="btn">エクスポート (バックアップ)</span> を取ってください。</p>
     </details>
 
     <footer>

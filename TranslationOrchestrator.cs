@@ -15,6 +15,10 @@ public class TranslationOrchestrator
     private int _fallbackTotal;
     private int _totalEntries;
     private readonly ConcurrentBag<TranslationEntry> _failedEntries = new();
+    private readonly ConcurrentBag<string> _keptEnglishKeys = new();
+
+    // AI が英語原文をそのまま返したキー。翻訳後に「原文維持」として DB に記録し、次回から翻訳対象にしない
+    public IReadOnlyCollection<string> KeptEnglishKeys => _keptEnglishKeys;
 
     public event Action<int, int, int, int>? ProgressChanged;
     public event Action<List<(string Key, string Japanese, string Translator)>>? BatchTranslated;
@@ -157,11 +161,18 @@ public class TranslationOrchestrator
 
         var lines = new List<string>();
         var translatedItems = new List<(string Key, string Japanese, string Translator)>();
-        int ok = 0, fail = 0;
+        int ok = 0, fail = 0, sameAsEnglish = 0;
 
         foreach (var entry in batch)
         {
-            if (resultMap != null && resultMap.TryGetValue(entry.Key, out var translated) && !string.IsNullOrWhiteSpace(translated))
+            if (resultMap != null && resultMap.TryGetValue(entry.Key, out var translated) && !string.IsNullOrWhiteSpace(translated)
+                && translated.Trim() == entry.English.Trim())
+            {
+                // AI が英語原文をそのまま返したものは AI の訳としては保存せず、「原文維持」にする (翻訳後に DB へ記録。リトライもしない)
+                sameAsEnglish++;
+                _keptEnglishKeys.Add(entry.Key);
+            }
+            else if (resultMap != null && resultMap.TryGetValue(entry.Key, out translated) && !string.IsNullOrWhiteSpace(translated))
             {
                 ok++;
                 translatedItems.Add((entry.Key, translated, backend.TranslatorLabel));
@@ -188,14 +199,15 @@ public class TranslationOrchestrator
 
             var done = _progress.Done;
             var pct = (double)done / _totalEntries * 100;
-            Console.WriteLine($"[{Now}] [{backend.Name}] {done:N0}/{_totalEntries:N0} ({pct:F1}%) OK:{ok} FAIL:{fail}");
+            Console.WriteLine($"[{Now}] [{backend.Name}] {done:N0}/{_totalEntries:N0} ({pct:F1}%) OK:{ok} FAIL:{fail}"
+                + (sameAsEnglish > 0 ? $" 原文のまま(未保存):{sameAsEnglish}" : ""));
             ProgressChanged?.Invoke(done, _totalEntries, _successTotal, _fallbackTotal);
         }
 
         if (translatedItems.Count > 0)
             BatchTranslated?.Invoke(translatedItems);
 
-        return ok > 0;
+        return ok + sameAsEnglish > 0;
     }
 
     private static string Now => DateTime.Now.ToString("HH:mm:ss");
@@ -230,8 +242,20 @@ public class TranslationOrchestrator
             try
             {
                 using var db = new TranslationDatabase(dbPath);
-                foreach (var (key, _) in db.GetAllTranslations())
+                // AI が英語原文をそのまま返して保存された行 (source='ai' かつ japanese と english が前後の空白を除いて一致) は
+                // 翻訳済みとして扱わず、翻訳対象に入れる (DB の行は書き換えない。訳が返れば通常どおり上書きされる)
+                using var cmd = db.Connection.CreateCommand();
+                cmd.CommandText = "SELECT key, japanese, english, source FROM translations WHERE japanese IS NOT NULL AND japanese != ''";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    var key = reader.GetString(0);
+                    var ja = reader.GetString(1);
+                    var en = reader.IsDBNull(2) ? "" : reader.GetString(2);
+                    var source = reader.IsDBNull(3) ? "" : reader.GetString(3);
+                    if (source == "ai" && ja.Trim() == en.Trim()) continue;
                     dbTranslated.Add(key);
+                }
             }
             catch { }
         }

@@ -133,6 +133,7 @@ public class GameDataExtractor : IDisposable
                 MigrateShipPortsTable();
                 MigrateWikiColumns();
                 MigrateItemIndexSizeColumn();
+                MigrateShipsNameEnColumn();
                 return;
             }
             catch { try { _db?.Dispose(); } catch { } _db = null; }
@@ -207,7 +208,8 @@ public class GameDataExtractor : IDisposable
                 crew_size INTEGER,
                 size INTEGER,
                 raw_json TEXT NOT NULL,
-                extracted_at TEXT NOT NULL
+                extracted_at TEXT NOT NULL,
+                name_en TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_ships_name ON ships(name COLLATE NOCASE);
             """ + ShipPortsDdl + """
@@ -316,6 +318,7 @@ public class GameDataExtractor : IDisposable
         cmd.ExecuteNonQuery();
         MigrateShipPortsTable();   // 旧スキーマの ship_ports (CREATE TABLE IF NOT EXISTS では作り直されない) を現行 DDL に移行
         MigrateItemIndexSizeColumn();
+        MigrateShipsNameEnColumn();
     }
 
     public void Dispose()
@@ -343,6 +346,99 @@ public class GameDataExtractor : IDisposable
             alt.ExecuteNonQuery();
         }
         catch { }
+    }
+
+    // 既存 DB の ships に name_en 列 (英語 ini で解決した船名) が無ければ追加する
+    private void MigrateShipsNameEnColumn()
+    {
+        if (_db == null) return;
+        try
+        {
+            using var chk = _db.CreateCommand();
+            chk.CommandText = "PRAGMA table_info(ships)";
+            using var reader = chk.ExecuteReader();
+            bool hasTable = false;
+            while (reader.Read())
+            {
+                hasTable = true;
+                if (string.Equals(reader.GetString(1), "name_en", StringComparison.OrdinalIgnoreCase)) return;
+            }
+            reader.Close();
+            if (!hasTable) return;
+            using var alt = _db.CreateCommand();
+            alt.CommandText = "ALTER TABLE ships ADD COLUMN name_en TEXT";
+            alt.ExecuteNonQuery();
+        }
+        catch { }
+    }
+
+    // ships.name_en を埋める英語ローカライズ。<GamePath>\data\Localization\english\global.ini (ExtractMissionsAsync と同じ 2 か所) に無ければ、
+    // [新しいパッチを読み取る] が作業ディレクトリに作る english\global.ini を使う。どれも無ければ null。
+    // ※ ミッションの title 等の解決 (ExtractMissionsAsync の辞書) はこれを使わない (IniMerger の印が title_key = キーであることに依存しているため)
+    private Dictionary<string, string>? LoadShipNameLocalization()
+    {
+        var gamePath = App.Config.GamePath ?? "";
+        var candidates = new[]
+        {
+            Path.Combine(gamePath, "data", "Localization", "english", "global.ini"),
+            Path.Combine(Path.GetDirectoryName(gamePath) ?? "", "data", "Localization", "english", "global.ini"),
+            Path.Combine(Path.GetDirectoryName(DbPath) ?? "", "english", "global.ini"),
+        };
+        var path = candidates.FirstOrDefault(File.Exists);
+        if (path == null) return null;
+        return new Dictionary<string, string>(GlobalIniParser.Parse(path), StringComparer.OrdinalIgnoreCase);
+    }
+
+    // ships 全行の name_en を英語ローカライズで埋める。戻り値は (解決できた行数, 解決できなかった行数)
+    private (int Resolved, int Unresolved) UpdateShipEnglishNames()
+    {
+        var loc = LoadShipNameLocalization();
+        if (loc == null)
+        {
+            StatusChanged?.Invoke("船の英語名: 英語の global.ini が見つからないため name_en を埋められません");
+            return (0, 0);
+        }
+        var result = FillShipEnglishNames(_db!, loc);
+        StatusChanged?.Invoke($"船の英語名: {result.Resolved} 件解決 (未解決 {result.Unresolved} 件)");
+        return result;
+    }
+
+    // ships.name ("@vehicle_NameDRAK_Ironclad" のようなキー) を英語ローカライズで解決して name_en に入れる。
+    // "@" で始まらない name はそのまま英語名として入れる。解決できなければ NULL
+    internal static (int Resolved, int Unresolved) FillShipEnglishNames(SqliteConnection db, Dictionary<string, string> loc)
+    {
+        var rows = new List<(string Record, string Name)>();
+        using (var sel = db.CreateCommand())
+        {
+            sel.CommandText = "SELECT record_name, name FROM ships";
+            using var r = sel.ExecuteReader();
+            while (r.Read()) rows.Add((r.GetString(0), r.IsDBNull(1) ? "" : r.GetString(1)));
+        }
+
+        int resolved = 0, unresolved = 0;
+        using var tx = db.BeginTransaction();
+        using var upd = db.CreateCommand();
+        upd.Transaction = tx;
+        upd.CommandText = "UPDATE ships SET name_en = @ne WHERE record_name = @rn";
+        var pNe = upd.Parameters.Add("@ne", SqliteType.Text);
+        var pRn = upd.Parameters.Add("@rn", SqliteType.Text);
+        foreach (var (record, name) in rows)
+        {
+            var en = ResolveShipEnglishName(name, loc);
+            if (en != null) resolved++; else unresolved++;
+            pNe.Value = (object?)en ?? DBNull.Value;
+            pRn.Value = record;
+            upd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return (resolved, unresolved);
+    }
+
+    internal static string? ResolveShipEnglishName(string name, Dictionary<string, string> loc)
+    {
+        if (string.IsNullOrEmpty(name)) return null;
+        if (!name.StartsWith('@')) return name;
+        return loc.TryGetValue(name[1..], out var v) && !string.IsNullOrWhiteSpace(v) ? v : null;
     }
 
     public string? GetCachedVersion()
@@ -461,6 +557,7 @@ public class GameDataExtractor : IDisposable
         step++;
         ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] 船・車両データを抽出中...");
         int shipCount = await ExtractShipsAsync(dataP4kPath, now, ct);
+        UpdateShipEnglishNames();
 
         // Step 3: アイテム詳細（装備コンポーネント）
         step++;
@@ -565,6 +662,7 @@ public class GameDataExtractor : IDisposable
                 PopulateJapaneseNames(Path.Combine(Path.GetDirectoryName(DbPath) ?? "", "translations.db"));
 
                 int shipCount = await ExtractShipsAsync(p4kPath, now, ct);
+                UpdateShipEnglishNames();
 
                 SetMeta("equipment_rebuilt_at", now);
                 try { await RebuildMissionReputationAsync(progress, ct); }
@@ -1323,6 +1421,31 @@ public class GameDataExtractor : IDisposable
         var pRj = cmd.Parameters.Add("@rj", SqliteType.Text);
         var pEa = cmd.Parameters.Add("@ea", SqliteType.Text);
 
+        // 1 行分を missions 表に INSERT OR REPLACE する (MissionBrokerEntry 行・ContractGenerator 行で共用)
+        void InsertRow(MissionRow row)
+        {
+            pRn.Value = row.RecordName;
+            pTi.Value = row.Title;
+            pTh.Value = row.TitleHud;
+            pMt.Value = row.MissionType;
+            pDi.Value = row.Difficulty;
+            pMg.Value = row.MissionGiver;
+            pLl.Value = row.Location;
+            pDe.Value = row.Description;
+            pRmin.Value = row.RewardMin;
+            pRmax.Value = row.RewardMax;
+            pRr.Value = row.RequiredReputation;
+            pLt.Value = row.LawfulnessType;
+            pJu.Value = row.Jurisdiction;
+            pTl.Value = row.TimeLimit;
+            pRj.Value = row.RawJson;
+            pEa.Value = now;
+            cmd.ExecuteNonQuery();
+        }
+
+        // 6 フィルタで登録した MissionBrokerEntry の record_name (レガシー契約の参照先を重複登録しないため)
+        var insertedMbe = new HashSet<string>(StringComparer.Ordinal);
+
         var filters = new[] { "*PU_*", "*Tutorial*", "*Xenothreat*", "*ShipIncursion*", "*BlockadeRunner*", "*Kill*" };
         for (int fi = 0; fi < filters.Length; fi++)
         {
@@ -1340,40 +1463,10 @@ public class GameDataExtractor : IDisposable
             {
                 try
                 {
-                    using var doc = JsonDocument.Parse(block);
-                    var root = doc.RootElement;
-                    var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
-                    if (!recordName.StartsWith("MissionBrokerEntry.")) continue;
-                    if (!root.TryGetProperty("_RecordValue_", out var rv)) continue;
-
-                    var title = ResolveLoc(GetStr(rv, "title"), locDict);
-                    var difficulty = GetStr(rv, "difficulty");
-                    var location = ResolveLoc(GetStr(rv, "locationLabel"), locDict);
-                    if (string.IsNullOrEmpty(difficulty))
-                        difficulty = InferDifficulty(recordName);
-                    if (string.IsNullOrEmpty(location))
-                        location = InferLocation(recordName);
-
-                    pRn.Value = recordName;
-                    pTi.Value = title;
-                    pTh.Value = ResolveLoc(GetStr(rv, "titleHUD"), locDict);
-                    pMt.Value = CleanMissionType(GetStr(rv, "type"));
-                    pDi.Value = difficulty;
-                    pMg.Value = ResolveLoc(GetStr(rv, "missionGiver"), locDict);
-                    pLl.Value = location;
-                    pDe.Value = ResolveLoc(GetStr(rv, "description"), locDict);
-                    double rewardBase = 0;
-                    if (rv.TryGetProperty("missionReward", out var mReward))
-                        rewardBase = GetNum(mReward, "reward", GetNum(mReward, "max", 0));
-                    pRmin.Value = GetNum(rv, "rewardMin", GetNum(rv, "payoutMin", rewardBase));
-                    pRmax.Value = GetNum(rv, "rewardMax", GetNum(rv, "payoutMax", rewardBase));
-                    pRr.Value = GetStr(rv, "requiredReputation", GetStr(rv, "minReputation"));
-                    pLt.Value = GetStr(rv, "lawfulnessType");
-                    pJu.Value = GetStr(rv, "jurisdiction");
-                    pTl.Value = GetStr(rv, "timeLimit", GetStr(rv, "deadline"));
-                    pRj.Value = block;
-                    pEa.Value = now;
-                    cmd.ExecuteNonQuery();
+                    var row = BuildMissionBrokerRow(block, locDict);
+                    if (row == null) continue;
+                    InsertRow(row);
+                    insertedMbe.Add(row.RecordName);
                     count++;
                 }
                 catch { }
@@ -1385,8 +1478,439 @@ public class GameDataExtractor : IDisposable
             ProgressChanged?.Invoke(66 + (filterIdx + 1) * 10 / filters.Length, $"[4/6] ミッション・契約: {count}件抽出済み");
         }
 
+        // ContractGenerator の親契約 (contracts / introContracts / serviceBeaconContracts / PVPBountyContract) を 1 契約 1 行で登録する。
+        // 表示用の値の補完に ContractTemplate も読む
+        ct.ThrowIfCancellationRequested();
+        var generatorJson = await RunDcbQueryWithTimerAsync(p4kPath, "ContractGenerator", "*", "[4/6] 契約 (ContractGenerator)", ct);
+        if (!string.IsNullOrEmpty(generatorJson))
+        {
+            ct.ThrowIfCancellationRequested();
+            var templateJson = await RunDcbQueryWithTimerAsync(p4kPath, "ContractTemplate", "*", "[4/6] 契約テンプレート (ContractTemplate)", ct);
+
+            StatusChanged?.Invoke("[4/6] 契約解析中 (ContractGenerator) — DB登録中...");
+            int contractCount = 0;
+            foreach (var row in BuildContractGeneratorRows(generatorJson, templateJson, locDict))
+            {
+                try
+                {
+                    InsertRow(row);
+                    count++;
+                    contractCount++;
+                }
+                catch { }
+            }
+            StatusChanged?.Invoke($"[4/6] 契約解析中 (ContractGenerator) — {contractCount}件登録");
+            ProgressChanged?.Invoke(79, $"[4/6] ミッション・契約: {count}件抽出済み");
+
+            // legacyContracts[] が参照する MissionBrokerEntry のうち、6 フィルタで入らなかったものを同じ処理で登録する。
+            // 参照先だけをフィルタで指定できないため、MissionBrokerEntry を全件 ("*") 取得して参照名で拾う
+            // (RebuildMissionReputationAsync と同じ取り方)
+            var legacyRefs = CollectLegacyMissionBrokerRefs(generatorJson);
+            if (legacyRefs.Count > 0)
+            {
+                ct.ThrowIfCancellationRequested();
+                var mbeAllJson = await RunDcbQueryWithTimerAsync(p4kPath, "MissionBrokerEntry", "*",
+                    "[4/6] ミッション (レガシー契約の参照先): *", ct);
+                if (!string.IsNullOrEmpty(mbeAllJson))
+                {
+                    StatusChanged?.Invoke("[4/6] ミッション解析中 (レガシー契約の参照先) — DB登録中...");
+                    int legacyCount = 0;
+                    foreach (var block in SplitJsonBlocks(mbeAllJson))
+                    {
+                        try
+                        {
+                            var row = BuildMissionBrokerRow(block, locDict);
+                            if (row == null) continue;
+                            if (!legacyRefs.Contains(row.RecordName["MissionBrokerEntry.".Length..].ToLowerInvariant())) continue;
+                            if (insertedMbe.Contains(row.RecordName)) continue;
+                            InsertRow(row);
+                            insertedMbe.Add(row.RecordName);
+                            count++;
+                            legacyCount++;
+                        }
+                        catch { }
+                    }
+                    StatusChanged?.Invoke($"[4/6] ミッション解析中 (レガシー契約の参照先) — {legacyCount}件登録");
+                }
+            }
+            ProgressChanged?.Invoke(82, $"[4/6] ミッション・契約: {count}件抽出済み");
+        }
+
         tx.Commit();
         return count;
+    }
+
+    // missions 表の 1 行分 (raw_json 以外は表示・検索用に解決済みの値)
+    internal sealed class MissionRow
+    {
+        public string RecordName { get; init; } = "";
+        public string Title { get; init; } = "";
+        public string TitleHud { get; init; } = "";
+        public string MissionType { get; init; } = "";
+        public string Difficulty { get; init; } = "";
+        public string MissionGiver { get; init; } = "";
+        public string Location { get; init; } = "";
+        public string Description { get; init; } = "";
+        public double RewardMin { get; init; }
+        public double RewardMax { get; init; }
+        public string RequiredReputation { get; init; } = "";
+        public string LawfulnessType { get; init; } = "";
+        public string Jurisdiction { get; init; } = "";
+        public string TimeLimit { get; init; } = "";
+        public string RawJson { get; init; } = "";
+    }
+
+    // MissionBrokerEntry 1 レコード (dcb query の 1 ブロック) を missions 表の 1 行にする。
+    // MissionBrokerEntry 以外のレコード・_RecordValue_ が無いものは null。JSON が壊れていれば例外 (呼び出し側で握りつぶす)
+    internal static MissionRow? BuildMissionBrokerRow(string block, Dictionary<string, string> locDict)
+    {
+        using var doc = JsonDocument.Parse(block);
+        var root = doc.RootElement;
+        var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+        if (!recordName.StartsWith("MissionBrokerEntry.")) return null;
+        if (!root.TryGetProperty("_RecordValue_", out var rv)) return null;
+
+        var title = ResolveLoc(GetStr(rv, "title"), locDict);
+        var difficulty = GetStr(rv, "difficulty");
+        var location = ResolveLoc(GetStr(rv, "locationLabel"), locDict);
+        if (string.IsNullOrEmpty(difficulty))
+            difficulty = InferDifficulty(recordName);
+        if (string.IsNullOrEmpty(location))
+            location = InferLocation(recordName);
+
+        double rewardBase = 0;
+        if (rv.TryGetProperty("missionReward", out var mReward))
+            rewardBase = GetNum(mReward, "reward", GetNum(mReward, "max", 0));
+
+        return new MissionRow
+        {
+            RecordName = recordName,
+            Title = title,
+            TitleHud = ResolveLoc(GetStr(rv, "titleHUD"), locDict),
+            MissionType = CleanMissionType(GetStr(rv, "type")),
+            Difficulty = difficulty,
+            MissionGiver = ResolveLoc(GetStr(rv, "missionGiver"), locDict),
+            Location = location,
+            Description = ResolveLoc(GetStr(rv, "description"), locDict),
+            RewardMin = GetNum(rv, "rewardMin", GetNum(rv, "payoutMin", rewardBase)),
+            RewardMax = GetNum(rv, "rewardMax", GetNum(rv, "payoutMax", rewardBase)),
+            RequiredReputation = GetStr(rv, "requiredReputation", GetStr(rv, "minReputation")),
+            LawfulnessType = GetStr(rv, "lawfulnessType"),
+            Jurisdiction = GetStr(rv, "jurisdiction"),
+            TimeLimit = GetStr(rv, "timeLimit", GetStr(rv, "deadline")),
+            RawJson = block,
+        };
+    }
+
+    // ContractGenerator 行の record_name の接頭辞。後ろに契約 id (GUID, 小文字) を付ける。
+    // debugName を含めないのは、FetchWikiMissionsAsync の debug_name による LIKE 紐付けが CG 行に当たらないようにするため
+    internal const string ContractRecordPrefix = "ContractGenerator.";
+
+    // ContractGenerator 行の raw_json から表示用の名前を読む (record_name の GUID を画面に出さないため。MissionService / GameDataQueryService で共用)
+    //   NameBase         : 契約 debugName → 生成器 debugName ("_Name_") → タイトルキー (@ を外す)。分類・難易度・場所の推測と検索に使う
+    //   DisplayRecordName: "ContractGenerator.<生成器レコード名の末尾>.<NameBase>" (NameBase が空なら "ContractGenerator.<末尾>")
+    //   DebugName        : "_Name_" そのもの (契約 debugName → 生成器 debugName)。テスト用レコードの判定に使う
+    // 読めなければ ("", "", "")
+    internal static (string DebugName, string NameBase, string DisplayRecordName) ReadContractDisplayNames(string rawJson)
+    {
+        if (string.IsNullOrEmpty(rawJson)) return ("", "", "");
+        try
+        {
+            using var doc = JsonDocument.Parse(rawJson);
+            var root = doc.RootElement;
+            var debugName = GetStr(root, "_Name_");
+            var name = debugName;
+            if (string.IsNullOrEmpty(name) && root.TryGetProperty("_Resolved_", out var res) && res.ValueKind == JsonValueKind.Object)
+                name = GetStr(res, "title").TrimStart('@');
+            var generatorRecord = GetStr(root, "_RecordName_");
+            var generatorTail = generatorRecord.StartsWith(ContractRecordPrefix) ? generatorRecord[ContractRecordPrefix.Length..] : generatorRecord;
+            var display = ContractRecordPrefix + generatorTail + (string.IsNullOrEmpty(name) ? "" : "." + name);
+            return (debugName, name, display);
+        }
+        catch { return ("", "", ""); }
+    }
+
+    // 親契約を持つ配列 (subContracts は行にしない。legacyContracts は参照先の MissionBrokerEntry を別途登録する)
+    private static readonly string[] ContractArrayNames = ["contracts", "introContracts", "serviceBeaconContracts", "PVPBountyContract"];
+
+    // ContractGenerator 全件の dcb query 出力から、親契約 1 件ごとに missions 表の 1 行を作る。
+    // 値の取り方 (前にあるものを優先):
+    //   title       : 契約 Title → 生成器 contractParams の Title → テンプレート contractDisplayInfo.displayString[0]
+    //   description : 契約 Description → 生成器 Description → displayString[2]
+    //   依頼主      : 契約 Contractor → 生成器 Contractor → displayString[3] (LOC_UNINITIALIZED はどの段でも無視)
+    //   mission_type: 契約 missionTypeOverride → 生成器 contractParams.missionTypeOverride → テンプレート contractDisplayInfo.type
+    //   title_hud   : 契約 TitleHUD → 生成器 TitleHUD → displayString[1] (LOC_UNINITIALIZED はどの段でも無視)
+    //   Illegal     : 契約 boolParamOverrides の Illegal → 生成器 contractParams の Illegal → テンプレート contractDisplayInfo.illegal
+    //   パーティ共有: 契約 boolParamOverrides の CanBeShared → 生成器の CanBeShared (無ければ表示しない)
+    //   未リリース  : 契約または生成器の notForRelease が true
+    // raw_json は契約の JSON をそのまま "_Contract_" に入れ、補った値 (ローカライズキーとその出どころ) を "_Resolved_" に同梱する
+    internal static List<MissionRow> BuildContractGeneratorRows(string generatorJson, string? templateJson, Dictionary<string, string> locDict)
+    {
+        // ContractTemplate.<名前> の <名前> 小文字 → contractDisplayInfo (契約の template 参照のファイル名で引く)
+        var templates = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (!string.IsNullOrEmpty(templateJson))
+        {
+            foreach (var block in SplitJsonBlocks(templateJson))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(block);
+                    var root = doc.RootElement;
+                    var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+                    if (!recordName.StartsWith("ContractTemplate.")) continue;
+                    if (!root.TryGetProperty("_RecordValue_", out var rv)) continue;
+                    if (!rv.TryGetProperty("contractDisplayInfo", out var di) || di.ValueKind != JsonValueKind.Object) continue;
+                    templates[recordName["ContractTemplate.".Length..].ToLowerInvariant()] = di.GetRawText();
+                }
+                catch { }
+            }
+        }
+
+        var rows = new List<MissionRow>();
+        foreach (var block in SplitJsonBlocks(generatorJson))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                var generatorRecord = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+                if (!generatorRecord.StartsWith("ContractGenerator.")) continue;
+                if (!root.TryGetProperty("_RecordValue_", out var rv)) continue;
+                if (!rv.TryGetProperty("generators", out var generators) || generators.ValueKind != JsonValueKind.Array) continue;
+
+                foreach (var gen in generators.EnumerateArray())
+                {
+                    if (gen.ValueKind != JsonValueKind.Object) continue;
+                    var genParams = gen.TryGetProperty("contractParams", out var gp) && gp.ValueKind == JsonValueKind.Object ? gp : default;
+
+                    foreach (var arrayName in ContractArrayNames)
+                    {
+                        if (!gen.TryGetProperty(arrayName, out var contracts) || contracts.ValueKind != JsonValueKind.Array) continue;
+                        foreach (var contract in contracts.EnumerateArray())
+                        {
+                            try
+                            {
+                                var row = BuildContractRow(generatorRecord, gen, genParams, arrayName, contract, templates, locDict);
+                                if (row != null) rows.Add(row);
+                            }
+                            catch { }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+        return rows;
+    }
+
+    private static MissionRow? BuildContractRow(string generatorRecord, JsonElement gen, JsonElement genParams, string arrayName,
+        JsonElement contract, Dictionary<string, string> templates, Dictionary<string, string> locDict)
+    {
+        if (contract.ValueKind != JsonValueKind.Object) return null;
+        var id = GetStr(contract, "id").ToLowerInvariant();
+        if (string.IsNullOrEmpty(id)) return null;
+
+        var contractParams = contract.TryGetProperty("paramOverrides", out var po) && po.ValueKind == JsonValueKind.Object ? po : default;
+
+        // テンプレート: "file://.../contracttemplates/xxx.json" の xxx で引く
+        JsonDocument? templateDoc = null;
+        var templateRef = GetStr(contract, "template");
+        if (!string.IsNullOrEmpty(templateRef))
+        {
+            var name = templateRef[(templateRef.LastIndexOf('/') + 1)..];
+            if (name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) name = name[..^".json".Length];
+            if (templates.TryGetValue(name.ToLowerInvariant(), out var displayInfoJson))
+                templateDoc = JsonDocument.Parse(displayInfoJson);
+        }
+        using (templateDoc)
+        {
+            var displayInfo = templateDoc?.RootElement ?? default;
+            string DisplayString(int index)
+            {
+                if (displayInfo.ValueKind != JsonValueKind.Object) return "";
+                if (!displayInfo.TryGetProperty("displayString", out var ds) || ds.ValueKind != JsonValueKind.Array) return "";
+                if (index >= ds.GetArrayLength()) return "";
+                var v = ds[index];
+                return v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+            }
+
+            var (titleKey, titleSource) = FirstValue(
+                ("contract", GetStringParam(contractParams, "Title")),
+                ("generator", GetStringParam(genParams, "Title")),
+                ("template", DisplayString(0)));
+            var (descKey, descSource) = FirstValue(
+                ("contract", GetStringParam(contractParams, "Description")),
+                ("generator", GetStringParam(genParams, "Description")),
+                ("template", DisplayString(2)));
+            var (contractorKey, contractorSource) = FirstValue(
+                ("contract", SkipUninitialized(GetStringParam(contractParams, "Contractor"))),
+                ("generator", SkipUninitialized(GetStringParam(genParams, "Contractor"))),
+                ("template", SkipUninitialized(DisplayString(3))));
+            var (missionTypeRef, missionTypeSource) = FirstValue(
+                ("contract", contractParams.ValueKind == JsonValueKind.Object ? GetStr(contractParams, "missionTypeOverride") : ""),
+                ("generator", genParams.ValueKind == JsonValueKind.Object ? GetStr(genParams, "missionTypeOverride") : ""),
+                ("template", displayInfo.ValueKind == JsonValueKind.Object ? GetStr(displayInfo, "type") : ""));
+
+            var (titleHudKey, titleHudSource) = FirstValue(
+                ("contract", SkipUninitialized(GetStringParam(contractParams, "TitleHUD"))),
+                ("generator", SkipUninitialized(GetStringParam(genParams, "TitleHUD"))),
+                ("template", SkipUninitialized(DisplayString(1))));
+
+            bool? illegal = GetBoolParam(contractParams, "Illegal");
+            var illegalSource = illegal.HasValue ? "contract" : "";
+            if (!illegal.HasValue)
+            {
+                illegal = GetBoolParam(genParams, "Illegal");
+                if (illegal.HasValue) illegalSource = "generator";
+            }
+            if (!illegal.HasValue && displayInfo.ValueKind == JsonValueKind.Object && displayInfo.TryGetProperty("illegal", out var il)
+                && (il.ValueKind == JsonValueKind.True || il.ValueKind == JsonValueKind.False))
+            {
+                illegal = il.ValueKind == JsonValueKind.True;
+                illegalSource = "template";
+            }
+
+            // パーティ共有: 契約 → 生成器の boolParamOverrides の CanBeShared (どちらにも無ければ null)
+            bool? canBeShared = GetBoolParam(contractParams, "CanBeShared");
+            var canBeSharedSource = canBeShared.HasValue ? "contract" : "";
+            if (!canBeShared.HasValue)
+            {
+                canBeShared = GetBoolParam(genParams, "CanBeShared");
+                if (canBeShared.HasValue) canBeSharedSource = "generator";
+            }
+
+            // 一覧の表示名・難易度・場所・分類の推測に使う名前 (契約 debugName、空なら生成器 debugName)
+            var nameBase = GetStr(contract, "debugName");
+            if (string.IsNullOrEmpty(nameBase)) nameBase = GetStr(gen, "debugName");
+
+            // raw_json: 補った値を "_Resolved_"、契約の JSON をそのまま "_Contract_" に入れる
+            using var ms = new MemoryStream();
+            using (var w = new Utf8JsonWriter(ms))
+            {
+                w.WriteStartObject();
+                w.WriteString("_Name_", nameBase);
+                w.WriteString("_RecordName_", generatorRecord);
+                w.WriteString("_ContractArray_", arrayName);
+                w.WriteStartObject("_Generator_");
+                w.WriteString("_Type_", GetStr(gen, "_Type_"));
+                w.WriteString("debugName", GetStr(gen, "debugName"));
+                w.WriteBoolean("notForRelease", GetBoolOrFalse(gen, "notForRelease"));
+                w.WriteBoolean("workInProgress", GetBoolOrFalse(gen, "workInProgress"));
+                w.WriteEndObject();
+                w.WriteStartObject("_Resolved_");
+                w.WriteString("title", titleKey);
+                w.WriteString("titleSource", titleSource);
+                w.WriteString("description", descKey);
+                w.WriteString("descriptionSource", descSource);
+                w.WriteString("contractor", contractorKey);
+                w.WriteString("contractorSource", contractorSource);
+                w.WriteString("missionType", missionTypeRef);
+                w.WriteString("missionTypeSource", missionTypeSource);
+                if (illegal.HasValue) w.WriteBoolean("illegal", illegal.Value);
+                else w.WriteNull("illegal");
+                w.WriteString("illegalSource", illegalSource);
+                w.WriteString("titleHud", titleHudKey);
+                w.WriteString("titleHudSource", titleHudSource);
+                if (canBeShared.HasValue) w.WriteBoolean("canBeShared", canBeShared.Value);
+                else w.WriteNull("canBeShared");
+                w.WriteString("canBeSharedSource", canBeSharedSource);
+                w.WriteString("template", templateRef);
+                w.WriteBoolean("templateFound", templateDoc != null);
+                w.WriteEndObject();
+                w.WritePropertyName("_Contract_");
+                contract.WriteTo(w);
+                w.WriteEndObject();
+            }
+
+            return new MissionRow
+            {
+                RecordName = ContractRecordPrefix + id,
+                Title = ResolveLocWithPluralKey(titleKey, locDict),
+                TitleHud = ResolveLocWithPluralKey(titleHudKey, locDict),
+                MissionType = CleanMissionType(missionTypeRef),
+                Difficulty = InferDifficulty(nameBase),
+                MissionGiver = ResolveLocWithPluralKey(contractorKey, locDict),
+                Location = InferLocation(nameBase),
+                Description = ResolveLocWithPluralKey(descKey, locDict),
+                RawJson = Encoding.UTF8.GetString(ms.ToArray()),
+            };
+        }
+    }
+
+    // 候補を前から見て、最初の空でない値とその出どころを返す (どれも空なら ("", ""))
+    private static (string Value, string Source) FirstValue(params (string Source, string Value)[] candidates)
+    {
+        foreach (var (source, value) in candidates)
+            if (!string.IsNullOrEmpty(value)) return (value, source);
+        return ("", "");
+    }
+
+    // bool のプロパティを読む (true 以外は false)
+    private static bool GetBoolOrFalse(JsonElement el, string prop) =>
+        el.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.True;
+
+    // "@LOC_UNINITIALIZED" / "LOC_UNINITIALIZED" は値なしとして扱う
+    private static string SkipUninitialized(string value) =>
+        value.TrimStart('@').Equals("LOC_UNINITIALIZED", StringComparison.OrdinalIgnoreCase) ? "" : value;
+
+    // ContractParamOverrides.stringParamOverrides から param が一致する最初の value を返す (無ければ "")
+    private static string GetStringParam(JsonElement paramOverrides, string param)
+    {
+        if (paramOverrides.ValueKind != JsonValueKind.Object) return "";
+        if (!paramOverrides.TryGetProperty("stringParamOverrides", out var arr) || arr.ValueKind != JsonValueKind.Array) return "";
+        foreach (var p in arr.EnumerateArray())
+            if (p.ValueKind == JsonValueKind.Object && GetStr(p, "param") == param)
+                return GetStr(p, "value");
+        return "";
+    }
+
+    // ContractParamOverrides.boolParamOverrides から param が一致する最初の value を返す (無ければ null)
+    private static bool? GetBoolParam(JsonElement paramOverrides, string param)
+    {
+        if (paramOverrides.ValueKind != JsonValueKind.Object) return null;
+        if (!paramOverrides.TryGetProperty("boolParamOverrides", out var arr) || arr.ValueKind != JsonValueKind.Array) return null;
+        foreach (var p in arr.EnumerateArray())
+        {
+            if (p.ValueKind != JsonValueKind.Object || GetStr(p, "param") != param) continue;
+            if (!p.TryGetProperty("value", out var v)) return null;
+            if (v.ValueKind == JsonValueKind.True) return true;
+            if (v.ValueKind == JsonValueKind.False) return false;
+            return null;
+        }
+        return null;
+    }
+
+    // ContractGenerator の legacyContracts[].missionBrokerEntry が参照する MissionBrokerEntry 名 (小文字) の集合。
+    // 参照は "file://.../missionbroker/.../haulcargo_atob_stanton1_intro.json" の形で、ファイル名が "MissionBrokerEntry.<名前>" の <名前> 小文字に当たる
+    internal static HashSet<string> CollectLegacyMissionBrokerRefs(string generatorJson)
+    {
+        var refs = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var block in SplitJsonBlocks(generatorJson))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("_RecordValue_", out var rv)) continue;
+                if (!rv.TryGetProperty("generators", out var generators) || generators.ValueKind != JsonValueKind.Array) continue;
+                foreach (var gen in generators.EnumerateArray())
+                {
+                    if (gen.ValueKind != JsonValueKind.Object) continue;
+                    if (!gen.TryGetProperty("legacyContracts", out var legacy) || legacy.ValueKind != JsonValueKind.Array) continue;
+                    foreach (var c in legacy.EnumerateArray())
+                    {
+                        if (c.ValueKind != JsonValueKind.Object) continue;
+                        var path = GetStr(c, "missionBrokerEntry");
+                        if (string.IsNullOrEmpty(path)) continue;
+                        var name = path[(path.LastIndexOf('/') + 1)..];
+                        if (name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) name = name[..^".json".Length];
+                        if (name.Length > 0) refs.Add(name.ToLowerInvariant());
+                    }
+                }
+            }
+            catch { }
+        }
+        return refs;
     }
 
     private async Task<int> ExtractCommoditiesAsync(string p4kPath, string now, CancellationToken ct)
@@ -1437,6 +1961,20 @@ public class GameDataExtractor : IDisposable
         var key = raw[1..];
         if (locDict.TryGetValue(key, out var resolved) && !string.IsNullOrEmpty(resolved))
             return resolved;
+        return key;
+    }
+
+    // ResolveLoc と同じだが、キーが見つからなければ末尾に ",P" を付けたキーも試す
+    // (ContractGenerator のローカライズキーには ini に ",P" 付きでしか無いものがあるため。ContractGenerator 行だけで使う)
+    private static string ResolveLocWithPluralKey(string raw, Dictionary<string, string> locDict)
+    {
+        if (string.IsNullOrEmpty(raw)) return raw;
+        if (!raw.StartsWith('@')) return raw;
+        var key = raw[1..];
+        if (locDict.TryGetValue(key, out var resolved) && !string.IsNullOrEmpty(resolved))
+            return resolved;
+        if (locDict.TryGetValue(key + ",P", out var resolvedP) && !string.IsNullOrEmpty(resolvedP))
+            return resolvedP;
         return key;
     }
 
@@ -2249,6 +2787,10 @@ public class GameDataExtractor : IDisposable
         StatusChanged?.Invoke(msg);
     }
 
+    // チャットの検索語の埋め込み用 (ベクトル構築と同じ API・同じモデル指定で作る)
+    public static Task<List<float[]>?> GetQueryEmbeddingsAsync(BackendConfig backend, List<string> texts, CancellationToken ct) =>
+        GetEmbeddingsAsync(backend, texts, ct);
+
     private static async Task<List<float[]>?> GetEmbeddingsAsync(BackendConfig backend, List<string> texts, CancellationToken ct)
     {
         var type = backend.Type.ToLowerInvariant();
@@ -2452,9 +2994,27 @@ public class GameDataExtractor : IDisposable
 
                 if (string.IsNullOrEmpty(title) || title == "LOC_UNINITIALIZED") { totalFetched++; continue; }
 
-                // Try to link to existing DCB mission by debug_name
+                // Wiki の uuid が ContractGenerator 行の契約 id と一致すれば、その行に書く (record_name = "ContractGenerator.{契約 id 小文字}")
                 bool didLink = false;
-                if (!string.IsNullOrEmpty(debugName))
+                if (!string.IsNullOrEmpty(uuid))
+                {
+                    using var cgCmd = _db.CreateCommand();
+                    cgCmd.Transaction = tx;
+                    cgCmd.CommandText = "UPDATE missions SET wiki_title=@wt, wiki_faction=@wf, wiki_reward=@wr, wiki_legality=@wl, wiki_enemy_min=@we1, wiki_enemy_max=@we2, wiki_duration_min=@wd, wiki_uuid=@wu WHERE record_name = @rn";
+                    cgCmd.Parameters.AddWithValue("@wt", title);
+                    cgCmd.Parameters.AddWithValue("@wf", faction);
+                    cgCmd.Parameters.AddWithValue("@wr", rewardMin);
+                    cgCmd.Parameters.AddWithValue("@wl", legality);
+                    cgCmd.Parameters.AddWithValue("@we1", enemyMin);
+                    cgCmd.Parameters.AddWithValue("@we2", enemyMax);
+                    cgCmd.Parameters.AddWithValue("@wd", duration);
+                    cgCmd.Parameters.AddWithValue("@wu", uuid);
+                    cgCmd.Parameters.AddWithValue("@rn", ContractRecordPrefix + uuid.ToLowerInvariant());
+                    if (cgCmd.ExecuteNonQuery() > 0) { linked++; didLink = true; }
+                }
+
+                // Try to link to existing DCB mission by debug_name
+                if (!didLink && !string.IsNullOrEmpty(debugName))
                 {
                     using var linkCmd = _db.CreateCommand();
                     linkCmd.Transaction = tx;

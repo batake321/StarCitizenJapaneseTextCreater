@@ -31,34 +31,24 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
 
                     <WrapPanel Grid.Row="0" Margin="0,0,0,8">
-                        <Button x:Name="btnExtract" Content="1. 抽出" Style="{StaticResource ActionButton}" Click="Extract_Click"/>
-                        <Button x:Name="btnTranslate" Content="2. 翻訳" Style="{StaticResource ActionButton}" Click="Translate_Click"/>
-                        <Button x:Name="btnApply" Content="3. 反映" Style="{StaticResource ActionButton}" Click="Apply_Click"/>
+                        <Button x:Name="btnApply" Content="日本語化" Style="{StaticResource ActionButton}" Click="Apply_Click"/>
+                    </WrapPanel>
+
+                    <WrapPanel Grid.Row="1" Margin="0,0,0,8">
+                        <Button x:Name="btnExtract" Content="新しいパッチを読み取る" Style="{StaticResource ActionButton}" Click="Extract_Click"/>
+                        <Button x:Name="btnTranslate" Content="AI翻訳" Style="{StaticResource ActionButton}" Click="Translate_Click"/>
                         <Button x:Name="btnCancel" Content="中止" Padding="14,6" Margin="16,4,4,4"
                                 Background="#D94A4A" Foreground="White" FontWeight="Bold"
                                 Click="Cancel_Click" Visibility="Collapsed"/>
-                        <TextBlock Text="ゲーム内に付ける印:" VerticalAlignment="Center" Margin="16,4,6,4" Foreground="#555"/>
-                        <CheckBox x:Name="chkEquipClassMarks" Content="装備名の分類 [軍1C]"
-                                  VerticalAlignment="Center" Margin="0,4,10,4"
-                                  Checked="InGameMarks_Changed" Unchecked="InGameMarks_Changed"
-                                  ToolTip="装備名の後ろに 分類・サイズ・グレード を付けます"/>
-                        <CheckBox x:Name="chkMissionRepMarks" Content="ミッションの派閥と貢献度"
-                                  VerticalAlignment="Center" Margin="0,4,10,4"
-                                  Checked="InGameMarks_Changed" Unchecked="InGameMarks_Changed"
-                                  ToolTip="ミッション名の後ろに [派閥 +貢献度] を付けます"/>
-                        <CheckBox x:Name="chkBlueprintMarks" Content="設計図ミッション [BP]"
-                                  VerticalAlignment="Center" Margin="0,4,4,4"
-                                  Checked="InGameMarks_Changed" Unchecked="InGameMarks_Changed"
-                                  ToolTip="設計図がもらえるミッション名の後ろに [BP] を付けます"/>
                     </WrapPanel>
 
                     <!-- Progress area -->
-                    <Grid Grid.Row="1" Margin="0,0,0,2">
+                    <Grid Grid.Row="2" Margin="0,0,0,2">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
@@ -67,18 +57,14 @@
                         <TextBlock x:Name="txtProgressPct" Grid.Column="1" VerticalAlignment="Center"
                                    Margin="8,0,0,0" MinWidth="60" FontWeight="Bold"/>
                     </Grid>
-                    <TextBlock x:Name="txtProgressDetail" Grid.Row="2" Margin="0,0,0,4"
+                    <TextBlock x:Name="txtProgressDetail" Grid.Row="3" Margin="0,0,0,4"
                                FontFamily="Consolas" FontSize="12" Foreground="#444"/>
 
-                    <TextBox x:Name="txtLog" Grid.Row="3" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
+                    <!-- 翻訳・日本語化を実行したときのログ (全体のログはログタブ) -->
+                    <TextBox x:Name="txtTaskLog" Grid.Row="4" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
                              HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12"
                              Background="#1E1E1E" Foreground="#DCDCDC" Padding="4"
                              TextWrapping="Wrap"/>
-
-                    <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,4,0,0">
-                        <Button Content="ログ保存" Click="SaveLog_Click" Padding="12,4"/>
-                        <Button Content="ログクリア" Click="ClearLog_Click" Padding="12,4" Margin="4,0,0,0"/>
-                    </StackPanel>
                 </Grid>
             </TabItem>
 
@@ -1759,7 +1745,8 @@
 
                     <!-- External AI consultation + Verification agent (1 row) -->
                     <WrapPanel x:Name="pnlConsultBackends" Grid.Row="1" Margin="0,0,0,2">
-                        <TextBlock Text="📡 外部AI相談:" VerticalAlignment="Center" Margin="0,0,8,0" FontSize="12" Foreground="#666"/>
+                        <TextBlock Text="📡 外部AI相談 (?):" VerticalAlignment="Center" Margin="0,0,8,0" FontSize="12" Foreground="#666" Cursor="Help"
+                                   ToolTip="チェックした AI に、毎回メインの AI が答えたあと、質問とその回答を渡して補足・修正を頼みます (スキルは使わず、チェックした全 AI に同時に聞き、60 秒まで待ちます)。返答は回答の下に「📡 名前 の補足」として付きます。「補足はありません」という返答は付けません。"/>
                         <!-- checkboxes inserted dynamically -->
                         <!-- separator + verify agent appended dynamically -->
                     </WrapPanel>
@@ -1988,6 +1975,23 @@
                                 FontWeight="Bold" HorizontalAlignment="Left"/>
                     </StackPanel>
                 </ScrollViewer>
+            </TabItem>
+            <!-- ログタブ -->
+            <TabItem Header="ログ">
+                <Grid Margin="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <TextBox x:Name="txtLog" Grid.Row="0" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
+                             HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12"
+                             Background="#1E1E1E" Foreground="#DCDCDC" Padding="4"
+                             TextWrapping="Wrap"/>
+                    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,4,0,0">
+                        <Button Content="保存" Click="SaveLog_Click" Padding="12,4"/>
+                        <Button Content="クリア" Click="ClearLog_Click" Padding="12,4" Margin="4,0,0,0"/>
+                    </StackPanel>
+                </Grid>
             </TabItem>
         </TabControl>
     </Grid>

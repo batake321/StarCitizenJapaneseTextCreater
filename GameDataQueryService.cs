@@ -28,11 +28,25 @@ public class GameDataQueryService : IDisposable
         catch { return false; }
     }
 
-    public string SearchShips(string query)
+    // exactRecordName を渡すと、その record_name の船だけを返す (lookup で見つかった item_index の船を引くとき用)
+    public string SearchShips(string query, string? exactRecordName = null)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT record_name, name, manufacturer, career, role, crew_size, size FROM ships WHERE record_name LIKE @q OR name LIKE @q ORDER BY name LIMIT 20";
-        cmd.Parameters.AddWithValue("@q", $"%{query}%");
+        // name_en (英語 ini で解決した船名) がある DB ではそれも検索・表示する。列の無い古い DB では従来どおり
+        var hasNameEn = ShipsHasNameEn();
+        var cols = hasNameEn ? "record_name, name, manufacturer, career, role, crew_size, size, name_en" : "record_name, name, manufacturer, career, role, crew_size, size";
+        if (!string.IsNullOrEmpty(exactRecordName))
+        {
+            cmd.CommandText = $"SELECT {cols} FROM ships WHERE record_name = @q LIMIT 1";
+            cmd.Parameters.AddWithValue("@q", exactRecordName);
+        }
+        else
+        {
+            cmd.CommandText = hasNameEn
+                ? $"SELECT {cols} FROM ships WHERE record_name LIKE @q OR name LIKE @q OR name_en LIKE @q ORDER BY name LIMIT 20"
+                : $"SELECT {cols} FROM ships WHERE record_name LIKE @q OR name LIKE @q ORDER BY name LIMIT 20";
+            cmd.Parameters.AddWithValue("@q", $"%{query}%");
+        }
         using var reader = cmd.ExecuteReader();
 
         var sb = new StringBuilder();
@@ -46,8 +60,10 @@ public class GameDataQueryService : IDisposable
             var role = reader.IsDBNull(4) ? "" : reader.GetString(4);
             var crew = reader.IsDBNull(5) ? 0 : reader.GetInt32(5);
             var size = reader.IsDBNull(6) ? 0 : reader.GetInt32(6);
+            var nameEn = hasNameEn && !reader.IsDBNull(7) ? reader.GetString(7) : "";
 
             sb.Append($"- {rn}");
+            if (!string.IsNullOrEmpty(nameEn)) sb.Append($" | 英語名: {nameEn}");
             if (!string.IsNullOrEmpty(name)) sb.Append($" | 名前: {name}");
             if (!string.IsNullOrEmpty(mfr)) sb.Append($" | メーカー: {mfr}");
             if (!string.IsNullOrEmpty(career)) sb.Append($" | 職業: {career}");
@@ -63,6 +79,21 @@ public class GameDataQueryService : IDisposable
         }
 
         return count > 0 ? $"=== ゲームデータ (DB): 船 ===\n{sb}" : "";
+    }
+
+    // ships に name_en 列があるか (インデックス構築・マイグレーション前の古い DB には無い)
+    private bool ShipsHasNameEn()
+    {
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "PRAGMA table_info(ships)";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                if (string.Equals(r.GetString(1), "name_en", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        catch { }
+        return false;
     }
 
     private string GetShipPorts(string shipRecordName)
@@ -276,6 +307,127 @@ public class GameDataQueryService : IDisposable
         return likeResults.Select(r => (r.uuid, r.recordName, r.name, r.itemType, r.subType, r.manufacturer, 0.0)).ToList();
     }
 
+    // 綴りの揺れ用のあいまい検索 (例 "ironcrad" → "Drake Ironclad")。
+    // 検索語全体と、item_index の名前 (name と name_ja) の「全体」または「検索語と同じ語数の連続した語」を編集距離 (Damerau-Levenshtein の OSA 版。
+    // 挿入・削除・置換・隣接 2 文字の入れ替えをそれぞれ 1 とする) で比べ、類似度 = 1 - 距離 / 長い方の長さ の最大値が minSimilarity 以上のものを
+    // 類似度の高い順に返す。同点は名前全体との類似度 (WholeNameSimilarity。name と name_ja の高い方) の高い順、それも同点は名前順。検索語を断片に分けて照合することはしない (検索語の一部だけが名前に含まれても当たらない)
+    public List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double score)> EditDistanceSearch(string query, int limit = 10, double minSimilarity = FuzzyMinSimilarity)
+    {
+        var q = NormalizeForFuzzy(query);
+        if (q.Length == 0) return [];
+        var results = new List<((string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double score) item, double whole)>();
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT uuid, record_name, name, item_type, sub_type, manufacturer, name_ja FROM item_index WHERE name IS NOT NULL AND name != ''";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var name = reader.GetString(2);
+            var nameJa = reader.IsDBNull(6) ? "" : reader.GetString(6);
+            var sim = Math.Max(NameSimilarity(q, name, minSimilarity), NameSimilarity(q, nameJa, minSimilarity));
+            if (sim < minSimilarity) continue;
+            var whole = Math.Max(WholeNameSimilarity(q, name), WholeNameSimilarity(q, nameJa));
+            results.Add(((reader.GetString(0), reader.GetString(1), name,
+                reader.IsDBNull(3) ? "" : reader.GetString(3),
+                reader.IsDBNull(4) ? "" : reader.GetString(4),
+                reader.IsDBNull(5) ? "" : reader.GetString(5), sim), whole));
+        }
+        return results
+            .OrderByDescending(r => r.item.score).ThenByDescending(r => r.whole).ThenBy(r => r.item.name, StringComparer.OrdinalIgnoreCase)
+            .Take(limit)
+            .Select(r => r.item)
+            .ToList();
+    }
+
+    // 検索語と名前全体 (区切りを空白 1 つにまとめたもの) の編集距離の類似度 = 1 - 距離 / 長い方の長さ。名前が空なら 0
+    public static double WholeNameSimilarity(string normalizedQuery, string name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || normalizedQuery.Length == 0) return 0;
+        var whole = NormalizeForFuzzy(name);
+        if (whole.Length == 0) return 0;
+        return 1.0 - (double)OsaDistance(normalizedQuery, whole) / Math.Max(whole.Length, normalizedQuery.Length);
+    }
+
+    // EditDistanceSearch の採用下限 (類似度)。0.8 では 5 文字の語に距離 1 までを拾い、3〜4 文字の語の距離 1 (類似度 0.67〜0.75) は拾わない
+    public const double FuzzyMinSimilarity = 0.8;
+
+    // 検索語と名前の類似度 (0〜1)。名前全体と、名前を区切り文字で分けた語のうち検索語と同じ語数の連続した語を候補にし、最も近いものを採る。
+    // floor より明らかに届かない候補 (長さの差だけで下回るもの) は計算を省く。名前が空なら 0
+    public static double NameSimilarity(string normalizedQuery, string name, double floor = 0)
+    {
+        if (string.IsNullOrWhiteSpace(name) || normalizedQuery.Length == 0) return 0;
+        var whole = NormalizeForFuzzy(name);
+        if (whole.Length == 0) return 0;
+        var words = whole.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var qWords = normalizedQuery.Split(' ').Length;
+
+        double best = 0;
+        void Try(string candidate)
+        {
+            var maxLen = Math.Max(candidate.Length, normalizedQuery.Length);
+            // 長さの差 = 距離の下限。これだけで floor と現在の最良を下回るなら計算しない
+            var bound = 1.0 - (double)Math.Abs(candidate.Length - normalizedQuery.Length) / maxLen;
+            if (bound < floor || bound <= best) return;
+            var sim = 1.0 - (double)OsaDistance(normalizedQuery, candidate) / maxLen;
+            if (sim > best) best = sim;
+        }
+
+        Try(whole);
+        if (words.Length > qWords)
+            for (int i = 0; i + qWords <= words.Length; i++)
+                Try(string.Join(' ', words, i, qWords));
+        return best;
+    }
+
+    // 区切り文字 (空白・括弧・ハイフン・スラッシュ・引用符・読点など)
+    private static readonly char[] FuzzySeparators =
+        " \t()（）[]［］{}「」『』【】<>＜＞\"“”'‘’-‐‑–—―－/／,，、。.:：;；!！?？~～・".ToCharArray();
+
+    // 小文字化し、区切り文字を空白 1 つにまとめる
+    public static string NormalizeForFuzzy(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        return string.Join(' ', s.ToLowerInvariant().Split(FuzzySeparators, StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    // Damerau-Levenshtein の OSA (optimal string alignment) 版の編集距離
+    private static int OsaDistance(string a, string b)
+    {
+        int la = a.Length, lb = b.Length;
+        if (la == 0) return lb;
+        if (lb == 0) return la;
+        var d = new int[la + 1, lb + 1];
+        for (int i = 0; i <= la; i++) d[i, 0] = i;
+        for (int j = 0; j <= lb; j++) d[0, j] = j;
+        for (int i = 1; i <= la; i++)
+        {
+            for (int j = 1; j <= lb; j++)
+            {
+                int cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                int v = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + cost);
+                if (i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1])
+                    v = Math.Min(v, d[i - 2, j - 2] + 1);
+                d[i, j] = v;
+            }
+        }
+        return d[la, lb];
+    }
+
+    // uuid → name_ja (カタカナ検索の候補の並べ替え用)
+    public Dictionary<string, string> GetItemNamesJa(IEnumerable<string> uuids)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT name_ja FROM item_index WHERE uuid = @u";
+        var p = cmd.Parameters.Add("@u", SqliteType.Text);
+        foreach (var u in uuids.Distinct())
+        {
+            p.Value = u;
+            if (cmd.ExecuteScalar() is string ja && ja.Length > 0) result[u] = ja;
+        }
+        return result;
+    }
+
     public List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double similarity)> SemanticSearch(float[] queryEmbedding, int limit = 10)
     {
         var results = new List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double similarity)>();
@@ -396,7 +548,9 @@ public class GameDataQueryService : IDisposable
         var conditions = new List<string>();
         if (!string.IsNullOrEmpty(keyword))
         {
-            conditions.Add("(record_name LIKE @q OR title LIKE @q OR title_hud LIKE @q OR mission_type LIKE @q OR mission_giver LIKE @q OR description LIKE @q)");
+            // ContractGenerator 行は record_name が契約 GUID なので、raw_json の "_Name_" (契約 debugName → 生成器 debugName) でも当てる
+            // (CASE で CG 行以外では json_extract を評価しない)
+            conditions.Add($"(record_name LIKE @q OR title LIKE @q OR title_hud LIKE @q OR mission_type LIKE @q OR mission_giver LIKE @q OR description LIKE @q OR CASE WHEN record_name LIKE '{ContractRecordPrefix}%' THEN json_extract(raw_json, '$._Name_') END LIKE @q)");
             cmd.Parameters.AddWithValue("@q", $"%{keyword}%");
         }
         if (!string.IsNullOrEmpty(missionType))
@@ -406,7 +560,8 @@ public class GameDataQueryService : IDisposable
         }
 
         var where = conditions.Count > 0 ? $"WHERE {string.Join(" AND ", conditions)}" : "";
-        cmd.CommandText = $"SELECT record_name, title, title_hud, mission_type, difficulty, mission_giver, location_label, description, reward_min, reward_max, required_reputation, lawfulness_type FROM missions {where} ORDER BY reward_max DESC LIMIT 30";
+        // 13 列目: ContractGenerator 行だけ raw_json (表示名に使う debugName を読む)。他の行は NULL
+        cmd.CommandText = $"SELECT record_name, title, title_hud, mission_type, difficulty, mission_giver, location_label, description, reward_min, reward_max, required_reputation, lawfulness_type, CASE WHEN record_name LIKE '{ContractRecordPrefix}%' THEN raw_json END FROM missions {where} ORDER BY reward_max DESC LIMIT 30";
         using var reader = cmd.ExecuteReader();
 
         var sb = new StringBuilder();
@@ -426,15 +581,32 @@ public class GameDataQueryService : IDisposable
             var rep = reader.IsDBNull(10) ? "" : reader.GetString(10);
             var law = reader.IsDBNull(11) ? "" : reader.GetString(11);
 
-            var friendlyName = ExtractFriendlyName(rn);
             var displayTitle = IsLocKey(title) ? "" : title;
+            string friendlyName;
+            // 難易度・場所の推測に使う名前 (ContractGenerator 行は GUID ではなく debugName。抽出側と同じくタイトルキーでは推測しない)
+            var inferName = rn;
+            if (rn.StartsWith(ContractRecordPrefix))
+            {
+                // ContractGenerator 行 (record_name は契約 GUID): 表示名はタイトル、解決できなければ 契約 debugName → 生成器 debugName → タイトルキー
+                var contractRaw = reader.IsDBNull(12) ? "" : reader.GetString(12);
+                var (debugName, nameBase, _) = GameDataExtractor.ReadContractDisplayNames(contractRaw);
+                friendlyName = !string.IsNullOrEmpty(displayTitle) ? displayTitle : nameBase;
+                displayTitle = "";   // 表示名と同じタイトルを重ねて出さない
+                inferName = debugName;
+                // 合法性: lawfulness_type 列は空なので raw_json の _Resolved_.illegal から出す
+                law = ReadContractLawfulness(contractRaw);
+            }
+            else
+            {
+                friendlyName = ExtractFriendlyName(rn);
+            }
             sb.Append($"- {friendlyName}");
             if (!string.IsNullOrEmpty(displayTitle)) sb.Append($" | タイトル: {displayTitle}");
             if (!string.IsNullOrEmpty(mType)) sb.Append($" | 種別: {mType}");
             if (!string.IsNullOrEmpty(diff)) sb.Append($" | 難易度: {diff}");
             if (string.IsNullOrEmpty(diff))
             {
-                var inferred = InferDifficultyFromName(rn);
+                var inferred = InferDifficultyFromName(inferName);
                 if (!string.IsNullOrEmpty(inferred)) sb.Append($" | 難易度: {inferred}");
             }
             if (!string.IsNullOrEmpty(giver) && !IsLocKey(giver)) sb.Append($" | 依頼者: {giver}");
@@ -446,7 +618,7 @@ public class GameDataQueryService : IDisposable
             if (!string.IsNullOrEmpty(rep)) sb.Append($" | 必要評判: {rep}");
             if (!string.IsNullOrEmpty(law)) sb.Append($" | 合法性: {law}");
             if (!string.IsNullOrEmpty(loc)) sb.Append($" | 場所: {loc}");
-            var inferredLoc = InferLocationFromName(rn);
+            var inferredLoc = InferLocationFromName(inferName);
             if (!string.IsNullOrEmpty(inferredLoc) && string.IsNullOrEmpty(loc)) sb.Append($" | 場所: {inferredLoc}");
             sb.AppendLine();
 
@@ -506,6 +678,27 @@ public class GameDataQueryService : IDisposable
         if (val.StartsWith('@')) return true;
         if (val.Contains('_') && !val.Contains(' ') && val.Length > 10) return true;
         return false;
+    }
+
+    // ContractGenerator 行の record_name の接頭辞 (GameDataExtractor.ContractRecordPrefix と同じ)
+    private const string ContractRecordPrefix = GameDataExtractor.ContractRecordPrefix;
+
+    // ContractGenerator 行の raw_json の _Resolved_.illegal (契約 → 生成器 → テンプレート) から 合法 / 非合法 / 不明 を返す
+    private static string ReadContractLawfulness(string rawJson)
+    {
+        if (string.IsNullOrEmpty(rawJson)) return "不明";
+        try
+        {
+            using var doc = JsonDocument.Parse(rawJson);
+            if (doc.RootElement.TryGetProperty("_Resolved_", out var res) && res.ValueKind == JsonValueKind.Object
+                && res.TryGetProperty("illegal", out var il))
+            {
+                if (il.ValueKind == JsonValueKind.False) return "合法";
+                if (il.ValueKind == JsonValueKind.True) return "非合法";
+            }
+        }
+        catch { }
+        return "不明";
     }
 
     private static string ExtractFriendlyName(string recordName)

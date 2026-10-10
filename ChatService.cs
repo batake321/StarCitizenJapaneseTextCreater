@@ -481,12 +481,175 @@ public class ChatService
     private static string ClassifyItemType(string itemType, string subType)
     {
         if (ShipTypes.Contains(itemType) || ShipTypes.Contains(subType)) return "ship";
+        // item_index の船・車両は item_type = NOITEM_Vehicle、sub_type = Vehicle_Spaceship / Vehicle_GroundVehicle / Vehicle_PowerSuit
+        if (itemType.Equals("NOITEM_Vehicle", StringComparison.OrdinalIgnoreCase)
+            || subType.StartsWith("Vehicle_", StringComparison.OrdinalIgnoreCase)) return "ship";
         if (WeaponPersonalTypes.Contains(itemType)) return "weapon";
         if (ShipComponentTypes.Contains(itemType)) return "component";
         if (ArmorTypes.Contains(itemType) || ArmorTypes.Contains(subType)
             || itemType.StartsWith("Char_Armor", StringComparison.OrdinalIgnoreCase)
             || itemType.StartsWith("Char_Clothing", StringComparison.OrdinalIgnoreCase)) return "armor";
         return "item";
+    }
+
+    // 実行中のチャットのバックエンド (SendChatAsync で設定。スキルの中でカタカナ → 英語の変換に使う)
+    private static readonly AsyncLocal<BackendConfig?> _currentChatBackend = new();
+
+    private static readonly System.Text.RegularExpressions.Regex KatakanaRegex = new(@"[\u30A0-\u30FF]");
+
+    // アイテム名の検索。順に試し、当たった段で止める:
+    //   1. 通常の検索 (FuzzySearch: FTS5 trigram → LIKE)。
+    //      検索語にカタカナがあるときは、カタカナのままの検索と、チャットのバックエンドで英語の綴りに変換した検索の両方を行い、
+    //      候補をまとめる (重複は 1 つに。どちらで見つかったかを method に書く)。並びは、候補を見つけた検索語に対する
+    //      編集距離の類似度 (GameDataQueryService.NameSimilarity。name と name_ja の高い方) の高い順、同点は名前全体との類似度
+    //      (WholeNameSimilarity) の高い順、それも同点は元の順。これで 1 段とする
+    //   2. 編集距離のあいまい検索 (EditDistanceSearch、下限 GameDataQueryService.FuzzyMinSimilarity)
+    //   3. ベクトル検索 (SemanticSearch。ベクトル構築と同じバックエンド・モデルで検索語を埋め込む。使えなければ飛ばす)
+    // 戻り値の method は「どの方法で見つかったか」の説明 (AI に渡すテキストに付ける)。カタカナを含まない通常の検索で当たれば ""
+    private static async Task<(List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double score)> items, string method)>
+        SmartItemSearchAsync(string query, int limit)
+    {
+        var empty = new List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double score)>();
+        if (_queryService == null || string.IsNullOrWhiteSpace(query)) return (empty, "");
+
+        var exact = _queryService.FuzzySearch(query, limit);
+
+        string? english = null;
+        if (KatakanaRegex.IsMatch(query))
+        {
+            english = await ConvertKatakanaToEnglishAsync(query);
+            Log($"SEARCH: katakana '{query}' -> '{english}'");
+            if (string.IsNullOrWhiteSpace(english) || english.Equals(query, StringComparison.OrdinalIgnoreCase)) english = null;
+        }
+
+        if (english != null)
+        {
+            // カタカナのままの検索と英語化した検索の両方の候補をまとめる (uuid が同じものは 1 つに)
+            var en = _queryService.FuzzySearch(english, limit);
+            var merged = new List<((string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double score) item, string term)>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var asIsNames = new List<string>();
+            var englishNames = new List<string>();
+            foreach (var r in exact)
+                if (seen.Add(r.uuid)) { merged.Add((r, query)); asIsNames.Add(r.name); }
+            foreach (var r in en)
+                if (seen.Add(r.uuid)) { merged.Add((r, english)); englishNames.Add(r.name); }
+            if (merged.Count > 0)
+            {
+                // 候補を見つけた検索語に対する編集距離の類似度の高い順に並べる。同点は名前全体との類似度の高い順、
+                // それも同点は元の順 (OrderByDescending / ThenByDescending は安定)
+                var namesJa = _queryService.GetItemNamesJa(merged.Select(m => m.item.uuid));
+                var sorted = merged
+                    .Select(m =>
+                    {
+                        var nq = GameDataQueryService.NormalizeForFuzzy(m.term);
+                        var ja = namesJa.TryGetValue(m.item.uuid, out var j) ? j : "";
+                        var sim = Math.Max(GameDataQueryService.NameSimilarity(nq, m.item.name), GameDataQueryService.NameSimilarity(nq, ja));
+                        var whole = Math.Max(GameDataQueryService.WholeNameSimilarity(nq, m.item.name), GameDataQueryService.WholeNameSimilarity(nq, ja));
+                        return (m.item, sim, whole);
+                    })
+                    .OrderByDescending(x => x.sim).ThenByDescending(x => x.whole)
+                    .Select(x => x.item)
+                    .ToList();
+                var parts = new List<string>();
+                if (asIsNames.Count > 0)
+                    parts.Add($"'{query}' のまま検索して見つかった候補: {string.Join(", ", asIsNames.Distinct())}");
+                if (englishNames.Count > 0)
+                    parts.Add($"'{query}' のカタカナを AI で英語の綴り '{english}' に変換して検索して見つかった候補: {string.Join(", ", englishNames.Distinct())}");
+                else
+                    parts.Add($"英語の綴り '{english}' に変換した検索では、ほかの候補は見つかりませんでした");
+                return (sorted, string.Join(" / ", parts));
+            }
+        }
+        else if (exact.Count > 0)
+        {
+            return (exact, "");
+        }
+
+        var searchText = english ?? query;
+        var fuzzy = _queryService.EditDistanceSearch(searchText, limit);
+        if (fuzzy.Count > 0)
+            return (fuzzy, $"'{query}' に名前が一致するものが無かったため、綴りの近さ (あいまい検索。編集距離) で見つかった候補です。名前が一致したものではありません。");
+
+        var vec = await TrySemanticSearchAsync(searchText, limit);
+        if (vec.Count > 0)
+            return (vec, $"'{query}' に名前が一致するものが無かったため、ベクトル検索 (意味の近さ) で見つかった候補です。名前が一致したものではありません。");
+
+        return (empty, "");
+    }
+
+    // テスト用: カタカナ変換を差し替える (null なら実行中のチャットのバックエンドを使う)
+    internal static Func<string, Task<string?>>? KatakanaConverterOverride;
+
+    // 検索語のカタカナ部分を、実行中のチャットのバックエンドで英語の綴りに変換する (失敗・バックエンド不明なら null)
+    private static async Task<string?> ConvertKatakanaToEnglishAsync(string query)
+    {
+        if (KatakanaConverterOverride != null) return await KatakanaConverterOverride(query);
+        var backend = _currentChatBackend.Value;
+        if (backend == null) return null;
+        const string system =
+            "あなたは Star Citizen（スターシチズン）の固有名詞に詳しいアシスタントです。\n" +
+            "与えられた検索語のカタカナ部分を、ゲーム内で使われている英語の綴りに直してください。\n" +
+            "カタカナ以外の部分はそのまま残し、変換後の検索語だけを 1 行で返してください。説明は不要です。";
+        var history = new List<ChatMessage> { new() { Role = "user", Content = query } };
+        try
+        {
+            var task = backend.Type.ToLowerInvariant() switch
+            {
+                "claude" => SendClaudeChatAsync(backend, system, history, useTools: false),
+                "gemini" => SendGeminiChatAsync(backend, system, history, useTools: false),
+                "openai" => SendOpenAiChatAsync(backend, system, history, useTools: false),
+                "ollama" => SendOllamaChatAsync(backend, system, history, useTools: false),
+                _ => Task.FromResult("")
+            };
+            var text = await task.WaitAsync(TimeSpan.FromSeconds(15));
+            var line = (text ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim().Trim('"', '\'', '「', '」', '`') ?? "";
+            return line.Length > 0 ? line : null;
+        }
+        catch (Exception ex)
+        {
+            Log($"SEARCH: katakana conversion failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    // ベクトル検索。ベクトル構築 (MainWindow のベクトル構築ボタン) と同じく、チェックの付いた (Enabled) 使用可能なバックエンドのうち
+    // Ollama → OpenAI → Gemini の順で最初のものを使い、Ollama なら nomic-embed-text、それ以外はそのバックエンドの Model で検索語を埋め込む。
+    // インデックスが無い・埋め込みに失敗した・次元が合わない (類似度がすべて 0) ときは空を返す
+    private static async Task<List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double score)>> TrySemanticSearchAsync(string query, int limit)
+    {
+        var empty = new List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double score)>();
+        if (_queryService == null || !_queryService.HasVectorIndex()) return empty;
+
+        try
+        {
+            var backends = App.Config.Translation.Backends
+                .Where(b => b.Enabled && (!string.IsNullOrWhiteSpace(b.ApiKey) || b.Type == "Ollama")).ToList();
+            var embeddingBackend = backends.FirstOrDefault(b => b.Type.Equals("Ollama", StringComparison.OrdinalIgnoreCase))
+                ?? backends.FirstOrDefault(b => b.Type.Equals("OpenAI", StringComparison.OrdinalIgnoreCase))
+                ?? backends.FirstOrDefault(b => b.Type.Equals("Gemini", StringComparison.OrdinalIgnoreCase));
+            if (embeddingBackend == null) return empty;
+
+            var embConfig = new BackendConfig
+            {
+                Type = embeddingBackend.Type,
+                ApiKey = embeddingBackend.ApiKey,
+                BaseUrl = embeddingBackend.BaseUrl,
+                Model = embeddingBackend.Type.Equals("Ollama", StringComparison.OrdinalIgnoreCase) ? "nomic-embed-text" : embeddingBackend.Model,
+                Name = embeddingBackend.Name,
+            };
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var embs = await GameDataExtractor.GetQueryEmbeddingsAsync(embConfig, new List<string> { query }, cts.Token);
+            if (embs == null || embs.Count == 0 || embs[0].Length == 0) return empty;
+            var hits = _queryService.SemanticSearch(embs[0], limit);
+            if (hits.Count == 0 || hits[0].similarity <= 0) return empty;
+            return hits.Select(h => (h.uuid, h.recordName, h.name, h.itemType, h.subType, h.manufacturer, h.similarity)).ToList();
+        }
+        catch (Exception ex)
+        {
+            Log($"SEARCH: vector search unavailable: {ex.Message}");
+            return empty;
+        }
     }
 
     private static async Task<string> ExecuteLookupAsync(JsonElement args)
@@ -498,7 +661,7 @@ public class ChatService
         if (_queryService == null)
             return "⚠️ ゲームデータのインデックスが未構築です。設定タブの「インデックス構築」を実行してください。";
 
-        var candidates = _queryService.FuzzySearch(query, 10);
+        var (candidates, searchMethod) = await SmartItemSearchAsync(query, 10);
         if (candidates.Count == 0)
         {
             var iniResult = SearchGlobalIniForItem(query);
@@ -508,9 +671,11 @@ public class ChatService
 
         var best = candidates[0];
         var category = ClassifyItemType(best.itemType, best.subType);
-        Log($"LOOKUP: found '{best.name}' type={best.itemType}/{best.subType} -> category={category}");
+        Log($"LOOKUP: found '{best.name}' type={best.itemType}/{best.subType} -> category={category}{(searchMethod.Length > 0 ? $" ({searchMethod})" : "")}");
 
         var sb = new StringBuilder();
+        if (searchMethod.Length > 0)
+            sb.AppendLine($"※ {searchMethod}");
 
         if (candidates.Count > 1)
         {
@@ -550,11 +715,18 @@ public class ChatService
         {
             try
             {
-                var dcbResult = _queryService.SearchShips(query);
+                // 見つかった船 (item_index の record_name) を ships 表から引く。無ければ検索語で探す
+                var dcbResult = !string.IsNullOrEmpty(item.recordName) ? _queryService.SearchShips(query, item.recordName) : "";
+                if (string.IsNullOrEmpty(dcbResult)) dcbResult = _queryService.SearchShips(query);
                 if (!string.IsNullOrEmpty(dcbResult)) sb.AppendLine(dcbResult);
             }
             catch { }
         }
+
+        // 貨物積載量: ゲームデータ (ships / ship_ports) には SCU の数値が無いため、UEX の船データ (交易タブで取得したキャッシュ) から引く
+        var cachedScu = FindCachedShipScu(item.name);
+        if (cachedScu != null)
+            sb.AppendLine($"貨物積載量 (UEX の船データ「{cachedScu.Value.Name}」): {cachedScu.Value.Scu} SCU");
 
         try
         {
@@ -600,6 +772,22 @@ public class ChatService
         catch { }
 
         return sb.Length > 0 ? sb.ToString() : $"'{query}' の詳細情報が見つかりませんでした。";
+    }
+
+    // UEX の船データ (TradeService が取得・キャッシュしたもの) から、船名が完全一致するものの SCU を返す。
+    // item_index の船名は "Drake Ironclad" のようにメーカー名が付き、UEX は "Ironclad" なので、先頭の 1 語を外した名前も試す
+    private static (string Name, int Scu)? FindCachedShipScu(string shipName)
+    {
+        if (_tradeService == null || string.IsNullOrWhiteSpace(shipName)) return null;
+        var candidates = new List<string> { shipName.Trim() };
+        var space = shipName.Trim().IndexOf(' ');
+        if (space > 0) candidates.Add(shipName.Trim()[(space + 1)..]);
+        foreach (var name in candidates)
+        {
+            var hit = _tradeService.Ships.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (hit != null && hit.Scu > 0) return (hit.Name, hit.Scu);
+        }
+        return null;
     }
 
     private static async Task<string> LookupItemAsync(string query, (string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double score) item)
@@ -863,10 +1051,11 @@ public class ChatService
         {
             try
             {
-                var indexResults = _queryService.FuzzySearch(query);
+                var (indexResults, searchMethod) = await SmartItemSearchAsync(query, 20);
                 if (indexResults.Count > 0)
                 {
                     sb.AppendLine($"=== ゲームデータ (DB): アイテム検索 ({indexResults.Count}件) ===");
+                    if (searchMethod.Length > 0) sb.AppendLine($"※ {searchMethod}");
                     foreach (var (uuid, rn, name, itemType, subType, mfr, _) in indexResults)
                     {
                         sb.Append($"- {(!string.IsNullOrEmpty(name) ? name : rn)}");
@@ -1098,7 +1287,7 @@ public class ChatService
 
         if (string.IsNullOrEmpty(uuid))
         {
-            var candidates = _queryService.FuzzySearch(itemName);
+            var (candidates, searchMethod) = await SmartItemSearchAsync(itemName, 20);
             if (candidates.Count == 0)
                 return $"'{itemName}' に該当するアイテムが見つかりませんでした。インデックスを再構築すると改善される場合があります。";
 
@@ -1106,10 +1295,13 @@ public class ChatService
             {
                 uuid = candidates[0].uuid;
                 displayName = candidates[0].name;
+                if (searchMethod.Length > 0)
+                    return $"※ {searchMethod}\n" + await FetchCstonePricesAsync(uuid, displayName, system);
             }
             else
             {
                 var sb = new StringBuilder();
+                if (searchMethod.Length > 0) sb.AppendLine($"※ {searchMethod}");
                 sb.AppendLine($"'{itemName}' の候補が {candidates.Count} 件見つかりました:");
                 foreach (var (cUuid, _, cName, cType, cSub, cMfr, _) in candidates.Take(10))
                 {
@@ -2720,6 +2912,7 @@ public class ChatService
     public static async Task<string> SendChatAsync(BackendConfig backend, List<ChatMessage> history, bool useTools)
     {
         Log($"SendChatAsync: backend={backend.Type}, model={backend.Model}, tools={useTools}");
+        _currentChatBackend.Value = backend;
         var system = useTools ? ChatSystemPrompt : ChatSystemPrompt.Split("【重要】")[0] + "回答は簡潔で分かりやすい日本語でお願いします。";
 
         // Extract the latest user question for domain-targeted knowledge injection
@@ -2996,6 +3189,8 @@ public class ChatService
 
         Log($"CLAUDE: model={config.Model}, messages={conversationMessages.Count}, tools={tools.Count}");
         int maxIter = useTools ? 5 : 1;
+        // temperature を受け付けないモデルで 400 が返ったら、以降は temperature を付けない (再送は 1 回だけ)
+        bool omitTemperature = false;
         for (int iteration = 0; iteration < maxIter; iteration++)
         {
             var body = new Dictionary<string, object>
@@ -3005,7 +3200,7 @@ public class ChatService
                 ["system"] = system,
                 ["messages"] = conversationMessages,
             };
-            if (!config.Model.Contains("opus", StringComparison.OrdinalIgnoreCase))
+            if (!omitTemperature && ClaudeAcceptsTemperature(config.Model))
                 body["temperature"] = 0.7;
             if (useTools && tools.Count > 0)
             {
@@ -3017,6 +3212,24 @@ public class ChatService
             Log($"CLAUDE REQUEST (iter={iteration}): {json[..Math.Min(300, json.Length)]}...");
             var resp = await http.PostAsync("https://api.anthropic.com/v1/messages",
                 new StringContent(json, Encoding.UTF8, "application/json"));
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                var err = await resp.Content.ReadAsStringAsync();
+                var code = (int)resp.StatusCode;
+                if (code == 400 && !omitTemperature && body.ContainsKey("temperature") && IsClaudeTemperatureRejected(err))
+                {
+                    // temperature が非推奨・非対応と返ったので、temperature を外して 1 回だけ再送する
+                    omitTemperature = true;
+                    body.Remove("temperature");
+                    json = JsonSerializer.Serialize(body, JsonOpts);
+                    Log($"CLAUDE: temperature を受け付けないモデルのため temperature を外して再送します ({config.Model})");
+                    resp.Dispose();
+                    resp = await http.PostAsync("https://api.anthropic.com/v1/messages",
+                        new StringContent(json, Encoding.UTF8, "application/json"));
+                    // 再送も失敗したら下の通常のエラー処理に任せる
+                }
+            }
 
             if (!resp.IsSuccessStatusCode)
             {
@@ -3106,6 +3319,23 @@ public class ChatService
 
         return "[ツール呼び出し回数の上限に達しました]";
     }
+
+    // Claude API の 400 エラー本文が「temperature は非推奨・非対応」という内容か
+    // (例: "`temperature` is deprecated for this model.")
+    internal static bool IsClaudeTemperatureRejected(string errorBody) =>
+        errorBody.Contains("temperature", StringComparison.OrdinalIgnoreCase)
+        && (errorBody.Contains("deprecated", StringComparison.OrdinalIgnoreCase)
+            || errorBody.Contains("not supported", StringComparison.OrdinalIgnoreCase)
+            || errorBody.Contains("unsupported", StringComparison.OrdinalIgnoreCase)
+            || errorBody.Contains("does not support", StringComparison.OrdinalIgnoreCase));
+
+    // temperature を受け付けると分かっている Claude モデルか
+    // (claude-*-4-6、claude-haiku-4-5、claude-sonnet-4-5、Claude 3 系)。
+    // それ以外 (Opus 4.7 以降、Sonnet 5 以降、Haiku 5.5、Fable など) には temperature を付けない
+    internal static bool ClaudeAcceptsTemperature(string model) =>
+        System.Text.RegularExpressions.Regex.IsMatch(model ?? "",
+            @"^claude-(?:(?:[a-z]+-4-6|haiku-4-5|sonnet-4-5)(?:$|-)|(?:[a-z]+-)?3-)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
     private static async Task<string> SendGeminiChatAsync(BackendConfig config, string system, List<ChatMessage> history, bool useTools = true)
     {

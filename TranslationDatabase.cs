@@ -196,7 +196,9 @@ public class TranslationDatabase : IDisposable
         cmd.CommandText = """
             UPDATE translations SET japanese = $ja, source = 'ai', translator = $tr, modified_at = datetime('now', 'localtime')
             WHERE key = $key AND (japanese IS NULL OR japanese = '' OR source = 'ai' OR source = 'untranslated')
+              AND trim($ja, ' ' || char(9) || char(10) || char(13)) <> trim(english, ' ' || char(9) || char(10) || char(13))
             """;
+        // ↑ 訳文が英語原文と同じ (前後の空白・タブ・改行を除いて一致) ものは保存しない (AI が原文をそのまま返したもの。未翻訳のまま残す)
         var pKey = cmd.Parameters.Add("$key", SqliteType.Text);
         var pJa = cmd.Parameters.Add("$ja", SqliteType.Text);
         var pTr = cmd.Parameters.Add("$tr", SqliteType.Text);

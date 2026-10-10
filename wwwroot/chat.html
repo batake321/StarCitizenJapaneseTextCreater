@@ -28,6 +28,10 @@ body { font-family: 'Segoe UI','Meiryo','Noto Sans JP',sans-serif; background: v
 .status { font-size: 11px; color: var(--text-dim); }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
 .dot.on { background: #4caf50; } .dot.off { background: #f44336; }
+/* 外部AI相談・検証エージェントの説明 */
+.help { display: inline-block; width: 14px; height: 14px; line-height: 14px; text-align: center; border-radius: 50%;
+        background: var(--surface2); color: var(--text); font-size: 10px; cursor: help; }
+.panel-desc { color: var(--text-dim); font-size: 11px; margin-top: 2px; }
 #voicevoxStatus { margin-left: 8px; }
 .badge { background: var(--primary); color: #fff; border-radius: 10px; padding: 2px 8px; font-size: 10px; }
 
@@ -137,16 +141,17 @@ body { font-family: 'Segoe UI','Meiryo','Noto Sans JP',sans-serif; background: v
   <button onclick="clearChat()" title="履歴クリア">&#128465;</button>
 </div>
 
-<div id="consultPanel" style="display:none;padding:2px 12px;background:#f0f4ff;font-size:12px;border-bottom:1px solid #dde">
-  <span style="color:#666">📡 外部AI相談:</span>
+<div id="consultPanel" style="display:none;padding:4px 12px;background:var(--surface);color:var(--text);font-size:12px;border-bottom:1px solid var(--border)">
+  <span title="チェックした AI に、毎回メインの AI が答えたあと、質問とその回答を渡して補足・修正を頼みます (スキルは使わず、チェックした全 AI に同時に聞き、60 秒まで待ちます)。返答は回答の下に「📡 名前 の補足」として付きます。「補足はありません」という返答は付けません。">📡 外部AI相談 <span class="help">?</span>:</span>
   <span id="consultChecks"></span>
+  <div class="panel-desc">メインの AI の回答に、チェックした AI からの補足・修正を毎回付けます。</div>
 </div>
-<div id="verifyPanel" style="display:none;padding:2px 12px;background:#f5f0ff;font-size:12px;border-bottom:1px solid #dde">
-  <span style="color:#666">🔍 検証エージェント:</span>
-  <select id="selVerifyBackend" style="font-size:12px;margin-left:6px;padding:1px 4px;">
+<div id="verifyPanel" style="display:none;padding:4px 12px;background:var(--surface);color:var(--text);font-size:12px;border-bottom:1px solid var(--border)">
+  <span title="メインの AI の回答が不十分なとき (30 文字未満、または「わかりません」「申し訳ありません」などを含む)、または質問に「検証」が含まれるときだけ、選んだ AI に回答の正確さを確かめさせます (スキルは使わず、60 秒まで待ちます)。外部AI相談の補足を付けたあとの回答を確かめます。結果は回答の下に「🔍 検証」として付き、「検証OK」以外の結果は Web チャットではナレッジに自動保存されます。">🔍 検証エージェント <span class="help">?</span>:</span>
+  <select id="selVerifyBackend" style="font-size:12px;margin-left:6px;padding:1px 4px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px">
     <option value="">なし</option>
   </select>
-  <span style="color:#999;margin-left:8px">(答えが不十分 or「検証」で呼出)</span>
+  <div class="panel-desc">回答が不十分なとき、または質問に「検証」を含むときだけ、選んだ AI に回答の正しさを確かめさせます。</div>
 </div>
 
 <div class="messages" id="messages">
@@ -283,10 +288,25 @@ function sendMessage() {
   inputEl.value = ''; autoResize();
   sending = true; btnSend.disabled = true;
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'chat', text }));
+    ws.send(JSON.stringify({ type: 'chat', text, ...currentSelection() }));
   }
   if (voicevoxOn) speakVoicevox('おまちください。');
   setTimeout(() => { sending = false; btnSend.disabled = false; }, 500);
+}
+
+// この画面で選んだバックエンド・外部AI相談・検証エージェント (Name + Model で送る。サーバーはこれを使って回答する)
+function currentSelection() {
+  const sel = parseInt(selBackend.value) || 0;
+  const b = allBackends[sel];
+  const skills = $('#chkSkills').checked;
+  if (!b) return { backend: null, consult: [], verify: null, skills };
+  const saved = JSON.parse(localStorage.getItem('consultChecked') || '[]');
+  const consult = allBackends
+    .filter((x, i) => i !== sel && saved.includes(x.Name + '/' + x.Model))
+    .map(x => ({ name: x.Name, model: x.Model }));
+  const v = $('#selVerifyBackend').value;
+  const vb = v ? allBackends.find((x, i) => i !== sel && (x.Name + '/' + x.Model) === v) : null;
+  return { backend: { name: b.Name, model: b.Model }, consult, verify: vb ? { name: vb.Name, model: vb.Model } : null, skills };
 }
 
 function clearChat() {

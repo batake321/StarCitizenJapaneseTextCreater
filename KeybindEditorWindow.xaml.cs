@@ -46,7 +46,7 @@ public partial class KeybindEditorWindow : Window
         {
             MessageBox.Show(
                 "キーバインドデータが見つかりませんでした。\n\n" +
-                "先に「1. 抽出」を実行して Data.p4k からデータを抽出してください。\n" +
+                "先に翻訳タブの［新しいパッチを読み取る］を実行して Data.p4k からデータを抽出してください。\n" +
                 "または、ゲームパスが正しいか確認してください。",
                 "データなし", MessageBoxButton.OK, MessageBoxImage.Warning);
         }

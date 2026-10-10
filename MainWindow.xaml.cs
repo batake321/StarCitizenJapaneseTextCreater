@@ -93,9 +93,6 @@ public partial class MainWindow : Window
         txtVoiceVoxUrl.Text = config.VoiceVoxUrl;
         txtVoiceVoxSpeaker.Text = config.VoiceVoxSpeakerId.ToString();
         chkWebAutoStart.IsChecked = config.WebServerAutoStart;
-        chkEquipClassMarks.IsChecked = App.Config.EquipmentClassMarks;
-        chkMissionRepMarks.IsChecked = App.Config.MissionReputationMarks;
-        chkBlueprintMarks.IsChecked = App.Config.BlueprintMissionMarks;
         var mfs = config.MissionDetailFontSize;
         if (mfs < 8 || mfs > 30) mfs = 14;
         txtMissionFontSize.Text = mfs.ToString();
@@ -122,6 +119,7 @@ public partial class MainWindow : Window
         InitChat();
         InitCapture();
         _ = RunBackgroundFetchesAsync();
+        _ = CheckAiModelsAsync();
 
         if (config.WebServerAutoStart)
             _ = StartWebServerAsync();
@@ -183,6 +181,14 @@ public partial class MainWindow : Window
         _logBuffer.AppendLine(line);
         txtLog.AppendText(line + "\n");
         txtLog.ScrollToEnd();
+        // 翻訳・日本語化の実行中は、翻訳タブのログにも出す
+        if (_running)
+        {
+            txtTaskLog.AppendText(line + "\n");
+            txtTaskLog.ScrollToEnd();
+        }
+        // ログタブの内容を作業ディレクトリの app_log.txt にも追記する (あとから見返せるように)
+        try { File.AppendAllText(Path.Combine(WorkDir, "app_log.txt"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}\n", Encoding.UTF8); } catch { }
     }
 
     private void SaveLog_Click(object sender, RoutedEventArgs e)
@@ -298,6 +304,30 @@ public partial class MainWindow : Window
         }
     }
 
+    // 起動時のモデル確認: API キーがあるプロバイダーの「使えるモデル一覧」をバックグラウンドで取得する。
+    // 失敗してもアプリはそのまま動く。チェックが付いているバックエンドのモデルが一覧に無ければ 1 回だけ知らせる
+    private async Task CheckAiModelsAsync()
+    {
+        try
+        {
+            var backends = App.Config.Translation.Backends.ToList();
+            var result = await Task.Run(() => ModelCatalog.RefreshAsync(backends));
+            if (result.LogLine != null)
+                Log(result.LogLine);
+            if (result.Unavailable.Count > 0)
+            {
+                MessageBox.Show(this,
+                    "次のモデルは使えなくなっています。AI 設定で変更してください。\n"
+                    + string.Join("\n", result.Unavailable.Select(u => "・" + u)),
+                    "モデル確認");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"モデル確認エラー: {ex.Message}");
+        }
+    }
+
     private static bool IsChatUsable(BackendConfig b) =>
         !string.IsNullOrWhiteSpace(b.ApiKey) || b.Type == "Ollama";
 
@@ -349,7 +379,20 @@ public partial class MainWindow : Window
 
     private async void Extract_Click(object sender, RoutedEventArgs e) => await RunPipeline("extract");
     private async void Translate_Click(object sender, RoutedEventArgs e) => await RunPipeline("translate");
-    private async void Apply_Click(object sender, RoutedEventArgs e) => await RunPipeline("apply");
+    private async void Apply_Click(object sender, RoutedEventArgs e)
+    {
+        // ゲーム内の名前に付ける印を選んでから反映する
+        if (!_running)
+        {
+            var dlg = new InGameMarksDialog(App.Config.EquipmentClassMarks, App.Config.MissionReputationMarks, App.Config.BlueprintMissionMarks) { Owner = this };
+            if (dlg.ShowDialog() != true) return;
+            App.Config.EquipmentClassMarks = dlg.EquipmentClassMarks;
+            App.Config.MissionReputationMarks = dlg.MissionReputationMarks;
+            App.Config.BlueprintMissionMarks = dlg.BlueprintMissionMarks;
+            SaveConfigToFile();
+        }
+        await RunPipeline("apply");
+    }
 
     private async Task RunPipeline(string command)
     {
@@ -363,7 +406,7 @@ public partial class MainWindow : Window
         _running = true;
         _cts = new CancellationTokenSource();
         SetButtons(false);
-        txtLog.Clear();
+        txtTaskLog.Clear();   // 翻訳タブのログは実行ごとに消す (ログタブの全体ログは残す)
         SetProgress(0);
 
         App.Config.GamePath = txtGamePath.Text.Trim();
@@ -479,6 +522,15 @@ public partial class MainWindow : Window
                             using var db = new TranslationDatabase(DbPath);
                             db.ImportAiTranslations(TranslatedPath);
                         }
+
+                        // AI が英語のまま返したものは「原文維持」にして、次回から翻訳対象にしない
+                        var keptEnglish = orchestrator.KeptEnglishKeys.Distinct().ToList();
+                        if (keptEnglish.Count > 0)
+                        {
+                            using var db = new TranslationDatabase(DbPath);
+                            db.SetToOriginalEnglish(keptEnglish);
+                            Log($"原文維持にしました: {keptEnglish.Count:N0} 件");
+                        }
                     }
                     SetProgress(90, "翻訳完了");
                     Dispatcher.Invoke(RefreshEditor);
@@ -582,16 +634,6 @@ public partial class MainWindow : Window
             return File.GetLastWriteTimeUtc(p4k).ToString("o") == storedP4k;
         }
         catch { return false; }
-    }
-
-    // ゲーム内テキストに付ける印のオン／オフ。次の [3. 反映] から反映される
-    private void InGameMarks_Changed(object sender, RoutedEventArgs e)
-    {
-        if (chkEquipClassMarks == null || chkMissionRepMarks == null || chkBlueprintMarks == null) return;   // XAML 読込中
-        App.Config.EquipmentClassMarks = chkEquipClassMarks.IsChecked == true;
-        App.Config.MissionReputationMarks = chkMissionRepMarks.IsChecked == true;
-        App.Config.BlueprintMissionMarks = chkBlueprintMarks.IsChecked == true;
-        SaveConfigToFile();
     }
 
     private void OnBatchTranslated(List<(string Key, string Japanese, string Translator)> items)
@@ -2153,21 +2195,39 @@ public partial class MainWindow : Window
         _webServer?.Dispose();
         _webServer = new ChatWebServer();
 
-        _webServer.SetMessageHandler(async text =>
+        _webServer.SetMessageHandler(async (text, selection) =>
         {
             BackendConfig? backend = null;
             BackendConfig? verifyBackend = null;
             List<ChatMessage> history = null!;
             List<BackendConfig> consultBackends = null!;
+            string? selectionError = null;
 
             Dispatcher.Invoke(() =>
             {
-                backend = GetSelectedChatBackend();
-                consultBackends = GetCheckedConsultBackends();
-                verifyBackend = GetVerifyBackend();
+                if (selection?.Backend != null)
+                {
+                    // Web 画面で選んだバックエンド・外部AI相談・検証エージェントを使う (Web の一覧と同じ IsChatUsable の範囲から Name + Model で引く)
+                    var usable = App.Config.Translation.Backends.Where(b => IsChatUsable(b)).ToList();
+                    BackendConfig? Find(ChatWebServer.BackendRef r) =>
+                        usable.FirstOrDefault(b => b.Name == r.Name && (b.Model ?? "") == r.Model);
+                    backend = Find(selection.Backend);
+                    if (backend == null) selectionError = $"Web 画面で選んだバックエンド「{selection.Backend.Name} ({selection.Backend.Model})」がアプリの AI 設定に見つかりません。画面を再読み込みしてください。";
+                    consultBackends = selection.Consult.Select(Find).Where(b => b != null).Select(b => b!).ToList();
+                    verifyBackend = selection.Verify != null ? Find(selection.Verify) : null;
+                }
+                else
+                {
+                    backend = GetSelectedChatBackend();
+                    consultBackends = GetCheckedConsultBackends();
+                    verifyBackend = GetVerifyBackend();
+                }
+                if (selectionError != null) return;
                 _chatHistory.Add(new ChatMessage { Role = "user", Content = text });
                 history = _chatHistory.ToList();
             });
+
+            if (selectionError != null) return selectionError;
 
             // Check for pending remember (user selecting a number)
             var pendingResult = ChatService.TryCompletePendingRemember(text);
@@ -2180,7 +2240,9 @@ public partial class MainWindow : Window
 
             if (backend == null) return "バックエンドが選択されていません。アプリのチャットタブでバックエンドを選んでください。";
 
-            var useSkills = backend.SupportsSkills;
+            // Web 画面の Skills チェックボックスが届いたら、デスクトップ版 (chkFetchScData && SupportsSkills) と同じく
+            // チェックが付いていて、かつバックエンドがスキル対応のときだけスキルを使う。届かない (古い画面) ときは従来どおり
+            var useSkills = selection?.UseSkills is bool webSkills ? webSkills && backend.SupportsSkills : backend.SupportsSkills;
             var response = await ChatService.SendChatAsync(backend, history, useSkills);
             var primaryResponse = response;
 
@@ -2399,7 +2461,11 @@ public partial class MainWindow : Window
 
         pnlConsultBackends.Children.Add(new TextBlock
         {
-            Text = "🔍 検証:",
+            Text = "🔍 検証 (?):",
+            Cursor = System.Windows.Input.Cursors.Help,
+            ToolTip = "メインの AI の回答が不十分なとき (30 文字未満、または「わかりません」「申し訳ありません」などを含む)、または質問に「検証」が含まれるときだけ、"
+                    + "選んだ AI に回答の正確さを確かめさせます (スキルは使わず、60 秒まで待ちます)。外部AI相談の補足を付けたあとの回答を確かめます。"
+                    + "結果は回答の下に「🔍 検証」として付き、「検証OK」以外の結果はナレッジに保存するかを確認します。",
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 4, 0),
             FontSize = 12,

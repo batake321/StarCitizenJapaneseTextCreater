@@ -49,21 +49,20 @@ https://console.anthropic.com/
 
 | モデル | 特徴 | 翻訳用途の目安 |
 | :---- | :---- | :---- |
-| `claude-haiku-4-5-20251001` | 高速・低価格 | UI ラベル、字幕、リアルタイム翻訳 |
-| `claude-sonnet-4-6` | バランス型 | ミッションテキスト、メニュー全般 |
-| `claude-opus-4-6` | 最高品質 | ロア・専門用語が密な長文 |
+| `claude-haiku-5-5` | 高速・低価格 | UI ラベル、字幕、リアルタイム翻訳 |
+| `claude-sonnet-5-5` | バランス型 | ミッションテキスト、メニュー全般 |
+| `claude-opus-5-5` | 高品質 | ロア・専門用語が密な長文 |
+| `claude-fable-5-1` | 公式ドキュメントを参照 | — |
+| `claude-opus-4-7` (旧) | 以前の版 | 設定済みの人向け |
+| `claude-sonnet-4-6` (旧) | 以前の版 | 設定済みの人向け |
 
 Star Citizen 用途であれば、まずは **Haiku** で全体を試し、品質が足りない箇所だけ Sonnet にフォールバックする二段構成がコスト効率良好です。
 
-### 料金目安（1M トークンあたり）
+### 料金
 
-| モデル | 入力 | 出力 |
-|---|---|---|
-| `claude-haiku-4-5-20251001` | $0.80 | $4.00 |
-| `claude-sonnet-4-6` | $3.00 | $15.00 |
-| `claude-opus-4-6` | $15.00 | $75.00 |
+料金は公式の料金ページを参照してください。
 
-> Star Citizen の全テキスト（約 10 万行）を翻訳する場合、Haiku で $1〜3 程度、Sonnet で $5〜15 程度が目安です。
+https://platform.claude.com/docs/en/about-claude/pricing
 
 ---
 
@@ -73,7 +72,7 @@ Star Citizen 用途であれば、まずは **Haiku** で全体を試し、品�
 
 ANTHROPIC\_API\_KEY=sk-ant-api03-...
 
-ANTHROPIC\_MODEL=claude-haiku-4-5-20251001
+ANTHROPIC\_MODEL=claude-haiku-5-5
 
 Python 最小サンプル：
 

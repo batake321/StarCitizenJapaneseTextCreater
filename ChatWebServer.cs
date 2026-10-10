@@ -18,7 +18,7 @@ public class ChatWebServer : IDisposable
     private CancellationTokenSource? _cts;
     private readonly ConcurrentDictionary<int, WebSocket> _wsClients = new();
     private int _wsIdCounter;
-    private Func<string, Task<string>>? _onSendMessage;
+    private Func<string, WebChatSelection?, Task<string>>? _onSendMessage;
     private string? _htmlCache;
 
     public event Action<string, bool>? MessageReceived;
@@ -45,9 +45,40 @@ public class ChatWebServer : IDisposable
         return ips.ToArray();
     }
 
-    public void SetMessageHandler(Func<string, Task<string>> handler)
+    // handler の第 2 引数: Web 画面で選んだバックエンド・外部AI相談・検証エージェント (送ってこないクライアントや POST /api/chat では null)
+    public void SetMessageHandler(Func<string, WebChatSelection?, Task<string>> handler)
     {
         _onSendMessage = handler;
+    }
+
+    // Web チャット画面で選んだバックエンドを Name + Model で表す
+    public record BackendRef(string Name, string Model);
+
+    // Web チャット画面の選択 (Backend が null なら画面側で未選択 = アプリ側の選択を使う)。
+    // UseSkills は画面の Skills チェックボックス (届かなければ null)
+    public record WebChatSelection(BackendRef? Backend, List<BackendRef> Consult, BackendRef? Verify, bool? UseSkills);
+
+    // WebSocket の chat メッセージから選択を読む。backend プロパティが無ければ null (古いクライアント)
+    private static WebChatSelection? ParseSelection(JsonElement root)
+    {
+        static BackendRef? ReadRef(JsonElement el)
+        {
+            if (el.ValueKind != JsonValueKind.Object) return null;
+            var name = el.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() ?? "" : "";
+            var model = el.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() ?? "" : "";
+            return string.IsNullOrEmpty(name) ? null : new BackendRef(name, model);
+        }
+
+        if (!root.TryGetProperty("backend", out var b)) return null;
+        var backend = ReadRef(b);
+        var consult = new List<BackendRef>();
+        if (root.TryGetProperty("consult", out var c) && c.ValueKind == JsonValueKind.Array)
+            foreach (var e in c.EnumerateArray())
+                if (ReadRef(e) is { } r) consult.Add(r);
+        var verify = root.TryGetProperty("verify", out var v) ? ReadRef(v) : null;
+        bool? useSkills = root.TryGetProperty("skills", out var sk) && (sk.ValueKind == JsonValueKind.True || sk.ValueKind == JsonValueKind.False)
+            ? sk.ValueKind == JsonValueKind.True : null;
+        return new WebChatSelection(backend, consult, verify, useSkills);
     }
 
     public int HttpsPort { get; private set; }
@@ -295,6 +326,7 @@ public class ChatWebServer : IDisposable
                 {
                     var text = doc.RootElement.GetProperty("text").GetString() ?? "";
                     if (string.IsNullOrWhiteSpace(text)) continue;
+                    var selection = ParseSelection(doc.RootElement);
 
                     MessageReceived?.Invoke(text, true);
                     await BroadcastMessageAsync(text, true);
@@ -304,7 +336,7 @@ public class ChatWebServer : IDisposable
                     {
                         try
                         {
-                            var response = await _onSendMessage(text);
+                            var response = await _onSendMessage(text, selection);
                             MessageReceived?.Invoke(response, false);
                             await BroadcastMessageAsync(response, false);
                         }
@@ -372,7 +404,7 @@ public class ChatWebServer : IDisposable
         string responseText;
         try
         {
-            responseText = _onSendMessage != null ? await _onSendMessage(text) : "バックエンド未設定";
+            responseText = _onSendMessage != null ? await _onSendMessage(text, null) : "バックエンド未設定";
         }
         catch (Exception ex)
         {

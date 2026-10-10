@@ -144,6 +144,20 @@ public static class IniMerger
         if (dbExtras > 0)
             Console.WriteLine($"    DB-only keys added (not in extraction): {dbExtras}");
 
+        // ゲームの日本語フォントに「墟」が無く文字化けするため、「廃墟」は「廃棄された」に置き換える
+        int ruinReplaced = 0;
+        foreach (var key in merged.Keys.ToList())
+        {
+            var val = merged[key];
+            if (val.Contains("廃墟"))
+            {
+                merged[key] = val.Replace("廃墟", "廃棄された");
+                ruinReplaced++;
+            }
+        }
+        if (ruinReplaced > 0)
+            Console.WriteLine($"    Replaced 廃墟 -> 廃棄された: {ruinReplaced}");
+
         // 装備名に分類の印 (例: "Bracer <EM4>[軍1C]</EM4>")、設計図がもらえるミッション名に "[BP]" を付ける。
         // ",P" 複製・"@" 前置複製より前に行うこと (印を付けたあとの値を複製に載せるため)
         if (equipmentClassMarks)

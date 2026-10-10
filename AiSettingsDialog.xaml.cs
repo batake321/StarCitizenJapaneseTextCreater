@@ -5,24 +5,26 @@ namespace StarCitizenJapaneseTextCreater;
 
 public partial class AiSettingsDialog : Window
 {
+    // 起動時のモデル確認 (ModelCatalog) で一覧を取得できなかったときに使う固定の一覧
     private static readonly (string Id, string Display)[] ClaudeModels =
     {
-        ("claude-opus-4-7", "Opus 4.7"),
-        ("claude-opus-4-6", "Opus 4.6"),
-        ("claude-sonnet-4-6", "Sonnet 4.6"),
-        ("claude-sonnet-4-5-20250514", "Sonnet 4.5"),
-        ("claude-haiku-4-5-20251001", "Haiku 4.5"),
-        ("claude-3-5-haiku-20241022", "Haiku 3.5"),
+        ("claude-opus-5-5", "Opus 5.5"),
+        ("claude-sonnet-5-5", "Sonnet 5.5"),
+        ("claude-haiku-5-5", "Haiku 5.5"),
+        ("claude-fable-5-1", "Fable 5.1"),
+        ("claude-opus-4-7", "Opus 4.7 (旧)"),
+        ("claude-sonnet-4-6", "Sonnet 4.6 (旧)"),
     };
 
     private static readonly (string Id, string Display)[] GeminiModels =
     {
-        ("gemini-2.5-pro", "2.5 Pro"),
-        ("gemini-2.5-flash", "2.5 Flash"),
-        ("gemini-2.0-flash", "2.0 Flash"),
-        ("gemini-2.0-flash-lite", "2.0 Flash Lite"),
-        ("gemini-1.5-pro", "1.5 Pro"),
-        ("gemini-1.5-flash", "1.5 Flash"),
+        ("gemini-3.8-flash", "3.8 Flash"),
+        ("gemini-3.6-flash", "3.6 Flash"),
+        ("gemini-3.5-flash-lite", "3.5 Flash Lite"),
+        ("gemini-3.1-flash-lite", "3.1 Flash Lite"),
+        ("gemini-3.1-pro-preview", "3.1 Pro Preview"),
+        ("gemini-2.5-pro", "2.5 Pro (旧)"),
+        ("gemini-2.5-flash", "2.5 Flash (旧)"),
     };
 
     private static readonly (string Id, string Display)[] OpenAiModels =
@@ -121,7 +123,7 @@ public partial class AiSettingsDialog : Window
             _txtBaseUrl = new TextBox { Text = config.BaseUrl, Margin = new Thickness(4, 2, 0, 2) };
             _txtBatchSize = new TextBox { Text = config.BatchSize.ToString(), Width = 60, Margin = new Thickness(4, 2, 0, 2) };
 
-            PopulateModelList(config.Type);
+            PopulateModelList(config.Type, config.Model);
             _cmbModel.SelectedValue = config.Model;
             if (_cmbModel.SelectedValue == null)
                 _cmbModel.Text = config.Model;
@@ -227,18 +229,35 @@ public partial class AiSettingsDialog : Window
             }
         }
 
-        private void PopulateModelList(string type)
+        // keepId: 今設定されているモデル。一覧に無くても選択肢に残す (消さない)
+        private void PopulateModelList(string type, string? keepId = null)
         {
             _cmbModel.Items.Clear();
-            var models = type.ToLowerInvariant() switch
+            var key = type.ToLowerInvariant();
+            if (key is not ("claude" or "gemini" or "openai")) return;
+
+            // 起動時のモデル確認で取得できたプロバイダーはその一覧、取得できなければ固定の一覧
+            var fetched = ModelCatalog.GetModels(key);
+            if (fetched != null)
             {
-                "claude" => ClaudeModels,
-                "gemini" => GeminiModels,
-                "openai" => OpenAiModels,
-                _ => Array.Empty<(string, string)>()
-            };
-            foreach (var (id, display) in models)
-                _cmbModel.Items.Add(new ModelItem(id, display));
+                foreach (var m in fetched)
+                    _cmbModel.Items.Add(new ModelItem(m.Id, m.Display));
+            }
+            else
+            {
+                var models = key switch
+                {
+                    "claude" => ClaudeModels,
+                    "gemini" => GeminiModels,
+                    _ => OpenAiModels,
+                };
+                foreach (var (id, display) in models)
+                    _cmbModel.Items.Add(new ModelItem(id, display));
+            }
+
+            if (!string.IsNullOrWhiteSpace(keepId)
+                && !_cmbModel.Items.OfType<ModelItem>().Any(m => m.Id == keepId))
+                _cmbModel.Items.Add(new ModelItem(keepId, keepId));
         }
 
         private string GetSelectedModelId()

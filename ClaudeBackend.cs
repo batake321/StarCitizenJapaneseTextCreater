@@ -20,7 +20,7 @@ public class ClaudeBackend : TranslationBackend
     {
         var userMsg = BuildUserMessage(batch);
 
-        var supportsTemperature = !_model.Contains("opus", StringComparison.OrdinalIgnoreCase);
+        var supportsTemperature = ChatService.ClaudeAcceptsTemperature(_model);
         var bodyDict = new Dictionary<string, object>
         {
             ["model"] = _model,
@@ -39,6 +39,22 @@ public class ClaudeBackend : TranslationBackend
 
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [{Name}] POST api.anthropic.com (model={_model}, batch={batch.Count})");
         var resp = await Http.PostAsync("https://api.anthropic.com/v1/messages", content);
+        if ((int)resp.StatusCode == 400 && bodyDict.ContainsKey("temperature"))
+        {
+            // temperature が非推奨・非対応と返ったときだけ、temperature を外して 1 回だけ再送する
+            var errBody400 = await resp.Content.ReadAsStringAsync();
+            if (ChatService.IsClaudeTemperatureRejected(errBody400))
+            {
+                bodyDict.Remove("temperature");
+                json = JsonSerializer.Serialize(bodyDict, new JsonSerializerOptions
+                {
+                    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                });
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [{Name}] temperature を受け付けないモデルのため temperature を外して再送します (model={_model})");
+                resp.Dispose();
+                resp = await Http.PostAsync("https://api.anthropic.com/v1/messages", new StringContent(json, Encoding.UTF8, "application/json"));
+            }
+        }
         if (!resp.IsSuccessStatusCode)
         {
             var errBody = await resp.Content.ReadAsStringAsync();

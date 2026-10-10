@@ -739,7 +739,8 @@ public static class DatabaseBackupService
                 crew_size INTEGER,
                 size INTEGER,
                 raw_json TEXT NOT NULL,
-                extracted_at TEXT NOT NULL
+                extracted_at TEXT NOT NULL,
+                name_en TEXT
             );
             CREATE TABLE IF NOT EXISTS ship_ports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -804,5 +805,20 @@ public static class DatabaseBackupService
             );
         """;
         cmd.ExecuteNonQuery();
+
+        // 既存の ships に name_en 列 (船の英語名) が無ければ足す。バックアップ側に name_en があると INSERT が列不足で失敗するため
+        var shipCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var info = conn.CreateCommand())
+        {
+            info.CommandText = "PRAGMA table_info(ships)";
+            using var r = info.ExecuteReader();
+            while (r.Read()) shipCols.Add(r.GetString(1));
+        }
+        if (shipCols.Count > 0 && !shipCols.Contains("name_en"))
+        {
+            using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE ships ADD COLUMN name_en TEXT";
+            alter.ExecuteNonQuery();
+        }
     }
 }

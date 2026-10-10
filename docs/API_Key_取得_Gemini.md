@@ -44,15 +44,7 @@ Star Citizen の UI 翻訳程度であれば、まずは **Free Tier** で動作
 
 https://ai.google.dev/pricing
 
-### 料金目安（1M トークンあたり・Pay-as-you-go）
-
-| モデル | 入力 | 出力 |
-|---|---|---|
-| `gemini-2.5-flash` | $0.15 | $0.60 |
-| `gemini-2.5-flash-lite` | $0.075 | $0.30 |
-| `gemini-2.5-pro` | $1.25 | $10.00 |
-
-> Star Citizen の全テキスト（約 10 万行）を翻訳する場合、Flash で $0.5〜2 程度が目安です。Free Tier でも低レートで利用可能です。
+モデルごとの料金は、上の公式の料金ページを参照してください。
 
 ---
 
@@ -60,9 +52,13 @@ https://ai.google.dev/pricing
 
 | モデル名 | 特徴 | 用途目安 |
 | :---- | :---- | :---- |
-| `gemini-2.5-flash` | 高速・低コスト | リアルタイム字幕・大量テキスト |
-| `gemini-2.5-flash-lite` | 最速・最安 | UI ラベル等の短文 |
-| `gemini-2.5-pro` | 高品質 | 長文・専門用語が多い箇所 |
+| `gemini-3.8-flash` | 高速・低コスト（最新） | リアルタイム字幕・大量テキスト |
+| `gemini-3.6-flash` | 高速・低コスト | リアルタイム字幕・大量テキスト |
+| `gemini-3.5-flash-lite` | Flash の軽量版 | UI ラベル等の短文 |
+| `gemini-3.1-flash-lite` | Flash の軽量版 | UI ラベル等の短文 |
+| `gemini-3.1-pro-preview` | 高品質（プレビュー版） | 長文・専門用語が多い箇所 |
+| `gemini-2.5-pro` (旧) | 以前の版（以前から使っている人のみ利用可） | 設定済みの人向け |
+| `gemini-2.5-flash` (旧) | 以前の版（以前から使っている人のみ利用可） | 設定済みの人向け |
 
 Star Citizen は宇宙船・パイロット用語が多いため、UI 系は Flash、ミッションテキストは Pro、と使い分けると品質とコストのバランスが良いです。
 
@@ -74,7 +70,7 @@ Star Citizen は宇宙船・パイロット用語が多いため、UI 系は Fla
 
 GEMINI\_API\_KEY=AIzaSy...（取得したキー）
 
-GEMINI\_MODEL=gemini-2.5-flash
+GEMINI\_MODEL=gemini-3.8-flash
 
 `.env` は **必ず `.gitignore` に追加** して、リポジトリにコミットしないでください。
 

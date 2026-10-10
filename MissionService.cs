@@ -53,6 +53,8 @@ public class MissionService : IDisposable
 
     private static readonly (string Category, Func<string, string, bool> Match)[] CategoryDefs =
     {
+        // RSI Disc. Month (ContractGenerator.VisitingIasi の契約 31 件。mission_type はすべて iasi)。他のカテゴリより先に判定し、一覧の先頭に出す
+        ("RSIディスカバリー月間", (rn, t) => t == "iasi"),
         ("バウンティハンター", (rn, t) => t.Contains("bountyhunter") && !rn.Contains("PVP")),
         ("PVPミッション",     (rn, t) => rn.Contains("PVP") || rn.Contains("CertificationMission_PVP")),
         ("暗殺",             (rn, t) => rn.Contains("Assassination")),
@@ -185,7 +187,7 @@ public class MissionService : IDisposable
 
         foreach (var m in all)
         {
-            var cat = Classify(m.RecordName, m.MissionType);
+            var cat = Classify(m.NameBase, m.MissionType);
             if (counts.ContainsKey(cat)) counts[cat]++;
             else counts["その他"]++;
         }
@@ -202,7 +204,7 @@ public class MissionService : IDisposable
     public List<MissionEntry> GetMissions(string category)
     {
         var all = LoadAllMissions();
-        var filtered = all.Where(m => Classify(m.RecordName, m.MissionType) == category).ToList();
+        var filtered = all.Where(m => Classify(m.NameBase, m.MissionType) == category).ToList();
 
         foreach (var m in filtered)
             ParseRawJson(m);
@@ -404,14 +406,33 @@ public class MissionService : IDisposable
                 WikiDuration = _hasWikiColumns && !r.IsDBNull(21) ? r.GetDouble(21) : 0,
             };
 
+            // ContractGenerator 行は record_name が "ContractGenerator.{契約 id}" なので、GUID は画面に出さず、
+            // 表示名・分類には raw_json の名前 (契約 debugName → 生成器 debugName → タイトルキー) を使う。
+            // 難易度・場所の推測は抽出側 (GameDataExtractor) と同じく debugName ("_Name_") だけで行う
+            var isContract = rn.StartsWith(ContractRecordPrefix);
+            string contractDebugName = "", contractDisplayRecord = "";
+            if (isContract)
+            {
+                (contractDebugName, entry.NameBase, contractDisplayRecord) = GameDataExtractor.ReadContractDisplayNames(entry.RawJson);
+                entry.ContractId = rn[ContractRecordPrefix.Length..];
+            }
+            else
+            {
+                entry.NameBase = rn;
+            }
+            // テスト用レコードの除外 (MBE / Wiki 行は上で record_name により判定済み。CG 行は debugName で同じ条件を見る)
+            if (isContract && (contractDebugName.Contains("_test", StringComparison.OrdinalIgnoreCase)
+                || contractDebugName.Contains("ReputationTest", StringComparison.OrdinalIgnoreCase))) continue;
+
+            var inferName = isContract ? contractDebugName : rn;
             if (string.IsNullOrEmpty(entry.Difficulty))
-                entry.Difficulty = InferDifficulty(rn);
+                entry.Difficulty = InferDifficulty(inferName);
             if (string.IsNullOrEmpty(entry.Location))
-                entry.Location = InferLocation(rn);
+                entry.Location = InferLocation(inferName);
 
             entry.DifficultyOrder = DiffOrder(entry.Difficulty);
-            entry.FriendlyName = ExtractFriendlyName(rn);
-            entry.CleanedName = CleanRecordName(rn);
+            entry.FriendlyName = isContract ? contractDisplayRecord : ExtractFriendlyName(rn);
+            entry.CleanedName = CleanRecordName(entry.NameBase);
 
             // WikiFactionJa / WikiRank を設定
             if (!string.IsNullOrEmpty(entry.WikiFaction) && FactionJaMap.TryGetValue(entry.WikiFaction, out var fja))
@@ -453,6 +474,11 @@ public class MissionService : IDisposable
         try
         {
             using var doc = JsonDocument.Parse(entry.RawJson);
+            if (entry.RecordName.StartsWith(ContractRecordPrefix))
+            {
+                ParseContractJson(entry, doc.RootElement);
+                return;
+            }
             if (!doc.RootElement.TryGetProperty("_RecordValue_", out var rv)) return;
 
             // Resolve English/Japanese title from original @key
@@ -620,6 +646,76 @@ public class MissionService : IDisposable
         catch { }
     }
 
+    // ContractGenerator 行の record_name の接頭辞 (GameDataExtractor.ContractRecordPrefix と同じ)
+    private const string ContractRecordPrefix = GameDataExtractor.ContractRecordPrefix;
+
+    // ContractGenerator 行の raw_json ({"_Resolved_": 補った値, "_Contract_": 契約の JSON}) を読む。
+    // 元データにある Title / Description / 依頼主 / Illegal / timeToComplete / notForRelease だけを埋める
+    private void ParseContractJson(MissionEntry entry, JsonElement root)
+    {
+        entry.LawfulnessUnknown = true;
+        if (root.TryGetProperty("_Resolved_", out var res) && res.ValueKind == JsonValueKind.Object)
+        {
+            var titleKey = GetString(res, "title");
+            entry.OriginalTitleKey = titleKey;
+            if (!string.IsNullOrEmpty(titleKey))
+            {
+                entry.TitleJa = ResolveJa(titleKey);
+                var en = ResolveEn(titleKey);
+                if (!IsLocKey(en)) entry.TitleEn = en;
+            }
+
+            var descKey = GetString(res, "description");
+            if (!string.IsNullOrEmpty(descKey))
+            {
+                entry.DescriptionJa = ResolveJa(descKey);
+                var en = ResolveEn(descKey);
+                if (!IsLocKey(en)) entry.DescriptionEn = en;
+            }
+
+            var giverKey = GetString(res, "contractor");
+            if (!string.IsNullOrEmpty(giverKey))
+            {
+                var resolved = ResolveJa(giverKey);
+                if (!IsLocKey(resolved)) entry.MissionGiverJa = resolved;
+                var en = ResolveEn(giverKey);
+                if (!IsLocKey(en))
+                {
+                    entry.MissionGiverEn = en;
+                    // mission_giver 列は抽出時に英語 ini で解決した値で、ini が無い環境ではキーのまま入っている。
+                    // 詳細表示はこの列を使うので、翻訳 DB の英語で解決できたときはそれで置き換える (解決できなければ列のキーのまま)
+                    entry.MissionGiver = en;
+                }
+            }
+
+            // Illegal (契約 → 生成器 → テンプレート) が false なら合法、true なら非合法。どれにも無ければ「不明」(LawfulnessUnknown のまま)
+            if (res.TryGetProperty("illegal", out var il) && (il.ValueKind == JsonValueKind.True || il.ValueKind == JsonValueKind.False))
+            {
+                entry.IsLawful = il.ValueKind == JsonValueKind.False;
+                entry.LawfulnessUnknown = false;
+            }
+
+            // パーティ共有 (契約 → 生成器の CanBeShared)。どちらにも無ければ null で、詳細に出さない
+            if (res.TryGetProperty("canBeShared", out var cs) && (cs.ValueKind == JsonValueKind.True || cs.ValueKind == JsonValueKind.False))
+            {
+                entry.ContractCanBeShared = cs.ValueKind == JsonValueKind.True;
+                entry.CanBeShared = entry.ContractCanBeShared.Value;
+            }
+        }
+
+        // 契約または生成器の notForRelease が true なら未リリース扱い
+        if (root.TryGetProperty("_Generator_", out var gen) && gen.ValueKind == JsonValueKind.Object && GetBool(gen, "notForRelease"))
+            entry.NotForRelease = true;
+
+        if (root.TryGetProperty("_Contract_", out var contract) && contract.ValueKind == JsonValueKind.Object)
+        {
+            if (GetBool(contract, "notForRelease")) entry.NotForRelease = true;
+            // contractResults.timeToComplete は分単位
+            if (contract.TryGetProperty("contractResults", out var results) && results.ValueKind == JsonValueKind.Object)
+                entry.CompletionTimeMinutes = GetDouble(results, "timeToComplete");
+        }
+    }
+
     private static string Classify(string recordName, string missionType)
     {
         var rn = recordName ?? "";
@@ -713,6 +809,8 @@ public class MissionService : IDisposable
 
         lines.Add("■ 基本情報");
         lines.Add($"  レコード名: {m.FriendlyName}");
+        if (!string.IsNullOrEmpty(m.ContractId))
+            lines.Add($"  契約 ID: {m.ContractId}");
         if (!string.IsNullOrEmpty(m.TitleJa) && !IsLocKey(m.TitleJa))
             lines.Add($"  タイトル (日本語): {m.TitleJa}");
         var englishTitle = !string.IsNullOrEmpty(m.TitleEn) ? m.TitleEn : m.Title;
@@ -730,7 +828,7 @@ public class MissionService : IDisposable
             lines.Add($"  依頼元: {FormatGiverRecord(m.MissionGiverRecord)}");
         if (!string.IsNullOrEmpty(m.Location))
             lines.Add($"  場所: {m.Location}");
-        lines.Add($"  合法性: {(m.IsLawful ? "合法" : "非合法")}");
+        lines.Add($"  合法性: {(m.LawfulnessUnknown ? "不明" : m.IsLawful ? "合法" : "非合法")}");
         if (!string.IsNullOrEmpty(m.TranslationHint))
             lines.Add($"  ※ 検索一致タイトル: {m.TranslationHint}");
         if (!string.IsNullOrEmpty(m.WikiTitle))
@@ -867,11 +965,19 @@ public class MissionService : IDisposable
             lines.Add("  最大プレイヤー数: 無制限");
         if (m.MaxInstances > 0)
             lines.Add($"  最大インスタンス数: {m.MaxInstances}");
-        lines.Add($"  パーティ共有: {(m.CanBeShared ? "可" : "不可")}");
+        // ContractGenerator 行は元データに無い 3 項目を出さない (パーティ共有だけは CanBeShared があるときに出す)
+        var isContract = m.RecordName.StartsWith(ContractRecordPrefix);
+        if (!isContract)
+            lines.Add($"  パーティ共有: {(m.CanBeShared ? "可" : "不可")}");
+        else if (m.ContractCanBeShared.HasValue)
+            lines.Add($"  パーティ共有: {(m.ContractCanBeShared.Value ? "可" : "不可")}");
         if (m.OnceOnly)
             lines.Add("  一度きり: はい");
-        lines.Add($"  犯罪者化で失敗: {(m.FailIfCriminal ? "はい" : "いいえ")}");
-        lines.Add($"  収監で失敗: {(m.FailIfPrison ? "はい" : "いいえ")}");
+        if (!isContract)
+        {
+            lines.Add($"  犯罪者化で失敗: {(m.FailIfCriminal ? "はい" : "いいえ")}");
+            lines.Add($"  収監で失敗: {(m.FailIfPrison ? "はい" : "いいえ")}");
+        }
         if (m.RespawnTime > 0)
             lines.Add($"  リスポーン間隔: {m.RespawnTime:0}分");
         if (m.CooldownTime > 0)
@@ -1067,12 +1173,19 @@ public class MissionService : IDisposable
     private static string ResolveLoc(string raw, Dictionary<string, string> dict)
     {
         if (string.IsNullOrEmpty(raw)) return "";
-        string? val = null;
-        if (dict.TryGetValue(raw, out var v1) && !string.IsNullOrEmpty(v1)) val = v1;
-        else if (!raw.StartsWith("@") && dict.TryGetValue("@" + raw, out var v2) && !string.IsNullOrEmpty(v2)) val = v2;
-        else if (raw.StartsWith("@") && dict.TryGetValue(raw[1..], out var v3) && !string.IsNullOrEmpty(v3)) val = v3;
+        // キーが見つからなければ末尾に ",P" を付けたキーも試す (",P" 付きでしか存在しないキーがあるため)
+        var val = LookupLoc(raw, dict) ?? LookupLoc(raw + ",P", dict);
         if (val == null) return "";
         return val.Replace("\\n", "\n");
+    }
+
+    // そのまま / @ 付き / @ 無し の順で引く (見つからなければ null)
+    private static string? LookupLoc(string raw, Dictionary<string, string> dict)
+    {
+        if (dict.TryGetValue(raw, out var v1) && !string.IsNullOrEmpty(v1)) return v1;
+        if (!raw.StartsWith("@") && dict.TryGetValue("@" + raw, out var v2) && !string.IsNullOrEmpty(v2)) return v2;
+        if (raw.StartsWith("@") && dict.TryGetValue(raw[1..], out var v3) && !string.IsNullOrEmpty(v3)) return v3;
+        return null;
     }
 
     private static string SafeStr(SqliteDataReader r, int i) =>
@@ -1125,6 +1238,8 @@ public class MissionService : IDisposable
     public class MissionEntry
     {
         public string RecordName { get; set; } = "";
+        // 分類・難易度・場所の推測と表示名に使う名前 (MBE / Wiki 行は record_name、ContractGenerator 行は契約 debugName)
+        public string NameBase { get; set; } = "";
         public string FriendlyName { get; set; } = "";
         public string CleanedName { get; set; } = "";
         public string TitleJa { get; set; } = "";
@@ -1179,6 +1294,12 @@ public class MissionService : IDisposable
         public int MaxInstances { get; set; }
         public int MaxPlayers { get; set; }
         public bool CanBeShared { get; set; }
+        // ContractGenerator 行のパーティ共有 (契約 → 生成器の CanBeShared。どちらにも無ければ null)
+        public bool? ContractCanBeShared { get; set; }
+        // ContractGenerator 行で Illegal が契約・生成器・テンプレートのどこにも無い (合法性「不明」)。MBE / Wiki 行は常に false
+        public bool LawfulnessUnknown { get; set; }
+        // ContractGenerator 行の契約 id (record_name の GUID 部分)。MBE / Wiki 行は ""
+        public string ContractId { get; set; } = "";
         public bool OnceOnly { get; set; }
         public bool IsLawful { get; set; }
         public bool FailIfCriminal { get; set; }
