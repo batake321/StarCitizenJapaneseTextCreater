@@ -25,9 +25,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v1.17.0-win-x64.zip (最新 v1.17.0 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.17.0/StarCitizenJapaneseTextCreater-v1.17.0-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v1.22.0-win-x64.zip (最新 v1.22.0 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.22.0/StarCitizenJapaneseTextCreater-v1.22.0-win-x64.zip)**
 >
-> **[sc_japanese_backup_20260906_181410.zip (翻訳データベース 4.10 対応 2026/9/6 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.17.0/sc_japanese_backup_20260906_181410.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/11 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.22.0/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの [日本語化] → [実行] を行ってください。**
 
@@ -46,7 +46,7 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v1.21.2 更新内容
+### 🚀 v1.22.0 更新内容
 
 - **Star Citizen 4.10.2 対応**: 4.10.2 対応の翻訳DB・ゲームデータを同梱
 - **翻訳タブを簡単に**: [日本語化] を押し、オプションを選んで [実行] するだけになりました。ほかのボタンは [新しいパッチを読み取る] と [AI翻訳]。ログは「ログ」タブに移りました
@@ -56,7 +56,16 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - 船の質問に船のデータ (貨物積載量 SCU) を返すように
   - Web チャットで選んだ AI が使われない不具合を修正
   - 外部AI相談・検証エージェントの説明を表示
-- **翻訳**: AI が英語のまま返した訳を翻訳済みにせず、再翻訳の対象に戻すように
+- **ミッションタブ**: ゲームの書式タグをゲームに準じて表示 (<EM4> の強調を色付き、~mission(…) を〔場所〕〔船〕などで表示)
+- **翻訳**:
+  - AI が英語のまま返したもの (数字・記号・名前など) は原文維持にして、次から翻訳対象にしない
+  - AI が訳文の途中で改行すると訳が途中で切れる不具合を修正 (切れた訳は保存せず訳し直す)
+  - 韓国語が混じった訳・強調タグが壊れた訳は保存せず訳し直す
+  - 原文の書き間違いで閉じていない強調タグ (<EM4>語句<EM4>) を日本語化のときに閉じる
+  - よく出る用語 (Quantum Drive、給油リクエストなど 53 語) を用語集に登録して訳語を統一
+  - 新しい Claude (Opus 5.5 など) で翻訳が失敗する不具合を修正
+- **AI モデル**: Claude 5.5 / Gemini 3.x に更新。起動時に各社の使えるモデルを確認し、使えなくなったモデルを知らせる
+- **ログ**: ログタブの内容を作業フォルダの app_log.txt にも保存
 - **文字化け対策**: 「廃墟」の「墟」がゲーム内で文字化けするため「廃棄された」に置き換え
 - **ベクトル検索構築**: チェックを外した AI が使われる不具合を修正
 - **Claude の外部相談**: temperature のエラーで失敗する問題に対応
