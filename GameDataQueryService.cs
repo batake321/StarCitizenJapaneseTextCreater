@@ -7,9 +7,12 @@ namespace StarCitizenJapaneseTextCreater;
 public class GameDataQueryService : IDisposable
 {
     private readonly SqliteConnection _conn;
+    // 船の名前・職業・説明文などのローカライズキーを日本語にするための翻訳 DB (ゲームデータ DB と同じフォルダ)
+    private readonly string _translationsDbPath;
 
     public GameDataQueryService(string gamedataCacheDbPath)
     {
+        _translationsDbPath = Path.Combine(Path.GetDirectoryName(gamedataCacheDbPath) ?? "", "translations.db");
         _conn = new SqliteConnection($"Data Source={gamedataCacheDbPath}");
         _conn.Open();
         using var cmd = _conn.CreateCommand();
@@ -62,23 +65,95 @@ public class GameDataQueryService : IDisposable
             var size = reader.IsDBNull(6) ? 0 : reader.GetInt32(6);
             var nameEn = hasNameEn && !reader.IsDBNull(7) ? reader.GetString(7) : "";
 
-            sb.Append($"- {rn}");
-            if (!string.IsNullOrEmpty(nameEn)) sb.Append($" | 英語名: {nameEn}");
-            if (!string.IsNullOrEmpty(name)) sb.Append($" | 名前: {name}");
+            // ローカライズキー (@vehicle_…) は翻訳 DB で日本語にする。説明文はゲーム内の船の説明 (vehicle_Desc…)
+            var nameJa = ResolveLocKey(name);
+            var desc = name.StartsWith('@') ? LookupLoc(name[1..].Replace("vehicle_Name", "vehicle_Desc")) : null;
+            // メーカーはゲームデータではファイルの場所しか入っていないので、説明文の「メーカー: …」の行から取る
+            if (mfr.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+            {
+                var mm = desc != null ? System.Text.RegularExpressions.Regex.Match(desc, @"メーカー[:：]\s*(.+?)(?:\\n|$)") : null;
+                mfr = mm != null && mm.Success ? mm.Groups[1].Value.Trim() : "";
+            }
+
+            sb.Append($"- {(!string.IsNullOrEmpty(nameEn) ? nameEn : nameJa)}");
+            if (!string.IsNullOrEmpty(nameJa) && nameJa != nameEn && !nameJa.StartsWith('@')) sb.Append($" | 日本語名: {nameJa}");
             if (!string.IsNullOrEmpty(mfr)) sb.Append($" | メーカー: {mfr}");
-            if (!string.IsNullOrEmpty(career)) sb.Append($" | 職業: {career}");
-            if (!string.IsNullOrEmpty(role)) sb.Append($" | 役割: {role}");
+            if (!string.IsNullOrEmpty(career)) sb.Append($" | 職業: {ResolveLocKey(career)}");
+            if (!string.IsNullOrEmpty(role)) sb.Append($" | 種別: {ResolveLocKey(role)}");
             if (crew > 0) sb.Append($" | 乗員: {crew}");
             if (size > 0) sb.Append($" | サイズ: {size}");
             sb.AppendLine();
+            if (!string.IsNullOrWhiteSpace(desc))
+                sb.AppendLine("    説明: " + desc.Replace("\\n", " ").Trim());
 
-            // ハードポイントも取得
-            var ports = GetShipPorts(rn);
-            if (!string.IsNullOrEmpty(ports)) sb.Append(ports);
+            // ハードポイントは種類とサイズごとの数にまとめる (一覧のままだと長く、肝心の情報が埋もれる)
+            var ports = GetShipPortSummary(rn);
+            if (!string.IsNullOrEmpty(ports)) sb.AppendLine("    装備の取り付け口: " + ports);
             count++;
         }
 
         return count > 0 ? $"=== ゲームデータ (DB): 船 ===\n{sb}" : "";
+    }
+
+    // 「@vehicle_…」のようなローカライズキーなら翻訳 DB で日本語 (無ければ英語) にする。キーでなければそのまま返す
+    private string ResolveLocKey(string value)
+    {
+        if (string.IsNullOrEmpty(value) || !value.StartsWith('@')) return value;
+        return LookupLoc(value[1..]) ?? value;
+    }
+
+    // 翻訳 DB からキーの訳を引く (",P" 付きのキーも試す)。日本語が無ければ英語、どちらも無ければ null
+    private string? LookupLoc(string key)
+    {
+        try
+        {
+            if (!File.Exists(_translationsDbPath)) return null;
+            using var conn = new SqliteConnection($"Data Source={_translationsDbPath};Mode=ReadOnly");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT japanese, english FROM translations WHERE key = @k OR key = @kp ORDER BY (key = @k) DESC LIMIT 1";
+            cmd.Parameters.AddWithValue("@k", key);
+            cmd.Parameters.AddWithValue("@kp", key + ",P");
+            using var r = cmd.ExecuteReader();
+            if (!r.Read()) return null;
+            var ja = r.IsDBNull(0) ? null : r.GetString(0);
+            var en = r.IsDBNull(1) ? null : r.GetString(1);
+            return !string.IsNullOrWhiteSpace(ja) ? ja : (!string.IsNullOrWhiteSpace(en) ? en : null);
+        }
+        catch { return null; }
+    }
+
+    // 船のハードポイントを「種類 (サイズ) ×数」にまとめる
+    private string GetShipPortSummary(string shipRecordName)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT item_type, size, COUNT(*) FROM ship_ports WHERE ship_record_name = @srn GROUP BY item_type, size ORDER BY size DESC, item_type";
+        cmd.Parameters.AddWithValue("@srn", shipRecordName);
+        using var reader = cmd.ExecuteReader();
+        var parts = new List<string>();
+        while (reader.Read())
+        {
+            var itemType = reader.IsDBNull(0) ? "" : reader.GetString(0);
+            if (string.IsNullOrEmpty(itemType)) continue;
+            var size = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
+            var n = reader.GetInt64(2);
+            parts.Add($"{itemType} (S{size}) ×{n}");
+        }
+        return string.Join(", ", parts);
+    }
+
+    // 英語名が「船名 + 空白 + …」で始まる船 (派生型。例: Drake Ironclad → Drake Ironclad Assault) の record_name を返す
+    public List<string> FindShipVariants(string shipNameEn, string excludeRecordName)
+    {
+        var list = new List<string>();
+        if (string.IsNullOrWhiteSpace(shipNameEn) || !ShipsHasNameEn()) return list;
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT record_name FROM ships WHERE name_en LIKE @p AND record_name <> @ex ORDER BY name_en LIMIT 5";
+        cmd.Parameters.AddWithValue("@p", shipNameEn + " %");
+        cmd.Parameters.AddWithValue("@ex", excludeRecordName ?? "");
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) list.Add(r.GetString(0));
+        return list;
     }
 
     // ships に name_en 列があるか (インデックス構築・マイグレーション前の古い DB には無い)

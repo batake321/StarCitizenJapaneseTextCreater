@@ -743,6 +743,22 @@ public class ChatService
                 var dcbResult = !string.IsNullOrEmpty(item.recordName) ? _queryService.SearchShips(query, item.recordName) : "";
                 if (string.IsNullOrEmpty(dcbResult)) dcbResult = _queryService.SearchShips(query);
                 if (!string.IsNullOrEmpty(dcbResult)) sb.AppendLine(dcbResult);
+
+                // 派生型 (名前に元の船名を含む船。例: Drake Ironclad Assault) も同じ船の種類として一緒に渡す
+                var variants = _queryService.FindShipVariants(item.name, item.recordName);
+                if (variants.Count > 0)
+                {
+                    sb.AppendLine($"=== {item.name} の派生型 ({variants.Count} 種類) ===");
+                    foreach (var v in variants)
+                    {
+                        var vr = _queryService.SearchShips(v, v);
+                        if (string.IsNullOrEmpty(vr)) continue;
+                        sb.AppendLine(vr.Replace("=== ゲームデータ (DB): 船 ===", "").Trim());
+                        var vName = vr.Split('\n').Skip(1).FirstOrDefault()?.TrimStart('-', ' ').Split(" | ")[0];
+                        if (!string.IsNullOrEmpty(vName) && FindCachedShipScu(vName) is { } vScu)
+                            sb.AppendLine($"    貨物積載量 (UEX の船データ「{vScu.Name}」): {vScu.Scu} SCU");
+                    }
+                }
             }
             catch { }
         }
