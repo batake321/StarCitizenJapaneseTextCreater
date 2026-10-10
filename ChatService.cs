@@ -3026,7 +3026,7 @@ public class ChatService
             "ユーザーの質問と、別の AI が生成した回答が提示されます。\n" +
             "質問は Star Citizen に関するものである前提で、その回答に対して補足情報・修正・別の視点があれば簡潔に日本語で回答してください。\n" +
             "ゲーム内の用語・施設・ミッション・アイテム・船舶などについて、正確な情報を提供してください。\n" +
-            "重要: 現在のゲームバージョンは LIVE Alpha 4.8 です。Stanton, Pyro, Nyx の3星系が実装済みです。「Nyx は未実装」「Pyro は未実装」等の古い情報を回答しないでください。\n" +
+            "重要: 別の AI の回答は、最新のゲームデータベースから取得したデータに基づいています。あなたの知識は古い可能性があるので、データにある船・アイテム・場所を「存在しない」「未実装」「コンセプト段階」などと否定しないでください。Stanton, Pyro, Nyx の3星系が実装済みです。「Nyx は未実装」「Pyro は未実装」等の古い情報を回答しないでください。\n" +
             "回答が既に十分であれば「補足はありません」と答えてください。\n" +
             "回答は簡潔に、箇条書きを使ってください。" +
             GetKnowledgeSnippet(userQuestion);
@@ -3042,8 +3042,7 @@ public class ChatService
             try
             {
                 Log($"[Consult] {backend.Name}/{backend.Model} に相談開始");
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-                var response = await Task.Run(async () =>
+                var call = Task.Run(async () =>
                 {
                     return backend.Type.ToLowerInvariant() switch
                     {
@@ -3053,7 +3052,14 @@ public class ChatService
                         "ollama" => await SendOllamaChatAsync(backend, consultSystem, consultHistory, useTools: false),
                         _ => $"[未対応: {backend.Type}]"
                     };
-                }, cts.Token);
+                });
+                // 60 秒たっても返事が無い AI は打ち切り、答えたものだけで先に進む (呼び出し自体は止められないので、結果を待たないだけ)
+                if (await Task.WhenAny(call, Task.Delay(TimeSpan.FromSeconds(60))) != call)
+                {
+                    Log($"[Consult] {backend.Name}/{backend.Model} 60 秒で応答が無いため打ち切り");
+                    return (name: $"{backend.Name} ({backend.Model})", response: "");
+                }
+                var response = await call;
                 Log($"[Consult] {backend.Name}/{backend.Model} 完了: {response.Length} chars");
                 return (name: $"{backend.Name} ({backend.Model})", response);
             }
@@ -3137,7 +3143,7 @@ public class ChatService
             "ユーザーの質問と、別の AI が生成した回答が提示されます。\n" +
             "質問は Star Citizen に関するものである前提で、その回答の正確性を検証してください。\n" +
             "ゲーム内の用語・施設・ミッション・アイテム・船舶などについて正確な知識に基づいて判断してください。\n" +
-            "重要: 現在のゲームバージョンは LIVE Alpha 4.8 です。Stanton, Pyro, Nyx の3星系が実装済みです。「Nyx は未実装」「Pyro は未実装」等の古い情報を回答しないでください。\n" +
+            "重要: 別の AI の回答は、最新のゲームデータベースから取得したデータに基づいています。あなたの知識は古い可能性があるので、データにある船・アイテム・場所を「存在しない」「未実装」「コンセプト段階」などと否定しないでください。Stanton, Pyro, Nyx の3星系が実装済みです。「Nyx は未実装」「Pyro は未実装」等の古い情報を回答しないでください。\n" +
             "正確であれば「検証OK: 回答は正確です」と答えてください。\n" +
             "誤りや不足があれば、正しい情報を簡潔に日本語で提供してください。" +
             GetKnowledgeSnippet(userQuestion);
