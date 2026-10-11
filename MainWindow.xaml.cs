@@ -1557,6 +1557,8 @@ public partial class MainWindow : Window
 
     private void SaveConfigToFile()
     {
+        // 壊れた設定ファイルの控えを作れなかった起動中は、元のファイルを上書きしない (起動時に知らせ済み)
+        if (App.ConfigSaveDisabled) return;
         try
         {
             var config = new
@@ -1898,6 +1900,14 @@ public partial class MainWindow : Window
 
         _gameDataExtractor = new GameDataExtractor(workDir);
         ChatService.SetGameDataExtractor(_gameDataExtractor);
+        // インデックス構築 (設定タブ・チャットの自動構築)・装備データの再抽出が終わったら、新しい品目の売り場・価格を裏で取る
+        GameDataExtractor.ShopPriceFetchRequested -= OnShopPriceFetchRequested;
+        GameDataExtractor.ShopPriceFetchRequested += OnShopPriceFetchRequested;
+        // 構築・再抽出 (設定タブ・チャットの自動構築・装備データの再抽出) の前に裏の取得を止め、失敗したら続きを再開する
+        GameDataExtractor.ShopPriceFetchPauseRequested -= OnShopPriceFetchPauseRequested;
+        GameDataExtractor.ShopPriceFetchPauseRequested += OnShopPriceFetchPauseRequested;
+        GameDataExtractor.ShopPriceFetchResumeRequested -= OnShopPriceFetchResumeRequested;
+        GameDataExtractor.ShopPriceFetchResumeRequested += OnShopPriceFetchResumeRequested;
         ChatService.LogDirectory = workDir;
         ChatService.SetTranslationDbPath(DbPath);
 
@@ -1928,6 +1938,10 @@ public partial class MainWindow : Window
             {
                 var updateNote = _gameDataExtractor.IsP4kUpdated() ? " ⚠パッチ更新あり" : "";
                 txtGameDataStatus.Text = $"インデックス済み ({ver}){updateNote}";
+                // 前回の取得が途中で終わっていたとき (取得中の印が残っている。アプリを閉じた等) だけ、まだ取っていない品目から続ける。
+                // 一度も取得していない DB (配布の DB を受け取っただけ等) では始めない (インデックス構築・再抽出の後に始める)。
+                // ［価格の取得を中止］で止めていたときも続けない
+                StartShopPriceFetch(_gameDataExtractor.DbPath, afterRebuild: false, onlyIfInterrupted: true);
             }
             else if (_gameDataExtractor.IsStarBreakerInstalled)
                 txtGameDataStatus.Text = "未インデックス (インデックス構築で高速化)";
@@ -1973,14 +1987,19 @@ public partial class MainWindow : Window
         }
 
         btnExtractGameData.IsEnabled = false;
+        // 売り場・価格の裏での取得中なら止めてから構築する (構築が終わると ShopPriceFetchRequested で続きを再開する)
+        await StopShopPriceFetchAsync();
         txtGameDataStatus.Text = "構築中...";
 
         _gameDataExtractor.ProgressChanged += OnGameDataProgress;
         _gameDataExtractor.StatusChanged += OnGameDataStatus;
 
+        bool built = false;
         try
         {
-            await _gameDataExtractor.BuildIndexAsync(p4kPath);
+            // 売り場・価格の裏の取得は、構築の後の処理 (日本語名・固有名詞キャッシュ) が終わってから始める (並んで走らないように)
+            await _gameDataExtractor.BuildIndexAsync(p4kPath, requestShopPriceFetch: false);
+            built = true;
             OnGameDataStatus("日本語名をマッピング中...");
             var transDbPath = Path.Combine(WorkDir, "translations.db");
             if (File.Exists(transDbPath))
@@ -2003,6 +2022,8 @@ public partial class MainWindow : Window
             _gameDataExtractor.ProgressChanged -= OnGameDataProgress;
             _gameDataExtractor.StatusChanged -= OnGameDataStatus;
             btnExtractGameData.IsEnabled = true;
+            // 構築ができていれば (後の処理が失敗しても)、ここで売り場・価格の裏の取得を始めてもらう
+            if (built) GameDataExtractor.RequestShopPriceFetch(_gameDataExtractor.DbPath);
         }
     }
 
@@ -2024,6 +2045,179 @@ public partial class MainWindow : Window
             txtGameDataStatus.Text = status;
             Log($"[GameData] {status}");
         });
+    }
+
+    // ===== 売り場・価格の裏での取得 =====
+    // GameDataExtractor.FetchNewShopPricesAsync を裏で走らせる。動いている間は _shopPriceCts があり、［価格の取得を中止］ボタンを出す。
+    // 進み具合は設定タブのゲームデータ連携の欄 (進捗バーと詳細の行) に出す。
+    // 動いている間に別の依頼 (再抽出の後など) が来たら、今の取得が終わった後にもう一度走らせる (新しい品目を拾うため)。
+    // ［価格の取得を中止］で止めたことは gamedata_cache.db の gamedata_meta に残し、起動時の続き取得をしない。
+    // 次のインデックス構築・再抽出の後 (ShopPriceFetchRequested) に印を消して再開する
+    private CancellationTokenSource? _shopPriceCts;
+    private Task? _shopPriceTask;
+    private volatile bool _shopPriceRestart;
+    private string? _shopPriceDbPath;
+
+    // インデックス構築 (設定タブ・チャットの自動構築)・装備データの再抽出が終わったとき (別スレッドから呼ばれることがある)
+    private void OnShopPriceFetchRequested(string dbPath)
+    {
+        lock (_priceRefreshTasks) _priceRefreshBlocked = false;
+        StartShopPriceFetch(dbPath, afterRebuild: true);
+    }
+
+    // 構築・再抽出の前 (別スレッドから呼ばれることがある)。裏の取得とチャットの価格の取り直しを止めて、止まるまで待つ
+    // (構築・再抽出・VACUUM の間は新しい取り直しも始めない。終わったら OnShopPriceFetchRequested / OnShopPriceFetchResumeRequested で戻す)
+    private async Task OnShopPriceFetchPauseRequested()
+    {
+        await StopPriceRefreshesAsync();
+        if (Dispatcher.CheckAccess()) await StopShopPriceFetchAsync();
+        else await Dispatcher.InvokeAsync(StopShopPriceFetchAsync).Task.Unwrap();
+    }
+
+    // 構築・再抽出が失敗したとき。止めた取得が途中だったときだけ続きを再開する (［価格の取得を中止］で止めていたときは再開しない)
+    private void OnShopPriceFetchResumeRequested(string dbPath)
+    {
+        lock (_priceRefreshTasks) _priceRefreshBlocked = false;
+        StartShopPriceFetch(dbPath, afterRebuild: false, onlyIfInterrupted: true);
+    }
+
+    // チャットの価格の取り直し (StartPriceRefreshAndReask) の中止用。止めるときは今の CTS を取り消し、動いている取り直しが終わるまで待つ
+    // _priceRefreshBlocked の確認・変更と取り直しの登録は、すべて _priceRefreshTasks のロックの中で行う
+    // (止めた直後に登録された取り直しが、止まらず待ち合わせにも入らないことが無いように)
+    private CancellationTokenSource _priceRefreshCts = new();
+    private readonly List<Task> _priceRefreshTasks = new();
+    private bool _priceRefreshBlocked;
+
+    // 新しい取り直しを止め (構築・再抽出が終わるまで)、動いている取り直しを取り消して、終わるまで待つ
+    private async Task StopPriceRefreshesAsync()
+    {
+        Task[] running;
+        CancellationTokenSource old;
+        lock (_priceRefreshTasks)
+        {
+            _priceRefreshBlocked = true;
+            old = _priceRefreshCts;
+            _priceRefreshCts = new CancellationTokenSource();
+            running = _priceRefreshTasks.ToArray();
+        }
+        old.Cancel();
+        try { await Task.WhenAll(running); } catch { }
+        old.Dispose();
+    }
+
+    // onlyIfInterrupted: 前回の取得が途中で終わっていたとき (取得中の印がある) だけ始める (起動時・構築の失敗後)
+    private void StartShopPriceFetch(string dbPath, bool afterRebuild, bool onlyIfInterrupted = false)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(() => StartShopPriceFetch(dbPath, afterRebuild, onlyIfInterrupted));
+            return;
+        }
+        if (string.IsNullOrEmpty(dbPath) || !File.Exists(dbPath)) return;
+        if (afterRebuild)
+            GameDataExtractor.SetShopPriceFetchStopped(dbPath, false);
+        else if (GameDataExtractor.IsShopPriceFetchStopped(dbPath))
+        {
+            txtShopPriceStatus.Text = "[売り場・価格] 取得は中止中です (次のインデックス構築・装備データの再抽出の後に再開します)";
+            return;
+        }
+        if (onlyIfInterrupted && !GameDataExtractor.IsShopPriceFetchInterrupted(dbPath)) return;
+        _shopPriceDbPath = dbPath;
+        if (_shopPriceCts != null)
+        {
+            _shopPriceRestart = true;
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        _shopPriceCts = cts;
+        btnStopShopPrice.Visibility = Visibility.Visible;
+        _shopPriceTask = Task.Run(async () =>
+        {
+            try
+            {
+                do
+                {
+                    _shopPriceRestart = false;
+                    await GameDataExtractor.FetchNewShopPricesAsync(_shopPriceDbPath ?? dbPath, OnShopPriceStatus, OnShopPriceProgress, cts.Token);
+                } while (_shopPriceRestart && !cts.IsCancellationRequested);
+            }
+            catch (Exception ex)
+            {
+                _ = Dispatcher.BeginInvoke(() => Log($"[売り場・価格] エラー: {ex.Message}"));
+            }
+            finally
+            {
+                _ = Dispatcher.BeginInvoke(() =>
+                {
+                    if (ReferenceEquals(_shopPriceCts, cts))
+                    {
+                        _shopPriceCts = null;
+                        btnStopShopPrice.Visibility = Visibility.Collapsed;
+                        // 取得が終わる間際に来た依頼 (再抽出の後など) を取りこぼさない
+                        if (_shopPriceRestart && !cts.IsCancellationRequested && !string.IsNullOrEmpty(_shopPriceDbPath))
+                        {
+                            _shopPriceRestart = false;
+                            StartShopPriceFetch(_shopPriceDbPath, afterRebuild: false);
+                        }
+                    }
+                    cts.Dispose();
+                });
+            }
+        });
+    }
+
+    // 裏での取得を止めて、止まるまで待つ (インデックス構築の前に使う。手動で止めた印は付けない)
+    private async Task StopShopPriceFetchAsync()
+    {
+        var task = _shopPriceTask;
+        var cts = _shopPriceCts;
+        if (cts == null || task == null) return;
+        _shopPriceRestart = false;
+        cts.Cancel();
+        txtShopPriceStatus.Text = "[売り場・価格] 構築のため取得を止めています...";
+        try { await task; } catch { }
+        // 構築後の依頼 (ShopPriceFetchRequested) で新しく始められるよう、ここで「動いていない」状態にしておく
+        if (ReferenceEquals(_shopPriceCts, cts))
+        {
+            _shopPriceCts = null;
+            btnStopShopPrice.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    // ［価格の取得を中止］: 利用者が自分で止めたときは、次のインデックス構築・再抽出の後まで再開しない (起動時にも続けない)
+    private void StopShopPrice_Click(object sender, RoutedEventArgs e)
+    {
+        if (_shopPriceCts == null) return;
+        if (!string.IsNullOrEmpty(_shopPriceDbPath))
+            GameDataExtractor.SetShopPriceFetchStopped(_shopPriceDbPath, true);
+        _shopPriceRestart = false;
+        _shopPriceCts.Cancel();
+        btnStopShopPrice.IsEnabled = false;
+        txtShopPriceStatus.Text = "[売り場・価格] 中止しています...";
+        _ = Dispatcher.BeginInvoke(async () =>
+        {
+            var task = _shopPriceTask;
+            if (task != null) { try { await task; } catch { } }
+            btnStopShopPrice.IsEnabled = true;
+        });
+    }
+
+    // 節目の知らせ (開始・件数・完了・中止) は詳細の行とログに出す
+    // 売り場・価格の裏の取得の知らせは、構築の進捗 (進捗バー・詳細の行) とは別の行 (txtShopPriceStatus) に出す
+    private void OnShopPriceStatus(string status)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            txtShopPriceStatus.Text = status;
+            Log($"[GameData] {status}");
+        });
+    }
+
+    // 1 件ごとの進み具合は売り場・価格の行だけに出す (ログには出さない。件数が多いため)
+    private void OnShopPriceProgress(int pct, string detail)
+    {
+        Dispatcher.BeginInvoke(() => txtShopPriceStatus.Text = $"{detail} ({pct}%)");
     }
 
     private void UpdateSearchIndexStatus()
@@ -2078,7 +2272,9 @@ public partial class MainWindow : Window
             try
             {
                 using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-                var baseUrl = (embeddingBackend.BaseUrl ?? "http://localhost:11434").TrimEnd('/');
+                // null の確認はローカル変数の側で行う (後の embConfig は、今までどおりその時点の embeddingBackend.BaseUrl を入れる)
+                string? configuredBaseUrl = embeddingBackend.BaseUrl;
+                var baseUrl = (configuredBaseUrl ?? "http://localhost:11434").TrimEnd('/');
                 var tagsJson = await http.GetStringAsync($"{baseUrl}/api/tags");
                 using var tagsDoc = System.Text.Json.JsonDocument.Parse(tagsJson);
                 var models = tagsDoc.RootElement.GetProperty("models");
@@ -2267,6 +2463,8 @@ public partial class MainWindow : Window
             ChatService.LogExternal($"Web チャット: メイン={backend.Name}/{backend.Model}, 外部相談=[{string.Join(", ", consultBackends.Select(b => b.Name))}], 検証={verifyBackend?.Name ?? "なし"}, 選択の受信={(selection?.Backend != null ? "あり" : "なし (デスクトップの選択を使用)")}");
             string response;
             string? webReference = null;
+            // 答えに使った DB の売り場・価格を集める (答えたあと裏で取り直す)
+            var webPriceItems = ChatService.BeginPriceRefreshCapture();
             try
             {
                 var webToolData = ChatService.BeginToolCapture();
@@ -2341,11 +2539,10 @@ public partial class MainWindow : Window
                 }
             }
 
-            Dispatcher.Invoke(() =>
-            {
-                _chatHistory.Add(new ChatMessage { Role = "assistant", Content = response });
-            });
+            var webAnswerMessage = new ChatMessage { Role = "assistant", Content = response };
+            Dispatcher.Invoke(() => _chatHistory.Add(webAnswerMessage));
 
+            StartPriceRefreshAndReask(webPriceItems, text, history, backend, useSkills, consultBackends, verifyBackend, fromWeb: true, null, webAnswerMessage);
             return response;
         });
 
@@ -2380,7 +2577,8 @@ public partial class MainWindow : Window
             _ = Task.Run(async () =>
             {
                 await Task.Delay(3000);
-                Dispatcher.BeginInvoke(() => UpdateWebServerUrls(port));
+                // 今までどおり待たない (BeginInvoke の結果は捨てる)
+                _ = Dispatcher.BeginInvoke(() => UpdateWebServerUrls(port));
             });
         }
         catch (Exception ex)
@@ -2647,13 +2845,14 @@ public partial class MainWindow : Window
         if (_webServer?.IsRunning == true)
             _ = _webServer.BroadcastMessageAsync(text, true);
 
-        _chatBubbles.Add(new ChatBubble { Text = "考え中...", IsUser = false });
+        _pendingChatBubble = new ChatBubble { Text = "考え中...", IsUser = false };
+        _chatBubbles.Add(_pendingChatBubble);
         ScrollChatToBottom();
 
         try
         {
             var useSkills = chkFetchScData.IsChecked == true && backend.SupportsSkills;
-            ReplaceLast(new ChatBubble
+            ReplacePending(new ChatBubble
             {
                 Text = useSkills ? "AI がスキルを使って回答を生成中..." : "AI が回答を生成中...",
                 IsUser = false
@@ -2663,6 +2862,9 @@ public partial class MainWindow : Window
             Log($"[Chat] AI 応答生成開始: backend={backend.Name}/{backend.Model}, skills={useSkills}");
             var swAi = System.Diagnostics.Stopwatch.StartNew();
 
+            // 送り直し用に、この質問までの履歴を残す。答えに使った DB の売り場・価格を集める (答えたあと裏で取り直す)
+            var deskHistory = _chatHistory.ToList();
+            var deskPriceItems = ChatService.BeginPriceRefreshCapture();
             var deskToolData = ChatService.BeginToolCapture();
             var response = await ChatService.SendChatAsync(backend, _chatHistory, useSkills);
             var deskReference = ChatService.FormatToolCapture(deskToolData);
@@ -2673,7 +2875,7 @@ public partial class MainWindow : Window
             if (consultBackends.Count > 0)
             {
                 const string consultSpeak = "わからなかったのでもう少し調べます。";
-                ReplaceLast(new ChatBubble { Text = response + "\n\n📡 外部 AI に相談中...", IsUser = false });
+                ReplacePending(new ChatBubble { Text = response + "\n\n📡 外部 AI に相談中...", IsUser = false });
                 if (_webServer?.IsRunning == true)
                     _ = _webServer.BroadcastTypingAsync("📡 外部 AI に相談中...", consultSpeak);
 
@@ -2698,7 +2900,7 @@ public partial class MainWindow : Window
                     var verifySpeak = responseInsufficient
                         ? "回答が不十分なようなので検証エージェントに確認します。"
                         : "結果が出たので検証してもらいます。";
-                    ReplaceLast(new ChatBubble { Text = response + "\n\n🔍 検証エージェントに確認中...", IsUser = false });
+                    ReplacePending(new ChatBubble { Text = response + "\n\n🔍 検証エージェントに確認中...", IsUser = false });
                     if (_webServer?.IsRunning == true)
                         _ = _webServer.BroadcastTypingAsync("🔍 検証エージェントに確認中...", verifySpeak);
 
@@ -2718,25 +2920,175 @@ public partial class MainWindow : Window
                 }
             }
 
-            ReplaceLast(new ChatBubble { Text = response, IsUser = false });
-            _chatHistory.Add(new ChatMessage { Role = "assistant", Content = response });
+            var answerBubble = new ChatBubble { Text = response, IsUser = false };
+            ReplacePending(answerBubble);
+            var answerMessage = new ChatMessage { Role = "assistant", Content = response };
+            _chatHistory.Add(answerMessage);
             if (_webServer?.IsRunning == true)
             {
                 _ = _webServer.BroadcastMessageAsync(response, false);
                 _ = _webServer.BroadcastTypingAsync("");
             }
+
+            StartPriceRefreshAndReask(deskPriceItems, text, deskHistory, backend, useSkills, consultBackends, verifyBackend, fromWeb: false, answerBubble, answerMessage);
         }
         catch (Exception ex)
         {
             Log($"[Chat] エラー: {ex.Message}");
-            ReplaceLast(new ChatBubble { Text = $"エラー: {ex.Message}", IsUser = false, IsError = true });
+            ReplacePending(new ChatBubble { Text = $"エラー: {ex.Message}", IsUser = false, IsError = true });
         }
         finally
         {
+            _pendingChatBubble = null;
             _chatSending = false;
             btnChatSend.IsEnabled = true;
             ScrollChatToBottom();
         }
+    }
+
+    // 価格の取り直し: 答えに使った DB の売り場・価格 (item_shop_prices) を裏で取り直し (ChatService.RefreshUsedShopPricesAsync)、
+    // 変わっていたら同じ質問を最初と同じ設定 (メイン・外部相談・検証) で AI に送り直して、新しい答えを前置き付きの発言として足す
+    // (デスクトップのチャットと Web チャットの両方。前の答えは消さない)。変わっていなければ何もしない。
+    // 送り直しの中では品目を集めない (EndPriceRefreshCapture) ので、取り直しが繰り返されることはない。失敗はログにだけ出す
+    // answerBubble / answerMessage: 元の答えの発言と履歴の項目。答え直しはその直後に独立した発言として入れる
+    // (Web の答えは発言の項目が無いので、送信中の発言があればその前、無ければ最後に入れる)。
+    // 構築・再抽出の間は始めない。構築・再抽出・VACUUM の前には StopPriceRefreshesAsync で止める
+    private void StartPriceRefreshAndReask(HashSet<string> usedPriceItems, string question, List<ChatMessage> historyForQuestion,
+        BackendConfig backend, bool useSkills, List<BackendConfig> consultBackends, BackendConfig? verifyBackend, bool fromWeb,
+        ChatBubble? answerBubble = null, ChatMessage? answerMessage = null)
+    {
+        List<string> uuids;
+        lock (usedPriceItems) uuids = usedPriceItems.ToList();
+        if (uuids.Count == 0) return;
+        // 構築の前に止めて待つのは、売り場・価格を取り直す段 (cstone・UEX への取得と DB への保存) だけ。AI への送り直しの段は待たない
+        CancellationToken ct;
+        var refreshPhase = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_priceRefreshTasks)
+        {
+            if (_priceRefreshBlocked)
+            {
+                ChatService.LogExternal("[価格の取り直し] インデックス構築・再抽出の最中なので取り直しません");
+                return;
+            }
+            ct = _priceRefreshCts.Token;
+            _priceRefreshTasks.Add(refreshPhase.Task);
+        }
+        void EndRefreshPhase()
+        {
+            lock (_priceRefreshTasks) _priceRefreshTasks.Remove(refreshPhase.Task);
+            refreshPhase.TrySetResult();
+        }
+        _ = Task.Run(async () =>
+        {
+            ChatService.EndPriceRefreshCapture();
+            try
+            {
+                bool changed;
+                try { changed = await ChatService.RefreshUsedShopPricesAsync(uuids, ct); }
+                finally { EndRefreshPhase(); }
+                if (!changed) return;
+                ct.ThrowIfCancellationRequested();
+                ChatService.LogExternal($"[価格の取り直し] 売り場・価格が更新されたため、同じ質問を送り直します: {question}");
+
+                var toolData = ChatService.BeginToolCapture();
+                var response = await ChatService.SendChatAsync(backend, historyForQuestion, useSkills);
+                var reference = ChatService.FormatToolCapture(toolData);
+                var primaryResponse = response;
+
+                if (consultBackends.Count > 0)
+                {
+                    var supplements = await ChatService.ConsultExternalAIsAsync(question, response, consultBackends, reference);
+                    var sb = new System.Text.StringBuilder(response);
+                    foreach (var (name, sup) in supplements)
+                    {
+                        if (!string.IsNullOrWhiteSpace(sup) && !sup.Contains("補足はありません"))
+                            sb.Append($"\n\n---\n📡 **{name}** の補足:\n{sup}");
+                    }
+                    response = sb.ToString();
+                }
+
+                if (verifyBackend != null)
+                {
+                    bool userRequestedVerify = question.Contains("検証");
+                    bool responseInsufficient = ChatService.IsResponseInsufficient(primaryResponse);
+                    if (userRequestedVerify || responseInsufficient)
+                    {
+                        var verifyResult = await ChatService.VerifyWithExternalAIAsync(question, response, verifyBackend, reference);
+                        if (!string.IsNullOrWhiteSpace(verifyResult))
+                        {
+                            response += $"\n\n---\n🔍 **検証 ({verifyBackend.Name}/{verifyBackend.Model})**:\n{verifyResult}";
+
+                            // 検証で訂正が見つかったときのナレッジ保存は、最初の質問と同じ扱い (Web は自動保存、デスクトップは確認して保存)
+                            if (!verifyResult.Contains("検証OK") && _gameDataExtractor != null)
+                            {
+                                var knowledgeText = ChatService.ExtractKnowledgeSummary(question, verifyResult);
+                                if (!string.IsNullOrWhiteSpace(knowledgeText))
+                                {
+                                    if (fromWeb)
+                                    {
+                                        try
+                                        {
+                                            var qs = new GameDataQueryService(_gameDataExtractor.DbPath);
+                                            var (kid, kisDup) = qs.AddKnowledgeSafe(knowledgeText, "term");
+                                            qs.Dispose();
+                                            if (!kisDup)
+                                            {
+                                                Log($"[Knowledge] Web検証結果を自動保存: {knowledgeText.Length} chars");
+                                                response += "\n\n💾 検証結果をナレッジに自動保存しました。";
+                                            }
+                                            else
+                                            {
+                                                Log($"[Knowledge] Web検証結果: 類似ナレッジ既存 id={kid}");
+                                            }
+                                        }
+                                        catch { }
+                                    }
+                                    else
+                                    {
+                                        Dispatcher.Invoke(() => OfferKnowledgeSave(knowledgeText));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                var text = "※ 価格・売り場の情報が更新されたため、答え直しました。\n\n" + response;
+                bool added = false;
+                Dispatcher.Invoke(() =>
+                {
+                    // 履歴: 元の答えの直後に入れる。元の答えが履歴から消えていたら (履歴のクリア) 入れない
+                    var hi = answerMessage != null ? _chatHistory.IndexOf(answerMessage) : -1;
+                    if (answerMessage != null && hi < 0) return;
+                    var msg = new ChatMessage { Role = "assistant", Content = text };
+                    if (hi >= 0) _chatHistory.Insert(hi + 1, msg); else _chatHistory.Add(msg);
+                    // 発言: 元の答えの直後。無ければ送信中の発言の前、それも無ければ最後
+                    var bubble = new ChatBubble { Text = text, IsUser = false };
+                    var bi = answerBubble != null ? _chatBubbles.IndexOf(answerBubble) : -1;
+                    var pi = _pendingChatBubble != null ? _chatBubbles.IndexOf(_pendingChatBubble) : -1;
+                    if (bi >= 0) _chatBubbles.Insert(bi + 1, bubble);
+                    else if (pi >= 0) _chatBubbles.Insert(pi, bubble);
+                    else _chatBubbles.Add(bubble);
+                    added = true;
+                    ScrollChatToBottom();
+                });
+                if (!added) return;
+                if (_webServer?.IsRunning == true)
+                    await _webServer.BroadcastMessageAsync(text, false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                ChatService.LogExternal("[価格の取り直し] インデックス構築・再抽出のため中止しました");
+            }
+            catch (Exception ex)
+            {
+                ChatService.LogExternal($"[価格の取り直し] 失敗: {ex.Message}");
+            }
+            finally
+            {
+                EndRefreshPhase();
+            }
+        });
     }
 
     private void ChatCopyAll_Click(object sender, RoutedEventArgs e)
@@ -2827,11 +3179,16 @@ public partial class MainWindow : Window
         ScrollChatToBottom();
     }
 
-    private void ReplaceLast(ChatBubble bubble)
+    // 送信中の発言 (「考え中...」など) を差し替える。途中に別の発言 (価格の取り直しの答え直し・Web の発言) が足されても、
+    // 送信中の発言そのものを差し替える (見つからなければ最後に足す)
+    private ChatBubble? _pendingChatBubble;
+
+    private void ReplacePending(ChatBubble bubble)
     {
-        if (_chatBubbles.Count > 0)
-            _chatBubbles.RemoveAt(_chatBubbles.Count - 1);
-        _chatBubbles.Add(bubble);
+        var idx = _pendingChatBubble != null ? _chatBubbles.IndexOf(_pendingChatBubble) : -1;
+        if (idx >= 0) _chatBubbles[idx] = bubble;
+        else _chatBubbles.Add(bubble);
+        _pendingChatBubble = bubble;
     }
 
     private void ScrollChatToBottom()
@@ -2923,6 +3280,9 @@ public partial class MainWindow : Window
 
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
+        // 売り場・価格の裏での取得は中止する (取得済みの分は保存済み。次回は続きから)
+        _shopPriceRestart = false;
+        _shopPriceCts?.Cancel();
         _captureService?.Dispose();
         _hangarEquip?.Dispose();
 

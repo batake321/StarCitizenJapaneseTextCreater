@@ -1,6 +1,5 @@
 using System.Text.RegularExpressions;
 using System.Windows;
-using Microsoft.Extensions.Configuration;
 
 namespace StarCitizenJapaneseTextCreater;
 
@@ -8,6 +7,8 @@ public partial class App : Application
 {
     public static AppConfig Config { get; private set; } = new();
     public static string ConfigPath { get; private set; } = "";
+    // この起動中は個人の設定ファイルへ保存しない (壊れた設定ファイルの控えを作れなかったとき。AppConfigLoader)
+    public static bool ConfigSaveDisabled { get; private set; }
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -28,18 +29,17 @@ public partial class App : Application
         Directory.CreateDirectory(appDataDir);
         ConfigPath = Path.Combine(appDataDir, "appsettings.json");
 
-        // Migrate: if user config doesn't exist yet but exe-local one has user data, copy it
-        var exeLocalConfig = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
-        if (!File.Exists(ConfigPath) && File.Exists(exeLocalConfig))
-            File.Copy(exeLocalConfig, ConfigPath, overwrite: false);
-
-        // Load: user config (AppData) > default (exe dir)
-        var configBuilder = new ConfigurationBuilder()
-            .SetBasePath(AppContext.BaseDirectory)
-            .AddJsonFile("appsettings.json", optional: false)
-            .AddJsonFile(ConfigPath, optional: true, reloadOnChange: false);
-        var configuration = configBuilder.Build();
-        Config = configuration.Get<AppConfig>() ?? new AppConfig();
+        // Load: user config (AppData) > default (exe dir)。個人の設定がまだ無ければ既定を写す。
+        // 個人の設定ファイルが壊れていたら別名で残して初期値で起動し、画面が出た後に 1 回だけ知らせる (AppConfigLoader)
+        var loaded = AppConfigLoader.Load(AppContext.BaseDirectory, ConfigPath, DateTime.Now);
+        Config = loaded.Config;
+        ConfigSaveDisabled = loaded.SaveDisabled;
+        if (loaded.Notice is { } notice)
+        {
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, () =>
+                System.Windows.MessageBox.Show(notice, "設定ファイル",
+                    System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning));
+        }
 
         if (string.IsNullOrEmpty(Config.GamePath) || !Directory.Exists(Config.GamePath))
         {
@@ -70,7 +70,7 @@ public partial class App : Application
             if (!File.Exists(src)) continue;
             if (!File.Exists(dest))
             {
-                File.Copy(src, dest);
+                CopyBundledDb(src, dest);
                 continue;
             }
             if (File.GetLastWriteTime(src) > File.GetLastWriteTime(dest))
@@ -100,13 +100,13 @@ public partial class App : Application
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "StarCitizenJapaneseTextCreater");
         var configPath = Path.Combine(appDataDir, "appsettings.json");
-        var exeLocalConfig = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
 
-        var configBuilder = new ConfigurationBuilder()
-            .SetBasePath(AppContext.BaseDirectory)
-            .AddJsonFile("appsettings.json", optional: false)
-            .AddJsonFile(configPath, optional: true, reloadOnChange: false);
-        var config = configBuilder.Build().Get<AppConfig>() ?? new AppConfig();
+        // 起動時と同じ読み込み (個人の設定ファイルが壊れていたら別名で残して既定で続ける)。画面が無いので知らせはコンソールに出す。
+        // 個人の設定が無いときに既定を写さないのは今までどおり
+        var loaded = AppConfigLoader.Load(AppContext.BaseDirectory, configPath, DateTime.Now, copyDefaultIfMissing: false);
+        if (loaded.Notice is { } notice)
+            Console.WriteLine(notice);
+        var config = loaded.Config;
 
         var workDir = string.IsNullOrEmpty(config.WorkingDirectory) ? @"C:\temp" : config.WorkingDirectory;
         var translationDb = Path.Combine(workDir, "translations.db");
@@ -126,6 +126,27 @@ public partial class App : Application
 
         Console.WriteLine("Export complete.");
     }
+
+    // 同梱 DB を作業ディレクトリへ初めて写す。写した DB から、この PC だけの印 (売り場・価格の取得中・手動中止。
+    // GameDataExtractor.LocalOnlyMetaKeys) を消す (配布の DB を受け取っただけで起動時の取得が始まらないように)
+    internal static void CopyBundledDb(string srcPath, string destPath)
+    {
+        File.Copy(srcPath, destPath);
+        try
+        {
+            using var db = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={destPath};Pooling=False");
+            db.Open();
+            using var chk = db.CreateCommand();
+            chk.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='gamedata_meta'";
+            if ((long)(chk.ExecuteScalar() ?? 0L) == 0) return;
+            using var del = db.CreateCommand();
+            del.CommandText = $"DELETE FROM gamedata_meta WHERE key IN ({LocalOnlyMetaKeyList()})";
+            del.ExecuteNonQuery();
+        }
+        catch { }
+    }
+
+    private static string LocalOnlyMetaKeyList() => string.Join(", ", GameDataExtractor.LocalOnlyMetaKeys.Select(k => $"'{k}'"));
 
     private static void MergeBundledDb(string srcPath, string destPath)
     {
@@ -153,7 +174,10 @@ public partial class App : Application
                 if ((long)(chk.ExecuteScalar() ?? 0) == 0) continue;
 
                 using var readCmd = src.CreateCommand();
-                readCmd.CommandText = $"SELECT * FROM {table}";
+                // gamedata_meta のこの PC だけの印 (取得中・手動中止) は取り込まない (利用者側の印はそのまま)
+                readCmd.CommandText = table == "gamedata_meta"
+                    ? $"SELECT * FROM {table} WHERE key NOT IN ({LocalOnlyMetaKeyList()})"
+                    : $"SELECT * FROM {table}";
                 using var reader = readCmd.ExecuteReader();
                 var colCount = reader.FieldCount;
                 var colNames = new string[colCount];

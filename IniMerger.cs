@@ -158,6 +158,20 @@ public static class IniMerger
         if (ruinReplaced > 0)
             Console.WriteLine($"    Replaced 廃墟 -> 廃棄された: {ruinReplaced}");
 
+        // 同じくフォントに「橙」が無く文字化けするため、「オレンジ」に置き換える (公式訳の「赤橙色」なども含む)
+        int orangeReplaced = 0;
+        foreach (var key in merged.Keys.ToList())
+        {
+            var val = merged[key];
+            if (val.Contains('橙'))
+            {
+                merged[key] = val.Replace("橙", "オレンジ");
+                orangeReplaced++;
+            }
+        }
+        if (orangeReplaced > 0)
+            Console.WriteLine($"    Replaced 橙 -> オレンジ: {orangeReplaced}");
+
         // 原文の書き間違いで「<EM4>語句<EM4>」のように閉じタグの「/」が抜けているものは、2 つ目を </EM4> にして閉じる
         // (開き記号そのものを定義する text_ui_tags_*_open のような、タグ 1 つだけの値は触らない)
         int emClosed = 0;

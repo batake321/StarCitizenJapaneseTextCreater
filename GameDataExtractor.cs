@@ -314,7 +314,7 @@ public class GameDataExtractor : IDisposable
                 scope_record TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_mission_reputation_title ON mission_reputation(title_key);
-        """;
+        """ + ShopPriceStore.TableDdl + AmmoParamsDdl + GameDataQueryService.ItemVariantsDdl + GameDataQueryService.PlayerDamageParamsDdl;
         cmd.ExecuteNonQuery();
         MigrateShipPortsTable();   // 旧スキーマの ship_ports (CREATE TABLE IF NOT EXISTS では作り直されない) を現行 DDL に移行
         MigrateItemIndexSizeColumn();
@@ -517,12 +517,40 @@ public class GameDataExtractor : IDisposable
         ProgressChanged?.Invoke(100, "StarBreaker CLI 準備完了");
     }
 
-    public async Task BuildIndexAsync(string dataP4kPath, CancellationToken ct = default)
+    // requestShopPriceFetch: 構築が終わったら売り場・価格の裏の取得を始めてもらうか。設定タブの構築は、構築の後の処理
+    // (日本語名・固有名詞キャッシュ) を済ませてから MainWindow が RequestShopPriceFetch を呼ぶので false にする
+    public async Task BuildIndexAsync(string dataP4kPath, CancellationToken ct = default, bool requestShopPriceFetch = true)
     {
-        await BuildStructuredIndexAsync(dataP4kPath, ct);
+        await BuildStructuredIndexAsync(dataP4kPath, ct, requestShopPriceFetch);
     }
 
-    public async Task BuildStructuredIndexAsync(string dataP4kPath, CancellationToken ct = default)
+    // 売り場・価格の裏の取得を始めてもらう (MainWindow が受けて FetchNewShopPricesAsync を走らせる)
+    public static void RequestShopPriceFetch(string dbPath) => ShopPriceFetchRequested?.Invoke(dbPath);
+
+    // 構築の前に売り場・価格の裏の取得を止める (構築中・VACUUM 中に取得が DB に書かないように)。
+    // 成功すれば最後の ShopPriceFetchRequested で、失敗すれば ShopPriceFetchResumeRequested で続きを裏で再開する
+    // 構築は最初に gamedata_meta を消すので、売り場・価格の取得の印 (手動中止・途中) を先に退避し、失敗したら元に戻してから再開を頼む
+    // (成功したときは印を戻さず、ShopPriceFetchRequested の受け手が手動中止の印を消して取得を始める)
+    public async Task BuildStructuredIndexAsync(string dataP4kPath, CancellationToken ct = default, bool requestShopPriceFetch = true)
+    {
+        await PauseShopPriceFetchAsync();
+        Dictionary<string, string>? savedMarks = null;
+        try
+        {
+            EnsureDb();
+            savedMarks = ReadShopPriceMarks(_db!);
+            await BuildStructuredIndexCoreAsync(dataP4kPath, ct, requestShopPriceFetch);
+        }
+        catch
+        {
+            // 止めた取得 (とチャットの取り直し) は、どこで失敗しても必ず再開を頼む
+            try { if (savedMarks != null && _db != null) RestoreShopPriceMarks(_db, savedMarks); } catch { }
+            ShopPriceFetchResumeRequested?.Invoke(DbPath);
+            throw;
+        }
+    }
+
+    private async Task BuildStructuredIndexCoreAsync(string dataP4kPath, CancellationToken ct, bool requestShopPriceFetch)
     {
         var dbDrive = new DriveInfo(Path.GetPathRoot(DbPath)!);
         if (dbDrive.AvailableFreeSpace < 500 * 1024 * 1024)
@@ -547,7 +575,9 @@ public class GameDataExtractor : IDisposable
         // Step 1: アイテムインデックス（全メーカー＋船）
         step++;
         ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] アイテムインデックスを構築中...");
-        int indexCount = await ExtractItemIndexAsync(dataP4kPath, now, ct);
+        // 全エンティティの種類 (AttachDef.Type) の一覧。決め打ちの接頭辞で漏れる武器 (新しい製造元など) を種類で拾うために使う
+        var typeMap = await QueryEntityTypesAsync(dataP4kPath, ct);
+        int indexCount = await ExtractItemIndexAsync(dataP4kPath, now, ct, typeMap);
 
         // Step 1b: FTS5 全文検索インデックス
         StatusChanged?.Invoke($"FTS5 全文検索インデックスを構築中...");
@@ -581,6 +611,20 @@ public class GameDataExtractor : IDisposable
             StatusChanged?.Invoke($"[{step}/{totalSteps}] 武器抽出: {prefix}");
             itemCount += await ExtractItemsAsync(dataP4kPath, filter, "SCItemWeaponComponentParams", now, ct);
         }
+        // 上の接頭辞で取れない武器類 (新しい製造元・大文字の製造元コードの船の武器など) を、種類の一覧から拾って取り込む
+        foreach (var (filter, records) in BuildTypedExtraFilters(typeMap, ItemPrefixes.Where(p => p.Length <= 4)))
+        {
+            StatusChanged?.Invoke($"[{step}/{totalSteps}] 武器抽出 (種類で追加): {filter}");
+            itemCount += await ExtractItemsAsync(dataP4kPath, filter, "SCItemWeaponComponentParams", now, ct, records);
+        }
+        // 弾のデータ (AmmoParams): 武器の弾速・1発のダメージに使う
+        StatusChanged?.Invoke($"[{step}/{totalSteps}] 弾のデータ (AmmoParams) を抽出中...");
+        int ammoCount = await ExtractAmmoParamsAsync(dataP4kPath, now, ct);
+        StatusChanged?.Invoke($"[{step}/{totalSteps}] 弾のデータ: {ammoCount} 件");
+        // 何発で倒せるか (TTK) に使う、プレイヤーの体力・部位の倍率・アーマーの倍率
+        var damageParams = await ExtractPlayerDamageParamsAsync(dataP4kPath, ct);
+        StatusChanged?.Invoke($"[{step}/{totalSteps}] 体力・部位・アーマーの倍率: {damageParams} 件" + (damageParams == 0 ? " (取り込めなかったので前のデータを残します)" : ""));
+        RebuildItemVariantsAndReport($"[{step}/{totalSteps}] ");
 
         // Step 4: ミッション・契約
         step++;
@@ -600,9 +644,673 @@ public class GameDataExtractor : IDisposable
         SetMeta("indexed_at", now);
         SetMeta("p4k_path", dataP4kPath);
 
+        // 中身を消して入れ直したページが空きとして残り、ファイルが大きいままになるので VACUUM で詰める。
+        // 売り場・価格の裏の取得 (ShopPriceFetchRequested) はこの後に始まる。失敗しても構築の結果は使えるので、知らせて続ける
+        ClearCstoneNotFoundMarks();
+        StatusChanged?.Invoke("DB を最適化中 (VACUUM)...");
+        var vacuumSw = Stopwatch.StartNew();
+        try
+        {
+            using var vac = _db!.CreateCommand();
+            vac.CommandText = "VACUUM";
+            vac.ExecuteNonQuery();
+            StatusChanged?.Invoke($"DB の最適化完了 ({vacuumSw.Elapsed.TotalSeconds:F1}秒)");
+        }
+        catch (Exception ex) { StatusChanged?.Invoke($"DB の最適化 (VACUUM) に失敗しました: {ex.Message}"); }
+
         sw.Stop();
         ProgressChanged?.Invoke(100, $"完了！ ({sw.Elapsed.TotalSeconds:F1}秒)");
-        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}, 装備: {itemCount}, 契約: {missionCount}, 商品: {commodityCount}");
+        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}, 装備: {itemCount}, 弾: {ammoCount}, 契約: {missionCount}, 商品: {commodityCount}");
+
+        // 新しい品目の売り場・価格は、構築とは別に裏で取得する (MainWindow が受けて FetchNewShopPricesAsync を走らせる)
+        if (requestShopPriceFetch) ShopPriceFetchRequested?.Invoke(DbPath);
+    }
+
+    // インデックス構築・装備データの再抽出が成功した後に、「cstone に品目無し」の記録を消す (新しいパッチで cstone に載ったかもしれないので、
+    // この後の裏の取得で取り直す)。消せなくても構築の結果は使えるので、知らせて続ける
+    private void ClearCstoneNotFoundMarks()
+    {
+        try
+        {
+            using (var init = _db!.CreateCommand())
+            {
+                init.CommandText = ShopPriceStore.TableDdl;
+                init.ExecuteNonQuery();
+            }
+            var n = ShopPriceStore.DeleteCstoneNotFound(_db);
+            if (n > 0) StatusChanged?.Invoke($"[売り場・価格] cstone に品目無しの記録 {n} 件を消しました (この後の取得で取り直します)");
+        }
+        catch (Exception ex) { StatusChanged?.Invoke($"[売り場・価格] cstone に品目無しの記録を消せませんでした: {ex.Message}"); }
+    }
+
+    // インデックス構築・装備データの再抽出が終わり、新しい品目の売り場・価格を裏で取りに行ってほしいときに起きる (引数は gamedata_cache.db の場所)
+    public static event Action<string>? ShopPriceFetchRequested;
+
+    // インデックス構築・装備データの再抽出を始める前に、売り場・価格の裏の取得を止めてほしいときに起きる (止まるまで待つ。MainWindow が受ける)
+    public static event Func<Task>? ShopPriceFetchPauseRequested;
+
+    // 構築・再抽出が失敗したとき、止めた取得の続きを裏で再開してほしいときに起きる (引数は gamedata_cache.db の場所)
+    public static event Action<string>? ShopPriceFetchResumeRequested;
+
+    private static async Task PauseShopPriceFetchAsync()
+    {
+        if (ShopPriceFetchPauseRequested is not { } handlers) return;
+        foreach (var h in handlers.GetInvocationList().Cast<Func<Task>>())
+        {
+            try { await h(); }
+            catch (Exception ex) { ChatService.LogExternal($"[売り場・価格] 構築前の取得の停止に失敗: {ex.Message}"); }
+        }
+    }
+
+    // 弾のデータ (AmmoParams) の表。record_name は "AmmoParams.xxx"。damage_json は直撃の DamageInfo、explosion_json は爆発の DamageInfo
+    // (種類 → 値の JSON。爆発しない弾は NULL)
+    internal const string AmmoParamsDdl = """
+
+        CREATE TABLE IF NOT EXISTS ammo_params (
+            record_name TEXT PRIMARY KEY,
+            speed REAL,
+            lifetime REAL,
+            damage_json TEXT,
+            explosion_json TEXT,
+            raw_json TEXT NOT NULL,
+            extracted_at TEXT NOT NULL
+        );
+        """;
+
+    // 何発で倒せるか (TTK) に使う値を dcb query で取り、player_damage_params を作り直す (足りなければ前のデータを残して 0 を返す)。
+    //   体力: ActorStatusComponent.PlayerStatusPU の ActorStatData (statType = HealthPool) の maximumStatValue
+    //   ダウン後に死亡するまでのダメージ: 同じ record の downedParams.damageToInstaKillFromDowned (excessDamageToInstaKill も注記用に残す)
+    //   部位の倍率: BodyHealthConfig.HealthConfig_Player の bodyPartConfigs の damageMultiplier (bodyParts のファイル名で head / torso / arm / leg)
+    //   アーマーの倍率: DamageResistanceMacro の各 record の damageResistance.{種類}Resistance.Multiplier
+    private async Task<int> ExtractPlayerDamageParamsAsync(string p4kPath, CancellationToken ct)
+    {
+        try
+        {
+            var status = await RunDcbQueryWithTimerAsync(p4kPath, "ActorStatusComponent", "*PlayerStatusPU", "体力 (PlayerStatusPU)", ct);
+            var body = await RunDcbQueryWithTimerAsync(p4kPath, "BodyHealthConfig", "*HealthConfig_Player", "部位の倍率 (HealthConfig_Player)", ct);
+            var macros = await RunDcbQueryWithTimerAsync(p4kPath, "DamageResistanceMacro", "*", "アーマーの倍率 (DamageResistanceMacro)", ct);
+            var rows = ParsePlayerDamageParams(status, body, macros);
+            if (rows.Count == 0) return 0;
+            using var tx = _db!.BeginTransaction();
+            using (var del = _db.CreateCommand()) { del.Transaction = tx; del.CommandText = "DELETE FROM player_damage_params"; del.ExecuteNonQuery(); }
+            using var ins = _db.CreateCommand();
+            ins.Transaction = tx;
+            ins.CommandText = "INSERT OR REPLACE INTO player_damage_params(kind, name, damage_type, value, source) VALUES(@k, @n, @t, @v, @s)";
+            var pK = ins.Parameters.Add("@k", SqliteType.Text);
+            var pN = ins.Parameters.Add("@n", SqliteType.Text);
+            var pT = ins.Parameters.Add("@t", SqliteType.Text);
+            var pV = ins.Parameters.Add("@v", SqliteType.Real);
+            var pS = ins.Parameters.Add("@s", SqliteType.Text);
+            foreach (var r in rows)
+            {
+                pK.Value = r.Kind; pN.Value = r.Name; pT.Value = r.DamageType; pV.Value = r.Value; pS.Value = r.Source;
+                ins.ExecuteNonQuery();
+            }
+            tx.Commit();
+            return rows.Count;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            StatusChanged?.Invoke($"体力・部位・アーマーの倍率の取り込みに失敗しました: {ex.Message}");
+            return 0;
+        }
+    }
+
+    // dcb query の出力 3 つから player_damage_params の行を作る。体力・4 部位・アーマーの倍率のどれかが無ければ空
+    internal static List<(string Kind, string Name, string DamageType, double Value, string Source)> ParsePlayerDamageParams(string statusJson, string bodyJson, string macroJson)
+    {
+        var rows = new List<(string, string, string, double, string)>();
+        double health = 0, downed = 0, excess = 0;
+        foreach (var block in SplitJsonBlocks(statusJson ?? ""))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                if ((root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() : null) != "ActorStatusComponent.PlayerStatusPU") continue;
+                if (!root.TryGetProperty("_RecordValue_", out var rv)) continue;
+                health = FindHealthPoolMax(rv, 0);
+                if (rv.TryGetProperty("downedParams", out var dp) && dp.ValueKind == JsonValueKind.Object)
+                {
+                    if (dp.TryGetProperty("damageToInstaKillFromDowned", out var d1) && d1.ValueKind == JsonValueKind.Number) downed = d1.GetDouble();
+                    if (dp.TryGetProperty("excessDamageToInstaKill", out var d2) && d2.ValueKind == JsonValueKind.Number) excess = d2.GetDouble();
+                }
+            }
+            catch { }
+        }
+        var parts = new Dictionary<string, double>(StringComparer.Ordinal);
+        var nakedParts = new Dictionary<string, double>(StringComparer.Ordinal);
+        foreach (var block in SplitJsonBlocks(bodyJson ?? ""))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                if ((root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() : null) != "BodyHealthConfig.HealthConfig_Player") continue;
+                if (!root.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("bodyPartConfigs", out var cfgs) || cfgs.ValueKind != JsonValueKind.Array) continue;
+                foreach (var c in cfgs.EnumerateArray())
+                {
+                    if (c.ValueKind != JsonValueKind.Object || !c.TryGetProperty("damageMultiplier", out var dm) || dm.ValueKind != JsonValueKind.Number) continue;
+                    if (!c.TryGetProperty("bodyParts", out var bps) || bps.ValueKind != JsonValueKind.Array) continue;
+                    foreach (var bp in bps.EnumerateArray())
+                    {
+                        var file = Path.GetFileNameWithoutExtension(bp.GetString() ?? "").ToLowerInvariant();
+                        var part = file switch
+                        {
+                            "head" => "head", "torso" => "torso",
+                            "rightarm" or "leftarm" => "arm", "rightleg" or "leftleg" => "leg",
+                            _ => null,
+                        };
+                        if (part == null) continue;
+                        parts.TryAdd(part, dm.GetDouble());
+                        // 素肌 (アーマーを着ていない) ときの倍率。無い record では入れない
+                        if (c.TryGetProperty("nakedDamageMultiplier", out var nm) && nm.ValueKind == JsonValueKind.Number) nakedParts.TryAdd(part, nm.GetDouble());
+                    }
+                }
+            }
+            catch { }
+        }
+        var armorRows = new List<(string, string, string, double, string)>();
+        foreach (var block in SplitJsonBlocks(macroJson ?? ""))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                var name = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+                if (!name.StartsWith("DamageResistanceMacro.", StringComparison.Ordinal)) continue;
+                if (!root.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("damageResistance", out var dr) || dr.ValueKind != JsonValueKind.Object) continue;
+                foreach (var type in new[] { "Physical", "Energy", "Distortion", "Thermal", "Biochemical", "Stun" })
+                    if (dr.TryGetProperty(type + "Resistance", out var entry) && entry.ValueKind == JsonValueKind.Object
+                        && entry.TryGetProperty("Multiplier", out var m) && m.ValueKind == JsonValueKind.Number)
+                        armorRows.Add(("armor", name["DamageResistanceMacro.".Length..], type, m.GetDouble(), "DamageResistanceMacro"));
+            }
+            catch { }
+        }
+        if (health <= 0 || new[] { "head", "torso", "arm", "leg" }.Any(p => !parts.ContainsKey(p)) || armorRows.Count == 0) return rows;
+        rows.Add(("health", "", "", health, "ActorStatusComponent.PlayerStatusPU の HealthPool"));
+        if (downed > 0) rows.Add(("downed", "", "", downed, "ActorStatusComponent.PlayerStatusPU の downedParams.damageToInstaKillFromDowned"));
+        if (excess > 0) rows.Add(("excess_instakill", "", "", excess, "ActorStatusComponent.PlayerStatusPU の downedParams.excessDamageToInstaKill"));
+        foreach (var (part, v) in parts) rows.Add(("body_part", part, "", v, "BodyHealthConfig.HealthConfig_Player の bodyPartConfigs.damageMultiplier"));
+        foreach (var (part, v) in nakedParts) rows.Add(("body_part_naked", part, "", v, "BodyHealthConfig.HealthConfig_Player の bodyPartConfigs.nakedDamageMultiplier"));
+        rows.AddRange(armorRows);
+        return rows;
+    }
+
+    // ActorStatData (statType = HealthPool) の maximumStatValue を探す (見つからなければ 0)
+    private static double FindHealthPoolMax(JsonElement el, int depth)
+    {
+        if (depth > 8) return 0;
+        if (el.ValueKind == JsonValueKind.Object)
+        {
+            if (el.TryGetProperty("_Type_", out var t) && t.GetString() == "ActorStatData"
+                && el.TryGetProperty("statType", out var st) && st.GetString() == "HealthPool"
+                && el.TryGetProperty("maximumStatValue", out var mx) && mx.ValueKind == JsonValueKind.Number)
+                return mx.GetDouble();
+            foreach (var p in el.EnumerateObject())
+            {
+                var v = FindHealthPoolMax(p.Value, depth + 1);
+                if (v > 0) return v;
+            }
+        }
+        else if (el.ValueKind == JsonValueKind.Array)
+            foreach (var c in el.EnumerateArray())
+            {
+                var v = FindHealthPoolMax(c, depth + 1);
+                if (v > 0) return v;
+            }
+        return 0;
+    }
+
+    // dcb query "AmmoParams" で弾のデータを全件取り、ammo_params を作り直す (取れなかったときは前のデータを残す)
+    private async Task<int> ExtractAmmoParamsAsync(string p4kPath, string now, CancellationToken ct)
+    {
+        var rawJson = await RunDcbQueryWithTimerAsync(p4kPath, "AmmoParams", "*", "弾のデータ (AmmoParams)", ct);
+        var rows = ParseAmmoParams(rawJson);
+        if (rows.Count == 0) return 0;
+
+        using var tx = _db!.BeginTransaction();
+        using (var del = _db.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM ammo_params";
+            del.ExecuteNonQuery();
+        }
+        using var cmd = _db.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "INSERT OR REPLACE INTO ammo_params(record_name, speed, lifetime, damage_json, explosion_json, raw_json, extracted_at) VALUES(@rn, @sp, @lt, @dj, @ej, @rj, @ea)";
+        var pRn = cmd.Parameters.Add("@rn", SqliteType.Text);
+        var pSp = cmd.Parameters.Add("@sp", SqliteType.Real);
+        var pLt = cmd.Parameters.Add("@lt", SqliteType.Real);
+        var pDj = cmd.Parameters.Add("@dj", SqliteType.Text);
+        var pEj = cmd.Parameters.Add("@ej", SqliteType.Text);
+        var pRj = cmd.Parameters.Add("@rj", SqliteType.Text);
+        cmd.Parameters.AddWithValue("@ea", now);
+        foreach (var r in rows)
+        {
+            pRn.Value = r.RecordName;
+            pSp.Value = r.Speed;
+            pLt.Value = r.Lifetime;
+            pDj.Value = (object?)r.DamageJson ?? DBNull.Value;
+            pEj.Value = (object?)r.ExplosionJson ?? DBNull.Value;
+            pRj.Value = r.RawJson;
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return rows.Count;
+    }
+
+    // dcb query "AmmoParams" の出力を 1 弾 1 行にする。
+    // 弾速 = _RecordValue_.speed (m/s)、寿命 = lifetime (秒)、直撃のダメージ = projectileParams.damage (DamageInfo)、
+    // 爆発のダメージ = projectileParams.detonationParams.explosionParams.damage (DamageInfo)。
+    // DamageInfo は DamagePhysical / DamageEnergy / DamageDistortion / DamageThermal / DamageBiochemical / DamageStun を
+    // {"Physical": 値, …} の JSON にする (すべて 0 なら NULL)
+    internal static List<(string RecordName, double Speed, double Lifetime, string? DamageJson, string? ExplosionJson, string RawJson)> ParseAmmoParams(string rawJson)
+    {
+        var rows = new List<(string, double, double, string?, string?, string)>();
+        if (string.IsNullOrEmpty(rawJson)) return rows;
+        foreach (var block in SplitJsonBlocks(rawJson))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+                if (!recordName.StartsWith("AmmoParams.", StringComparison.Ordinal)) continue;
+                if (!root.TryGetProperty("_RecordValue_", out var rv) || rv.ValueKind != JsonValueKind.Object) continue;
+                double speed = rv.TryGetProperty("speed", out var sp) && sp.ValueKind == JsonValueKind.Number ? sp.GetDouble() : 0;
+                double lifetime = rv.TryGetProperty("lifetime", out var lt) && lt.ValueKind == JsonValueKind.Number ? lt.GetDouble() : 0;
+                string? direct = null, explosion = null;
+                if (rv.TryGetProperty("projectileParams", out var pp) && pp.ValueKind == JsonValueKind.Object)
+                {
+                    if (pp.TryGetProperty("damage", out var dmg)) direct = DamageInfoJson(dmg);
+                    if (pp.TryGetProperty("detonationParams", out var det) && det.ValueKind == JsonValueKind.Object
+                        && det.TryGetProperty("explosionParams", out var ex) && ex.ValueKind == JsonValueKind.Object
+                        && ex.TryGetProperty("damage", out var exd))
+                        explosion = DamageInfoJson(exd);
+                }
+                rows.Add((recordName, speed, lifetime, direct, explosion, block));
+            }
+            catch { }
+        }
+        return rows;
+    }
+
+    private static string? DamageInfoJson(JsonElement dmg)
+    {
+        if (dmg.ValueKind != JsonValueKind.Object) return null;
+        var d = new Dictionary<string, double>();
+        foreach (var key in new[] { "Physical", "Energy", "Distortion", "Thermal", "Biochemical", "Stun" })
+            if (dmg.TryGetProperty("Damage" + key, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var x) && x != 0) d[key] = x;
+        return d.Count > 0 ? JsonSerializer.Serialize(d) : null;
+    }
+
+    // 売り場・価格を取る武器・装備 (item_index)。個人武器・道具 (WeaponPersonal)、手榴弾・設置型の爆発物・医療用具 (FPS_Consumable)、
+    // 武器の付属品のうち個人武器用 (照準器・アンダーバレル・マガジン・マルチツール用・ランチャー用。Barrel 等は船の武器の部品なので除く)、
+    // アーマー・アンダースーツ・バックパック・服、船の部品 (シールド・動力装置・クアンタムドライブ・冷却装置・レーダー)、
+    // 船の武器・ミサイル・ミサイルラック・爆弾、船のトラクタービーム・サルベージヘッド。名前の無いもの・プレースホルダは除く。
+    // プレースホルダは、名前のローカライズキーが @LOC_PLACEHOLDER のもの。item_index.name はキーを訳した文 (英語の global.ini に
+    // 日本語が入っていれば「<= プレースホルダー =>」) なので、キーが残っている items.name で判定し、items に行が無いときのために
+    // 訳した文 (英語・日本語) でも外す
+    internal const string ShopPriceTargetWhere = """
+        (item_type IN ('WeaponPersonal', 'Grenade', 'FPS_Deployable', 'FPS_Consumable', 'Gadget',
+                       'Shield', 'PowerPlant', 'QuantumDrive', 'Cooler', 'Radar',
+                       'WeaponGun', 'Missile', 'MissileLauncher', 'Bomb', 'BombLauncher',
+                       'TractorBeam', 'SalvageHead', 'TowingBeam')
+         OR item_type LIKE 'Char_Armor_%' OR item_type LIKE 'Char_Clothing_%'
+         OR (item_type = 'WeaponAttachment' AND sub_type IN ('IronSight', 'BottomAttachment', 'Magazine', 'Utility', 'Missile')))
+        AND name IS NOT NULL AND TRIM(name) <> '' AND name NOT IN ('<= PLACEHOLDER =>', '<= プレースホルダー =>', '@LOC_PLACEHOLDER')
+        AND NOT EXISTS (SELECT 1 FROM items WHERE items.record_name = item_index.record_name AND items.name = '@LOC_PLACEHOLDER')
+        """;
+
+    // 裏の取得の途中の件数をログ (onStatus) に出す間隔。武器・装備は 25 件ごとか 30 秒ごと、船・車両は 30 秒ごと
+    private const int ShopPriceLogEveryItems = 25;
+    private static readonly TimeSpan ShopPriceLogInterval = TimeSpan.FromSeconds(30);
+
+    // 売り場・価格がまだ保存されていない品目だけを取得して item_shop_prices に保存する。インデックス構築・再抽出の後や起動時に、
+    // MainWindow が裏で呼ぶ (自分の DB 接続を使うので、アプリの他の処理と同時に動いてよい)。
+    // 武器・装備は cstone (finder.cstone.space/search/{uuid}) を 1 件ずつ、船・車両は UEX の一括 API を使う。
+    // 1 件の失敗では止めない (失敗した品目は保存しないので、次回に取り直す)。キャンセルされたら、そこまでの分を残して終える。
+    // onStatus は節目の知らせ (途中の件数も一定の間隔で出す)、onProgress は (割合, 進み具合の文) で、どちらも呼び出し側のスレッドとは別のスレッドから呼ばれる
+    public static async Task FetchNewShopPricesAsync(string dbPath, Action<string>? onStatus, Action<int, string>? onProgress, CancellationToken ct)
+    {
+        // 今の段階 (武器・装備 / 船・車両) のそこまでの件数の文。中止したときの知らせに付ける
+        Func<string>? currentCounts = null;
+        try
+        {
+            using var db = new SqliteConnection($"Data Source={dbPath}");
+            db.Open();
+            using (var init = db.CreateCommand())
+            {
+                init.CommandText = ShopPriceStore.TableDdl;
+                init.ExecuteNonQuery();
+            }
+            // 取得中の印 (最後まで終わったら消す)。アプリを閉じる等で途中で終わったときだけ、起動時に続きを取る
+            SetMeta(db, ShopPriceInProgressMetaKey, DateTime.UtcNow.ToString("o"));
+            var targets = new List<string>();
+            using (var cmd = db.CreateCommand())
+            {
+                cmd.CommandText = $"SELECT uuid FROM item_index WHERE {ShopPriceTargetWhere} AND uuid NOT IN (SELECT uuid FROM item_shop_prices) ORDER BY item_type, record_name";
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) targets.Add(r.GetString(0));
+            }
+
+            if (targets.Count > 0)
+            {
+                onStatus?.Invoke($"[売り場・価格] 未取得の武器・装備 {targets.Count} 件を cstone から取得します");
+                var sw = Stopwatch.StartNew();
+                int withShop = 0, noShop = 0, notOnCstone = 0, failed = 0, done = 0;
+                string Counts() => $"[売り場・価格] 武器・装備 {done:N0} / {targets.Count:N0} 件 (売り場あり {withShop:N0}, 売り場なし {noShop:N0}, cstone に品目無し {notOnCstone:N0}, 失敗 {failed:N0})";
+                currentCounts = Counts;
+                var lastLog = Stopwatch.StartNew();
+                int lastLoggedDone = 0;
+                for (int i = 0; i < targets.Count; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    // cstone への間隔 (0.75 秒) と同時に 1 つの順番待ちは FetchCstoneShopRowsAsync の中で行う (チャットの取り直しと共用)
+                    var rows = await ChatService.FetchCstoneShopRowsAsync(targets[i], ct);
+                    if (rows == null) failed++;
+                    else if (!await TryReplaceShopRowsAsync(db, targets[i], rows, onStatus, ct)) failed++;
+                    else if (rows.Any(x => x.Kind != ShopPriceStore.KindNone)) withShop++;
+                    else if (ShopPriceStore.IsCstoneNotFound(rows)) notOnCstone++;
+                    else noShop++;
+                    done = i + 1;
+                    // ログ (節目の知らせ) には 25 件ごとか 30 秒ごとに件数を出す。最後の 1 件の分は下のまとめで出す
+                    if (done < targets.Count && (done - lastLoggedDone >= ShopPriceLogEveryItems || lastLog.Elapsed >= ShopPriceLogInterval))
+                    {
+                        onStatus?.Invoke(Counts());
+                        lastLoggedDone = done;
+                        lastLog.Restart();
+                    }
+                    var remainMin = sw.Elapsed.TotalSeconds / done * (targets.Count - done) / 60;
+                    onProgress?.Invoke(done * 100 / targets.Count, $"{Counts()} 残り約 {remainMin:F0} 分");
+                }
+                currentCounts = null;
+                onStatus?.Invoke($"[売り場・価格] 武器・装備: 売り場あり {withShop} 件, 売り場なし {noShop} 件, cstone に品目無し {notOnCstone} 件, 取得失敗 {failed} 件 ({sw.Elapsed.TotalMinutes:F1} 分)" +
+                                      (failed > 0 ? "。失敗した品目は次回に取り直します" : "") +
+                                      (notOnCstone > 0 ? "。cstone に品目無しの品目は、次のインデックス構築・装備データの再抽出の後に取り直します" : ""));
+            }
+
+            var shipTargets = new List<string>();
+            using (var cmd = db.CreateCommand())
+            {
+                // プレースホルダ (名前のキーが @LOC_PLACEHOLDER) は除く。キーが残っている ships.name・items.name で判定し、
+                // どちらにも行が無いときのために訳した文 (英語・日本語) でも外す (ShopPriceTargetWhere と同じ考え方)
+                cmd.CommandText = "SELECT uuid FROM item_index WHERE item_type = 'NOITEM_Vehicle' AND name IS NOT NULL AND TRIM(name) <> '' " +
+                                  "AND name NOT IN ('<= PLACEHOLDER =>', '<= プレースホルダー =>', '@LOC_PLACEHOLDER') " +
+                                  "AND NOT EXISTS (SELECT 1 FROM ships WHERE ships.record_name = item_index.record_name AND ships.name = '@LOC_PLACEHOLDER') " +
+                                  "AND NOT EXISTS (SELECT 1 FROM items WHERE items.record_name = item_index.record_name AND items.name = '@LOC_PLACEHOLDER') " +
+                                  "AND uuid NOT IN (SELECT uuid FROM item_shop_prices)";
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) shipTargets.Add(r.GetString(0));
+            }
+            if (shipTargets.Count > 0)
+            {
+                onStatus?.Invoke($"[売り場・価格] 未取得の船・車両 {shipTargets.Count} 件の購入・レンタル価格を UEX から取得中...");
+                var map = await FetchUexShipPriceRowsAsync(db, ct);
+                if (map == null)
+                {
+                    onStatus?.Invoke("[売り場・価格] UEX から船・車両の価格を取得できませんでした (次回に取り直します)");
+                }
+                else
+                {
+                    int withShop = 0, done = 0;
+                    // 「なし」は終わりのまとめと同じ数え方 (処理した件数 - 登録あり)
+                    string Counts() => $"[売り場・価格] 船・車両 {done:N0} / {shipTargets.Count:N0} 件 (購入・レンタルの登録あり {withShop:N0}, なし {done - withShop:N0})";
+                    currentCounts = Counts;
+                    var lastLog = Stopwatch.StartNew();
+                    // UEX からは一括で取ってあり、ここは DB への保存だけで速いので、ログには 30 秒ごとにだけ件数を出す
+                    foreach (var uuid in shipTargets)
+                    {
+                        if (map.TryGetValue(uuid, out var rows)) { if (await TryReplaceShopRowsAsync(db, uuid, rows, onStatus, ct)) withShop++; }
+                        else await TryReplaceShopRowsAsync(db, uuid, [UexNoShopRow()], onStatus, ct);
+                        done++;
+                        if (done < shipTargets.Count && lastLog.Elapsed >= ShopPriceLogInterval)
+                        {
+                            onStatus?.Invoke(Counts());
+                            lastLog.Restart();
+                        }
+                        onProgress?.Invoke(done * 100 / shipTargets.Count, Counts());
+                    }
+                    currentCounts = null;
+                    onStatus?.Invoke($"[売り場・価格] 船・車両: 購入・レンタルの登録あり {withShop} 件, なし {shipTargets.Count - withShop} 件");
+                }
+            }
+            // 最後まで終わったので取得中の印を消す (取れなかった品目は次のインデックス構築・再抽出の後に取り直す)
+            DeleteMeta(db, ShopPriceInProgressMetaKey);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            var counts = currentCounts?.Invoke();
+            onStatus?.Invoke("[売り場・価格] 中止しました (取得済みの分は保存しています。残りは次回、まだ取っていない品目から続けます)" +
+                             (counts != null ? $"。中止までの件数: {counts.Replace("[売り場・価格] ", "")}" : ""));
+        }
+        catch (Exception ex)
+        {
+            onStatus?.Invoke($"[売り場・価格] 取得中にエラーが発生しました: {ex.Message}");
+        }
+    }
+
+    // 1 品目の行を保存する。database is locked などで失敗したら少し待って取り直し (3 回まで)、だめならその品目を飛ばす
+    // (保存しないので次回取り直す)。保存できたら true
+    private static async Task<bool> TryReplaceShopRowsAsync(SqliteConnection db, string uuid, IReadOnlyList<ShopPriceRow> rows, Action<string>? onStatus, CancellationToken ct)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                ShopPriceStore.Replace(db, uuid, rows, DateTime.UtcNow);
+                return true;
+            }
+            catch (SqliteException ex)
+            {
+                if (attempt >= 3)
+                {
+                    onStatus?.Invoke($"[売り場・価格] {uuid}: DB に保存できませんでした ({ex.Message})。この品目は次回取り直します");
+                    return false;
+                }
+                await Task.Delay(TimeSpan.FromSeconds(attempt), ct);
+            }
+        }
+    }
+
+    private static void SetMeta(SqliteConnection db, string key, string value)
+    {
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "CREATE TABLE IF NOT EXISTS gamedata_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT OR REPLACE INTO gamedata_meta(key, value) VALUES(@k, @v)";
+        cmd.Parameters.AddWithValue("@k", key);
+        cmd.Parameters.AddWithValue("@v", value);
+        cmd.ExecuteNonQuery();
+    }
+
+    private static void DeleteMeta(SqliteConnection db, string key)
+    {
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "DELETE FROM gamedata_meta WHERE key = @k";
+        cmd.Parameters.AddWithValue("@k", key);
+        cmd.ExecuteNonQuery();
+    }
+
+    // 売り場・価格の取得の印 (手動中止・取得中) を読む / 戻す (インデックス構築が失敗したときに戻すため)
+    private static Dictionary<string, string> ReadShopPriceMarks(SqliteConnection db)
+    {
+        var marks = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT key, value FROM gamedata_meta WHERE key IN (@a, @b)";
+            cmd.Parameters.AddWithValue("@a", ShopPriceStoppedMetaKey);
+            cmd.Parameters.AddWithValue("@b", ShopPriceInProgressMetaKey);
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) marks[r.GetString(0)] = r.GetString(1);
+        }
+        catch { }
+        return marks;
+    }
+
+    private static void RestoreShopPriceMarks(SqliteConnection db, Dictionary<string, string> marks)
+    {
+        foreach (var (k, v) in marks) SetMeta(db, k, v);
+    }
+
+    // 売り場・価格の取得が途中で終わった (取得中の印が残っている) か。印があるときだけ起動時に続きを取る
+    private const string ShopPriceInProgressMetaKey = "shop_price_fetch_in_progress";
+
+    // この PC だけの印 (売り場・価格の取得中・手動中止)。バックアップに入れず、インポートでも受け取った側の印を上書きしない
+    internal static readonly string[] LocalOnlyMetaKeys = [ShopPriceInProgressMetaKey, ShopPriceStoppedMetaKey];
+
+    public static bool IsShopPriceFetchInterrupted(string dbPath)
+    {
+        try
+        {
+            using var db = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM gamedata_meta WHERE key = @k";
+            cmd.Parameters.AddWithValue("@k", ShopPriceInProgressMetaKey);
+            return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) > 0;
+        }
+        catch { return false; }
+    }
+
+    // ［価格の取得を中止］で利用者が止めたことの印。gamedata_meta の shop_price_fetch_stopped に止めた時刻を入れる
+    // (インデックス構築は gamedata_meta を消して作り直すが、構築の前に退避して、失敗したときは戻す)。印があれば起動時の続き取得をしない
+    private const string ShopPriceStoppedMetaKey = "shop_price_fetch_stopped";
+
+    public static void SetShopPriceFetchStopped(string dbPath, bool stopped)
+    {
+        try
+        {
+            using var db = new SqliteConnection($"Data Source={dbPath}");
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "CREATE TABLE IF NOT EXISTS gamedata_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)";
+            cmd.ExecuteNonQuery();
+            cmd.CommandText = stopped
+                ? "INSERT OR REPLACE INTO gamedata_meta(key, value) VALUES(@k, @v)"
+                : "DELETE FROM gamedata_meta WHERE key = @k";
+            cmd.Parameters.AddWithValue("@k", ShopPriceStoppedMetaKey);
+            if (stopped) cmd.Parameters.AddWithValue("@v", DateTime.UtcNow.ToString("o"));
+            cmd.ExecuteNonQuery();
+        }
+        catch { }
+    }
+
+    public static bool IsShopPriceFetchStopped(string dbPath)
+    {
+        try
+        {
+            using var db = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM gamedata_meta WHERE key = @k";
+            cmd.Parameters.AddWithValue("@k", ShopPriceStoppedMetaKey);
+            return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) > 0;
+        }
+        catch { return false; }
+    }
+
+    // UEX に船・車両の購入・レンタルの登録が無かったことの記録
+    internal static ShopPriceRow UexNoShopRow() =>
+        new(ShopPriceStore.KindNone, "", null, null, "", "UEX に購入・レンタルの登録無し", "uex");
+
+    // UEX の船・車両の購入価格 (vehicles_purchases_prices_all) とレンタル価格 (vehicles_rentals_prices_all。1 日分) を取り、
+    // item_index の船・車両 (NOITEM_Vehicle) の uuid ごとの行にする (API キー不要の GET 3 回)。
+    // 対応付け: UEX の uuid が item_index の uuid と一致すればそれ、一致しなければ UEX の name_full と ships.name_en の一致。
+    // 同じ name_en の record (AI 用などの複製) の uuid すべてに同じ行を付ける。購入・レンタルの登録が無い船は含めない。取れなければ null
+    internal static async Task<Dictionary<string, List<ShopPriceRow>>?> FetchUexShipPriceRowsAsync(SqliteConnection db, CancellationToken ct)
+    {
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(60));
+            var vehiclesJson = await Http.GetStringAsync("https://api.uexcorp.space/2.0/vehicles", cts.Token);
+            var buyJson = await Http.GetStringAsync("https://api.uexcorp.space/2.0/vehicles_purchases_prices_all", cts.Token);
+            var rentJson = await Http.GetStringAsync("https://api.uexcorp.space/2.0/vehicles_rentals_prices_all", cts.Token);
+
+            // item_index の船・車両: uuid → name_en、name_en → uuid 一覧
+            var uuidToName = new Dictionary<string, string>(StringComparer.Ordinal);
+            var nameToUuids = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            using (var cmd = db.CreateCommand())
+            {
+                cmd.CommandText = "SELECT x.uuid, s.name_en FROM item_index x LEFT JOIN ships s ON s.record_name = x.record_name WHERE x.item_type = 'NOITEM_Vehicle'";
+                try
+                {
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read())
+                    {
+                        var uuid = r.GetString(0);
+                        var nameEn = r.IsDBNull(1) ? "" : r.GetString(1).Trim();
+                        uuidToName[uuid] = nameEn;
+                        if (nameEn.Length == 0) continue;
+                        if (!nameToUuids.TryGetValue(nameEn, out var list)) nameToUuids[nameEn] = list = new List<string>();
+                        list.Add(uuid);
+                    }
+                }
+                catch (SqliteException)
+                {
+                    // name_en 列の無い古い DB: uuid の一致だけで対応付ける
+                    cmd.CommandText = "SELECT uuid FROM item_index WHERE item_type = 'NOITEM_Vehicle'";
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read()) uuidToName[r.GetString(0)] = "";
+                }
+            }
+
+            static string Verified(JsonElement row) =>
+                row.TryGetProperty("date_modified", out var d) && d.ValueKind == JsonValueKind.Number && d.TryGetInt64(out var sec) && sec > 0
+                    ? DateTimeOffset.FromUnixTimeSeconds(sec).UtcDateTime.ToString("yyyy-MM-dd") : "";
+            static string Str(JsonElement row, string key) =>
+                row.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+
+            // UEX の車両 id ごとの行
+            var rowsByVehicle = new Dictionary<int, List<ShopPriceRow>>();
+            void AddRows(string json, string priceKey, string kind, int? rentDays)
+            {
+                using var doc = JsonDocument.Parse(json);
+                if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array) return;
+                foreach (var row in data.EnumerateArray())
+                {
+                    if (!row.TryGetProperty("id_vehicle", out var idEl) || !idEl.TryGetInt32(out var id)) continue;
+                    if (!row.TryGetProperty(priceKey, out var pe) || pe.ValueKind != JsonValueKind.Number || !pe.TryGetDouble(out var price)) continue;
+                    if (price < ShopPriceStore.MinPrice || price > ShopPriceStore.MaxPrice) continue;
+                    if (!rowsByVehicle.TryGetValue(id, out var list)) rowsByVehicle[id] = list = new List<ShopPriceRow>();
+                    list.Add(new ShopPriceRow(kind, Str(row, "terminal_name"), price, rentDays, Verified(row), "", "uex"));
+                }
+            }
+            AddRows(buyJson, "price_buy", ShopPriceStore.KindBuy, null);
+            // UEX のレンタル価格は 1 日分 (100i の 28,665 aUEC が cstone の 1 DAY と一致することで確認)
+            AddRows(rentJson, "price_rent", ShopPriceStore.KindRent, 1);
+
+            var result = new Dictionary<string, List<ShopPriceRow>>(StringComparer.Ordinal);
+            using var vdoc = JsonDocument.Parse(vehiclesJson);
+            if (!vdoc.RootElement.TryGetProperty("data", out var vdata) || vdata.ValueKind != JsonValueKind.Array) return null;
+            var byName = new List<(string NameFull, List<ShopPriceRow> Rows)>();
+            foreach (var v in vdata.EnumerateArray())
+            {
+                if (!v.TryGetProperty("id", out var idEl) || !idEl.TryGetInt32(out var id)) continue;
+                if (!rowsByVehicle.TryGetValue(id, out var rows) || rows.Count == 0) continue;
+                var uexUuid = Str(v, "uuid");
+                if (uexUuid.Length > 0 && uuidToName.TryGetValue(uexUuid, out var nameEn))
+                {
+                    // uuid が一致: その船と、同じ name_en の record すべて
+                    var uuids = nameEn.Length > 0 && nameToUuids.TryGetValue(nameEn, out var same) ? same : new List<string> { uexUuid };
+                    foreach (var u in uuids.Append(uexUuid).Distinct()) result.TryAdd(u, rows);
+                }
+                else byName.Add((Str(v, "name_full"), rows));
+            }
+            // uuid で対応付かなかった UEX の船は name_full = ships.name_en で対応付ける (uuid で付いたものは上書きしない)
+            foreach (var (nameFull, rows) in byName)
+                if (nameFull.Length > 0 && nameToUuids.TryGetValue(nameFull, out var uuids))
+                    foreach (var u in uuids) result.TryAdd(u, rows);
+            return result;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            ChatService.LogExternal($"[UEX] 船・車両の価格の取得に失敗: {ex.Message}");
+            return null;
+        }
     }
 
     public bool IsP4kUpdated()
@@ -632,6 +1340,8 @@ public class GameDataExtractor : IDisposable
         if (relay != null) StatusChanged += relay;
         try
         {
+            // 売り場・価格の裏の取得を止めてから再抽出する (成功すれば最後の ShopPriceFetchRequested、失敗すれば下の catch で再開)
+            await PauseShopPriceFetchAsync();
             var sw = Stopwatch.StartNew();
             var now = DateTime.UtcNow.ToString("o");
             StatusChanged?.Invoke("装備データ (item_index / ships / ship_ports) を再構築中...");
@@ -660,6 +1370,7 @@ public class GameDataExtractor : IDisposable
                 // item_index_fts もここで item_index から作り直される
                 StatusChanged?.Invoke("日本語名をマッピング中...");
                 PopulateJapaneseNames(Path.Combine(Path.GetDirectoryName(DbPath) ?? "", "translations.db"));
+                RebuildItemVariantsAndReport("");
 
                 int shipCount = await ExtractShipsAsync(p4kPath, now, ct);
                 UpdateShipEnglishNames();
@@ -693,12 +1404,21 @@ public class GameDataExtractor : IDisposable
             // ここに到達するのは成功時のみ (失敗時は上の catch で再スロー済み)。
             // DELETE した旧 3 表とバックアップ表 (ships.raw_json の複製約 315MB を含む) のページが freelist に残って DB が肥大するため VACUUM で回収する。
             // VACUUM はトランザクション内では実行できないので、トランザクション外 (各抽出メソッドの tx は Commit 済み) で実行する
+            ClearCstoneNotFoundMarks();
             StatusChanged?.Invoke("DB を最適化中...");
             using (var cmd = _db.CreateCommand())
             {
                 cmd.CommandText = "VACUUM";
                 cmd.ExecuteNonQuery();
             }
+
+            // 新しい品目の売り場・価格を裏で取得してもらう
+            ShopPriceFetchRequested?.Invoke(DbPath);
+        }
+        catch
+        {
+            ShopPriceFetchResumeRequested?.Invoke(DbPath);
+            throw;
         }
         finally
         {
@@ -942,6 +1662,101 @@ public class GameDataExtractor : IDisposable
         return cmd.ExecuteScalar() as string;
     }
 
+    // 種類で拾う武器・装備 (AttachDef.Type)。個人武器・道具 (マルチツール・医療ガン等)・武器の付属品 (マガジン・照準器等)・手榴弾・設置型の爆発物・
+    // 医療用具 (メディペン等。FPS_Consumable)・船の武器・ミサイル・ミサイルラック・爆弾と、アーマー・服 (Char_Armor_* / Char_Clothing_*。
+    // バックパック・アンダースーツを含む)。決め打ちの接頭辞 (ItemPrefixes 等) に無い製造元の品目もこれで取り込む
+    internal static readonly HashSet<string> TypedDiscoveryTypes = new(StringComparer.Ordinal)
+    {
+        "WeaponPersonal", "Gadget", "WeaponAttachment", "Grenade", "FPS_Deployable", "FPS_Consumable",
+        "WeaponGun", "Missile", "MissileLauncher", "Bomb", "BombLauncher",
+    };
+
+    internal static bool IsTypedDiscoveryType(string type) =>
+        TypedDiscoveryTypes.Contains(type)
+        || type.StartsWith("Char_Armor_", StringComparison.Ordinal)
+        || type.StartsWith("Char_Clothing_", StringComparison.Ordinal);
+
+    // 全エンティティの record 名 → 種類 (AttachDef.Type)。dcb query の値の取り出し (1 行 "record名<TAB>種類") で、全件でも数秒で済む。
+    // 取れなければ空 (従来の接頭辞だけで取り込む)
+    private async Task<Dictionary<string, string>> QueryEntityTypesAsync(string p4kPath, CancellationToken ct)
+    {
+        try
+        {
+            StatusChanged?.Invoke("エンティティの種類の一覧を取得中...");
+            var text = await RunDcbQueryRawAsync(p4kPath, "EntityClassDefinition.Components[SAttachableComponentParams].AttachDef.Type", "*", ct);
+            return ParseEntityTypes(text);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            StatusChanged?.Invoke($"エンティティの種類の一覧を取得できませんでした (従来の接頭辞だけで取り込みます): {ex.Message}");
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+    }
+
+    internal static Dictionary<string, string> ParseEntityTypes(string text)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var raw in (text ?? "").Split('\n'))
+        {
+            var line = raw.TrimEnd('\r');
+            var tab = line.IndexOf('\t');
+            if (tab <= 0) continue;
+            var rec = line[..tab].Trim();
+            var type = line[(tab + 1)..].Trim();
+            if (rec.StartsWith("EntityClassDefinition.", StringComparison.Ordinal) && type.Length > 0) map[rec] = type;
+        }
+        return map;
+    }
+
+    // 1 回の dcb query の filter に並べる record 名の文字数・件数の上限 (コマンドラインの長さ 32,767 文字の制限と、1 回の出力の大きさを抑えるため)
+    private const int TypedFilterMaxChars = 20000;
+    private const int TypedFilterMaxRecords = 400;
+
+    // 種類の一覧のうち IsTypedDiscoveryType に当たり、coveredPrefixes ("{接頭辞}_*" の filter。大文字小文字を区別) で取れない record を、
+    // record 名そのものを並べた filter "EntityClassDefinition.{名前1,名前2,…}" にまとめる (starbreaker の --filter は {a,b} の選択に対応)。
+    // 1 回の filter は TypedFilterMaxChars 文字・TypedFilterMaxRecords 件まで。名前に glob の記号 ({}[]*?,\) を含むものは 1 件ずつの filter にする。
+    // 戻り値の Records は取り込む record (EntityClassDefinition. 付き)
+    internal static List<(string Filter, HashSet<string> Records)> BuildTypedExtraFilters(Dictionary<string, string> typeMap, IEnumerable<string> coveredPrefixes)
+    {
+        const string head = "EntityClassDefinition.";
+        var covered = coveredPrefixes.Select(p => p + "_").ToList();
+        var names = new List<string>();
+        foreach (var (rec, type) in typeMap)
+        {
+            if (!IsTypedDiscoveryType(type)) continue;
+            var shortName = rec[head.Length..];
+            if (covered.Any(c => shortName.StartsWith(c, StringComparison.Ordinal))) continue;
+            names.Add(shortName);
+        }
+        names.Sort(StringComparer.Ordinal);
+
+        var result = new List<(string, HashSet<string>)>();
+        var batch = new List<string>();
+        int batchChars = 0;
+        void Flush()
+        {
+            if (batch.Count == 0) return;
+            var filter = batch.Count == 1 ? head + batch[0] : head + "{" + string.Join(",", batch) + "}";
+            result.Add((filter, new HashSet<string>(batch.Select(n => head + n), StringComparer.Ordinal)));
+            batch.Clear();
+            batchChars = 0;
+        }
+        foreach (var n in names)
+        {
+            if (n.IndexOfAny(['{', '}', '[', ']', '*', '?', ',', '\\']) >= 0)
+            {
+                result.Add((head + n, new HashSet<string>(StringComparer.Ordinal) { head + n }));
+                continue;
+            }
+            if (batch.Count >= TypedFilterMaxRecords || batchChars + n.Length + 1 > TypedFilterMaxChars) Flush();
+            batch.Add(n);
+            batchChars += n.Length + 1;
+        }
+        Flush();
+        return result;
+    }
+
     private static readonly string[] VehicleManufacturerPrefixes =
         ["AEGS", "ANVL", "ARGO", "BANU", "CNOU", "CRUS", "DRAK", "GAMA", "GATA", "GRIN", "KRIG", "MISC", "MRAI", "ORIG", "RSI", "TMBL", "VNCL", "XIAN", "ESPR"];
 
@@ -956,7 +1771,8 @@ public class GameDataExtractor : IDisposable
          // ship_ports.equipped_item に出るが item_index で未解決だったプレフィックス (武器ラック / メーカー / マウント / 爆弾系)
          "Weapon_Rack", "MXOX", "KRON", "GLSN", "HRST", "UMNT", "TOAG", "KBAR", "ASAD", "RPOD", "GMNT", "BMBRCK", "BOMB"];
 
-    private async Task<int> ExtractItemIndexAsync(string p4kPath, string now, CancellationToken ct)
+    // typeMap は QueryEntityTypesAsync の結果 (null なら中で取る)。決め打ちの接頭辞で取れない武器類を、種類で拾って追加する
+    private async Task<int> ExtractItemIndexAsync(string p4kPath, string now, CancellationToken ct, Dictionary<string, string>? typeMap = null)
     {
         var gamePath = App.Config.GamePath;
         var enDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -994,14 +1810,15 @@ public class GameDataExtractor : IDisposable
         var pEa = cmd.Parameters.Add("@ea", SqliteType.Text);
 
         // --filter は大文字小文字を区別するので、重複排除も大小区別 (Ordinal) で行う ("BEHR_*" と "behr_*" は別クエリ)
-        var allPrefixes = VehicleManufacturerPrefixes.Select(p => $"EntityClassDefinition.{p}_*")
-            .Concat(ItemPrefixes.Select(p => $"EntityClassDefinition.{p}_*"))
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
+        var basePrefixes = VehicleManufacturerPrefixes.Concat(ItemPrefixes).Distinct(StringComparer.Ordinal).ToList();
+        var allPrefixes = basePrefixes.Select(p => (Filter: $"EntityClassDefinition.{p}_*", Only: (HashSet<string>?)null)).ToList();
+        // 上の接頭辞で取れない武器類 (新しい製造元など) を種類の一覧から拾って追加する (その record だけを入れる)
+        typeMap ??= await QueryEntityTypesAsync(p4kPath, ct);
+        allPrefixes.AddRange(BuildTypedExtraFilters(typeMap, basePrefixes).Select(x => (x.Filter, (HashSet<string>?)x.Records)));
 
         for (int i = 0; i < allPrefixes.Count; i++)
         {
-            var filter = allPrefixes[i];
+            var (filter, only) = allPrefixes[i];
             var prefix = filter.Split('.')[1].TrimEnd('*').TrimEnd('_');
             StatusChanged?.Invoke($"[1/{4}] インデックス構築 ({prefix}, {i + 1}/{allPrefixes.Count})");
 
@@ -1019,12 +1836,16 @@ public class GameDataExtractor : IDisposable
                     var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
                     var uuid = root.TryGetProperty("_RecordId_", out var rid) ? rid.GetString() ?? "" : "";
                     if (string.IsNullOrEmpty(recordName) || string.IsNullOrEmpty(uuid)) continue;
+                    if (only != null && !only.Contains(recordName)) continue;
                     if (!root.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("Components", out var components)) continue;
 
                     string name = "", itemType = "", subType = "", manufacturer = "";
                     int size = 0;
+                    if (components.ValueKind != JsonValueKind.Array) continue;
                     foreach (var comp in components.EnumerateArray())
                     {
+                        // Components には null の要素が入っている record がある (例 grin_multitool_01_cutter)。読まずに飛ばす
+                        if (comp.ValueKind != JsonValueKind.Object) continue;
                         var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
                         if (type == "SAttachableComponentParams" && comp.TryGetProperty("AttachDef", out var ad))
                         {
@@ -1222,9 +2043,12 @@ public class GameDataExtractor : IDisposable
                 string name = "", manufacturer = "", career = "", role = "";
                 int crewSize = 0, size = 0;
                 bool hasVehicleComponent = false;
+                if (components.ValueKind != JsonValueKind.Array) continue;
 
                 foreach (var comp in components.EnumerateArray())
                 {
+                    // Components には null やオブジェクトでない要素が入っている record がある。読まずに飛ばす
+                    if (comp.ValueKind != JsonValueKind.Object) continue;
                     var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
                     if (type == "SAttachableComponentParams" && comp.TryGetProperty("AttachDef", out var ad))
                     {
@@ -1320,7 +2144,72 @@ public class GameDataExtractor : IDisposable
         }
     }
 
-    private async Task<int> ExtractItemsAsync(string p4kPath, string filter, string componentType, string now, CancellationToken ct)
+    // 色違いの表 (item_variants) を作り直し、色違いの items の性能 (raw_json / component_json) を空にする (基本品目から読むので重複して持たない)
+    private void RebuildItemVariantsAndReport(string statusPrefix)
+    {
+        try
+        {
+            StatusChanged?.Invoke($"{statusPrefix}色違いの表を作成中...");
+            using var q = new GameDataQueryService(DbPath);
+            var (variants, blanked) = q.RebuildItemVariants(blankVariantData: true);
+            StatusChanged?.Invoke($"{statusPrefix}色違い: {variants} 件 (性能を基本品目と共用: {blanked} 件)");
+        }
+        catch (Exception ex) { StatusChanged?.Invoke($"{statusPrefix}色違いの表の作成に失敗しました: {ex.Message}"); }
+    }
+
+    // raw_json を小さくする種類 (アーマー・服・医療用具)
+    private static bool IsSlimRawJsonType(string itemType) =>
+        itemType.StartsWith("Char_Armor_", StringComparison.Ordinal)
+        || itemType.StartsWith("Char_Clothing_", StringComparison.Ordinal)
+        || itemType == "FPS_Consumable";
+
+    // 小さくした raw_json に残す部品 (比べるツール・lookup の GameDataQueryService.FillItemStats / 装弾数・弾の参照が読むもの)。
+    // 説明文の参照と大きさ (SAttachableComponentParams)、温度・放射線 (SCItemClothingParams)、防御の参照 (SCItemSuitArmorParams)、
+    // 収納 (SCItemInventoryContainerComponentParams)、装弾数と弾の参照 (SAmmoContainerComponentParams)、
+    // シールド・動力装置・冷却装置・クアンタムドライブの性能 (SCItemShieldGeneratorParams / ItemResourceComponentParams / SCItemQuantumDriveParams)
+    private static readonly HashSet<string> SlimRawJsonComponents = new(StringComparer.Ordinal)
+    {
+        "SAttachableComponentParams", "SCItemClothingParams", "SCItemSuitArmorParams", "SCItemInventoryContainerComponentParams",
+        "SAmmoContainerComponentParams", "SCItemShieldGeneratorParams", "ItemResourceComponentParams", "SCItemQuantumDriveParams",
+    };
+
+    // record の JSON を、形 ({"_RecordName_", "_RecordId_", "_RecordValue_": {"_Type_", "Components": [...]}}) はそのままに、
+    // Components を SlimRawJsonComponents だけにしたものにする
+    internal static string SlimItemRawJson(JsonElement root)
+    {
+        using var ms = new MemoryStream();
+        using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
+        {
+            w.WriteStartObject();
+            foreach (var prop in root.EnumerateObject())
+            {
+                if (prop.Name != "_RecordValue_" || prop.Value.ValueKind != JsonValueKind.Object)
+                {
+                    if (prop.Name is "_RecordName_" or "_RecordId_" or "_RecordTag_") prop.WriteTo(w);
+                    continue;
+                }
+                w.WritePropertyName("_RecordValue_");
+                w.WriteStartObject();
+                foreach (var p2 in prop.Value.EnumerateObject())
+                {
+                    if (p2.Name == "_Type_") { p2.WriteTo(w); continue; }
+                    if (p2.Name != "Components" || p2.Value.ValueKind != JsonValueKind.Array) continue;
+                    w.WritePropertyName("Components");
+                    w.WriteStartArray();
+                    foreach (var comp in p2.Value.EnumerateArray())
+                        if (comp.ValueKind == JsonValueKind.Object && comp.TryGetProperty("_Type_", out var t) && SlimRawJsonComponents.Contains(t.GetString() ?? ""))
+                            comp.WriteTo(w);
+                    w.WriteEndArray();
+                }
+                w.WriteEndObject();
+            }
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(ms.ToArray());
+    }
+
+    // onlyRecords を渡すと、その record だけを取り込む (種類で拾った追加分。同じ接頭辞の関係ない record を入れないため)
+    private async Task<int> ExtractItemsAsync(string p4kPath, string filter, string componentType, string now, CancellationToken ct, HashSet<string>? onlyRecords = null)
     {
         var rawJson = await RunDcbQueryWithTimerAsync(p4kPath, "EntityClassDefinition", filter, $"アイテム ({filter})", ct);
         if (string.IsNullOrEmpty(rawJson)) return 0;
@@ -1349,6 +2238,7 @@ public class GameDataExtractor : IDisposable
                 var root = doc.RootElement;
                 var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
                 if (string.IsNullOrEmpty(recordName)) continue;
+                if (onlyRecords != null && !onlyRecords.Contains(recordName)) continue;
                 if (!root.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("Components", out var components)) continue;
 
                 string name = "", itemType = "", subType = "", mfr = "";
@@ -1357,6 +2247,9 @@ public class GameDataExtractor : IDisposable
 
                 foreach (var comp in components.EnumerateArray())
                 {
+                    // Components には null の要素が入っている record がある (例 grin_multitool_01_cutter)。読まずに飛ばす
+                    // (飛ばさないと TryGetProperty が例外になり、その record ごと取り込めなかった)
+                    if (comp.ValueKind != JsonValueKind.Object) continue;
                     var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
                     if (type == "SAttachableComponentParams" && comp.TryGetProperty("AttachDef", out var ad))
                     {
@@ -1374,9 +2267,11 @@ public class GameDataExtractor : IDisposable
 
                 if (string.IsNullOrEmpty(itemType) || itemType == "UNDEFINED") continue;
 
+                // アーマー・服・医療用具と、種類で拾った追加分は raw_json が大きいので、比べるツールと lookup が使う部品だけを残す
+                var slim = onlyRecords != null || IsSlimRawJsonType(itemType);
                 pRn.Value = recordName; pNm.Value = name; pIt.Value = itemType; pIst.Value = subType;
                 pSz.Value = size; pGr.Value = grade; pMf.Value = mfr;
-                pCt.Value = componentType; pCj.Value = compJson; pRj.Value = block; pEa.Value = now;
+                pCt.Value = componentType; pCj.Value = compJson; pRj.Value = slim ? SlimItemRawJson(root) : block; pEa.Value = now;
                 cmd.ExecuteNonQuery();
                 count++;
             }
@@ -2301,8 +3196,11 @@ public class GameDataExtractor : IDisposable
                     !rv.TryGetProperty("Components", out var components)) continue;
 
                 var parts = new List<string>();
+                if (components.ValueKind != JsonValueKind.Array) continue;
                 foreach (var comp in components.EnumerateArray())
                 {
+                    // Components には null やオブジェクトでない要素が入っている record がある。読まずに飛ばす
+                    if (comp.ValueKind != JsonValueKind.Object) continue;
                     var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
 
                     if (type == "SAttachableComponentParams" && comp.TryGetProperty("AttachDef", out var ad))
@@ -2358,9 +3256,12 @@ public class GameDataExtractor : IDisposable
 
                 string itemName = "", itemType = "";
                 int size = 0, grade = 0;
+                if (components.ValueKind != JsonValueKind.Array) continue;
 
                 foreach (var comp in components.EnumerateArray())
                 {
+                    // Components には null やオブジェクトでない要素が入っている record がある。読まずに飛ばす
+                    if (comp.ValueKind != JsonValueKind.Object) continue;
                     var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
                     if (type == "SAttachableComponentParams" && comp.TryGetProperty("AttachDef", out var ad))
                     {
@@ -2404,9 +3305,12 @@ public class GameDataExtractor : IDisposable
                 string itemName = "", itemType = "";
                 int size = 0, grade = 0;
                 var extraProps = new List<string>();
+                if (components.ValueKind != JsonValueKind.Array) continue;
 
                 foreach (var comp in components.EnumerateArray())
                 {
+                    // Components には null やオブジェクトでない要素が入っている record がある。読まずに飛ばす
+                    if (comp.ValueKind != JsonValueKind.Object) continue;
                     var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
 
                     if (type == "SAttachableComponentParams" && comp.TryGetProperty("AttachDef", out var ad))

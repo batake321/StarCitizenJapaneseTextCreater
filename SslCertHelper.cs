@@ -32,7 +32,9 @@ public static class SslCertHelper
 
             if (File.Exists(PfxPath))
             {
-                using var existing = new X509Certificate2(PfxPath, PfxPassword);
+                // .NET 9 以降でコンストラクタによる読み込みは旧形式 (SYSLIB0057)。PFX は X509CertificateLoader.LoadPkcs12FromFile で読む
+                // (鍵の保存先は今までのコンストラクタと同じ既定、読み込みの制限は既定 = Pkcs12LoaderLimits.Defaults)
+                using var existing = X509CertificateLoader.LoadPkcs12FromFile(PfxPath, PfxPassword, X509KeyStorageFlags.DefaultKeySet, null);
                 if (existing.NotAfter < DateTime.Now.AddDays(30))
                 {
                     File.Delete(PfxPath);

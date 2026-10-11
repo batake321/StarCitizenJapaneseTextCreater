@@ -17,7 +17,11 @@ public static class DatabaseBackupService
 {
     private static readonly string[] TranslationTables = ["translations"];
     private static readonly string[] GlossaryTables = ["glossary"];
-    private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache"];
+    // item_shop_prices: 武器・装備 (cstone) と船・車両 (UEX) の売り場・価格。公開データなので配布のバックアップに入れてよい
+    // ammo_params: 弾のデータ (Data.p4k の AmmoParams。武器の弾速・ダメージに使う)
+    // item_variants: 色違いの表 (性能が基本品目と同じ色・柄違い。インデックス構築で作る)
+    // player_damage_params: 何発で倒せるか (TTK) に使う体力・部位の倍率・アーマーの倍率 (インデックス構築で作る)
+    private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache", "item_shop_prices", "ammo_params", "item_variants", "player_damage_params"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
     private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "ship_loaners", "store_skus", "my_components", "ship_loadouts"];
 
@@ -51,7 +55,20 @@ public static class DatabaseBackupService
                 if (File.Exists(indexDbPath))
                 {
                     onStatus?.Invoke("gamedata_cache.db をコピー中...");
-                    File.Copy(indexDbPath, Path.Combine(tempDir, "gamedata_cache.db"), true);
+                    var tempIndexPath = Path.Combine(tempDir, "gamedata_cache.db");
+                    File.Copy(indexDbPath, tempIndexPath, true);
+                    // この PC だけの印 (売り場・価格の取得中・手動中止) はバックアップに入れない
+                    using (var conn = new SqliteConnection($"Data Source={tempIndexPath}"))
+                    {
+                        conn.Open();
+                        if (TableExists(conn, "gamedata_meta"))
+                        {
+                            using var cmd = conn.CreateCommand();
+                            cmd.CommandText = $"DELETE FROM gamedata_meta WHERE key IN ({LocalOnlyMetaKeyList})";
+                            cmd.ExecuteNonQuery();
+                        }
+                    }
+                    SqliteConnection.ClearAllPools();
                 }
                 if (!string.IsNullOrEmpty(tradeDbPath) && File.Exists(tradeDbPath))
                 {
@@ -400,16 +417,18 @@ public static class DatabaseBackupService
             // (個人資産除外バックアップは空の my_ships / hangar_* テーブルを含むため、Drop モードでもローカルの個人資産を消さない)
             if (PersonalTables.Contains(table) && CountRows(src, table) == 0) continue;
 
+            // gamedata_meta のこの PC だけの印は、消さず・読み込まない (受け取った側の印をそのまま残す)
+            var localMetaFilter = table == "gamedata_meta" ? $" WHERE key NOT IN ({LocalOnlyMetaKeyList})" : "";
             if (mode == ImportMode.Drop)
             {
                 using var delCmd = dest.CreateCommand();
-                delCmd.CommandText = $"DELETE FROM {table}";
+                delCmd.CommandText = $"DELETE FROM {table}{localMetaFilter}";
                 delCmd.Transaction = tx;
                 delCmd.ExecuteNonQuery();
             }
 
             using var readCmd = src.CreateCommand();
-            readCmd.CommandText = $"SELECT * FROM {table}";
+            readCmd.CommandText = $"SELECT * FROM {table}{localMetaFilter}";
             using var reader = readCmd.ExecuteReader();
 
             var colCount = reader.FieldCount;
@@ -658,12 +677,17 @@ public static class DatabaseBackupService
 
             var upper = stmt.TrimStart().ToUpperInvariant();
 
+            // gamedata_meta のこの PC だけの印は、消さず・取り込まない (受け取った側の印をそのまま残す)
+            if (tableName == "gamedata_meta" && upper.StartsWith("INSERT")
+                && GameDataExtractor.LocalOnlyMetaKeys.Any(k => stmt.Contains($"'{k}'", StringComparison.Ordinal)))
+                continue;
+
             if (upper.StartsWith("DELETE FROM"))
             {
                 if (mode == ImportMode.Drop)
                 {
                     using var cmd = conn.CreateCommand();
-                    cmd.CommandText = stmt;
+                    cmd.CommandText = tableName == "gamedata_meta" ? $"DELETE FROM gamedata_meta WHERE key NOT IN ({LocalOnlyMetaKeyList})" : stmt;
                     cmd.Transaction = tx;
                     cmd.ExecuteNonQuery();
                     deletedTables.Add(tableName);
@@ -701,6 +725,9 @@ public static class DatabaseBackupService
         }
         tx.Commit();
     }
+
+    // バックアップに入れない gamedata_meta のキーの SQL 用の一覧 ('a', 'b')
+    private static string LocalOnlyMetaKeyList => string.Join(", ", GameDataExtractor.LocalOnlyMetaKeys.Select(k => $"'{k}'"));
 
     private static string? ExtractTableName(string stmt)
     {
@@ -803,7 +830,7 @@ public static class DatabaseBackupService
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
-        """;
+        """ + ShopPriceStore.TableDdl + GameDataExtractor.AmmoParamsDdl + GameDataQueryService.ItemVariantsDdl + GameDataQueryService.PlayerDamageParamsDdl;
         cmd.ExecuteNonQuery();
 
         // 既存の ships に name_en 列 (船の英語名) が無ければ足す。バックアップ側に name_en があると INSERT が列不足で失敗するため

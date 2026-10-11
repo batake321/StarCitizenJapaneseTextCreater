@@ -25,9 +25,11 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v1.22.1-win-x64.zip (最新 v1.22.1 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.22.1/StarCitizenJapaneseTextCreater-v1.22.1-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v1.22.2-win-x64.zip (最新 v1.22.2 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.22.2/StarCitizenJapaneseTextCreater-v1.22.2-win-x64.zip)**
 >
-> **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/11 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.22.1/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
+> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v1.22.2-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
+>
+> **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/12 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.22.2/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの [日本語化] → [実行] を行ってください。**
 
@@ -46,7 +48,19 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v1.22.1 更新内容
+### 🚀 v1.22.2 更新内容
+
+- **インストーラーを同梱**: zip の中の exe をそのまま実行しても、`SCJPTextCreator-v1.22.2-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。更新しても所持船などの個人データや設定は消えません
+- **.NET 10 に移行**: 動かすには .NET 10 Desktop Runtime が必要です。インストーラーは無ければ自動で入れます。zip の exe は、無ければ起動時にダウンロードの案内が出ます
+- **［船舶戦闘］［個人戦闘］タブを追加**: 武器のダメージ表。1発のダメージ・最大DPS・平均DPS・弾速・店の最安値など。個人武器はヘビーアーマー相手に何発で倒せるかも表示。各列で絞り込み (含む/含まない) と、複数列の並べ替えができます
+- **チャット**:
+  - 種類全体の比較 (「店売りのスナイパーで一番強いのは？」など) に対応。武器・装備・個人装備・船・車両
+  - 武器の質問に、何発で倒せるか (素肌・ライト・ミディアム・ヘビー × 頭・胴・腕・脚、ダウンと死亡) を付けるように
+  - 店の値段を DB に保存し、質問のときは裏で取り直して、変わっていれば答え直すように
+- **設定ファイルが壊れていても起動するように**: 壊れたファイルは別名で残し、初期値で起動します
+
+<details>
+<summary>v1.22.1 更新内容</summary>
 
 - **チャット**:
   - 新しい Claude (Opus 5.5 など) をメインにすると毎回 400 エラーになる不具合を修正
@@ -56,6 +70,8 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - Web チャットで受け取った選択 (メイン・外部相談・検証) をログに出すように
   - 船の質問で、日本語の説明文・メーカー・種別・派生型 (Ironclad Assault など) まで AI に渡すように
   - 調べものが多い質問で「ツール呼び出し回数の上限に達しました」で終わらず、集めたデータで答えるように
+
+</details>
 
 <details>
 <summary>v1.22.0 更新内容</summary>
@@ -192,7 +208,7 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
 ### 動作要件
 
 - Windows 10 / 11
-- [.NET 8.0 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (デスクトップランタイム)
+- [.NET 10.0 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) (x64) — インストーラーなら無ければ自動で入ります。zip の exe は、.NET 10 が無ければ起動時にダウンロードの案内が出ます
 - Star Citizen がインストール済みであること
 - AI 翻訳を利用する場合 (いずれか1つ以上):
   - [Claude API キー](docs/API_Key_取得_Claude.md)

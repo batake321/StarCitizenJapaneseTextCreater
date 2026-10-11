@@ -87,7 +87,8 @@ public class ChatService
         "【重要】以下のスキルを使って最新のゲームデータを取得できます。質問に答えるために必要なデータは必ずスキルを使って取得してください。\n\n" +
         "【最重要ルール】アイテム名・船名・武器名・商品名が含まれる質問には、まず lookup を呼んでください。\n" +
         "lookup はゲームデータベースからアイテムの種類を自動判別し、適切なデータ（価格・詳細・購入場所等）をまとめて返します。\n" +
-        "lookup が返すデータだけで十分な場合は、他のスキルを呼ぶ必要はありません。\n\n" +
+        "lookup が返すデータだけで十分な場合は、他のスキルを呼ぶ必要はありません。\n" +
+        "ただし、種類全体を比べる質問 (一番強い・おすすめ・比較・一覧など。例: 店売りのスナイパーライフルで一番強いのは？) には compare_items を使ってください。\n\n" +
         "【検索のコツ】\n" +
         "- データベースの名称は英語です。日本語で見つからない場合は英語に翻訳して再検索してください\n" +
         "  例: 短機関銃→SMG、重機関銃→LMG、戦闘機→Fighter、シールド→Shield Generator、ピストル→Pistol、精錬所→Refinery\n" +
@@ -98,6 +99,7 @@ public class ChatService
         "- ハイフンやスペースの有無で結果が変わることがあります（P8-SC, P8SC 等）\n\n" +
         "【スキル一覧】\n" +
         "- lookup: 統合検索（最初に呼ぶ）。アイテム名からDB検索し、種類を自動判別して価格・詳細を返す\n" +
+        "- compare_items: 種類全体の比較。武器・装備・船・車両の種類 (例: スナイパーライフル, SMG, シールド, アーマー, 貨物船, 地上車両) と任意のサイズ (例: S2) で、基本モデルごとの性能・店で買えるか・値段の表を返す。アーマーは任意の重さ (light / medium / heavy) を指定するとその重さの全部の一覧、省略すると重さごとの要約を返す。アーマー・服を部位なしで聞くと部位ごとの要約になる。shop_only で店で買えるものだけに絞れる。船の武器は種類 (例: レーザーキャノン, バリスティックガトリング。「船の武器 (種類)」でも可)・サイズ・弾薬/エネルギー (ammo) で絞れる\n" +
         "- search_mission: ミッション・契約の検索\n" +
         "- search_commodity: 商品・資源の購入/売却場所と価格\n" +
         "- search_keybind: キーバインド検索\n" +
@@ -278,6 +280,24 @@ public class ChatService
             },
             new()
             {
+                ["name"] = "compare_items",
+                ["description"] = "種類全体の比較。「一番強い」「おすすめ」「比較」「一覧」など、武器・装備・船・車両の種類全体を比べる質問に使う。基本モデルごとの性能の表、店で買えるか・最安値、店で買えるものの中で性能ごとに最も高いものを返す。",
+                ["input_schema"] = new Dictionary<string, object>
+                {
+                    ["type"] = "object",
+                    ["properties"] = new Dictionary<string, object>
+                    {
+                        ["category"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "種類（日本語・英語どちらもOK）。例: スナイパーライフル, SMG, ピストル, ショットガン, アサルトライフル, ヘルメット, 胴アーマー, 腕アーマー, 脚アーマー, アンダースーツ, バックパック, 上着, シャツ, ズボン, 靴, 手袋, 帽子, マルチツール, スコープ, シールド, 動力装置, クアンタムドライブ, 冷却装置, 船の武器, ミサイル, 貨物船, 戦闘機, 採掘船, 地上車両。船の武器は種類でも絞れる (例: レーザーキャノン, バリスティックガトリング, ディストーションリピーター。「船の武器 (種類)」の形でも指定できる)。「アーマー」「服」だけ (部位なし) だと部位ごとの件数と上位 5 件の要約になるので、全部の一覧が要るときは部位を指定する" },
+                        ["size"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "サイズで絞る場合（例: S2, 3）。省略で全サイズ" },
+                        ["weight"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "アーマー (ヘルメット・胴・腕・脚・アンダースーツ・バックパック) の重さで絞る場合: light / medium / heavy (ライト / ミディアム / ヘビー)。部位を指定したときは、重さを指定するとその重さの全部の一覧、省略すると重さごとの件数と上位 10 件の要約を返す。質問に重さ (例: ヘビーアーマー) があれば指定する。アーマー以外では使わない" },
+                        ["ammo"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "船の武器を弾を使うかで絞る場合: 弾薬 / エネルギー。船の武器以外では使わない" },
+                        ["shop_only"] = new Dictionary<string, object> { ["type"] = "boolean", ["description"] = "true にすると店で買えるもの (販売データのあるもの) だけを表にする。服の部位など一覧が長くて要約になったとき、絞り込みに使う" }
+                    },
+                    ["required"] = new[] { "category" }
+                }
+            },
+            new()
+            {
                 ["name"] = "search_commodity",
                 ["description"] = "商品・資源の購入/売却場所と価格を検索（コモディティ交易向け）",
                 ["input_schema"] = new Dictionary<string, object>
@@ -427,6 +447,7 @@ public class ChatService
             var resultTask = toolName switch
             {
                 "lookup" => ExecuteLookupAsync(args),
+                "compare_items" => ExecuteCompareItemsAsync(args),
                 "search_ship" => ExecuteSearchShipAsync(args),
                 "search_commodity" => ExecuteSearchCommodityAsync(args),
                 "search_trade_routes" => Task.FromResult(ExecuteSearchTradeRoutes(args)),
@@ -519,6 +540,288 @@ public class ChatService
         return joined.Length > 8000 ? joined[..8000] + "\n…(以下省略)" : joined;
     }
 
+    // ===== 売り場・価格の裏での取り直し =====
+    // ツールが DB に保存済みの売り場・価格 (item_shop_prices) を使って答えたとき、その品目の uuid を集める入れ物。
+    // SendChatAsync の前に BeginPriceRefreshCapture を呼び、答えを出したあと RefreshUsedShopPricesAsync に渡す
+    private static readonly AsyncLocal<HashSet<string>?> _priceRefreshCapture = new();
+
+    public static HashSet<string> BeginPriceRefreshCapture()
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        _priceRefreshCapture.Value = set;
+        return set;
+    }
+
+    // これ以降、この流れの中では品目を集めない (送り直しの中で取り直しが繰り返されないようにする)
+    public static void EndPriceRefreshCapture() => _priceRefreshCapture.Value = null;
+
+    // 1 回の質問で集める (取り直す) 品目は GameDataQueryService.MaxRefreshTargetsPerQuestion 件まで
+    // (compare_items の表に出した行と search_price の分を合わせて、集めた順に数える)
+    private static void NotePriceItemUsed(string uuid)
+    {
+        var set = _priceRefreshCapture.Value;
+        if (set == null || string.IsNullOrEmpty(uuid)) return;
+        lock (set)
+            if (set.Count < GameDataQueryService.MaxRefreshTargetsPerQuestion || set.Contains(uuid)) set.Add(uuid);
+    }
+
+    // 同じ品目は、最後に取得 (インデックス構築・取り直し) してから 10 分以内なら取り直さない
+    public static readonly TimeSpan PriceRefreshMinInterval = TimeSpan.FromMinutes(10);
+
+    // 答えに使った品目の売り場・価格を取り直す (武器・装備は cstone、船・車両は UEX)。
+    // 保存済みと違えば DB を更新して true を返す。同じなら取得日時だけ更新する。失敗はログにだけ出して無視する
+    public static async Task<bool> RefreshUsedShopPricesAsync(IEnumerable<string> uuids, CancellationToken ct = default)
+    {
+        var dbPath = _queryService?.DbPath;
+        if (string.IsNullOrEmpty(dbPath) || !File.Exists(dbPath)) return false;
+        var list = uuids.Distinct().ToList();
+        if (list.Count == 0) return false;
+
+        bool changed = false;
+        var shipUuids = new List<(string Uuid, List<ShopPriceRow> Rows)>();
+        foreach (var uuid in list)
+        {
+            try
+            {
+                var (rows, fetchedAt) = LoadStoredShopPrices(uuid);
+                if (rows.Count == 0) continue;
+                if (ShopPriceStore.IsCstoneNotFound(rows))
+                {
+                    Log($"[価格の取り直し] {uuid}: cstone に品目無しと記録済みなので、次のインデックス構築・再抽出まで取り直しません");
+                    continue;
+                }
+                if (fetchedAt is { } f && DateTime.UtcNow - f < PriceRefreshMinInterval)
+                {
+                    Log($"[価格の取り直し] {uuid}: 前回の取得から {PriceRefreshMinInterval.TotalMinutes:0} 分以内なので取り直しません");
+                    continue;
+                }
+                if (rows.Any(r => r.Source == "uex")) { shipUuids.Add((uuid, rows)); continue; }
+
+                // cstone への間隔と同時に 1 つの順番待ちは FetchCstoneShopRowsAsync の中で行う (裏の取得と共用)
+                var fresh = await FetchCstoneShopRowsAsync(uuid, ct);
+                if (fresh == null) continue;
+                changed |= ApplyRefreshedShopRows(dbPath, uuid, rows, fresh);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { Log($"[価格の取り直し] {uuid}: 失敗 {ex.Message}"); }
+        }
+
+        if (shipUuids.Count > 0)
+        {
+            try
+            {
+                Dictionary<string, List<ShopPriceRow>>? map;
+                using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={dbPath};Mode=ReadOnly"))
+                {
+                    conn.Open();
+                    map = await GameDataExtractor.FetchUexShipPriceRowsAsync(conn, ct);
+                }
+                if (map != null)
+                {
+                    foreach (var (uuid, rows) in shipUuids)
+                    {
+                        if (!map.TryGetValue(uuid, out var fresh))
+                        {
+                            changed |= ApplyRefreshedShopRows(dbPath, uuid, rows, new List<ShopPriceRow> { GameDataExtractor.UexNoShopRow() });
+                            continue;
+                        }
+                        changed |= ApplyRefreshedShopRows(dbPath, uuid, rows, fresh);
+                        // 同じ船の複製 (同じ name_en の record) にも同じ行が付いているので、保存済みのものは一緒に更新する
+                        foreach (var other in map.Where(kv => kv.Key != uuid && ReferenceEquals(kv.Value, fresh)).Select(kv => kv.Key))
+                        {
+                            var (otherRows, _) = LoadStoredShopPrices(other);
+                            if (otherRows.Count > 0) ApplyRefreshedShopRows(dbPath, other, otherRows, fresh);
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { Log($"[価格の取り直し] 船・車両 (UEX): 失敗 {ex.Message}"); }
+        }
+        return changed;
+    }
+
+    // 取り直した行を保存済みと比べ、違えば入れ替えて true。同じなら取得日時だけ更新して false
+    private static bool ApplyRefreshedShopRows(string dbPath, string uuid, List<ShopPriceRow> oldRows, List<ShopPriceRow> newRows)
+    {
+        using var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var now = DateTime.UtcNow;
+        if (ShopPriceStore.SameRows(oldRows, newRows))
+        {
+            ShopPriceStore.Touch(conn, uuid, now);
+            Log($"[価格の取り直し] {uuid}: 変化なし");
+            return false;
+        }
+        ShopPriceStore.Replace(conn, uuid, newRows, now);
+        Log($"[価格の取り直し] {uuid}: 更新 ({oldRows.Count} 行 → {newRows.Count} 行)");
+        return true;
+    }
+
+    // ===== 種類ごとの比較 (compare_items) =====
+
+    private static async Task<string> ExecuteCompareItemsAsync(JsonElement args)
+    {
+        var categoryText = args.TryGetProperty("category", out var c) ? c.ToString() : "";
+        var sizeText = args.TryGetProperty("size", out var s) ? s.ToString() : "";
+        var weightText = args.TryGetProperty("weight", out var w) ? w.ToString() : "";
+        var ammoText = args.TryGetProperty("ammo", out var am) ? am.ToString().Trim() : "";
+        var shopOnly = args.TryGetProperty("shop_only", out var so)
+                       && (so.ValueKind == JsonValueKind.True
+                           || (so.ValueKind == JsonValueKind.String && (so.GetString() ?? "").Trim().ToLowerInvariant() is "true" or "1" or "yes" or "はい"));
+        if (string.IsNullOrWhiteSpace(categoryText)) return "種類 (category) が空です。";
+        if (_queryService == null)
+            return "⚠️ ゲームデータのインデックスが未構築です。設定タブの「インデックス構築」を実行してください。";
+
+        var cat = GameDataQueryService.ResolveCompareCategory(categoryText);
+        if (cat == null)
+            return $"'{categoryText}' に当たる種類が見つかりませんでした。比べられる種類: " +
+                   string.Join(", ", GameDataQueryService.CompareCategories.Select(x => x.Label));
+
+        // サイズ: size の数字 (S2 / 2)。無ければ category の中の「S2」「サイズ2」
+        int? size = null;
+        var sm = System.Text.RegularExpressions.Regex.Match(sizeText ?? "", @"\d+");
+        if (sm.Success) size = int.Parse(sm.Value);
+        else
+        {
+            var cm = System.Text.RegularExpressions.Regex.Match(categoryText, @"(?:(?<![A-Za-z])[Ss]|サイズ\s*)(\d{1,2})(?!\d)");
+            if (cm.Success) size = int.Parse(cm.Groups[1].Value);
+        }
+        // アーマーの重さ: weight (light / ライト / 軽 など)。無ければ category の中の light / ライト などの語
+        string? weight = null;
+        if (GameDataQueryService.UsesArmorWeight(cat))
+        {
+            if (!string.IsNullOrWhiteSpace(weightText))
+            {
+                weight = GameDataQueryService.ParseArmorWeight(weightText);
+                if (weight == null) return $"重さ (weight) '{weightText}' がわかりません。light / medium / heavy (ライト / ミディアム / ヘビー) のどれかを指定してください。";
+            }
+            else weight = GameDataQueryService.ParseArmorWeight(categoryText, allowKanji: false);
+        }
+        Log($"COMPARE: category='{categoryText}' -> {cat.Label}, size={size?.ToString() ?? "全て"}, weight={weight ?? "なし"}, shop_only={shopOnly}");
+
+        var uex = cat.UexCategoryIds is { Length: > 0 } ids ? await GetUexItemPricesAsync(ids) : null;
+        // 船の武器の弾薬/エネルギー (弾薬 / ammo / ballistic → 弾薬、エネルギー / energy → エネルギー)。読めない値は指定し直してもらう
+        string? ammo = null;
+        if (ammoText.Length > 0 && cat.Kind == GameDataQueryService.CompareKind.ShipWeapon)
+        {
+            ammo = ammoText.ToLowerInvariant() switch
+            {
+                "弾薬" or "弾" or "ammo" or "ammunition" or "ballistic" => "弾薬",
+                "エネルギー" or "energy" => "エネルギー",
+                _ => null,
+            };
+            if (ammo == null) return $"弾薬/エネルギー (ammo) '{ammoText}' がわかりません。弾薬 / エネルギー のどちらかを指定してください。";
+        }
+        var (text, used) = _queryService.CompareItems(cat, size, uex, name => FindCachedShipScu(name)?.Scu, weight, shopOnly, ammo);
+        foreach (var u in used) NotePriceItemUsed(u);
+        return text;
+    }
+
+    // UEX の items_prices (API キー不要) をカテゴリごとに取り、英語名 (正規化) → 売り場と購入価格 にする。1 時間は覚えておく
+    private static readonly Dictionary<int, (DateTime At, Dictionary<string, List<(string Location, double Price)>> Data)> _uexItemPriceCache = new();
+    private static readonly TimeSpan UexItemPriceCacheTtl = TimeSpan.FromHours(1);
+
+    private static async Task<Dictionary<string, List<(string Location, double Price)>>> GetUexItemPricesAsync(int[] categoryIds)
+    {
+        // 覚えていないカテゴリはまとめて (並べて) 取りに行く (ツールの 30 秒の時間切れに当たらないように。1 件 15 秒まで)
+        var results = new Dictionary<int, Dictionary<string, List<(string Location, double Price)>>>();
+        var missing = new List<int>();
+        foreach (var id in categoryIds.Distinct())
+        {
+            lock (_uexItemPriceCache)
+                if (_uexItemPriceCache.TryGetValue(id, out var cached) && DateTime.UtcNow - cached.At < UexItemPriceCacheTtl) { results[id] = cached.Data; continue; }
+            missing.Add(id);
+        }
+        // 取得・キャッシュへの登録は FetchUexItemPricesOnceAsync の中で行う。応答の読み取り・組み立ては UI スレッドの外で行う
+        // (タブから呼んだときも ConfigureAwait(false) で UI スレッドに戻らない。呼び出し側の await は呼び出し側のスレッドに戻る)
+        var fetchedData = await Task.WhenAll(missing.Select(async id => (Id: id, Data: await FetchUexItemPricesOnceAsync(id).ConfigureAwait(false)))).ConfigureAwait(false);
+        foreach (var (id, data) in fetchedData)
+            if (data != null) results[id] = data;
+        var merged = new Dictionary<string, List<(string Location, double Price)>>(StringComparer.Ordinal);
+        foreach (var id in categoryIds.Distinct())
+        {
+            if (!results.TryGetValue(id, out var data)) continue;
+            foreach (var (name, rows) in data)
+            {
+                if (!merged.TryGetValue(name, out var list)) merged[name] = list = new List<(string, double)>();
+                list.AddRange(rows);
+            }
+        }
+        return merged;
+    }
+
+    // UEX の items_prices (カテゴリごと)。チャットの compare_items と武器の表のタブで共用する (1 時間覚えておき、同じカテゴリを何度も取りに行かない)
+    public static Task<Dictionary<string, List<(string Location, double Price)>>> GetSharedUexItemPricesAsync(int[] categoryIds) =>
+        GetUexItemPricesAsync(categoryIds);
+
+    // 同じカテゴリを同時に取りに行かない (取得中なら、その結果を待つ)。
+    // 取得が終わったら、_uexItemPriceInFlight のロックの中で「キャッシュに入れる → 取得中の登録を外す」の順に行い、
+    // 新しく取りに行く前にも同じロックの中でキャッシュを見直す (登録を外した直後に来た要求も、キャッシュから受け取る)
+    private static readonly Dictionary<int, Task<Dictionary<string, List<(string Location, double Price)>>?>> _uexItemPriceInFlight = new();
+
+    private static Task<Dictionary<string, List<(string Location, double Price)>>?> FetchUexItemPricesOnceAsync(int categoryId)
+    {
+        lock (_uexItemPriceInFlight)
+        {
+            if (_uexItemPriceInFlight.TryGetValue(categoryId, out var running)) return running;
+            lock (_uexItemPriceCache)
+                if (_uexItemPriceCache.TryGetValue(categoryId, out var cached) && DateTime.UtcNow - cached.At < UexItemPriceCacheTtl)
+                    return Task.FromResult<Dictionary<string, List<(string Location, double Price)>>?>(cached.Data);
+            var task = FetchAndCacheUexItemPricesAsync(categoryId);
+            // すぐに終わった (同期で失敗した) ときは登録しない (後片付けが登録より先に済んでいるため)
+            if (!task.IsCompleted) _uexItemPriceInFlight[categoryId] = task;
+            return task;
+        }
+    }
+
+    private static async Task<Dictionary<string, List<(string Location, double Price)>>?> FetchAndCacheUexItemPricesAsync(int categoryId)
+    {
+        Dictionary<string, List<(string Location, double Price)>>? data = null;
+        try { data = await FetchUexItemPricesAsync(categoryId).ConfigureAwait(false); }
+        finally
+        {
+            lock (_uexItemPriceInFlight)
+            {
+                if (data != null) lock (_uexItemPriceCache) _uexItemPriceCache[categoryId] = (DateTime.UtcNow, data);
+                _uexItemPriceInFlight.Remove(categoryId);
+            }
+        }
+        return data;
+    }
+
+    private static async Task<Dictionary<string, List<(string Location, double Price)>>?> FetchUexItemPricesAsync(int categoryId)
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            // 応答の読み取り (JsonDocument.Parse と辞書の組み立て) を UI スレッドの外で行う
+            var resp = await Http.GetStringAsync($"https://api.uexcorp.space/2.0/items_prices?id_category={categoryId}", cts.Token).ConfigureAwait(false);
+            using var doc = JsonDocument.Parse(resp);
+            if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array) return null;
+            var map = new Dictionary<string, List<(string Location, double Price)>>(StringComparer.Ordinal);
+            foreach (var p in data.EnumerateArray())
+            {
+                var itemName = p.TryGetProperty("item_name", out var inm) ? inm.GetString() ?? "" : "";
+                if (string.IsNullOrWhiteSpace(itemName)) continue;
+                // 価格は cstone と同じ範囲 (ShopPriceStore.MinPrice〜MaxPrice、1〜10 億 aUEC) のものだけ
+                if (!p.TryGetProperty("price_buy", out var pb) || pb.ValueKind != JsonValueKind.Number || !pb.TryGetDouble(out var buy)
+                    || double.IsNaN(buy) || buy < ShopPriceStore.MinPrice || buy > ShopPriceStore.MaxPrice) continue;
+                string Str(string key) => p.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+                var location = string.Join(" > ", new[] { Str("star_system_name"), Str("planet_name"), Str("city_name"), Str("terminal_name") }.Where(x => x.Length > 0));
+                var key = GameDataQueryService.NormalizeItemName(itemName);
+                if (!map.TryGetValue(key, out var list)) map[key] = list = new List<(string, double)>();
+                list.Add((location, buy));
+            }
+            return map;
+        }
+        catch (Exception ex)
+        {
+            Log($"[compare_items] UEX items_prices (カテゴリ {categoryId}) の取得に失敗: {ex.Message}");
+            return null;
+        }
+    }
+
     private static readonly System.Text.RegularExpressions.Regex KatakanaRegex = new(@"[\u30A0-\u30FF]");
 
     // アイテム名の検索。順に試し、当たった段で止める:
@@ -602,8 +905,9 @@ public class ChatService
         return (empty, "");
     }
 
-    // テスト用: カタカナ変換を差し替える (null なら実行中のチャットのバックエンドを使う)
-    internal static Func<string, Task<string?>>? KatakanaConverterOverride;
+    // テスト用: カタカナ変換を差し替える (null なら実行中のチャットのバックエンドを使う)。
+    // アプリの中では代入しない (テストのときだけ差し替える)。既定値の null を明示する
+    internal static Func<string, Task<string?>>? KatakanaConverterOverride = null;
 
     // 検索語のカタカナ部分を、実行中のチャットのバックエンドで英語の綴りに変換する (失敗・バックエンド不明なら null)
     private static async Task<string?> ConvertKatakanaToEnglishAsync(string query)
@@ -847,6 +1151,10 @@ public class ChatService
                 var compType = GameDataExtractor.DetectComponentType(query);
                 var dbResult = _queryService.SearchItems(query, compType);
                 if (!string.IsNullOrEmpty(dbResult)) sb.AppendLine(dbResult);
+                // 品目の性能 (武器は連射速度・弾速・1発のダメージ・DPS、アーマーはダメージ軽減・温度など) と色違いの関係
+                // (色違いなら「この品目は ○○ の色違い」と基本品目の性能、基本品目なら色違いの名前の一覧)
+                var itemStats = _queryService.GetItemStatsText(item.recordName);
+                if (!string.IsNullOrEmpty(itemStats)) sb.AppendLine(itemStats);
             }
             catch { }
         }
@@ -1369,15 +1677,25 @@ public class ChatService
 
     private static async Task<string> FetchCstonePricesAsync(string uuid, string displayName, string? systemFilter)
     {
+        // DB に保存済み (インデックス構築・取り直しで保存したもの) ならそれを使う。使った品目は裏での取り直しの対象として記録する
+        var stored = LoadStoredShopPrices(uuid);
+        if (stored.Rows.Count > 0)
+        {
+            Log($"[search_price] 保存済みの売り場・価格を使用: {uuid} ({displayName}) {stored.Rows.Count} 行");
+            NotePriceItemUsed(uuid);
+            var source = stored.Rows.Select(r => r.Source).FirstOrDefault(s => !string.IsNullOrEmpty(s)) ?? "";
+            var info = $"(保存済みデータ: 出典 {(source == "uex" ? "UEX" : source)}" +
+                       (stored.FetchedAtUtc is { } f ? $"、取得 {f.ToLocalTime():yyyy-MM-dd HH:mm}" : "") + ")";
+            return FormatShopPriceText(displayName, stored.Rows, systemFilter, info);
+        }
+
         Log($"[search_price] cstone.space fetch: {uuid} ({displayName})");
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            var resp = await Http.GetAsync($"https://finder.cstone.space/search/{uuid}", cts.Token);
-            if (!resp.IsSuccessStatusCode)
-                return $"'{displayName}' の価格情報を取得できませんでした (HTTP {(int)resp.StatusCode})。";
-
-            var html = await resp.Content.ReadAsStringAsync(cts.Token);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+            var (status, html, _) = await CstoneGetAsync(uuid, cts.Token);
+            if (html == null)
+                return $"'{displayName}' の価格情報を取得できませんでした (HTTP {status})。";
             return ParseCstoneHtml(html, displayName, systemFilter);
         }
         catch (OperationCanceledException)
@@ -1391,172 +1709,248 @@ public class ChatService
         }
     }
 
-    private static string ParseCstoneHtml(string html, string displayName, string? systemFilter)
+    // DB (item_shop_prices) に保存済みの売り場・価格。インデックスが無い・表が無いときは空
+    private static (List<ShopPriceRow> Rows, DateTime? FetchedAtUtc) LoadStoredShopPrices(string uuid)
+    {
+        var dbPath = _queryService?.DbPath;
+        if (string.IsNullOrEmpty(dbPath) || string.IsNullOrEmpty(uuid) || !File.Exists(dbPath)) return (new List<ShopPriceRow>(), null);
+        try
+        {
+            using var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
+            conn.Open();
+            return ShopPriceStore.Load(conn, uuid);
+        }
+        catch (Exception ex)
+        {
+            Log($"[search_price] 保存済みデータの読み込みに失敗: {ex.Message}");
+            return (new List<ShopPriceRow>(), null);
+        }
+    }
+
+    private static string ParseCstoneHtml(string html, string displayName, string? systemFilter) =>
+        FormatShopPriceText(displayName, ParseCstonePriceRows(html), systemFilter, null);
+
+    // 売り場・価格の行を AI に渡す文字列にする。storedInfo は保存済みデータを使ったときの注記
+    private static string FormatShopPriceText(string displayName, List<ShopPriceRow> rows, string? systemFilter, string? storedInfo)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"【{displayName}】");
+        if (!string.IsNullOrEmpty(storedInfo)) sb.AppendLine(storedInfo);
 
-        var buyLocations = ParseCstoneShopEntries(html, "Buy", systemFilter);
-        var rentLocations = ParseCstoneRentEntries(html, systemFilter);
+        bool Match(ShopPriceRow r) => string.IsNullOrEmpty(systemFilter) || r.Location.Contains(systemFilter, StringComparison.OrdinalIgnoreCase);
+        var buyLocations = rows.Where(r => r.Kind == ShopPriceStore.KindBuy && r.Price.HasValue && Match(r)).ToList();
+        var rentRows = rows.Where(r => r.Kind == ShopPriceStore.KindRent && r.Price.HasValue && Match(r)).ToList();
 
         if (buyLocations.Count > 0)
         {
             sb.AppendLine("購入場所:");
-            foreach (var (location, price, date) in buyLocations)
+            foreach (var r in buyLocations)
             {
-                sb.Append($"  - {location} | 価格: {price} aUEC");
-                if (!string.IsNullOrEmpty(date)) sb.Append($" (確認日: {date})");
+                sb.Append($"  - {r.Location} | 価格: {r.Price!.Value:N0} aUEC");
+                if (!string.IsNullOrEmpty(r.Verified)) sb.Append($" (確認日: {r.Verified})");
                 sb.AppendLine();
             }
         }
 
-        if (rentLocations.Count > 0)
+        if (rentRows.Count > 0)
         {
             sb.AppendLine("レンタル場所:");
-            foreach (var (location, prices, date) in rentLocations)
+            foreach (var g in rentRows.GroupBy(r => r.Location))
             {
-                sb.Append($"  - {location}");
-                if (!string.IsNullOrEmpty(prices)) sb.Append($" | {prices}");
+                sb.Append($"  - {g.Key}");
+                sb.Append(" | " + string.Join(" | ", g.OrderBy(r => r.RentDays ?? 0).Select(r => $"{r.RentDays}日: {r.Price!.Value:N0} aUEC")));
+                var date = g.Select(r => r.Verified).FirstOrDefault(v => !string.IsNullOrEmpty(v));
                 if (!string.IsNullOrEmpty(date)) sb.Append($" (確認日: {date})");
                 sb.AppendLine();
             }
         }
 
-        if (buyLocations.Count == 0 && rentLocations.Count == 0)
+        if (buyLocations.Count == 0 && rentRows.Count == 0)
+        {
             sb.AppendLine("販売場所が見つかりませんでした。");
+            var note = rows.FirstOrDefault(r => r.Kind == ShopPriceStore.KindNone)?.Note;
+            if (!string.IsNullOrEmpty(note)) sb.AppendLine($"  備考: {note}");
+        }
 
         return sb.ToString();
     }
 
-    private static List<(string location, string price, string date)> ParseCstoneShopEntries(string html, string type, string? systemFilter)
+    // cstone の品目ページから売り場・価格を読む (購入とレンタル)
+    internal static List<ShopPriceRow> ParseCstonePriceRows(string html)
     {
-        var results = new List<(string, string, string)>();
-        var rows = System.Text.RegularExpressions.Regex.Matches(html,
-            @"<tr[^>]*>.*?</tr>", System.Text.RegularExpressions.RegexOptions.Singleline);
+        var rows = ParseCstoneShopEntries(html, null);
+        rows.AddRange(ParseCstoneRentEntries(html, null));
+        return rows;
+    }
 
-        foreach (System.Text.RegularExpressions.Match row in rows)
+    // ParseCstonePriceRows の結果を保存用の行にする。売り場が無ければ、次のときだけ「なし」の行を 1 行返す:
+    //   「Not Sold directly or at all」の記載がある / 品目のページ (タイトルが「Star Citizen - 」で始まり、売り場の表がある) と確かめられる。
+    // cstone に品目が無いと確かめられる応答 (IsCstoneNotFoundPage) なら「cstone に品目無し」の行を 1 行返す。
+    // それ以外 (空の応答・エラーページなど想定外のページ) は null を返し、何も保存しない (次回取り直す)。
+    // finalPath は転送 (リダイレクト) を追った後の URL のパス
+    internal static List<ShopPriceRow>? ToStoredShopRows(string html, List<ShopPriceRow> rows, string? finalPath = null)
+    {
+        if (rows.Count > 0) return rows;
+        if (html.Contains("Not Sold directly or at all", StringComparison.OrdinalIgnoreCase))
+            return new List<ShopPriceRow> { new(ShopPriceStore.KindNone, "", null, null, "", "cstone: 販売なし (Not Sold directly or at all)", "cstone") };
+        if (IsCstoneItemPage(html))
+            return new List<ShopPriceRow> { new(ShopPriceStore.KindNone, "", null, null, "", "cstone に売り場の記載無し", "cstone") };
+        if (IsCstoneNotFoundPage(html, finalPath))
+            return new List<ShopPriceRow> { new(ShopPriceStore.KindNone, "", null, null, "", ShopPriceStore.CstoneNotFoundNote, "cstone") };
+        return null;
+    }
+
+    // cstone に品目が無いときの応答か。cstone は知らない uuid の /search/{uuid} を「/」へ転送 (HTTP 302) し、検索のトップページを返す
+    // (2026-10 に確かめた)。転送先のパスが「/」で、タイトルが「CStone: Universal Item Finder」、売り場の表 <table id="table"> が無いときだけ true
+    internal static bool IsCstoneNotFoundPage(string html, string? finalPath) =>
+        finalPath == "/"
+        && System.Text.RegularExpressions.Regex.IsMatch(html, @"<title>\s*CStone:\s*Universal Item Finder\s*</title>", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+        && !System.Text.RegularExpressions.Regex.IsMatch(html, @"<table\b[^>]*\bid\s*=\s*""table""", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    // cstone の品目のページか (タイトルが「Star Citizen - 種類 - 名前」で、売り場の表 <table id="table"> に LOCATION 等の見出しがある)。
+    // 品目が無いときに返る検索のトップページはタイトルが「CStone: Universal Item Finder」で、売り場の表が無い
+    private static bool IsCstoneItemPage(string html) =>
+        System.Text.RegularExpressions.Regex.IsMatch(html, @"<title>\s*Star Citizen\s*-\s", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+        && ExtractCstonePriceTables(html).Any(t => IsCstonePriceTable(t.Headers));
+
+    // cstone へ取りに行くのは同時に 1 つだけにし、前の取得から 0.75 秒以上空ける (裏の取得・チャットの取り直し・search_price で共用。
+    // 相手に負荷をかけないため)。取れなければ例外 (HttpRequestException など) か、HTTP の状態が成功でなければ null。
+    // FinalPath は転送 (リダイレクト) を追った後の URL のパス
+    private static readonly SemaphoreSlim _cstoneGate = new(1, 1);
+    private static DateTime _cstoneLastRequestUtc = DateTime.MinValue;
+    private static readonly TimeSpan CstoneRequestInterval = TimeSpan.FromMilliseconds(750);
+
+    private static async Task<(int Status, string? Html, string? FinalPath)> CstoneGetAsync(string uuid, CancellationToken ct)
+    {
+        await _cstoneGate.WaitAsync(ct);
+        try
         {
-            var cells = System.Text.RegularExpressions.Regex.Matches(row.Value,
-                @"<td[^>]*>(.*?)</td>", System.Text.RegularExpressions.RegexOptions.Singleline);
-            if (cells.Count < 2) continue;
-
-            var locationCell = StripHtml(cells[0].Groups[1].Value).Trim();
-            var priceCell = StripHtml(cells.Count > 1 ? cells[1].Groups[1].Value : "").Trim();
-            var dateCell = cells.Count > 2 ? StripHtml(cells[2].Groups[1].Value).Trim() : "";
-
-            if (string.IsNullOrEmpty(locationCell) || string.IsNullOrEmpty(priceCell)) continue;
-            if (!double.TryParse(priceCell.Replace(",", "").Replace(" ", ""), out _) && !priceCell.Any(char.IsDigit)) continue;
-
-            if (!string.IsNullOrEmpty(systemFilter) &&
-                !locationCell.Contains(systemFilter, StringComparison.OrdinalIgnoreCase)) continue;
-
-            results.Add((locationCell, priceCell, dateCell));
-        }
-
-        if (results.Count == 0)
-        {
-            var lines = html.Split('\n');
-            string? currentLocation = null;
-            string? currentPrice = null;
-            string? currentDate = null;
-
-            foreach (var rawLine in lines)
+            var wait = _cstoneLastRequestUtc + CstoneRequestInterval - DateTime.UtcNow;
+            if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
+            try
             {
-                var line = StripHtml(rawLine).Trim();
-                if (string.IsNullOrEmpty(line)) continue;
-
-                if (line.Contains(" - ") && (line.Contains("Stanton") || line.Contains("Nyx") || line.Contains("Pyro")))
-                {
-                    if (currentLocation != null && currentPrice != null)
-                    {
-                        if (string.IsNullOrEmpty(systemFilter) ||
-                            currentLocation.Contains(systemFilter, StringComparison.OrdinalIgnoreCase))
-                            results.Add((currentLocation, currentPrice, currentDate ?? ""));
-                    }
-                    currentLocation = line;
-                    currentPrice = null;
-                    currentDate = null;
-                }
-                else if (currentLocation != null && currentPrice == null &&
-                         line.Any(char.IsDigit) && !line.Contains("day", StringComparison.OrdinalIgnoreCase))
-                {
-                    var numMatch = System.Text.RegularExpressions.Regex.Match(line, @"[\d,]+");
-                    if (numMatch.Success) currentPrice = numMatch.Value;
-                }
-                else if (currentLocation != null && line.Contains("29"))
-                {
-                    var dateMatch = System.Text.RegularExpressions.Regex.Match(line, @"\d{4}-\d{2}-\d{2}");
-                    if (dateMatch.Success) currentDate = dateMatch.Value;
-                }
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(TimeSpan.FromSeconds(15));
+                using var resp = await Http.GetAsync($"https://finder.cstone.space/search/{uuid}", cts.Token);
+                if (!resp.IsSuccessStatusCode) return ((int)resp.StatusCode, null, null);
+                return ((int)resp.StatusCode, await resp.Content.ReadAsStringAsync(cts.Token), resp.RequestMessage?.RequestUri?.AbsolutePath);
             }
+            finally { _cstoneLastRequestUtc = DateTime.UtcNow; }
+        }
+        finally { _cstoneGate.Release(); }
+    }
 
-            if (currentLocation != null && currentPrice != null)
+    // cstone の品目ページを 1 件取って保存用の行にする。取れない・想定外のページなら null (失敗はログにだけ出す)。
+    // cstone に品目が無ければ「cstone に品目無し」の行を返す (1 件ずつはログに出さない。裏の取得が最後に件数をまとめて出す)
+    internal static async Task<List<ShopPriceRow>?> FetchCstoneShopRowsAsync(string uuid, CancellationToken ct)
+    {
+        try
+        {
+            var (status, html, finalPath) = await CstoneGetAsync(uuid, ct);
+            if (html == null)
             {
-                if (string.IsNullOrEmpty(systemFilter) ||
-                    currentLocation.Contains(systemFilter, StringComparison.OrdinalIgnoreCase))
-                    results.Add((currentLocation, currentPrice, currentDate ?? ""));
+                Log($"[cstone] {uuid}: HTTP {status}");
+                return null;
+            }
+            var rows = ToStoredShopRows(html, ParseCstonePriceRows(html), finalPath);
+            if (rows == null) Log($"[cstone] {uuid}: 品目のページではない応答 (長さ {html.Length})。保存せず次回取り直します");
+            return rows;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            Log($"[cstone] {uuid}: 取得失敗 {ex.Message}");
+            return null;
+        }
+    }
+
+    // cstone の売り場の表 (<table id="table">)。見出し (th) と、各行のセル (td) の文字列。
+    // セル内の <br> は " - " にする (レンタルの表は場所を <br> 区切りで書いている)
+    private static List<(List<string> Headers, List<List<string>> Rows)> ExtractCstonePriceTables(string html)
+    {
+        var tables = new List<(List<string>, List<List<string>>)>();
+        foreach (System.Text.RegularExpressions.Match t in System.Text.RegularExpressions.Regex.Matches(html,
+                     @"<table\b[^>]*\bid\s*=\s*""table""[^>]*>(.*?)</table>",
+                     System.Text.RegularExpressions.RegexOptions.Singleline | System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+        {
+            var body = t.Groups[1].Value;
+            var headers = System.Text.RegularExpressions.Regex.Matches(body, @"<th[^>]*>(.*?)</th>", System.Text.RegularExpressions.RegexOptions.Singleline)
+                .Select(m => System.Text.RegularExpressions.Regex.Replace(StripHtml(m.Groups[1].Value).Replace(' ', ' '), @"\s+", " ").Trim().ToUpperInvariant())
+                .ToList();
+            var rows = new List<List<string>>();
+            foreach (System.Text.RegularExpressions.Match tr in System.Text.RegularExpressions.Regex.Matches(body, @"<tr[^>]*>(.*?)</tr>", System.Text.RegularExpressions.RegexOptions.Singleline))
+            {
+                var cells = System.Text.RegularExpressions.Regex.Matches(tr.Groups[1].Value, @"<td[^>]*>(.*?)</td>", System.Text.RegularExpressions.RegexOptions.Singleline)
+                    .Select(m => StripHtml(System.Text.RegularExpressions.Regex.Replace(m.Groups[1].Value, @"<br\s*/?>", " - ")).Trim())
+                    .ToList();
+                if (cells.Count > 0) rows.Add(cells);
+            }
+            tables.Add((headers, rows));
+        }
+        return tables;
+    }
+
+    // 購入の売り場。見出しに BASE PRICE がある表 (列: LOCATION / BASE PRICE / VERIFIED) の行を読む。
+    // 性能の表 (GENERAL / STATS など、id="table" の無い 2 列の表) は売り場ではないので読まない。
+    // 価格は数値として読めて ShopPriceStore の範囲 (1〜10 億 aUEC) にあるものだけ。「Not Sold directly or at all.」の行は売り場ではない。
+    // 売り場の表だけを読む (表の無いページからは何も読まない)
+    private static List<ShopPriceRow> ParseCstoneShopEntries(string html, string? systemFilter)
+    {
+        var results = new List<ShopPriceRow>();
+        var tables = ExtractCstonePriceTables(html);
+        var buyTables = tables.Where(t => t.Headers.Any(h => h.Contains("BASE PRICE"))).ToList();
+        foreach (var (_, rows) in buyTables)
+        {
+            foreach (var cells in rows)
+            {
+                if (cells.Count < 2) continue;
+                var location = cells[0];
+                if (string.IsNullOrEmpty(location)) continue;
+                if (!ShopPriceStore.TryParsePrice(cells[1], out var price)) continue;
+                if (!string.IsNullOrEmpty(systemFilter) && !location.Contains(systemFilter, StringComparison.OrdinalIgnoreCase)) continue;
+                var verified = cells.Count > 2 ? cells[2] : "";
+                results.Add(new ShopPriceRow(ShopPriceStore.KindBuy, location, price, null, verified, "", "cstone"));
             }
         }
 
         return results;
     }
 
-    private static List<(string location, string prices, string date)> ParseCstoneRentEntries(string html, string? systemFilter)
+    // レンタルの売り場。見出しに "1 DAY" などがある表 (列: LOCATION / 1 DAY / 3 DAY / 7 DAYS / 30 DAYS / VERIFIED) の行を読み、日数ごとに 1 行にする。
+    // 売り場の表だけを読む (表の無いページからは何も読まない)
+    private static List<ShopPriceRow> ParseCstoneRentEntries(string html, string? systemFilter)
     {
-        var results = new List<(string, string, string)>();
-        var lines = html.Split('\n');
-        string? currentLocation = null;
-        var rentPrices = new List<string>();
-        string? currentDate = null;
-        bool inRentalSection = false;
-
-        foreach (var rawLine in lines)
+        var results = new List<ShopPriceRow>();
+        var tables = ExtractCstonePriceTables(html);
+        foreach (var (headers, rows) in tables.Where(t => t.Headers.Any(h => System.Text.RegularExpressions.Regex.IsMatch(h, @"^\d+ DAYS?$"))))
         {
-            var line = StripHtml(rawLine).Trim();
-            if (string.IsNullOrEmpty(line)) continue;
-
-            if (line.Contains("Rent", StringComparison.OrdinalIgnoreCase) && line.Contains("Location", StringComparison.OrdinalIgnoreCase))
+            var dayCols = new List<(int Index, int Days)>();
+            int verifiedCol = -1;
+            for (int i = 0; i < headers.Count; i++)
             {
-                inRentalSection = true;
-                continue;
+                var m = System.Text.RegularExpressions.Regex.Match(headers[i], @"^(\d+) DAYS?$");
+                if (m.Success) dayCols.Add((i, int.Parse(m.Groups[1].Value)));
+                else if (headers[i] == "VERIFIED") verifiedCol = i;
             }
-
-            if (!inRentalSection) continue;
-
-            if (line.Contains(" - ") && (line.Contains("Stanton") || line.Contains("Nyx") || line.Contains("Pyro")))
+            foreach (var cells in rows)
             {
-                if (currentLocation != null && rentPrices.Count > 0)
+                if (cells.Count < 2) continue;
+                var location = cells[0];
+                if (string.IsNullOrEmpty(location)) continue;
+                if (!string.IsNullOrEmpty(systemFilter) && !location.Contains(systemFilter, StringComparison.OrdinalIgnoreCase)) continue;
+                var verified = verifiedCol >= 0 && verifiedCol < cells.Count ? cells[verifiedCol] : "";
+                foreach (var (index, days) in dayCols)
                 {
-                    if (string.IsNullOrEmpty(systemFilter) ||
-                        currentLocation.Contains(systemFilter, StringComparison.OrdinalIgnoreCase))
-                        results.Add((currentLocation, string.Join(" | ", rentPrices), currentDate ?? ""));
+                    if (index >= cells.Count || !ShopPriceStore.TryParsePrice(cells[index], out var price)) continue;
+                    results.Add(new ShopPriceRow(ShopPriceStore.KindRent, location, price, days, verified, "", "cstone"));
                 }
-                currentLocation = line;
-                rentPrices.Clear();
-                currentDate = null;
-            }
-            else if (currentLocation != null && System.Text.RegularExpressions.Regex.IsMatch(line, @"\d+\s*[Dd]ay"))
-            {
-                var match = System.Text.RegularExpressions.Regex.Match(line, @"(\d+)\s*[Dd]ay[s]?\s*[:\s]*([\d,]+)");
-                if (match.Success)
-                    rentPrices.Add($"{match.Groups[1].Value}日: {match.Groups[2].Value} aUEC");
-            }
-            else if (currentLocation != null && line.Contains("29"))
-            {
-                var dateMatch = System.Text.RegularExpressions.Regex.Match(line, @"\d{4}-\d{2}-\d{2}");
-                if (dateMatch.Success) currentDate = dateMatch.Value;
             }
         }
-
-        if (currentLocation != null && rentPrices.Count > 0)
-        {
-            if (string.IsNullOrEmpty(systemFilter) ||
-                currentLocation.Contains(systemFilter, StringComparison.OrdinalIgnoreCase))
-                results.Add((currentLocation, string.Join(" | ", rentPrices), currentDate ?? ""));
-        }
-
         return results;
     }
+
+    private static bool IsCstonePriceTable(List<string> headers) =>
+        headers.Any(h => h.Contains("BASE PRICE") || System.Text.RegularExpressions.Regex.IsMatch(h, @"^\d+ DAYS?$"));
 
     private static string StripHtml(string html)
     {

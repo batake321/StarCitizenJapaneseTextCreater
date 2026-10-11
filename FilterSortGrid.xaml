@@ -1,0 +1,21 @@
+<UserControl x:Class="StarCitizenJapaneseTextCreater.FilterSortGrid"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- 絞り込み・複数列の並べ替えができる表 (Wiki の表のように)。上に表全体の検索欄、見出しに並べ替えの順位と絞り込みのボタン -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <DockPanel Grid.Row="0" Margin="0,0,0,6">
+            <TextBlock Text="検索" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <TextBlock x:Name="txtCount" DockPanel.Dock="Right" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
+            <TextBox x:Name="txtSearch" MinWidth="200" TextChanged="TxtSearch_TextChanged"/>
+        </DockPanel>
+
+        <DataGrid x:Name="grid" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False"
+                  CanUserDeleteRows="False" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                  SelectionMode="Single" CanUserSortColumns="True" Sorting="Grid_Sorting"/>
+    </Grid>
+</UserControl>

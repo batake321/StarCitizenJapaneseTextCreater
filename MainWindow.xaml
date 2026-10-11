@@ -1721,6 +1721,16 @@
                 </Grid>
             </TabItem>
 
+            <!-- 船舶戦闘タブ (船の武器を 1 つの表に。ミサイル・魚雷・ロケットポッドは除く) -->
+            <TabItem Header="船舶戦闘">
+                <local:WeaponTablePanel IsShip="True"/>
+            </TabItem>
+
+            <!-- 個人戦闘タブ (個人武器を 1 つの表に。医療ガンは除く) -->
+            <TabItem Header="個人戦闘">
+                <local:WeaponTablePanel IsShip="False"/>
+            </TabItem>
+
             <!-- チャットタブ -->
             <TabItem Header="チャット">
                 <Grid Margin="8">
@@ -1862,6 +1872,7 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
 
                                 <TextBlock Grid.Row="0" TextWrapping="Wrap" Margin="0,0,0,8" Foreground="#666"
@@ -1879,6 +1890,10 @@
                                             Click="FetchWikiMissions_Click" Padding="14,6" Margin="8,0,0,0"
                                             FontWeight="Bold" Background="#FF9800" Foreground="White"
                                             ToolTip="Star Citizen Wiki API からミッションデータを取得し、既存データと統合"/>
+                                    <Button x:Name="btnStopShopPrice" Content="価格の取得を中止"
+                                            Click="StopShopPrice_Click" Padding="8,4" Margin="8,0,0,0"
+                                            Visibility="Collapsed"
+                                            ToolTip="裏で行っている売り場・価格の取得を止めます。次のインデックス構築・装備データの再抽出の後に、まだ取っていない品目から再開します"/>
                                     <TextBlock x:Name="txtGameDataStatus" VerticalAlignment="Center"
                                                Margin="12,0,0,0" Foreground="#666"/>
                                 </StackPanel>
@@ -1898,6 +1913,10 @@
 
                                 <TextBlock x:Name="txtSearchIndexStatus" Grid.Row="4" Margin="0,4,0,0" Foreground="#666"
                                            FontFamily="Consolas" FontSize="11"/>
+
+                                <!-- 売り場・価格の裏の取得の進み具合・中止の知らせ (構築の進捗とは別の行) -->
+                                <TextBlock x:Name="txtShopPriceStatus" Grid.Row="5" Margin="0,4,0,0" Foreground="#444"
+                                           FontFamily="Consolas" FontSize="12" TextWrapping="Wrap"/>
                             </Grid>
                         </GroupBox>
 

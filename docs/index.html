@@ -61,7 +61,7 @@
       <p class="lead">Star Citizen のゲーム内テキストを日本語にして、ついでに交易・所持船・ミッション調べまで面倒を見る Windows アプリです。<br>このページでは、初めて起動したところから一通り使えるようになるまでを図解で説明します。</p>
       <div class="pills">
         <span class="pill">Windows 10 / 11</span>
-        <span class="pill">.NET 8.0</span>
+        <span class="pill">.NET 10.0</span>
         <span class="pill">翻訳済み DB 同梱 (Patch 4.10.2 対応)</span>
         <span class="pill">AI 翻訳は任意</span>
       </div>
@@ -103,7 +103,7 @@
     <h3>動作要件</h3>
     <ul>
       <li>Windows 10 / 11</li>
-      <li><a href="https://dotnet.microsoft.com/download/dotnet/8.0" rel="noreferrer">.NET 8.0 Runtime</a>（デスクトップランタイム）</li>
+      <li><a href="https://dotnet.microsoft.com/download/dotnet/10.0" rel="noreferrer">.NET 10.0 Desktop Runtime</a>（x64）— インストーラーなら無ければ自動で入ります。zip の exe は、.NET 10 が無ければ起動時にダウンロードの案内が出ます</li>
       <li>Star Citizen がインストールされていること</li>
       <li><b>AI 翻訳や AI チャットを使う場合のみ</b>（いずれか 1 つ以上）
         <ul>
@@ -126,20 +126,15 @@
           <td><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/latest" rel="noreferrer">最新リリース</a></td>
         </tr>
         <tr>
-          <td><b>インストーラー (exe)</b></td>
-          <td>インストール形式が良い方はこちら（公開されているのは v1.15.0）</td>
-          <td><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.15.0/SCJPTextCreator-v1.15.0-Setup.exe" rel="noreferrer">SCJPTextCreator-v1.15.0-Setup.exe</a></td>
-        </tr>
-        <tr>
           <td><b>翻訳データベース (zip)</b></td>
-          <td>Patch 4.10.2 対応 (2026/10/11)。アプリの <span class="btn">インポート (復元)</span> から取り込みます</td>
-          <td><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.22.1/sc_japanese_backup.zip" rel="noreferrer">sc_japanese_backup.zip</a></td>
+          <td>Patch 4.10.2 対応 (2026/10/12)。アプリの <span class="btn">インポート (復元)</span> から取り込みます</td>
+          <td><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v1.22.2/sc_japanese_backup.zip" rel="noreferrer">sc_japanese_backup.zip</a></td>
         </tr>
       </tbody>
     </table>
 
     <div class="note tip">
-      <p><strong>アプリ本体だけで足ります。</strong>v1.14.5 以降は<b>訳し終わった翻訳データベース</b>が本体に同梱されているので、翻訳DB の zip を別途取り込む必要はありません。上の 3 つ目は、本体より新しい翻訳データを先に試したいとき用です。</p>
+      <p><strong>アプリ本体だけで足ります。</strong>v1.14.5 以降は<b>訳し終わった翻訳データベース</b>が本体に同梱されているので、翻訳DB の zip を別途取り込む必要はありません。上の 2 つ目は、本体より新しい翻訳データを先に試したいとき用です。</p>
     </div>
 
     <h3>インストール</h3>
@@ -148,6 +143,7 @@
       <li>好きな場所に展開します。<b>zip 版はインストール作業なしで動きます。</b></li>
       <li>展開したフォルダの中の実行ファイルを起動します。</li>
     </ol>
+    <p><b>インストーラーでも動きます。</b>zip の中の <code>SCJPTextCreator-v1.22.2-Setup.exe</code> を実行すると、作業ディレクトリ（一時ファイルの場所）を選べて、無ければ作成されます。exe を直接使う場合は、起動後に設定タブで設定してください。</p>
 
     <div class="note warn">
       <p><strong>アプリを新しいバージョンに入れ替えたときは、翻訳タブの <span class="btn">日本語化</span> → <span class="btn">実行</span> を一度行ってください。</strong>同梱の翻訳データベースがローカルのものより新しい場合、起動時に自動で差分マージされますが（未翻訳のレコードだけを更新し、手動で直した翻訳は保護されます）、ゲーム側のファイルに書き出すのは <span class="btn">日本語化</span> の役目です。</p>
