@@ -72,6 +72,13 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        // 表の名前のダブルクリック → ［詳細］タブ
+        DetailPanel.Requested += OnDetailRequested;
+        DetailPanel.SearchRequested += OnDetailSearchRequested;
+        Closed += (_, _) => { DetailPanel.Requested -= OnDetailRequested; DetailPanel.SearchRequested -= OnDetailSearchRequested; };
+        // 装備タブの表: Ctrl+C で選んだセルの文字だけをコピーする
+        DataGridCellCopy.Attach(dgMyComponents);
+        DataGridCellCopy.Attach(dgLoadout);
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -1464,9 +1471,23 @@ public partial class MainWindow : Window
 
             txtBackupStatus.Text = "インポート中...";
             var tradeDbImportPath = Path.Combine(WorkDir, "trade_cache.db");
-            await DatabaseBackupService.ImportFromZipAsync(dlg.FileName, DbPath, IndexDbPath,
-                selectDlg.SelectedCategories, selectDlg.Mode,
-                s => Dispatcher.Invoke(() => txtBackupStatus.Text = s), tradeDbImportPath);
+            // インデックス (gamedata_cache.db) を取り込むときは、装備タブの読み込み口の覚えた結果が古くなるので、閉じてから取り込み、後で作り直す
+            var reopenEquip = selectDlg.SelectedCategories.Contains(BackupCategory.Index);
+            if (reopenEquip)
+            {
+                _hangarEquip?.Dispose();
+                _hangarEquip = null;
+            }
+            try
+            {
+                await DatabaseBackupService.ImportFromZipAsync(dlg.FileName, DbPath, IndexDbPath,
+                    selectDlg.SelectedCategories, selectDlg.Mode,
+                    s => Dispatcher.Invoke(() => txtBackupStatus.Text = s), tradeDbImportPath);
+            }
+            finally
+            {
+                if (reopenEquip) ReopenHangarEquip();
+            }
 
             txtBackupStatus.Text = "インポート完了";
             UpdateDbPathDisplay();
@@ -1994,6 +2015,11 @@ public partial class MainWindow : Window
         _gameDataExtractor.ProgressChanged += OnGameDataProgress;
         _gameDataExtractor.StatusChanged += OnGameDataStatus;
 
+        // 装備タブの読み込み口 (EquipmentService) は覚えた結果 (子ポートの定義・本当の大きさ等) を持つので、
+        // 装備データの再抽出と同じく、構築の前に閉じて構築の後に作り直す (ReopenHangarEquip)
+        _hangarEquip?.Dispose();
+        _hangarEquip = null;
+
         bool built = false;
         try
         {
@@ -2022,8 +2048,28 @@ public partial class MainWindow : Window
             _gameDataExtractor.ProgressChanged -= OnGameDataProgress;
             _gameDataExtractor.StatusChanged -= OnGameDataStatus;
             btnExtractGameData.IsEnabled = true;
+            ReopenHangarEquip();
             // 構築ができていれば (後の処理が失敗しても)、ここで売り場・価格の裏の取得を始めてもらう
             if (built) GameDataExtractor.RequestShopPriceFetch(_gameDataExtractor.DbPath);
+        }
+    }
+
+    // 装備タブの読み込み口 (_hangarEquip) を作り直す。gamedata_cache.db の中身が替わったあと (インデックス構築・バックアップの取り込み) に呼ぶ。
+    // 装備タブを一度でも読み込んでいれば、装備データの再抽出と同じく読み込み直して開き直す (LoadUpgradeData が gamedata_cache.db を開く)。
+    // まだ読み込んでいなければ閉じるだけ (次に装備タブを開いたときに開かれる)
+    private void ReopenHangarEquip()
+    {
+        _hangarEquip?.Dispose();
+        _hangarEquip = null;
+        if (!_upgradeDataLoadedOnce) return;
+        try
+        {
+            _hangarService.InvalidateCaches();
+            LoadUpgradeData();
+        }
+        catch (Exception ex)
+        {
+            Log($"[Hangar] 装備DBの開き直しに失敗: {ex.Message}");
         }
     }
 
@@ -3263,6 +3309,42 @@ public partial class MainWindow : Window
         var row = (sender as FrameworkElement)?.DataContext as LoadoutRow;
         ApplyTooltip(sender, e, row == null ? "" : BuildItemTooltip(row.EffectiveItemName, row.EffectiveItemRecord));
     }
+
+    // 装備タブの名前のダブルクリック → ［詳細］タブにその品目を出す (dgMyComponents の名称、dgLoadout の初期装備・現在)
+    private void ComponentName_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ClickCount == 2 && (sender as FrameworkElement)?.DataContext is MyComponentRow row) DetailPanel.Request(row.ItemRecord, row.ItemName);
+    }
+
+    private void LoadoutDefaultName_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ClickCount == 2 && (sender as FrameworkElement)?.DataContext is LoadoutRow row && row.DefaultItemRecord.Length > 0)
+            DetailPanel.Request(row.DefaultItemRecord, row.DefaultItemName);
+    }
+
+    private void LoadoutCurrentName_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ClickCount == 2 && (sender as FrameworkElement)?.DataContext is LoadoutRow row && row.EffectiveItemRecord.Length > 0)
+            DetailPanel.Request(row.EffectiveItemRecord, row.EffectiveItemName);
+    }
+
+    // ［詳細］タブを開いて品目を出す (DetailPanel.Request から)。
+    // タブの切り替えは、ダブルクリックのマウスの処理が終わってから行う (SwitchToDetailTabLater)
+    private void OnDetailRequested(string? record, string name) =>
+        SwitchToDetailTabLater(() => detailPanel.ShowItem(record, name));
+
+    // ［詳細］タブを開いて、名前欄にその名前を入れて検索した状態にする (DetailPanel.RequestSearch から)
+    private void OnDetailSearchRequested(string name) =>
+        SwitchToDetailTabLater(() => detailPanel.ShowSearch(name));
+
+    // 表のダブルクリック (マウスのボタンを押したときの処理) の中でタブを切り替えると、同じマウスの処理が元のタブの TabItem
+    // (TabItem.OnMouseLeftButtonDown) まで届き、元のタブが選び直されて［詳細］に移らない。マウスの処理が終わってから切り替える
+    private void SwitchToDetailTabLater(Action show) =>
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () =>
+        {
+            tabMain.SelectedItem = tabDetail;
+            show();
+        });
 
     // dgMyComponents「名称」列
     private void ComponentTooltip_Opening(object sender, ToolTipEventArgs e)
@@ -4715,7 +4797,13 @@ public partial class MainWindow : Window
             _hangarService.SetCacheDir(WorkDir);
             _myComponents = _hangarService.LoadMyComponents();
             _myComponentRows = _myComponents
-                .Select(c => new MyComponentRow(c) { OnUsableChanged = MyComponentUsable_Changed })
+                .Select(c => new MyComponentRow(c)
+                {
+                    OnUsableChanged = MyComponentUsable_Changed,
+                    // 種別の欄の武器の名前 (装備の表と同じく、ダメージの種類で分ける) と性能の欄。gamedata_cache.db が無ければ空
+                    WeaponKindDisplay = _hangarEquip != null && c.ItemType == "WeaponGun" ? _hangarEquip.WeaponDamageKindLabel(c.ItemRecord) : "",
+                    PerfDisplay = _hangarEquip?.ComponentPerfLabel(c.ItemRecord, c.ItemType) ?? "",
+                })
                 .ToList();
             var selectedId = (dgMyComponents.SelectedItem as MyComponentRow)?.Id;
             dgMyComponents.ItemsSource = null;
@@ -4923,10 +5011,10 @@ public partial class MainWindow : Window
                 return;
             }
             var rows = _hangarService.GetShipLoadout(ship.ShipKey, ship.Record, _hangarEquip)
-                .Select(MakeLoadoutRow)
+                .Select(p => MakeLoadoutRow(p, ship.Record))
                 .ToList();
             dgLoadout.ItemsSource = rows;
-            txtLoadoutStatus.Text = $"{ship.Name}: ポート {rows.Count} / 設定済 {rows.Count(r => r.IsCustom)}";
+            txtLoadoutStatus.Text = $"{ship.Name}: 搭載枠 {rows.Count} / 設定済 {rows.Count(r => r.IsCustom)}";
         }
         catch (Exception ex)
         {
@@ -4934,9 +5022,13 @@ public partial class MainWindow : Window
         }
     }
 
-    // 候補 = 所持コンポーネントのうち同じ ItemType かつ Size <= PortSize (ポート size が 0 = 未収録のときはサイズで絞らない) かつ使用可。
+    // 候補 = 所持コンポーネントのうち HangarService.IsLoadoutCandidate に当たるもの (同じ ItemType かつ Size <= PortSize
+    // (ポート size が 0 = 未収録のときはサイズで絞らない) かつ使用可。タレットのポートは既定のタレットと同じ形で、そのサイズ以下のものだけ。
+    // 武器のハードポイントは武器とジンバルの両方 (ジンバルは他の船の既定の装備のものを除く)。本当の大きさ (最小〜最大) と
+    // 受け付ける種類が分かるときはそれでも絞る)。
+    // shipRecordName は船の ships.record_name。
     // 先頭は「(デフォルトに戻す)」
-    private LoadoutRow MakeLoadoutRow(ShipPortLoadout p)
+    private LoadoutRow MakeLoadoutRow(ShipPortLoadout p, string shipRecordName)
     {
         var row = new LoadoutRow
         {
@@ -4951,15 +5043,23 @@ public partial class MainWindow : Window
             CurrentItemName = p.CurrentItemName,
             ItemSize = p.ItemSize,
             ItemGrade = p.ItemGrade,
+            IsMount = p.IsMount,
+            IsMountNow = p.IsMountNow,
+            IsWeaponHardpoint = p.IsWeaponHardpoint,
+            IsGimbalChild = p.IsGimbalChild,
+            MinSize = p.MinSize,
+            MaxSize = p.MaxSize,
+            AcceptTypes = p.AcceptTypes,
+            PortDisplay = p.PortDisplay,
+            WeaponKindDisplay = p.WeaponKindDisplay,
+            MountKindDisplay = p.MountKindDisplay,
         };
 
         var defaultChoice = new LoadoutChoice { IsDefault = true, ItemRecord = "", Display = "(デフォルトに戻す)" };
         row.Candidates.Add(defaultChoice);
         foreach (var c in _myComponents)
         {
-            if (!c.Usable) continue;
-            if (!c.ItemType.Equals(p.ItemType, StringComparison.OrdinalIgnoreCase)) continue;
-            if (p.PortSize > 0 && c.Size > p.PortSize) continue;
+            if (_hangarEquip == null || !HangarService.IsLoadoutCandidate(p, c, _hangarEquip, shipRecordName)) continue;
             var parts = new List<string>();
             if (c.SizeDisplay.Length > 0) parts.Add(c.SizeDisplay);
             if (c.GradeDisplay.Length > 0) parts.Add(c.GradeDisplay);
@@ -5000,7 +5100,9 @@ public partial class MainWindow : Window
         try
         {
             _hangarService.SetCacheDir(WorkDir);
-            _hangarService.SetLoadoutItem(ship.ShipKey, row.PortKey, choice.IsDefault ? null : choice.ItemRecord);
+            // 武器のハードポイント・タレットでジンバル・タレットを外した・替えたときは、その下の付け替えも同じ保存で消す
+            _hangarService.SetLoadoutItem(ship.ShipKey, row.PortKey, choice.IsDefault ? null : choice.ItemRecord,
+                row.HasReplaceableChildren, row.EffectiveItemRecord, row.DefaultItemRecord);
             row.SelectedChoice = choice;
             Log($"[Equip] {ship.Name} {row.PortKey}: {(choice.IsDefault ? "デフォルトに戻す" : choice.Display)}");
             LoadUpgradeData();   // ツールチップを更新 (内部で RefreshLoadoutShipCombo → RefreshLoadoutGrid)
@@ -5256,6 +5358,16 @@ public partial class MainWindow : Window
 
     private void MyShip_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
+        // 船名の列 (1 列目) のダブルクリック: ［詳細］タブでその船を開く。ほかの列は下の編集と装備タブの切り替え
+        DependencyObject? d = e.OriginalSource as DependencyObject;
+        while (d != null && d is not DataGridCell)
+            d = d is System.Windows.Media.Visual or System.Windows.Media.Media3D.Visual3D ? System.Windows.Media.VisualTreeHelper.GetParent(d) : LogicalTreeHelper.GetParent(d);
+        if (d is DataGridCell cell && dgMyShips.Columns.IndexOf(cell.Column) == 0 && cell.DataContext is MyShipRow nameRow)
+        {
+            OpenMyShipDetail(nameRow);
+            return;
+        }
+
         if (dgMyShips.SelectedItem is not MyShipRow ship) return;
 
         SetAddShipName(ship.Name);
@@ -5274,6 +5386,30 @@ public partial class MainWindow : Window
             RefreshLoadoutGrid();
             txtMyShipStatus.Text += $" | 装備タブを「{ship.Name}」に切替";
         }
+    }
+
+    // 所持船を［詳細］タブで開く。品目 (ships.record_name) は装備タブと同じ決め方: 同じ船の保有船インスタンス (FindHangarRowForMyShip)、
+    // 無ければ所持船の項目 ("my|{id}") の船セレクタ項目の船名・メーカーで ResolveShipRecordName (どちらも無ければ所持船の船名と
+    // Ship Matrix のメーカー)。決まらなければ［詳細］の名前欄に船名を入れて検索した状態にする
+    private void OpenMyShipDetail(MyShipRow my)
+    {
+        string? record = null;
+        try
+        {
+            var hangarRow = FindHangarRowForMyShip(my);
+            var choice = hangarRow != null ? FindLoadoutShipChoice(hangarRow.InstanceKey) : FindLoadoutShipChoice($"my|{my.Id}");
+            record = choice?.Record;
+            if (record == null)
+            {
+                var name = choice?.Name ?? my.Name;
+                var mfr = choice != null ? choice.Manufacturer : _hangarService.ResolveShip(my.Name)?.ManufacturerName;
+                _hangarService.SetCacheDir(WorkDir);
+                record = _hangarService.ResolveShipRecordName(name, mfr);
+            }
+        }
+        catch (Exception ex) { Log($"[Ship] 詳細の品目を決められませんでした ({my.Name}): {ex.Message}"); record = null; }
+        if (record != null) DetailPanel.Request(record, my.Name);
+        else DetailPanel.RequestSearch(my.Name);
     }
 
     private void UpdateMyShip_Click(object sender, RoutedEventArgs e)
@@ -6308,9 +6444,13 @@ public class MyComponentRow : INotifyPropertyChanged
     public string ItemRecord => Model.ItemRecord;
     public string ItemName => Model.ItemName;
     public string ItemType => Model.ItemType;
-    public string TypeDisplay => Model.TypeDisplay;
+    // 種別の欄: 武器はダメージの種類で分けた名前 (装備の表と同じ。例 実弾武器)、分からなければ / 武器以外は Model.TypeDisplay
+    public string WeaponKindDisplay { get; set; } = "";
+    public string TypeDisplay => WeaponKindDisplay.Length > 0 ? WeaponKindDisplay : Model.TypeDisplay;
     public string SizeDisplay => Model.SizeDisplay;
     public string GradeDisplay => Model.GradeDisplay;
+    // 性能の欄 (種類ごとに 1 つの代表の値。EquipmentService.ComponentPerfLabel。record の基本値)
+    public string PerfDisplay { get; set; } = "";
     public int Quantity => Model.Quantity;
     public string Notes => Model.Notes;
     public string AddedAt => Model.AddedAt;

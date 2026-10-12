@@ -211,12 +211,20 @@ public static class IniMerger
         }
 
         // Strip ",P" suffix variants — game references keys without the parameter tag
-        int paramStripped = 0;
+        // 英語 ini に「キー,P」だけがあり素のキーが無いのに、素のキーが公式日本語 ini・DB にしか無いキーから入っていて
+        // 「キー,P」の値と食い違うもの (古い訳) は、その素のキーを外して「キー,P」の値で作り直す
+        int paramStripped = 0, staleBaseReplaced = 0;
         foreach (var key in merged.Keys.ToList())
         {
             if (key.EndsWith(",P", StringComparison.Ordinal))
             {
                 var baseKey = key[..^2];
+                if (english.ContainsKey(key) && !english.ContainsKey(baseKey)
+                    && merged.TryGetValue(baseKey, out var staleVal) && staleVal != merged[key])
+                {
+                    merged.Remove(baseKey);
+                    staleBaseReplaced++;
+                }
                 if (!merged.ContainsKey(baseKey))
                 {
                     merged[baseKey] = merged[key];
@@ -226,6 +234,17 @@ public static class IniMerger
         }
         if (paramStripped > 0)
             Console.WriteLine($"    ,P suffix stripped duplicates: {paramStripped}");
+        if (staleBaseReplaced > 0)
+            Console.WriteLine($"    Stale base keys replaced by ,P values: {staleBaseReplaced}");
+
+        // 品目の中の枠の名前 "itemPort_<枠の名前>" が英語 ini に無いものを、枠の表示名 (DisplayName) の値で足す。
+        // ",P" 複製のあと ("port_NameJDrive,P" から作った素のキーを引くため)、"@" 前置複製の前 (足したキーにも "@" 版を付けるため) に行う
+        if (!string.IsNullOrEmpty(gamedataDbPath))
+        {
+            var portNames = AddItemPortNames(english, merged, gamedataDbPath);
+            if (portNames > 0)
+                Console.WriteLine($"    itemPort_ keys added from port display names: {portNames}");
+        }
 
         // Add @-prefixed duplicates for keys the game may reference with @ prefix
         int atDupes = 0;
@@ -241,6 +260,74 @@ public static class IniMerger
         Console.WriteLine($"    @-prefixed duplicates added: {atDupes}");
 
         return merged;
+    }
+
+    // 品目の中の枠 (item_port_labels) の名前ごとに、"itemPort_<枠の名前>" が merged に無ければ (大文字小文字を区別せず)、
+    // 枠の表示名 (DisplayName の "@キー") の値を引いて足す。値は merged (訳・公式訳・英語のうち merged に入ったもの) → english の順に、
+    // キーそのものと "キー,P" を引く。引けない・空のもの (例 "@LOC_EMPTY") は足さない。
+    // 機体ロードアウトマネージャーは枠の名前を "@itemPort_<枠の名前>" で引き、キーが無いと生のキーが出る (利用者がゲームで確認)。
+    // 枠の名前の綴りが大文字小文字だけ違って複数あるときは、使っている品目の多い綴り 1 つで足す。
+    // 表示名が品目によって違うときは、使っている品目の多い順に試し、最初に値が引けたものを使う。足した件数を返す
+    internal static int AddItemPortNames(Dictionary<string, string> english, Dictionary<string, string> merged, string gamedataDbPath)
+    {
+        if (!File.Exists(gamedataDbPath)) return 0;
+        // 枠の名前 (小文字) → 綴りごとの品目数・表示名ごとの品目数
+        var spellings = new Dictionary<string, Dictionary<string, int>>(StringComparer.Ordinal);
+        var displays = new Dictionary<string, Dictionary<string, int>>(StringComparer.Ordinal);
+        try
+        {
+            using var db = new SqliteConnection($"Data Source={gamedataDbPath};Mode=ReadOnly");
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT port_name, COALESCE(display_name, ''), COUNT(*) FROM item_port_labels GROUP BY port_name, display_name";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var name = r.GetString(0);
+                var display = r.GetString(1);
+                var n = r.GetInt32(2);
+                var lower = name.ToLowerInvariant();
+                if (!spellings.TryGetValue(lower, out var sp)) spellings[lower] = sp = new Dictionary<string, int>(StringComparer.Ordinal);
+                sp[name] = sp.GetValueOrDefault(name) + n;
+                if (!displays.TryGetValue(lower, out var dp)) displays[lower] = dp = new Dictionary<string, int>(StringComparer.Ordinal);
+                dp[display] = dp.GetValueOrDefault(display) + n;
+            }
+        }
+        catch (SqliteException ex)
+        {
+            // インデックスの作り直し前の DB には item_port_labels が無い
+            Console.WriteLine($"    itemPort_ keys: item_port_labels を読めません ({ex.Message})");
+            return 0;
+        }
+
+        string? Lookup(string key)
+        {
+            foreach (var dict in new[] { merged, english })
+                foreach (var k in new[] { key, key + ",P" })
+                    if (dict.TryGetValue(k, out var v) && !string.IsNullOrWhiteSpace(v)) return v;
+            return null;
+        }
+
+        var existing = new HashSet<string>(merged.Keys, StringComparer.OrdinalIgnoreCase);
+        int added = 0;
+        foreach (var (lower, sp) in spellings)
+        {
+            var name = sp.OrderByDescending(x => x.Value).ThenBy(x => x.Key, StringComparer.Ordinal).First().Key;
+            var key = "itemPort_" + name;
+            if (existing.Contains(key) || existing.Contains(key + ",P")) continue;
+            string? value = null;
+            foreach (var (display, _) in displays[lower].OrderByDescending(x => x.Value).ThenBy(x => x.Key, StringComparer.Ordinal))
+            {
+                if (display.Length < 2 || display[0] != '@') continue;
+                value = Lookup(display[1..]);
+                if (value != null) break;
+            }
+            if (value == null) continue;
+            merged[key] = value;
+            existing.Add(key);
+            added++;
+        }
+        return added;
     }
 
     // ミッション名の印に付ける強調タグ。ゲーム自身がミッション説明で使っている

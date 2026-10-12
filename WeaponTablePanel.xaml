@@ -14,7 +14,7 @@
 
         <local:FilterSortGrid x:Name="table" Grid.Row="1"/>
 
-        <!-- 最大 DPS の注 (注1 / 注2 の印がある行を表に出しているときだけ) -->
+        <!-- バースト DPS の注 (注1 / 注2 の印がある行を表に出しているときだけ) -->
         <TextBlock x:Name="txtNotes" Grid.Row="2" Foreground="#666" Margin="0,6,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
     </Grid>
 </UserControl>

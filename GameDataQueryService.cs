@@ -251,6 +251,177 @@ public partial class GameDataQueryService : IDisposable
         return count > 0 ? $"=== ゲームデータ (DB): アイテム ===\n{sb}" : "";
     }
 
+    // 武器 1 件のダメージの種類のキー (Physical / Energy など)。［船舶戦闘］の「ダメージの種類」と同じ判定 (WeaponDamageTypes:
+    // 弾の直撃 + 爆発、弾が無ければビーム)。record 名は "EntityClassDefinition." の有無どちらでもよい。
+    // 色違いで性能の JSON を空にしてある品目は、色違いの表 (item_variants) の基本品目の JSON で判定する。読めなければ空
+    public List<string> WeaponDamageTypesOf(string recordName)
+    {
+        const string prefix = "EntityClassDefinition.";
+        var rn = (recordName ?? "").Trim();
+        if (rn.Length == 0) return new List<string>();
+        if (!rn.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) rn = prefix + rn;
+        (string Component, string Raw)? Read(string record)
+        {
+            try
+            {
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "SELECT COALESCE(component_json, ''), COALESCE(raw_json, ''), record_name FROM items WHERE record_name = @rn COLLATE NOCASE LIMIT 1";
+                cmd.Parameters.AddWithValue("@rn", record);
+                using var r = cmd.ExecuteReader();
+                if (!r.Read()) return null;
+                rn = r.GetString(2);
+                return (r.GetString(0), r.GetString(1));
+            }
+            catch { return null; }
+        }
+        var row = Read(rn);
+        if (row == null) return new List<string>();
+        if (row.Value.Component.Length == 0 && row.Value.Raw.Length == 0)
+        {
+            var (baseRecord, _) = VariantRow(rn);
+            if (baseRecord != null) row = Read(baseRecord) ?? row;
+        }
+        var (component, raw) = row.Value;
+        if (component.Length == 0 && raw.Length == 0) return new List<string>();
+        return WeaponDamageTypes(ReadWeaponAmmo(component, raw), component);
+    }
+
+    // 所持コンポーネントの表の「性能」の欄。種類 (itemType = my_components.item_type) ごとに 1 つの代表の値を「項目名 値」で返す。
+    // 値は record の基本値 (品質による増減は入れない)。record 名は "EntityClassDefinition." の有無どちらでもよい。
+    // 色違いで性能の JSON を空にしてある品目は、色違いの表 (item_variants) の基本品目の JSON で補う。値が無い・読めなければ ""
+    //   PowerPlant:      出力 = ItemResourceComponentParams の Online の ItemResourceDeltaGeneration の generation (Power) の量 (［比べる］の「出力 (パワー)」と同じ)
+    //   Cooler:          冷却 = ItemResourceComponentParams の Online の generation (Coolant) の量 (［比べる］の「冷却 (クーラント/秒)」と同じ)
+    //   Shield:          HP = SCItemShieldGeneratorParams.MaxShieldHealth (［比べる］の「シールド容量」と同じ)
+    //   QuantumDrive:    速度 = SCItemQuantumDriveParams.params.driveSpeed (m/秒) を km/秒 にしたもの (［比べる］の「速度 (km/秒)」と同じ)
+    //   Radar:           感度 = SCItemRadarComponentParams.signatureDetection の 1 つ目の sensitivity
+    //   WeaponGun:       Alpha = 1 回撃ったときの合計ダメージ = 1発のダメージ × 1回の弾数 (［船舶戦闘］の Damage/Alpha と同じ。WeaponAlpha)。
+    //                    1回の弾数が 2 以上なら「(1発 X × N発)」を付ける。弾が無くビームなら毎秒のダメージ (ビーム DPS)
+    //   MissileLauncher: 搭載 = SItemPortContainerComponentParams.Ports のうち Missile を受け付けるポートのサイズと数 (例 S2×4)
+    //   Missile / Bomb:  ダメージ = SCItemMissileParams / SCItemBombParams の explosionParams.damage の種類の合計
+    // タレット・ジンバル/マウントは EquipmentService.ComponentPerfLabel が item_ports から作る (ここでは "")
+    public string ComponentPerfOf(string recordName, string itemType)
+    {
+        const string prefix = "EntityClassDefinition.";
+        var rn = (recordName ?? "").Trim();
+        if (rn.Length == 0) return "";
+        if (!rn.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) rn = prefix + rn;
+        (string Component, string Raw)? Read(string record)
+        {
+            try
+            {
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "SELECT COALESCE(component_json, ''), COALESCE(raw_json, ''), record_name FROM items WHERE record_name = @rn COLLATE NOCASE LIMIT 1";
+                cmd.Parameters.AddWithValue("@rn", record);
+                using var r = cmd.ExecuteReader();
+                if (!r.Read()) return null;
+                return (r.GetString(0), r.GetString(1));
+            }
+            catch { return null; }
+        }
+        var row = Read(rn);
+        if (row == null) return "";
+        var (component, raw) = row.Value;
+        if (component.Length == 0 || raw.Length == 0)
+        {
+            // 色違いは基本品目の JSON で補う (空の方だけ)
+            var (baseRecord, _) = VariantRow(rn);
+            if (baseRecord != null && Read(baseRecord) is { } b)
+            {
+                if (component.Length == 0) component = b.Component;
+                if (raw.Length == 0) raw = b.Raw;
+            }
+        }
+        if (component.Length == 0 && raw.Length == 0) return "";
+
+        JsonDocument? doc = null;
+        try { if (raw.Length > 0) doc = JsonDocument.Parse(raw); } catch { }
+        try
+        {
+            var comps = new List<JsonElement>();
+            if (doc != null && doc.RootElement.TryGetProperty("_RecordValue_", out var rv)
+                && rv.TryGetProperty("Components", out var cs) && cs.ValueKind == JsonValueKind.Array)
+                comps.AddRange(cs.EnumerateArray().Where(c => c.ValueKind == JsonValueKind.Object));
+            JsonElement? Comp(string type) => comps.Cast<JsonElement?>().FirstOrDefault(c => c!.Value.TryGetProperty("_Type_", out var t) && t.GetString() == type);
+
+            switch (itemType)
+            {
+                case "PowerPlant":
+                    if (Comp("ItemResourceComponentParams") is { } pr && FindResourceAmount(pr, "ItemResourceDeltaGeneration", "Power") is { } pw)
+                        return $"出力 {pw:#,0.##}";
+                    break;
+                case "Cooler":
+                    if (Comp("ItemResourceComponentParams") is { } cr && FindResourceAmount(cr, null, "Coolant") is { } cl)
+                        return $"冷却 {cl:#,0.##}";
+                    break;
+                case "Shield":
+                    if (Comp("SCItemShieldGeneratorParams") is { } sh && TryNum(sh, "MaxShieldHealth", out var hp))
+                        return $"HP {hp:#,0}";
+                    break;
+                case "QuantumDrive":
+                    if (Comp("SCItemQuantumDriveParams") is { } qd && qd.TryGetProperty("params", out var qp) && TryNum(qp, "driveSpeed", out var sp))
+                        return $"速度 {sp / 1000:#,0} km/秒";
+                    break;
+                case "Radar":
+                    if (Comp("SCItemRadarComponentParams") is { } rd && rd.TryGetProperty("signatureDetection", out var sd)
+                        && sd.ValueKind == JsonValueKind.Array && sd.GetArrayLength() > 0 && TryNum(sd[0], "sensitivity", out var sens))
+                        return $"感度 {sens:0.##}";
+                    break;
+                case "WeaponGun":
+                {
+                    var ammo = ReadWeaponAmmo(component, raw);
+                    if (ammo != null && ammo.Total > 0)
+                    {
+                        var pellets = PrimaryPellets(ReadFireRates(component));
+                        return $"Alpha {WeaponAlpha(ammo.Total, pellets):#,0.##}" + (pellets >= 2 ? $" (1発 {ammo.Total:#,0.##} × {pellets}発)" : "");
+                    }
+                    var beams = ReadBeamDamage(component);
+                    if (beams.Count > 0) return $"ビーム DPS {beams.Max(x => x.Total):#,0.##}";
+                    break;
+                }
+                case "MissileLauncher":
+                    if (Comp("SItemPortContainerComponentParams") is { } pc && pc.TryGetProperty("Ports", out var ports) && ports.ValueKind == JsonValueKind.Array)
+                    {
+                        var sizes = new List<(int Min, int Max)>();
+                        foreach (var port in ports.EnumerateArray())
+                        {
+                            if (port.ValueKind != JsonValueKind.Object || !port.TryGetProperty("Types", out var types) || types.ValueKind != JsonValueKind.Array) continue;
+                            var missile = types.EnumerateArray().Any(t => t.ValueKind == JsonValueKind.Object && t.TryGetProperty("Type", out var tt)
+                                && string.Equals(tt.GetString(), "Missile", StringComparison.OrdinalIgnoreCase));
+                            if (!missile) continue;
+                            TryNum(port, "MinSize", out var mn);
+                            TryNum(port, "MaxSize", out var mx);
+                            sizes.Add(((int)mn, (int)mx));
+                        }
+                        if (sizes.Count > 0)
+                            return "搭載 " + string.Join(" + ", sizes.GroupBy(x => x).OrderByDescending(g => g.Key.Max)
+                                .Select(g => $"{PortSizeText(g.Key.Min, g.Key.Max)}×{g.Count()}"));
+                    }
+                    break;
+                case "Missile":
+                case "Bomb":
+                    if ((Comp("SCItemMissileParams") ?? Comp("SCItemBombParams")) is { } ms && ms.TryGetProperty("explosionParams", out var ep)
+                        && ep.TryGetProperty("damage", out var dmg) && dmg.ValueKind == JsonValueKind.Object)
+                    {
+                        double total = 0;
+                        foreach (var d in dmg.EnumerateObject())
+                            if (d.Value.ValueKind == JsonValueKind.Number && d.Value.TryGetDouble(out var v)) total += v;
+                        if (total > 0) return $"ダメージ {total:#,0.##}";
+                    }
+                    break;
+            }
+        }
+        catch { }
+        finally { doc?.Dispose(); }
+        return "";
+    }
+
+    // Damage/Alpha = 1 回撃ったときの合計ダメージ = 1発のダメージ × 1回の弾数 (散弾などで弾数が 2 以上のときだけ 1発と違う)
+    internal static double WeaponAlpha(double perShot, int pellets) => perShot * Math.Max(1, pellets);
+
+    // ポートのサイズの表記。最小と最大が同じ (または最小が無い) なら「S3」、違えば「S2-3」
+    public static string PortSizeText(int min, int max) =>
+        max <= 0 ? "" : min > 0 && min != max ? $"S{min}-{max}" : $"S{max}";
+
     // 色違い (と同じ名前の複製) の基本品目の component_json。基本品目が無い・空なら ""
     private string BaseComponentJson(string recordName, LocReader loc)
     {
@@ -1166,6 +1337,7 @@ public partial class GameDataQueryService : IDisposable
         public string? Weight;                       // アーマーの重さ (Light / Medium / Heavy)。無ければ null
         public int Size;
         public string ComponentJson = "", RawJson = "";
+        public string? ShipWeaponKindKey;            // 船の武器の種類のキー (ShipWeaponKindKeyOf。読み込みのときに決める。未設定なら null)
         public List<string> Uuids = new();
         public Dictionary<string, string> Desc = new(StringComparer.OrdinalIgnoreCase);
         public CompareEntry? Base;
@@ -1177,14 +1349,29 @@ public partial class GameDataQueryService : IDisposable
         public bool Buyable;
         public string? PriceUuid;
         public List<CompareEntry> Dups = new();      // 同じ名前・同じ種類でまとめた複製 (代表以外)
-        public bool DpsNoteCharge, DpsNoteMixed;     // 最大 DPS の注 (注1 チャージ式 / 注2 段ごとに連射速度が違う連続動作)
+        public bool DpsNoteCharge, DpsNoteMixed;     // バースト DPS の注 (注1 チャージ式 / 注2 段ごとに連射速度が違う連続動作)
         public string NameSuffix = "";               // 同じ名前で別の品目になったものの区別 (例 " (S7・レーザーキャノン)")
+        public List<ShopListing> Shops = new();      // 店で買える売り場 (MinPrice を決めたデータの購入の行。色違いのほうが安ければその色違いのもの)
+        public string ShopsNote = "";                // 売り場の一覧の注 (例 色違いの X の売り場)
         public string DisplayName => Name + NameSuffix;
     }
 
     // 種類全体を比べる表を作る (チャットの compare_items)。
     // 戻り値の UsedPriceUuids は、DB に保存済みの売り場・価格 (item_shop_prices) を使った品目の uuid (裏での取り直しの対象)。
     // uexItemPrices: UEX の items_prices (英語名 → 売り場と価格)。cstone の保存データが無い品目の店の販売データに使う。
+    // 船の武器が弾を使うかの指定 (ammo) を 使う / 使わない にする。読めない値は null。
+    // 使う / 弾を使う / yes / true → 使う、使わない / 弾を使わない / no / false → 使わない (前後の空白と英字の大小は無視)
+    public static string? NormalizeShipWeaponAmmo(string? text) => (text ?? "").Trim().ToLowerInvariant() switch
+    {
+        "使う" or "弾を使う" or "yes" or "true" => "使う",
+        "使わない" or "弾を使わない" or "no" or "false" => "使わない",
+        _ => null,
+    };
+
+    // ammo が読めないときの案内の文 (ChatService と CompareItems で共用)
+    public static string ShipWeaponAmmoUnknownText(string? text) =>
+        $"弾を使うか (ammo) '{(text ?? "").Trim()}' がわかりません。使う / 使わない のどちらかを指定してください (ダメージの種類で絞る引数ではありません)。";
+
     // shipScuLookup: 船の英語名 → 貨物積載量 (SCU)。UEX の船データ (TradeService のキャッシュ) から引く
     // weight: アーマーの重さ (Light / Medium / Heavy)。アーマーの種類で指定があればその重さだけを表にし、無ければ重さごとの要約を返す
     public (string Text, List<string> UsedPriceUuids) CompareItems(CompareCategory cat, int? sizeFilter,
@@ -1264,13 +1451,21 @@ public partial class GameDataQueryService : IDisposable
     {
         var roots = LoadCompareRoots(cat, sizeFilter, loc, out var excluded, out var noEntries);
         var sizeLabel = sizeFilter.HasValue ? $" S{sizeFilter.Value}" : "";
-        // 船の武器の弾薬/エネルギーで絞る (ゲームデータで判定できないものは外れる)
-        if (ammo != null && cat.Kind == CompareKind.ShipWeapon && !noEntries)
+        // 船の武器を弾を使うか (ammo: 使う / 使わない) で絞る (ゲームデータで判定できないものは外れる)。
+        // 値は NormalizeShipWeaponAmmo で 使う / 使わない にし、読めない値は案内の文を返す
+        if (!string.IsNullOrWhiteSpace(ammo) && cat.Kind == CompareKind.ShipWeapon)
         {
-            roots = roots.Where(e => e.Cells.TryGetValue("弾薬/エネルギー", out var a) && a == ammo).ToList();
-            sizeLabel += " " + ammo;
+            var normalized = NormalizeShipWeaponAmmo(ammo);
+            if (normalized == null) return (ShipWeaponAmmoUnknownText(ammo), used);
+            ammo = normalized;
+        }
+        else ammo = null;
+        if (ammo != null && !noEntries)
+        {
+            roots = roots.Where(e => e.Cells.TryGetValue("弾", out var a) && a == ammo).ToList();
+            sizeLabel += $" 弾を{ammo}";
             if (roots.Count == 0)
-                return ($"=== 比較: {cat.Label}{sizeLabel} ===\nデータ無し: {ammo}の武器がありません。", used);
+                return ($"=== 比較: {cat.Label}{sizeLabel} ===\nデータ無し: 弾を{ammo}武器がありません。", used);
         }
         if (noEntries)
             return ($"=== 比較: {cat.Label}{sizeLabel} ===\nデータ無し: ゲームデータ (item_index) に該当する品目がありません。" +
@@ -1379,8 +1574,10 @@ public partial class GameDataQueryService : IDisposable
 
     // 比べるツールと武器の表 (WeaponTablePanel) で共用する前半: item_index から品目を読み、同じ名前の複製を 1 つにまとめ、
     // 基本品目と色違いに分けて (GroupVariants の種類)、基本品目の性能を入れる (FillItemStats)。
-    // excluded は名前が未設定で外した数、noEntries は品目が 1 つも無かったか
-    private List<CompareEntry> LoadCompareRoots(CompareCategory cat, int? sizeFilter, LocReader loc, out int excluded, out bool noEntries)
+    // excluded は名前が未設定で外した数、noEntries は品目が 1 つも無かったか。
+    // rootFilter を渡すと、それに当たる基本品目だけを返す (性能を入れる前に絞るので、要らない品目の性能は読まない)
+    private List<CompareEntry> LoadCompareRoots(CompareCategory cat, int? sizeFilter, LocReader loc, out int excluded, out bool noEntries,
+        Func<CompareEntry, bool>? rootFilter = null)
     {
         using var cmd = _conn.CreateCommand();
         var where = BuildFilterWhere(cmd, cat.Filters);
@@ -1412,8 +1609,14 @@ public partial class GameDataQueryService : IDisposable
                 var indexName = r.IsDBNull(2) ? "" : r.GetString(2);
                 var itemsName = r.IsDBNull(5) ? "" : r.GetString(5);
                 var name = ResolveItemNameEn(itemsName, indexName, loc);
-                // 船の武器の種類は表示名でも決める (名前が未設定なら record 名だけで決め、その種類のときだけ除外に数える)
-                if (cat.ShipWeaponKind != null && ShipWeaponKindOf(shortName, name) != cat.ShipWeaponKind) continue;
+                // 船の武器の種類は表示名でも決める。種類での絞り込みは、同じ名前をまとめた後の種類 (名前のキーの持ち主の種類) で行う
+                // (名前が未設定の品目だけはここで絞り、その種類のときだけ除外に数える)
+                string? shipKindKey = null;
+                if (cat.Kind == CompareKind.ShipWeapon)
+                {
+                    shipKindKey = ShipWeaponKindKeyOf(shortName, name, r.IsDBNull(7) ? "" : r.GetString(7), r.IsDBNull(8) ? "" : r.GetString(8), loc);
+                    if (name == null && cat.ShipWeaponKind != null && shipKindKey != cat.ShipWeaponKind) continue;
+                }
                 if (name == null) { excluded++; continue; }
                 var e = new CompareEntry
                 {
@@ -1427,39 +1630,34 @@ public partial class GameDataQueryService : IDisposable
                     RawJson = r.IsDBNull(8) ? "" : r.GetString(8),
                     SubType = r.IsDBNull(9) ? "" : r.GetString(9),
                     ManufacturerRef = r.IsDBNull(10) ? "" : r.GetString(10),
+                    ShipWeaponKindKey = shipKindKey,
                 };
                 e.Uuids.Add(e.Uuid);
                 all.Add(e);
             }
         }
 
-        // 同じ名前・同じ種類の品目 (AI 用・テスト用の複製など) は 1 つにまとめる (代表の選び方は PickRepresentative)
+        // 同じ名前の品目 (AI 用・砲塔用・テスト用など内部用の複製) は 1 つにまとめる。サイズや種類が違っても同じ武器として 1 行にする
+        // (ゲームに同じ名前の別の武器は無い)。代表の選び方: 武器は PickWeaponRepresentative (実在の record を選ぶ)、ほかは PickRepresentative
         var sold = LoadSoldUuids();
+        var isWeapon = cat.Kind is CompareKind.PersonalWeapon or CompareKind.ShipWeapon;
+        var shipUse = isWeapon ? LoadShipPortUse() : null;
         var entries = new List<CompareEntry>();
-        // 武器 (個人武器・船の武器) は、同じ名前でもサイズか種類が違うもの (別の武器) を別の品目として残し、名前の後ろにサイズと種類の区別を付ける。
-        // サイズと種類が同じ複製 (AI 用・砲塔用など) は今までどおり 1 つにまとめる (代表の選び方も今までどおり PickRepresentative)。
-        // 武器以外は今までどおり同じ名前を 1 つにまとめる
-        var splitSameName = cat.Kind is CompareKind.PersonalWeapon or CompareKind.ShipWeapon;
         foreach (var g in all.GroupBy(e => (e.ItemType, e.Name.ToLowerInvariant())))
         {
-            var members = g.ToList();
-            if (members.Count == 1 || !splitSameName) { entries.Add(MergeSameName(members, sold)); continue; }
-            // 種類が分からない (空) 品目がある同じサイズの組は、種類では分けない (種類が違うとは言えないため。Z1 の前と同じくまとめる)
-            var kinds = members.ToDictionary(m => m, m => SameNameKindLabel(cat.Kind, m));
-            var unknownKindSizes = members.Where(m => kinds[m].Length == 0).Select(m => m.Size).ToHashSet();
-            var parts = members.GroupBy(m => (m.Size, Kind: unknownKindSizes.Contains(m.Size) ? "" : kinds[m])).ToList();
-            if (parts.Count == 1) { entries.Add(MergeSameName(members, sold)); continue; }
-            foreach (var p in parts)
+            var rep = shipUse != null ? MergeSameName(g, PickWeaponRepresentative(g.ToList(), sold, shipUse)) : MergeSameName(g, sold);
+            // 船の武器の種類は、名前のローカライズキー (@item_Name<record 名>) の持ち主の record のものにする。値 (1 発・DPS など) は代表のまま
+            // (例 M9A Cannon: 代表は BEHR_JavelinBallisticCannon_S7 だが、名前のキーの持ち主は BEHR_LaserCannon_S7 なのでレーザーキャノン)。
+            // 代表が持ち主か、持ち主が群に無ければ代表の種類のまま
+            if (cat.Kind == CompareKind.ShipWeapon && rep.Dups.Count > 0 && !OwnsNameKey(rep))
             {
-                var merged = MergeSameName(p, sold);
-                var bits = new List<string>();
-                if (p.Key.Size > 0 && parts.Select(x => x.Key.Size).Distinct().Count() > 1) bits.Add($"S{p.Key.Size}");
-                if (p.Key.Kind.Length > 0 && parts.Select(x => x.Key.Kind).Distinct().Count() > 1) bits.Add(p.Key.Kind);
-                if (bits.Count == 0 && p.Key.Size > 0) bits.Add($"S{p.Key.Size}");
-                merged.NameSuffix = bits.Count > 0 ? $" ({string.Join("・", bits)})" : "";
-                entries.Add(merged);
+                var owner = rep.Dups.FirstOrDefault(OwnsNameKey);
+                if (owner != null) rep.ShipWeaponKindKey = owner.ShipWeaponKindKey;
             }
+            entries.Add(rep);
         }
+        // 船の武器の種類で絞る (まとめた後の種類で決める。種類は名前のキーの持ち主のもの。上を参照)
+        if (cat.ShipWeaponKind != null) entries = entries.Where(e => e.ShipWeaponKindKey == cat.ShipWeaponKind).ToList();
 
         noEntries = entries.Count == 0;
         if (noEntries) return new List<CompareEntry>();
@@ -1485,8 +1683,19 @@ public partial class GameDataQueryService : IDisposable
             foreach (var e in entries.Where(e => e.Base != null)) e.Base!.Variants.Add(e);
         }
         else roots = entries;
+        if (rootFilter != null) roots = roots.Where(rootFilter).ToList();
 
-        foreach (var e in roots) FillItemStats(cat.Kind, e, loc);
+        // 「ミサイル・魚雷」のロケットポッド (WeaponGun/Rocket) は船の武器と同じ計算 (1発のダメージ・連射速度・DPS・弾速)。［船舶戦闘］の表と同じ値
+        // (説明文の「性能 (説明文)」の欄 (例 Rockets: 6xS1) も今までどおり付ける)
+        foreach (var e in roots)
+        {
+            if (cat.Kind == CompareKind.Generic && string.Equals(e.ItemType, "WeaponGun", StringComparison.OrdinalIgnoreCase))
+            {
+                FillItemStats(CompareKind.ShipWeapon, e, loc);
+                AddDescCell(e);
+            }
+            else FillItemStats(cat.Kind, e, loc);
+        }
         return roots;
     }
 
@@ -1510,6 +1719,8 @@ public partial class GameDataQueryService : IDisposable
                 e.PriceText = cheapest.PriceText + $" [最安は色違いの {cheapest.Name}]";
                 e.MinPrice = cheapest.MinPrice;
                 e.Buyable = true;
+                e.Shops = cheapest.Shops;
+                e.ShopsNote = $"色違いの {cheapest.Name} の売り場";
             }
         }
     }
@@ -1548,12 +1759,14 @@ public partial class GameDataQueryService : IDisposable
 
     // 医療ガンにはダメージ系の値が無い (A13: 薬剤の注入量だけを出す) ので、混ざる表では「データ無し」ではなく「-」にする欄
     private static readonly HashSet<string> HealingBlankColumns = new(StringComparer.Ordinal)
-        { "1発のダメージ", "ビームのダメージ (毎秒)", "DPS (最大 / 平均)", "弾速", TtkColumn };
+        { "1発のダメージ", "ビームのダメージ (毎秒)", "DPS (バースト / 平均)", "弾速", TtkColumn };
 
-    // 表の 1 欄の文字。値が無ければ「データ無し」(医療ガンのダメージ系の欄は「-」)
+    // 表の 1 欄の文字。値が無ければ「データ無し」(医療ガンのダメージ系の欄、ミサイル・魚雷の DPS の欄、ロケットポッドの追尾の欄は「-」。種類としてその値を持たないため)
     private static string CellText(CompareEntry e, string col) =>
         e.Cells.TryGetValue(col, out var v) && !string.IsNullOrWhiteSpace(v) ? v
         : IsHealingDevice(e) && HealingBlankColumns.Contains(col) ? "-"
+        : col == "DPS (バースト / 平均)" && string.Equals(e.ItemType, "Missile", StringComparison.OrdinalIgnoreCase) ? "-"
+        : col == "追尾" && string.Equals(e.ItemType, "WeaponGun", StringComparison.OrdinalIgnoreCase) ? "-"
         : "データ無し";
 
     // 「店で買えるものの中で、主な性能ごとに最も高いもの」の欄 (個人武器はヘビー相手に胴で最も少ない発数を足す)
@@ -1973,12 +2186,63 @@ public partial class GameDataQueryService : IDisposable
              .First();
 
     // 同じ名前の群を代表 1 件にまとめる (ほかの品目の uuid を代表の Uuids に足す)
-    private static CompareEntry MergeSameName(IEnumerable<CompareEntry> group, HashSet<string> sold)
+    private static CompareEntry MergeSameName(IEnumerable<CompareEntry> group, HashSet<string> sold) =>
+        MergeSameName(group, PickRepresentative(group.ToList(), sold));
+
+    private static CompareEntry MergeSameName(IEnumerable<CompareEntry> group, CompareEntry rep)
     {
-        var list = group.ToList();
-        var rep = PickRepresentative(list, sold);
-        foreach (var other in list.Where(x => !ReferenceEquals(x, rep))) { rep.Uuids.Add(other.Uuid); rep.Dups.Add(other); }
+        foreach (var other in group.Where(x => !ReferenceEquals(x, rep))) { rep.Uuids.Add(other.Uuid); rep.Dups.Add(other); }
         return rep;
+    }
+
+    // 同じ名前の武器の代表 (ゲームに実在する record)。次の順に選ぶ:
+    //   1. 内部用の record (IsInternalRecord) でない
+    //   2. 店で買える (sold)
+    //   3. 船の既定の装備 (ship_ports.equipped_item) に使われている船の数が多い
+    //      (例 M9A Cannon: BEHR_JavelinBallisticCannon_S7 は Javelin など 7 隻、BEHR_LaserCannon_S7 は 2 隻、S8・S9・MassDriver_S12 は 0 隻)
+    //   4. 名前のローカライズキー (AttachDef.Localization.Name の @item_Name<record 名>) がその record 自身のもの
+    //      (例 GVSR Repeater: どれも既定の装備に無いが、名前のキーは BEHR_LaserRepeater_VNG_S2 のもの)
+    //   5. 前の選び方 (record 名の短い順、同じなら文字の順)
+    private static CompareEntry PickWeaponRepresentative(List<CompareEntry> group, HashSet<string> sold, IReadOnlyDictionary<string, int> shipUse) =>
+        group.OrderBy(e => IsInternalRecord(e.Short) ? 1 : 0)
+             .ThenBy(e => sold.Contains(e.Uuid) ? 0 : 1)
+             .ThenByDescending(e => shipUse.TryGetValue(e.Short, out var n) ? n : 0)
+             .ThenBy(e => OwnsNameKey(e) ? 0 : 1)
+             .ThenBy(e => e.Record.Length)
+             .ThenBy(e => e.Record, StringComparer.Ordinal)
+             .First();
+
+    // 名前のローカライズキーが品目自身の record 名のものか (@item_Name<record 名>。大小は無視)
+    private static bool OwnsNameKey(CompareEntry e)
+    {
+        if (e.RawJson.Length == 0) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(e.RawJson);
+            if (!doc.RootElement.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("Components", out var cs) || cs.ValueKind != JsonValueKind.Array) return false;
+            foreach (var c in cs.EnumerateArray())
+                if (c.ValueKind == JsonValueKind.Object && c.TryGetProperty("_Type_", out var t) && t.GetString() == "SAttachableComponentParams"
+                    && c.TryGetProperty("AttachDef", out var ad) && ad.TryGetProperty("Localization", out var lz)
+                    && lz.TryGetProperty("Name", out var nk) && nk.ValueKind == JsonValueKind.String)
+                    return string.Equals(nk.GetString(), "@item_Name" + e.Short, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (JsonException) { }
+        return false;
+    }
+
+    // 船の既定の装備 (ship_ports.equipped_item) の record 名 → それを使う船の数。表が無ければ空
+    private Dictionary<string, int> LoadShipPortUse()
+    {
+        var dict = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT equipped_item, COUNT(DISTINCT ship_record_name) FROM ship_ports WHERE equipped_item IS NOT NULL AND equipped_item <> '' GROUP BY equipped_item";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) dict[r.GetString(0)] = r.GetInt32(1);
+        }
+        catch (SqliteException) { }
+        return dict;
     }
 
     // 名前の最後の語を除いた名前 (1 語しか無ければ null)
@@ -2159,7 +2423,7 @@ public partial class GameDataQueryService : IDisposable
         var sb = new StringBuilder();
         sb.AppendLine(isWeapon ? "【武器の性能 (ゲームデータ)】" : "【性能 (ゲームデータ)】");
         var keys = isWeapon
-            ? new[] { "サイズ", "連射速度 (発/分)", "1回の弾数", "装弾数", "有効射程 (説明文)", "弾速", "1発のダメージ", "ビームのダメージ (毎秒)", "最大 DPS", "平均 DPS (推定)", "薬剤の注入量 (mSCU/秒)" }
+            ? new[] { "サイズ", "連射速度 (発/分)", "1回の弾数", "装弾数", "有効射程 (説明文)", "弾速", "1発のダメージ", "ビームのダメージ (毎秒)", "バースト DPS", "平均 DPS (推定)", "薬剤の注入量 (mSCU/秒)" }
             : ItemColumns(kind, new List<CompareEntry> { e }).Prepend("サイズ").Distinct().ToArray();
         int lines = 0;
         foreach (var key in keys)
@@ -2170,7 +2434,7 @@ public partial class GameDataQueryService : IDisposable
                 sb.AppendLine($"  {key}: {v}");
                 lines++;
             }
-            else if (isWeapon && !healing && key is "弾速" or "1発のダメージ" or "最大 DPS" or "平均 DPS (推定)") sb.AppendLine($"  {key}: データ無し");
+            else if (isWeapon && !healing && key is "弾速" or "1発のダメージ" or "バースト DPS" or "平均 DPS (推定)") sb.AppendLine($"  {key}: データ無し");
         }
         if (isWeapon && !healing)
         {
@@ -2217,6 +2481,8 @@ public partial class GameDataQueryService : IDisposable
     private const string TtkColumn = "ヘビー相手 胴 / 頭 (ダウンまで)";
     private const string TtkHeavyTorsoKey = "ヘビー胴ダウン発数";
     private const string TtkHeavyHeadKey = "ヘビー頭ダウン発数";
+    // アーマー (TtkArmors のラベル) ごとの胴 / 頭でダウンまでの発数の Nums のキー。ヘビーは TtkHeavyTorsoKey / TtkHeavyHeadKey と同じ
+    private static string TtkDownKey(string armorLabel, bool head) => $"{armorLabel}{(head ? "頭" : "胴")}ダウン発数";
     private const string TtkColumnNote = "「ヘビー相手 胴 / 頭 (ダウンまで)」= ヘビーアーマーの相手を胴 / 頭に当て続けてダウンさせるまでの発数 (体力に効く物理・エネルギー・熱・生化学だけで数える。距離による減衰は含まない。表は lookup で武器名を聞くと返します)。";
 
     private TtkParams? LoadTtkParams()
@@ -2276,15 +2542,29 @@ public partial class GameDataQueryService : IDisposable
     }
 
     // 比べるツールの欄: ヘビー相手の胴 / 頭でダウンまでの発数 (射撃モードで違えばモードごと)
-    private static void FillTtkCell(CompareEntry e, AmmoInfo ammo, List<FireModeInfo> rates, TtkParams p)
+    // 射撃モードごとに、そのモードが撃つ弾 (第1 / 第2の弾。ModeAmmo) のダメージで数える。第2の弾が読めないモードは除く
+    private static void FillTtkCell(CompareEntry e, AmmoInfo ammo, AmmoInfo? ammo2, List<FireModeInfo> rates, TtkParams p)
     {
         var dmg = AmmoDamageByType(ammo);
         if (HealthDamageTypes.All(t => !dmg.ContainsKey(t))) return;
+        var dmg2 = ammo2 != null ? AmmoDamageByType(ammo2) : null;
+        rates = rates.Where(m => !m.Secondary || dmg2 != null).ToList();
+        Dictionary<string, double> D(FireModeInfo m) => m.Secondary ? dmg2! : dmg;
+        // 武器の表 (［個人戦闘］) のライト・ミディアム相手の値: ヘビーと同じ計算 (射撃モードのうち最も少ない発数)。比べるツールの出力には使わない
+        foreach (var (label, macro) in TtkArmors)
+        {
+            if (macro == "HeavyArmor" || !p.Armor.TryGetValue(macro, out var armor)) continue;
+            var shots = rates.Select(m => (Torso: TtkShots(p.Health, TtkPerShot(D(m), armor, p.Parts["torso"], m)),
+                Head: TtkShots(p.Health, TtkPerShot(D(m), armor, p.Parts["head"], m)))).ToList();
+            if (shots.Count == 0 || shots.Any(x => x.Torso <= 0)) continue;
+            e.Nums[TtkDownKey(label, false)] = shots.Min(x => x.Torso);
+            e.Nums[TtkDownKey(label, true)] = shots.Min(x => x.Head);
+        }
         p.Armor.TryGetValue("HeavyArmor", out var heavy);
         if (heavy == null) return;
         var perMode = rates.Select(m => (m.Mode,
-            Torso: TtkShots(p.Health, TtkPerShot(dmg, heavy, p.Parts["torso"], m)),
-            Head: TtkShots(p.Health, TtkPerShot(dmg, heavy, p.Parts["head"], m)))).ToList();
+            Torso: TtkShots(p.Health, TtkPerShot(D(m), heavy, p.Parts["torso"], m)),
+            Head: TtkShots(p.Health, TtkPerShot(D(m), heavy, p.Parts["head"], m)))).ToList();
         if (perMode.Count == 0 || perMode.Any(x => x.Torso <= 0)) return;
         var distinct = perMode.Select(x => (x.Torso, x.Head)).Distinct().Count();
         e.Cells[TtkColumn] = distinct == 1
@@ -2302,6 +2582,10 @@ public partial class GameDataQueryService : IDisposable
         var p = LoadTtkParams();
         var ammo = ReadWeaponAmmo(componentJson, rawJson);
         var rates = ReadFireRates(componentJson);
+        // 第2の弾を撃つモードは、その弾のダメージで数える (第2の弾が読めないモードは出さない)
+        var ammo2 = rates.Any(x => x.Secondary) ? ReadWeaponAmmo(componentJson, rawJson, secondary: true) : null;
+        rates = rates.Where(m => !m.Secondary || ammo2 != null).ToList();
+        var dmg2 = ammo2 != null ? AmmoDamageByType(ammo2) : null;
         if (ReadBeamDamage(componentJson).Count > 0 && ammo == null) return "";
         sb.AppendLine("【何発で倒せるか (ゲームデータから計算)】");
         if (p == null) { sb.AppendLine("  データ無し: 体力・部位・アーマーの倍率がありません。設定タブの［インデックス構築］を実行すると入ります。"); return sb.ToString(); }
@@ -2328,13 +2612,15 @@ public partial class GameDataQueryService : IDisposable
         sb.AppendLine("  アーマーの倍率 (" + p.ArmorSource + "): " + string.Join(" / ", TtkArmors.Select(a => $"{a.Label} ({a.Macro}) {ArmorText(a.Macro)}")));
         foreach (var m in rates)
         {
-            var extra = (m.ChargeDamageMult != 1 ? $"、最大チャージ ×{m.ChargeDamageMult:0.##}" : "") + (m.Pellets > 1 ? $"、1 回 {m.Pellets} 発" : "");
+            var md = m.Secondary ? dmg2! : dmg;
+            var extra = (m.ChargeDamageMult != 1 ? $"、最大チャージ ×{m.ChargeDamageMult:0.##}" : "") + (m.Pellets > 1 ? $"、1 回 {m.Pellets} 発" : "")
+                + (m.Secondary ? $"、別の弾 1 発 {string.Join(" / ", md.Select(kv => $"{Label(kv.Key)} {kv.Value:0.##}"))}" : "");
             sb.AppendLine($"  [{FireModeJa(m.Mode)} ({m.Rate:0.##} 発/分{extra})] 各欄 = ダウンまでの発数・その弾を撃つ時刻 / 死亡までの発数");
             sb.AppendLine("  | アーマー | " + string.Join(" | ", TtkParts.Select(x => x.Label)) + " |");
             sb.AppendLine("  |---|" + string.Concat(Enumerable.Repeat("---|", TtkParts.Length)));
             string Cell(Dictionary<string, double>? armor, double part)
             {
-                var per = TtkPerShot(dmg, armor, part, m);
+                var per = TtkPerShot(md, armor, part, m);
                 var down = TtkShots(p.Health, per);
                 var dead = TtkShots(p.Health + p.Downed, per);
                 return down <= 0 ? "データ無し" : $"{down} 発 {TtkTime(down, m):0.00} 秒 / {dead} 発";
@@ -2625,7 +2911,8 @@ public partial class GameDataQueryService : IDisposable
                         e.Cells["連射速度 (発/分)"] = string.Join(" / ", rates.Select(x => $"{FireModeJa(x.Mode)} {x.Rate:0.##}"));
                         e.Nums["連射速度"] = rates.Max(x => x.Rate);
                     }
-                    var maxPellets = rates.Count > 0 ? rates.Max(x => x.Pellets) : 1;
+                    // 1回の弾数は、1発のダメージの弾 (第1の弾) を撃つモードのもの (PrimaryPellets。第2の弾のモードの弾数を第1の弾のダメージに掛けない)
+                    var maxPellets = PrimaryPellets(rates);
                     if (rates.Count > 0) e.Cells["1回の弾数"] = maxPellets.ToString();
                     if (kind == CompareKind.PersonalWeapon)
                     {
@@ -2635,6 +2922,8 @@ public partial class GameDataQueryService : IDisposable
                     }
                     // 弾のデータ (ammo_params): 弾速・1発のダメージ。DPS は射撃モードごとの 1 周期 (FireCycle) から計算する
                     var ammo = ReadWeaponAmmo(e.ComponentJson, e.RawJson);
+                    // 第2の弾を撃つモードがあれば、その弾 (DPS・ダウンまでの発数はモードごとに撃つ弾のダメージで計算する)
+                    var ammo2 = rates.Any(x => x.Secondary) ? ReadWeaponAmmo(e.ComponentJson, e.RawJson, secondary: true) : null;
                     if (ammo != null)
                     {
                         var chargeSpeed = rates.Select(x => x.ChargeSpeedMult).Where(m => m != 1).DefaultIfEmpty(1).Max();
@@ -2648,57 +2937,61 @@ public partial class GameDataQueryService : IDisposable
                         {
                             var chargeDamage = rates.Select(x => x.ChargeDamageMult).Where(m => m != 1).DefaultIfEmpty(1).Max();
                             e.Cells["1発のダメージ"] = FormatAmmoDamage(ammo) +
-                                (chargeDamage != 1 ? $"、最大チャージで ×{chargeDamage:0.##} = {alpha * chargeDamage:#,0.##}" : "");
+                                (chargeDamage != 1 ? $"、最大チャージで ×{chargeDamage:0.##} = {alpha * chargeDamage:#,0.##}" : "") +
+                                (ammo2 != null ? "。" + string.Join("、", rates.Where(x => x.Secondary).Select(x => $"{FireModeJa(x.Mode)} は別の弾 {FormatAmmoDamage(ammo2)}" + (x.Pellets > 1 ? $" × {x.Pellets}発" : ""))) : "");
                             e.Nums["1発のダメージ"] = alpha;
                             if (rates.Count > 0)
                             {
-                                // 最大 DPS = 撃っている間の値 (待ち時間・チャージ倍率を入れない。cstone と同じ式)、
+                                // バースト DPS = 撃っている間の値 (待ち時間・チャージ倍率を入れない。cstone と同じ式)、
                                 // 平均 DPS = 待ち時間・最大チャージの倍率を入れた推定 (WeaponDps)
-                                var dps = rates.Select(x => (x.Mode, Max: alpha * x.Pellets * x.Rate / 60, Avg: WeaponDps(alpha, x), NoCycle: x.CycleSeconds <= 0, Mark: DpsMark(x))).ToList();
-                                e.Cells["DPS (最大 / 平均)"] = string.Join("、", dps.Select(x =>
+                                // モードごとに、そのモードが撃つ弾のダメージで計算する (第2の弾が読めないモードは除く)
+                                var dps = rates.Where(x => ModeAmmo(x, ammo, ammo2) is { Total: > 0 })
+                                    .Select(x => (x.Mode, A: ModeAmmo(x, ammo, ammo2)!.Total, R: x))
+                                    .Select(x => (x.Mode, Max: x.A * x.R.Pellets * x.R.Rate / 60, Avg: WeaponDps(x.A, x.R), NoCycle: x.R.CycleSeconds <= 0, Mark: DpsMark(x.R))).ToList();
+                                e.Cells["DPS (バースト / 平均)"] = string.Join("、", dps.Select(x =>
                                     $"{FireModeJa(x.Mode)} {x.Max:#,0.##} / {x.Avg:#,0.##}" + (x.NoCycle ? " (平均は待ち時間を含まない)" : "") + x.Mark));
-                                e.Cells["最大 DPS"] = string.Join(" / ", dps.Select(x => $"{FireModeJa(x.Mode)} {x.Max:#,0.##}" + x.Mark));
+                                e.Cells["バースト DPS"] = string.Join(" / ", dps.Select(x => $"{FireModeJa(x.Mode)} {x.Max:#,0.##}" + x.Mark));
                                 e.Cells["平均 DPS (推定)"] = string.Join(" / ", dps.Select(x => $"{FireModeJa(x.Mode)} {x.Avg:#,0.##}" + (x.NoCycle ? " (待ち時間を含まない)" : "") + x.Mark));
                                 e.DpsNoteCharge = rates.Any(x => x.Charged);
                                 e.DpsNoteMixed = rates.Any(x => x.MixedRates);
-                                e.Nums["最大DPS"] = dps.Max(x => x.Max);
+                                e.Nums["バーストDPS"] = dps.Max(x => x.Max);
                                 e.Nums["平均DPS"] = dps.Max(x => x.Avg);
                             }
                         }
                     }
                     // ビーム (SWeaponActionFireBeamParams) は弾ではなく damagePerSecond (毎秒のダメージ) を持つ。
-                    // 最大 DPS = damagePerSecond の種類の合計。平均 DPS は待ち (熱など) を求めないので最大と同じ値で「待ち時間を含まない」
+                    // バースト DPS = damagePerSecond の種類の合計。平均 DPS は待ち (熱など) を求めないので最大と同じ値で「待ち時間を含まない」
                     var beams = ReadBeamDamage(e.ComponentJson);
                     if (beams.Count > 0)
                     {
                         var beamText = string.Join("、", beams.Select(b => $"{FireModeJa(b.Mode)} (ビーム) {b.Total:#,0.##} / {b.Total:#,0.##} (平均は待ち時間を含まない)"));
-                        e.Cells["DPS (最大 / 平均)"] = e.Cells.TryGetValue("DPS (最大 / 平均)", out var prev) ? prev + "、" + beamText : beamText;
+                        e.Cells["DPS (バースト / 平均)"] = e.Cells.TryGetValue("DPS (バースト / 平均)", out var prev) ? prev + "、" + beamText : beamText;
                         var beamMax = string.Join(" / ", beams.Select(b => $"{FireModeJa(b.Mode)} (ビーム) {b.Total:#,0.##}"));
-                        e.Cells["最大 DPS"] = e.Cells.TryGetValue("最大 DPS", out var pm) ? pm + " / " + beamMax : beamMax;
+                        e.Cells["バースト DPS"] = e.Cells.TryGetValue("バースト DPS", out var pm) ? pm + " / " + beamMax : beamMax;
                         var beamAvg = string.Join(" / ", beams.Select(b => $"{FireModeJa(b.Mode)} (ビーム) {b.Total:#,0.##} (待ち時間を含まない)"));
                         e.Cells["平均 DPS (推定)"] = e.Cells.TryGetValue("平均 DPS (推定)", out var pa) ? pa + " / " + beamAvg : beamAvg;
                         e.Cells["ビームのダメージ (毎秒)"] = string.Join("、", beams.Select(b => $"{FireModeJa(b.Mode)}: {FormatDamageParts(b.Damage)}"));
                         var bm = beams.Max(b => b.Total);
-                        e.Nums["最大DPS"] = Math.Max(e.Nums.TryGetValue("最大DPS", out var m1) ? m1 : 0, bm);
+                        e.Nums["バーストDPS"] = Math.Max(e.Nums.TryGetValue("バーストDPS", out var m1) ? m1 : 0, bm);
                         e.Nums["平均DPS"] = Math.Max(e.Nums.TryGetValue("平均DPS", out var m2) ? m2 : 0, bm);
                     }
                     // 医療ガン (SWeaponActionFireHealingBeamParams): 回復量 (HP) はゲームデータに無く、薬剤を注入する速さ (mSCUPerSec) だけがある。
                     // ダメージとは混ぜず、別の欄に出す
-                    // 種類 (個人武器は比べるツールの種類、船の武器は ShipWeaponKindOf)、弾薬/エネルギー (船)、ダメージの種類 (個人)
-                    FillWeaponKindCells(kind, e, ammo, Comp("SAmmoContainerComponentParams"));
+                    // 種類 (個人武器は比べるツールの種類、船の武器は ShipWeaponKindOf)、弾 (船)、ダメージの種類 (個人・船)
+                    FillWeaponKindCells(kind, e, ammo, Comp("SAmmoContainerComponentParams"), loc);
                     var heals = ReadHealingBeams(e.ComponentJson);
                     if (heals.Count > 0)
                     {
                         e.Cells["薬剤の注入量 (mSCU/秒)"] = string.Join(" / ", heals.Select(h => $"{FireModeJa(h.Mode)} {h.MscuPerSec:0.##}" + (h.MaxDistance > 0 ? $" (届く距離 {h.MaxDistance:0.#} m)" : "")));
                         // 医療ガンは弾のデータ (1発のダメージ・DPS・弾速) を出さない (薬剤の注入量だけ)
-                        foreach (var k in new[] { "1発のダメージ", "DPS (最大 / 平均)", "最大 DPS", "平均 DPS (推定)", "弾速" }) e.Cells.Remove(k);
-                        foreach (var k in new[] { "1発のダメージ", "最大DPS", "平均DPS", "弾速" }) e.Nums.Remove(k);
+                        foreach (var k in new[] { "1発のダメージ", "DPS (バースト / 平均)", "バースト DPS", "平均 DPS (推定)", "弾速" }) e.Cells.Remove(k);
+                        foreach (var k in new[] { "1発のダメージ", "バーストDPS", "平均DPS", "弾速" }) e.Nums.Remove(k);
                     }
                     else if (kind == CompareKind.PersonalWeapon && ammo != null && rates.Count > 0)
                     {
                         // 何発で倒せるか (ヘビー相手の胴 / 頭、ダウンまで)
                         var ttk = LoadTtkParams();
-                        if (ttk != null) FillTtkCell(e, ammo, rates, ttk);
+                        if (ttk != null) FillTtkCell(e, ammo, ammo2, rates, ttk);
                     }
                     break;
                 }
@@ -2729,14 +3022,19 @@ public partial class GameDataQueryService : IDisposable
                         if (qd.TryGetProperty("params", out var p))
                         {
                             if (TryNum(p, "driveSpeed", out var sp)) { e.Cells["速度 (km/秒)"] = (sp / 1000).ToString("N0"); e.Nums["速度"] = sp / 1000; }
-                            if (TryNum(p, "spoolUpTime", out var su)) e.Cells["スプール時間 (秒)"] = su.ToString("0.##");
-                            if (TryNum(p, "cooldownTime", out var cd)) e.Cells["クールダウン (秒)"] = cd.ToString("0.##");
+                            if (TryNum(p, "spoolUpTime", out var su)) { e.Cells["スプール時間 (秒)"] = su.ToString("0.##"); e.Nums["スプール"] = su; }
+                            if (TryNum(p, "cooldownTime", out var cd)) { e.Cells["クールダウン (秒)"] = cd.ToString("0.##"); e.Nums["クールダウン"] = cd; }
                         }
                         if (TryNum(qd, "quantumFuelRequirement", out var fu)) e.Cells["燃料消費"] = fu.ToString("0.#####");
                     }
                     break;
                 case CompareKind.Radar:
                     AddGradeClass(e);
+                    // 感度 (SCItemRadarComponentParams.signatureDetection の 1 つ目の sensitivity。所持コンポーネントの性能の欄と同じ値)。
+                    // ［船舶装備］の表の列に使う (比べるツールの列には出さない)
+                    if (Comp("SCItemRadarComponentParams") is { } rd && rd.TryGetProperty("signatureDetection", out var sd)
+                        && sd.ValueKind == JsonValueKind.Array && sd.GetArrayLength() > 0 && TryNum(sd[0], "sensitivity", out var sens))
+                        e.Nums["感度"] = sens;
                     break;
                 case CompareKind.Armor:
                 {
@@ -2774,15 +3072,80 @@ public partial class GameDataQueryService : IDisposable
                 }
                 default:
                 {
-                    var pairs = e.Desc.Where(kv => !kv.Key.Equals("Manufacturer", StringComparison.OrdinalIgnoreCase)
-                                                   && !kv.Key.Equals("Item Type", StringComparison.OrdinalIgnoreCase))
-                                      .Select(kv => $"{kv.Key}: {kv.Value}").ToList();
-                    if (pairs.Count > 0) e.Cells["性能 (説明文)"] = string.Join("; ", pairs);
+                    AddDescCell(e);
+                    if (string.Equals(e.ItemType, "Missile", StringComparison.OrdinalIgnoreCase)) FillMissileCells(e);
                     break;
                 }
             }
         }
         finally { raw?.Dispose(); }
+    }
+
+    // ミサイル・魚雷・ロケット 1 件の値 (raw_json の SCItemMissileParams)。無ければ null。
+    //   Damage = explosionParams.damage の 0 でない種類 (DamagePhysical → Physical)、Speed = GCSParams.linearSpeed、Tracking = targetingParams.trackingSignalType
+    private sealed record MissileStats(Dictionary<string, double> Damage, double Speed, string Tracking)
+    {
+        public double Total => Damage.Values.Sum();
+    }
+
+    private static MissileStats? ReadMissileStats(string rawJson)
+    {
+        if (string.IsNullOrEmpty(rawJson)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(rawJson);
+            if (!doc.RootElement.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("Components", out var cs) || cs.ValueKind != JsonValueKind.Array) return null;
+            foreach (var c in cs.EnumerateArray())
+            {
+                if (c.ValueKind != JsonValueKind.Object || !c.TryGetProperty("_Type_", out var t) || t.GetString() != "SCItemMissileParams") continue;
+                var dmg = new Dictionary<string, double>();
+                if (c.TryGetProperty("explosionParams", out var ep) && ep.ValueKind == JsonValueKind.Object
+                    && ep.TryGetProperty("damage", out var d) && d.ValueKind == JsonValueKind.Object)
+                    foreach (var p in d.EnumerateObject())
+                        if (p.Name.StartsWith("Damage", StringComparison.Ordinal) && p.Value.ValueKind == JsonValueKind.Number && p.Value.TryGetDouble(out var v) && v != 0)
+                            dmg[p.Name["Damage".Length..]] = v;
+                var speed = c.TryGetProperty("GCSParams", out var g) && TryNum(g, "linearSpeed", out var sp) ? sp : 0;
+                var tracking = c.TryGetProperty("targetingParams", out var tp) && tp.ValueKind == JsonValueKind.Object
+                    && tp.TryGetProperty("trackingSignalType", out var ts) && ts.ValueKind == JsonValueKind.String ? ts.GetString() ?? "" : "";
+                return new MissileStats(dmg, speed, tracking);
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    // 追尾する信号の名前。表に無い値はそのまま
+    internal static string TrackingSignalLabel(string signal) => signal switch
+    {
+        "Infrared" => "赤外線 (IR)",
+        "Electromagnetic" => "電磁 (EM)",
+        "CrossSection" => "断面積 (CS)",
+        _ => signal,
+    };
+
+    // 比べるツール・［船舶戦闘］のミサイルの欄: 1発のダメージ (種類の合計。1 回に 1 発なので Damage/Alpha も同じ)、ダメージの種類、弾速、追尾。
+    // 「性能 (説明文)」の欄: 説明文の先頭の「項目: 値」のうちメーカー・種類以外 (それ以外の種類と、ミサイル・魚雷のロケットポッドで使う)
+    private static void AddDescCell(CompareEntry e)
+    {
+        var pairs = e.Desc.Where(kv => !kv.Key.Equals("Manufacturer", StringComparison.OrdinalIgnoreCase)
+                                       && !kv.Key.Equals("Item Type", StringComparison.OrdinalIgnoreCase))
+                          .Select(kv => $"{kv.Key}: {kv.Value}").ToList();
+        if (pairs.Count > 0) e.Cells["性能 (説明文)"] = string.Join("; ", pairs);
+    }
+
+    private void FillMissileCells(CompareEntry e)
+    {
+        var m = ReadMissileStats(e.RawJson);
+        if (m == null) return;
+        if (m.Damage.Count > 0)
+        {
+            var parts = string.Join(" / ", DamageTypeLabels.Where(t => m.Damage.ContainsKey(t.Key)).Select(t => $"{t.Label} {m.Damage[t.Key]:#,0.##}"));
+            e.Cells["1発のダメージ"] = $"{m.Total:#,0.##} ({parts})";
+            e.Nums["1発のダメージ"] = m.Total;
+            e.Cells["ダメージの種類"] = string.Join("・", DamageTypeLabels.Where(t => m.Damage.ContainsKey(t.Key)).Select(t => t.Label));
+        }
+        if (m.Speed > 0) { e.Cells["弾速"] = $"{m.Speed:0.#} m/s"; e.Nums["弾速"] = m.Speed; }
+        if (m.Tracking.Length > 0) e.Cells["追尾"] = TrackingSignalLabel(m.Tracking);
     }
 
     private static void AddGradeClass(CompareEntry e)
@@ -2827,8 +3190,21 @@ public partial class GameDataQueryService : IDisposable
     // ChargeDamageMult / ChargeSpeedMult は最大チャージ時のダメージ・弾速の倍率 (チャージ式でなければ 1)
     // LeadSeconds は最初の弾を撃つまでの時間 (チャージ式のチャージ時間。それ以外は 0)
     // Charged はチャージ式 (SWeaponActionFireChargedParams) を含むか、MixedRates は連続動作 (SWeaponActionSequenceParams) の段ごとに fireRate が違うか
+    // Secondary はそのモードが第2の弾 (launchParams.projectileType = Secondary。マガジンの secondaryAmmoParamsRecord の弾) を撃つか
+    // (例 Arlington Rifle: Slug は 1 発の 44mm 弾 (Primary)、もう 1 つのモードは 8 発の散弾 (Secondary))
     private sealed record FireModeInfo(string Mode, double Rate, int Pellets, int CycleShots, double CycleSeconds, double ChargeDamageMult, double ChargeSpeedMult, double LeadSeconds = 0,
-        bool Charged = false, bool MixedRates = false);
+        bool Charged = false, bool MixedRates = false, bool Secondary = false);
+
+    // そのモードが撃つ弾 (Secondary なら第2の弾、それ以外は第1の弾)。無ければ null
+    private static AmmoInfo? ModeAmmo(FireModeInfo m, AmmoInfo? primary, AmmoInfo? secondary) => m.Secondary ? secondary : primary;
+
+    // 表の「1回の弾数」: 第1の弾 (1発のダメージの弾) を撃つモードのうち最も多い弾数。第1の弾を撃つモードが無ければ全モードのうち最も多い数。モードが無ければ 1
+    private static int PrimaryPellets(List<FireModeInfo> rates)
+    {
+        var prim = rates.Where(x => !x.Secondary).ToList();
+        var src = prim.Count > 0 ? prim : rates;
+        return src.Count > 0 ? src.Max(x => x.Pellets) : 1;
+    }
 
     // DPS (毎秒のダメージ)。1 周期が求まれば
     //   1発のダメージ × チャージ倍率 × 1回の弾数 × 1 周期に撃つ弾の数 ÷ 1 周期の秒数、
@@ -2911,7 +3287,10 @@ public partial class GameDataQueryService : IDisposable
 
     // 武器の射撃モードごとの連射速度 (発/分)・1 回に出る弾の数・1 周期。連射速度は component_json の fireActions の fireRate
     // (チャージ式・連続動作は中の weaponAction / sequenceEntries / weaponActions の fireRate)。
-    // 弾の数は fireRate と同じ場所の launchParams.pelletCount (散弾銃は 2 以上。無ければ 1)
+    // 弾の数は fireRate と同じ場所の launchParams.pelletCount (散弾銃は 2 以上。無ければ 1)。
+    // 条件で切り替わる動作 (SWeaponActionDynamicConditionParams) は、通常時の動作 (defaultWeaponAction。モードの名前は外側の name) と、
+    // 条件のときの動作 (conditionalWeaponActions の各 weaponAction。名前は中の name、無ければ「外側の name (条件)」) を別のモードとして数える
+    // (例 Prism Laser Shotgun: 通常時は 8 発の散弾、熱が 0.4 以上のときは Slug)
     private static List<FireModeInfo> ReadFireRates(string componentJson)
     {
         var list = new List<FireModeInfo>();
@@ -2920,20 +3299,31 @@ public partial class GameDataQueryService : IDisposable
         {
             using var doc = JsonDocument.Parse(componentJson);
             if (!doc.RootElement.TryGetProperty("fireActions", out var fas) || fas.ValueKind != JsonValueKind.Array) return list;
+            void Add(JsonElement act, string mode)
+            {
+                int pellets = 1;
+                bool secondary = false;
+                var rate = FindFireRate(act, 0, ref pellets, ref secondary);
+                if (rate <= 0) return;
+                var cycle = FireCycle(act);
+                var seqRates = new List<double>();
+                CollectSequenceRates(act, 0, seqRates);
+                list.Add(new FireModeInfo(mode, rate, Math.Max(1, pellets),
+                    cycle?.Shots ?? 0, cycle?.Seconds ?? 0, cycle?.DamageMult ?? 1, cycle?.SpeedMult ?? 1, cycle?.Lead ?? 0,
+                    ContainsActionType(act, "SWeaponActionFireChargedParams", 0), seqRates.Distinct().Count() > 1, secondary));
+            }
+            static string? NameOf(JsonElement el) =>
+                el.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String && (n.GetString() ?? "").Length > 0 ? n.GetString() : null;
             foreach (var fa in fas.EnumerateArray())
             {
                 if (fa.ValueKind != JsonValueKind.Object) continue;
-                var mode = fa.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String && (n.GetString() ?? "").Length > 0
-                    ? n.GetString()! : (fa.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "");
-                int pellets = 1;
-                var rate = FindFireRate(fa, 0, ref pellets);
-                if (rate <= 0) continue;
-                var cycle = FireCycle(fa);
-                var seqRates = new List<double>();
-                CollectSequenceRates(fa, 0, seqRates);
-                list.Add(new FireModeInfo(mode, rate, Math.Max(1, pellets),
-                    cycle?.Shots ?? 0, cycle?.Seconds ?? 0, cycle?.DamageMult ?? 1, cycle?.SpeedMult ?? 1, cycle?.Lead ?? 0,
-                    ContainsActionType(fa, "SWeaponActionFireChargedParams", 0), seqRates.Distinct().Count() > 1));
+                var mode = NameOf(fa) ?? (fa.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "");
+                Add(fa, mode);
+                if (fa.TryGetProperty("_Type_", out var ft) && ft.GetString() == "SWeaponActionDynamicConditionParams"
+                    && fa.TryGetProperty("conditionalWeaponActions", out var cwas) && cwas.ValueKind == JsonValueKind.Array)
+                    foreach (var cwa in cwas.EnumerateArray())
+                        if (cwa.ValueKind == JsonValueKind.Object && cwa.TryGetProperty("weaponAction", out var wa) && wa.ValueKind == JsonValueKind.Object)
+                            Add(wa, NameOf(wa) ?? $"{mode} (条件)");
             }
         }
         catch { }
@@ -2969,7 +3359,8 @@ public partial class GameDataQueryService : IDisposable
                 {
                     if (en.ValueKind != JsonValueKind.Object || !en.TryGetProperty("weaponAction", out var wa)) continue;
                     int p = 1;
-                    var r = FindFireRate(wa, 0, ref p);
+                    bool sec = false;
+                    var r = FindFireRate(wa, 0, ref p, ref sec);
                     if (r > 0) rates.Add(r);
                 }
                 return;
@@ -2981,9 +3372,9 @@ public partial class GameDataQueryService : IDisposable
             foreach (var c in el.EnumerateArray()) CollectSequenceRates(c, depth + 1, rates);
     }
 
-    // 最大 DPS の注 (チャージ式・段ごとに連射速度が違う連続動作)。表・lookup では DPS の値の後ろに「(注1)」「(注2)」を付け、説明を一行出す
-    private const string DpsNote1 = "注1 = チャージ式: 最大 DPS にチャージの倍率を入れていない (平均 DPS は入れているので、最大より大きくなることがある)。";
-    private const string DpsNote2 = "注2 = 段ごとに連射速度が変わる連続動作: 最大 DPS と連射速度は最初の段の値 (平均 DPS は全部の段を含む)。";
+    // バースト DPS の注 (チャージ式・段ごとに連射速度が違う連続動作)。表・lookup では DPS の値の後ろに「(注1)」「(注2)」を付け、説明を一行出す
+    private const string DpsNote1 = "注1 = チャージ式: バースト DPS にチャージの倍率を入れていない (平均 DPS は入れているので、バーストより大きくなることがある)。";
+    private const string DpsNote2 = "注2 = 段ごとに連射速度が変わる連続動作: バースト DPS と連射速度は最初の段の値 (平均 DPS は全部の段を含む)。";
     private static string DpsMark(FireModeInfo m) => (m.Charged ? " (注1)" : "") + (m.MixedRates ? " (注2)" : "");
 
     private static IEnumerable<string> DpsNotes(IEnumerable<CompareEntry> shown)
@@ -2993,21 +3384,27 @@ public partial class GameDataQueryService : IDisposable
         if (list.Any(e => e.DpsNoteMixed)) yield return "※ " + DpsNote2;
     }
 
-    private static double FindFireRate(JsonElement el, int depth, ref int pellets)
+    // fireRate と同じ場所の launchParams から、弾数 (pelletCount) と第2の弾を撃つか (projectileType が Secondary) も読む
+    private static double FindFireRate(JsonElement el, int depth, ref int pellets, ref bool secondary)
     {
         if (depth > 6) return 0;
         if (el.ValueKind == JsonValueKind.Object)
         {
             if (TryNum(el, "fireRate", out var fr) && fr > 0)
             {
-                if (el.TryGetProperty("launchParams", out var lp) && TryNum(lp, "pelletCount", out var pc) && pc >= 1) pellets = (int)pc;
+                if (el.TryGetProperty("launchParams", out var lp) && lp.ValueKind == JsonValueKind.Object)
+                {
+                    if (TryNum(lp, "pelletCount", out var pc) && pc >= 1) pellets = (int)pc;
+                    if (lp.TryGetProperty("projectileType", out var pt) && pt.ValueKind == JsonValueKind.String
+                        && string.Equals(pt.GetString(), "Secondary", StringComparison.OrdinalIgnoreCase)) secondary = true;
+                }
                 return fr;
             }
             // 条件で切り替わる動作 (SWeaponActionDynamicConditionParams。例: Zenith の Parallax) は通常時の defaultWeaponAction を見る
             foreach (var key in new[] { "weaponAction", "defaultWeaponAction", "sequenceEntries", "weaponActions" })
                 if (el.TryGetProperty(key, out var child))
                 {
-                    var r = FindFireRate(child, depth + 1, ref pellets);
+                    var r = FindFireRate(child, depth + 1, ref pellets, ref secondary);
                     if (r > 0) return r;
                 }
         }
@@ -3015,7 +3412,7 @@ public partial class GameDataQueryService : IDisposable
         {
             foreach (var c in el.EnumerateArray())
             {
-                var r = FindFireRate(c, depth + 1, ref pellets);
+                var r = FindFireRate(c, depth + 1, ref pellets, ref secondary);
                 if (r > 0) return r;
             }
         }
@@ -3111,24 +3508,26 @@ public partial class GameDataQueryService : IDisposable
         catch { return null; }
     }
 
-    // raw_json の SAmmoContainerComponentParams の弾の参照 (ammoParamsRecord) と最大装弾数 (maxAmmoCount)
-    private static (string? AmmoParamsRecord, int MaxAmmo) ReadAmmoContainer(string rawJson)
+    // raw_json の SAmmoContainerComponentParams の弾の参照 (ammoParamsRecord)、最大装弾数 (maxAmmoCount)、
+    // 第2の弾の参照 (secondaryAmmoParamsRecord。射撃モードの launchParams.projectileType が Secondary のときに撃つ弾。無ければ null)
+    private static (string? AmmoParamsRecord, int MaxAmmo, string? SecondaryAmmoParamsRecord) ReadAmmoContainer(string rawJson)
     {
         try
         {
             using var doc = JsonDocument.Parse(rawJson);
             if (!doc.RootElement.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("Components", out var cs) || cs.ValueKind != JsonValueKind.Array)
-                return (null, 0);
+                return (null, 0, null);
             foreach (var c in cs.EnumerateArray())
             {
                 if (c.ValueKind != JsonValueKind.Object || !c.TryGetProperty("_Type_", out var t) || t.GetString() != "SAmmoContainerComponentParams") continue;
                 var rec = c.TryGetProperty("ammoParamsRecord", out var ap) && ap.ValueKind == JsonValueKind.String ? ap.GetString() : null;
                 var max = TryNum(c, "maxAmmoCount", out var m) ? (int)m : 0;
-                return (rec, max);
+                var sec = c.TryGetProperty("secondaryAmmoParamsRecord", out var sp) && sp.ValueKind == JsonValueKind.String && (sp.GetString() ?? "").Length > 0 ? sp.GetString() : null;
+                return (rec, max, sec);
             }
         }
         catch { }
-        return (null, 0);
+        return (null, 0, null);
     }
 
     // 弾 1 種類のデータ (ammo_params の 1 行)。Direct は直撃、Explosion は爆発のダメージ (種類 → 値)
@@ -3142,12 +3541,14 @@ public partial class GameDataQueryService : IDisposable
     //   船の武器: 武器自身の raw_json の SAmmoContainerComponentParams.ammoParamsRecord
     // 参照はファイルの場所 (…/ammoparams/fps/xxx.json、…/ammoparams/vehicle/ammoparams.xxx.json) なので、ファイル名から
     // 先頭の "ammoparams." と拡張子を除いたものを AmmoParams のレコード名として ammo_params を引く。無ければ null
-    private AmmoInfo? ReadWeaponAmmo(string componentJson, string rawJson)
+    // secondary = true なら第2の弾 (secondaryAmmoParamsRecord。たどり方は同じ)
+    private AmmoInfo? ReadWeaponAmmo(string componentJson, string rawJson, bool secondary = false)
     {
         string? ammoPath = null;
+        string? Pick(string raw) { var c = ReadAmmoContainer(raw); return secondary ? c.SecondaryAmmoParamsRecord : c.AmmoParamsRecord; }
         var magRaw = LoadMagazineRaw(componentJson);
-        if (magRaw != null) ammoPath = ReadAmmoContainer(magRaw).AmmoParamsRecord;
-        if (string.IsNullOrEmpty(ammoPath) && !string.IsNullOrEmpty(rawJson)) ammoPath = ReadAmmoContainer(rawJson).AmmoParamsRecord;
+        if (magRaw != null) ammoPath = Pick(magRaw);
+        if (string.IsNullOrEmpty(ammoPath) && !string.IsNullOrEmpty(rawJson)) ammoPath = Pick(rawJson);
         if (string.IsNullOrEmpty(ammoPath)) return null;
         var stem = Path.GetFileNameWithoutExtension(ammoPath);
         if (stem.StartsWith("ammoparams.", StringComparison.OrdinalIgnoreCase)) stem = stem["ammoparams.".Length..];
@@ -3196,10 +3597,11 @@ public partial class GameDataQueryService : IDisposable
     // 1発のダメージ・DPS の計算方法 (比較の表と lookup に付ける注記)
     private const string WeaponDamageNote =
         "1発のダメージ = 弾 1 個の直撃 (+爆発) ダメージの種類 (物理・エネルギー・ディストーション・熱・生化学・スタン) の合計。" +
-        "最大 DPS = 撃っている間の値 = 1発のダメージ × 1回の弾数 × 連射速度 ÷ 60 (待ち時間・チャージの倍率は入れない。cstone と同じ式)。" +
+        "バースト DPS = 撃っている間の値 = 1発のダメージ × 1回の弾数 × 連射速度 ÷ 60 (待ち時間・チャージの倍率は入れない。cstone と同じ式)。" +
         "平均 DPS = ゲームデータから計算した推定 = 1発のダメージ × 最大チャージの倍率 × 1回の弾数 × 1 周期に撃つ弾の数 ÷ 1 周期の秒数 " +
         "(1 周期にはチャージ時間・バースト後の待ち・連続動作の段ごとの待ちを含む。最大までチャージして撃ち続ける前提。周期を求められないモードは待ち時間を含まない)。" +
-        "どちらも射撃モードごとで、距離による減衰は含まない。";
+        "どちらも射撃モードごとで、距離による減衰は含まない。" +
+        "別の弾を撃つ射撃モード (例 Arlington Rifle の散弾) は、そのモードの DPS をその弾のダメージで計算する (1回の弾数の欄は 1発のダメージの弾を撃つモードのもの)。";
 
     // 説明文の先頭の「項目: 値」の行を読む。空行で区切られた複数のまとまりも読み (例: 武器は Class の後に空行を挟んで Effective Range)、
     // 「項目: 値」でない行 (本文) に来たら終える。改行は翻訳 DB では "\n" の 2 文字で入っている
@@ -3228,19 +3630,22 @@ public partial class GameDataQueryService : IDisposable
     {
         List<string> cols = kind switch
         {
-            CompareKind.PersonalWeapon => ["種類", "サイズ", "連射速度 (発/分)", "装弾数", "1回の弾数", "有効射程 (説明文)", "ダメージの種類", "1発のダメージ", "ビームのダメージ (毎秒)", "DPS (最大 / 平均)", TtkColumn, "弾速", "薬剤の注入量 (mSCU/秒)"],
-            CompareKind.ShipWeapon => ["種類", "弾薬/エネルギー", "サイズ", "連射速度 (発/分)", "1回の弾数", "弾速", "1発のダメージ", "DPS (最大 / 平均)"],
+            CompareKind.PersonalWeapon => ["種類", "サイズ", "連射速度 (発/分)", "装弾数", "1回の弾数", "有効射程 (説明文)", "ダメージの種類", "1発のダメージ", "ビームのダメージ (毎秒)", "DPS (バースト / 平均)", TtkColumn, "弾速", "薬剤の注入量 (mSCU/秒)"],
+            CompareKind.ShipWeapon => ["種類", "ダメージの種類", "弾", "サイズ", "連射速度 (発/分)", "1回の弾数", "弾速", "1発のダメージ", "DPS (バースト / 平均)"],
             CompareKind.Shield => ["サイズ", "グレード", "クラス", "シールド容量", "回復 (毎秒)", "回復開始までの時間 (被弾後 / ダウン後)"],
             CompareKind.PowerPlant => ["サイズ", "グレード", "クラス", "出力 (パワー)"],
             CompareKind.Cooler => ["サイズ", "グレード", "クラス", "冷却 (クーラント/秒)"],
             CompareKind.QuantumDrive => ["サイズ", "グレード", "クラス", "速度 (km/秒)", "スプール時間 (秒)", "クールダウン (秒)", "燃料消費"],
             CompareKind.Radar => ["サイズ", "グレード", "クラス"],
             CompareKind.Armor => ["ダメージ軽減 (説明文)", "耐えられる温度", "放射線防護", "所持容量 (説明文)", "対応 (バックパック/コア)"],
-            _ => ["サイズ", "性能 (説明文)"],
+            // それ以外の種類。ミサイル・魚雷は FillMissileCells の値 (ダメージの種類・1発のダメージ・弾速・追尾)、
+            // ロケットポッドは船の武器の値 (DPS も) を出す (値のある品目があるときだけ)
+            _ => ["サイズ", "ダメージの種類", "1発のダメージ", "DPS (バースト / 平均)", "弾速", "追尾", "性能 (説明文)"],
         };
-        // 1発のダメージ・DPS・弾速は、弾のデータが無い品目は「データ無し」と出すため常に残す (医療ガンだけの表では残さない)。
+        // 武器 (個人・船) の表では、1発のダメージ・DPS・弾速は、弾のデータが無い品目は「データ無し」と出すため常に残す (医療ガンだけの表では残さない)。
         // それ以外は値の無い列を落とす
-        var always = roots.Count > 0 && roots.All(IsHealingDevice) ? new HashSet<string>() : new HashSet<string> { "1発のダメージ", "DPS (最大 / 平均)", "弾速" };
+        var always = kind is not (CompareKind.PersonalWeapon or CompareKind.ShipWeapon) || (roots.Count > 0 && roots.All(IsHealingDevice))
+            ? new HashSet<string>() : new HashSet<string> { "1発のダメージ", "DPS (バースト / 平均)", "弾速" };
         // 1回の弾数は、2 以上 (散弾) の品目があるときだけ出す
         return cols.Where(c => always.Contains(c)
                                || (c == "1回の弾数" ? roots.Any(e => e.Cells.TryGetValue(c, out var p) && p != "1") : roots.Any(e => e.Cells.ContainsKey(c))))
@@ -3250,8 +3655,8 @@ public partial class GameDataQueryService : IDisposable
     // 「店で買えるものの中で最も高いもの」に使う性能 (Nums のキー, 表示名, 単位)
     private static List<(string Key, string Label, string Unit)> BestStats(CompareKind kind) => kind switch
     {
-        CompareKind.PersonalWeapon => [("最大DPS", "最大 DPS (撃っている間)", ""), ("平均DPS", "平均 DPS (待ち時間込みの推定)", ""), ("1発のダメージ", "1発のダメージ", ""), ("弾速", "弾速", " m/s"), ("連射速度", "連射速度", " 発/分"), ("装弾数", "装弾数", " 発")],
-        CompareKind.ShipWeapon => [("最大DPS", "最大 DPS (撃っている間)", ""), ("平均DPS", "平均 DPS (待ち時間込みの推定)", ""), ("1発のダメージ", "1発のダメージ", ""), ("連射速度", "連射速度", " 発/分")],
+        CompareKind.PersonalWeapon => [("バーストDPS", "バースト DPS (撃っている間)", ""), ("平均DPS", "平均 DPS (待ち時間込みの推定)", ""), ("1発のダメージ", "1発のダメージ", ""), ("弾速", "弾速", " m/s"), ("連射速度", "連射速度", " 発/分"), ("装弾数", "装弾数", " 発")],
+        CompareKind.ShipWeapon => [("バーストDPS", "バースト DPS (撃っている間)", ""), ("平均DPS", "平均 DPS (待ち時間込みの推定)", ""), ("1発のダメージ", "1発のダメージ", ""), ("連射速度", "連射速度", " 発/分")],
         CompareKind.Shield => [("シールド容量", "シールド容量", ""), ("回復", "回復 (毎秒)", "")],
         CompareKind.PowerPlant => [("出力", "出力", "")],
         CompareKind.Cooler => [("冷却", "冷却", " /秒")],
@@ -3304,6 +3709,7 @@ public partial class GameDataQueryService : IDisposable
             e.PriceText = $"店で買える: 最安 {min.Price!.Value:N0} aUEC ({min.Location}{(others > 0 ? $" ほか {others} か所" : "")}) [{SourceLabel(min.Source)}]";
             e.MinPrice = min.Price!.Value;
             e.Buyable = true;
+            e.Shops = buys.Select(r => new ShopListing(r.Location, r.Price!.Value, r.Source)).ToList();
         }
         else if (uexItemPrices != null && uexItemPrices.TryGetValue(NormalizeItemName(e.Name), out var uex) && uex.Count > 0)
         {
@@ -3312,6 +3718,7 @@ public partial class GameDataQueryService : IDisposable
             e.PriceText = $"店で買える: 最安 {min.Price:N0} aUEC ({min.Location}{(others > 0 ? $" ほか {others} か所" : "")}) [UEX]";
             e.MinPrice = min.Price;
             e.Buyable = true;
+            e.Shops = uex.Select(x => new ShopListing(x.Location, x.Price, ShopListing.SourceUexItemsPrices)).ToList();
         }
         else
         {
@@ -3374,6 +3781,29 @@ public partial class GameDataQueryService : IDisposable
             return result;
         }
 
+        // displayType の英語 (例 Crossbow) と同じ英語の訳がある item_displayType_ のキーの日本語。無ければ null
+        public string? DisplayTypeJapanese(string english)
+        {
+            var cacheKey = "\u0001displayType\u0001" + english;
+            if (_cache.TryGetValue(cacheKey, out var v)) return v.Ja;
+            string? ja = null;
+            try
+            {
+                if (_c != null)
+                {
+                    using var cmd = _c.CreateCommand();
+                    cmd.CommandText = "SELECT japanese FROM translations WHERE key LIKE 'item_displayType%' AND english = @e COLLATE NOCASE " +
+                                      "AND japanese IS NOT NULL AND japanese <> '' ORDER BY key LIMIT 1";
+                    cmd.Parameters.AddWithValue("@e", english.Trim());
+                    ja = cmd.ExecuteScalar() as string;
+                }
+            }
+            catch { }
+            if (ja != null && (ja.StartsWith('!') || string.IsNullOrWhiteSpace(ja))) ja = null;
+            _cache[cacheKey] = (english, ja);
+            return ja;
+        }
+
         public string? English(string key)
         {
             var en = Get(key).En;
@@ -3405,6 +3835,73 @@ public partial class GameDataQueryService : IDisposable
 public record ShopPriceRow(string Kind, string Location, double? Price, int? RentDays, string Verified, string Note, string Source);
 
 // item_shop_prices (gamedata_cache.db) の読み書き。武器・装備は cstone、船・車両は UEX から取った売り場・価格を入れる
+// 店の売り場 1 か所 (購入)。Location は保存データ・UEX の文字のまま、Source は出どころ
+//   "cstone": cstone の保存データ。「星系 - 場所 - … - 店名」(" - " 区切り。星系の位置がジャンプポイントなら「星系 > X Jump Point」)
+//   "uex":    item_shop_prices の UEX の行 (船・車両の店。「Vantage HUR-L1」のように店名と場所が 1 つの名前)。分けずにそのまま
+//   SourceUexItemsPrices: UEX の items_prices。「星系 > 天体 > 店名 - 場所」(天体が無いものもある)
+public sealed record ShopListing(string Location, double Price, string Source)
+{
+    public const string SourceUexItemsPrices = "uex-items";
+
+    // (星系, 場所, 店名)。分けられない形なら null
+    public (string System, string Place, string Shop)? Parts()
+    {
+        var loc = (Location ?? "").Trim();
+        if (loc.Length == 0) return null;
+        if (Source == "cstone")
+        {
+            var t = loc.Split(" - ");
+            if (t.Length < 2) return null;
+            var head = t[0];
+            var system = head;
+            var place = new List<string>();
+            var gt = head.IndexOf(" > ", StringComparison.Ordinal);
+            if (gt >= 0) { system = head[..gt]; place.Add(head[(gt + 3)..]); }
+            place.AddRange(t[1..^1]);
+            return (system, string.Join(" - ", Dedup(place)), t[^1]);
+        }
+        if (Source == SourceUexItemsPrices)
+        {
+            var segs = loc.Split(" > ");
+            if (segs.Length < 2) return null;
+            var last = segs[^1];
+            var dash = last.IndexOf(" - ", StringComparison.Ordinal);
+            var shop = dash >= 0 ? last[..dash] : last;
+            var place = segs[1..^1].ToList();
+            if (dash >= 0) place.Add(last[(dash + 3)..]);
+            return (segs[0], string.Join(" / ", Dedup(place)), shop);
+        }
+        return null;
+    }
+
+    // 場所の語が直前と同じ (大文字小文字無視) なら 1 つにする (例 Levski / Levski → Levski。見た目だけ)
+    private static List<string> Dedup(List<string> place)
+    {
+        var r = new List<string>();
+        foreach (var p in place.Select(x => x.Trim()).Where(x => x.Length > 0))
+            if (r.Count == 0 || !r[^1].Equals(p, StringComparison.OrdinalIgnoreCase)) r.Add(p);
+        return r;
+    }
+
+    // ツールチップの 1 行: 「星系 / 場所 / 店名 / 値段 aUEC」。分けられないときは「売り場の文字 / 値段 aUEC」
+    public string Line()
+    {
+        var p = Parts();
+        var price = $"{Price:N0} aUEC";
+        return p is { } x ? $"{x.System} / {(x.Place.Length > 0 ? x.Place : "-")} / {x.Shop} / {price}" : $"{Location} / {price}";
+    }
+
+    // 「店の最安値」のセルのツールチップ。値段の安い順に 1 行ずつ (同じ売り場は 1 行)。売り場が無ければ null
+    public static string? Tooltip(IReadOnlyList<ShopListing>? shops, string note = "")
+    {
+        if (shops == null || shops.Count == 0) return null;
+        var lines = shops.GroupBy(s => s.Location).Select(g => g.MinBy(s => s.Price)!)
+            .OrderBy(s => s.Price).ThenBy(s => s.Location, StringComparer.OrdinalIgnoreCase).Select(s => s.Line()).ToList();
+        var head = "星系 / 場所 / 店名 / 値段" + (note.Length > 0 ? $" ({note})" : "");
+        return head + "\n" + string.Join("\n", lines);
+    }
+}
+
 public static class ShopPriceStore
 {
     public const string KindBuy = "購入";

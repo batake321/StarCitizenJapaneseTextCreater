@@ -82,6 +82,15 @@ public class ChatService
         catch { }
     }
 
+    // 宇宙船の壊れ方 (利用者が教えてくれた仕様)。ナレッジは質問の語で検索して入れるため、関係する質問でも入らないことがあるので、
+    // チャットのシステムプロンプト (ツールあり・なし) と外部相談・検証の AI の前提に毎回入れる。確かさの度合い (不明・可能性が高い・恐らく) は利用者の書いたまま
+    private const string ShipDamageSpec =
+        "【宇宙船の壊れ方（利用者が教えてくれた仕様）】\n" +
+        "- 宇宙船は基本的に「シールド → 装甲 → 船体」の順に壊れていく。\n" +
+        "- 実弾: シールドはほぼ無視され、いきなり装甲 → 船体の順にダメージが入る。ダメージ低減値は不明だが、ある可能性が高い。装甲値が残っていても、確率で装甲を貫通する（確率と距離は武器に依存）。経路上のコンポーネントにダメージが入る。装甲によるダメージ低減を大きく受ける。\n" +
+        "- エネルギー弾: シールドに全て吸われ、シールドを貫通することは恐らくない。「シールド → 装甲 → 船体」の順に壊す必要がある。\n" +
+        "- 船の武器の質問（比べる・おすすめ等）では、この仕様を踏まえて答えてください。ただし数値はツール（スキル）のデータだけを使い、この仕様から数値を作らないでください。\n\n";
+
     private static readonly string ChatSystemPrompt =
         "あなたはゲーム「Star Citizen」の情報アシスタントです。プレイヤーからの質問に日本語で回答してください。\n\n" +
         "【重要】以下のスキルを使って最新のゲームデータを取得できます。質問に答えるために必要なデータは必ずスキルを使って取得してください。\n\n" +
@@ -99,7 +108,7 @@ public class ChatService
         "- ハイフンやスペースの有無で結果が変わることがあります（P8-SC, P8SC 等）\n\n" +
         "【スキル一覧】\n" +
         "- lookup: 統合検索（最初に呼ぶ）。アイテム名からDB検索し、種類を自動判別して価格・詳細を返す\n" +
-        "- compare_items: 種類全体の比較。武器・装備・船・車両の種類 (例: スナイパーライフル, SMG, シールド, アーマー, 貨物船, 地上車両) と任意のサイズ (例: S2) で、基本モデルごとの性能・店で買えるか・値段の表を返す。アーマーは任意の重さ (light / medium / heavy) を指定するとその重さの全部の一覧、省略すると重さごとの要約を返す。アーマー・服を部位なしで聞くと部位ごとの要約になる。shop_only で店で買えるものだけに絞れる。船の武器は種類 (例: レーザーキャノン, バリスティックガトリング。「船の武器 (種類)」でも可)・サイズ・弾薬/エネルギー (ammo) で絞れる\n" +
+        "- compare_items: 種類全体の比較。武器・装備・船・車両の種類 (例: スナイパーライフル, SMG, シールド, アーマー, 貨物船, 地上車両) と任意のサイズ (例: S2) で、基本モデルごとの性能・店で買えるか・値段の表を返す。アーマーは任意の重さ (light / medium / heavy) を指定するとその重さの全部の一覧、省略すると重さごとの要約を返す。アーマー・服を部位なしで聞くと部位ごとの要約になる。shop_only で店で買えるものだけに絞れる。船の武器は種類 (例: レーザーキャノン, バリスティックガトリング。「船の武器 (種類)」でも可)・サイズ・弾を使うか (ammo: 使う / 使わない。ダメージの種類のエネルギーとは別) で絞れる\n" +
         "- search_mission: ミッション・契約の検索\n" +
         "- search_commodity: 商品・資源の購入/売却場所と価格\n" +
         "- search_keybind: キーバインド検索\n" +
@@ -112,6 +121,7 @@ public class ChatService
         "- スキルから取得した価格は正確な数値です。絶対に独自の数値を作らず、スキルが返した数値をそのまま使ってください\n" +
         "- 「購入場所」はプレイヤーが商品を買える場所、「売却場所」はプレイヤーが商品を売れる場所です\n" +
         "- 前の質問の続きでも、必ずスキルを再呼出しして最新データを取得してください\n\n" +
+        ShipDamageSpec +
         "【記憶機能】\n" +
         "- ユーザーが「覚えて」「記憶して」と言ったら remember ツールで情報を保存してください\n" +
         "- ユーザーが「直った」「忘れて」「もう不要」と言ったら forget ツールで該当する記憶を削除してください\n" +
@@ -290,7 +300,7 @@ public class ChatService
                         ["category"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "種類（日本語・英語どちらもOK）。例: スナイパーライフル, SMG, ピストル, ショットガン, アサルトライフル, ヘルメット, 胴アーマー, 腕アーマー, 脚アーマー, アンダースーツ, バックパック, 上着, シャツ, ズボン, 靴, 手袋, 帽子, マルチツール, スコープ, シールド, 動力装置, クアンタムドライブ, 冷却装置, 船の武器, ミサイル, 貨物船, 戦闘機, 採掘船, 地上車両。船の武器は種類でも絞れる (例: レーザーキャノン, バリスティックガトリング, ディストーションリピーター。「船の武器 (種類)」の形でも指定できる)。「アーマー」「服」だけ (部位なし) だと部位ごとの件数と上位 5 件の要約になるので、全部の一覧が要るときは部位を指定する" },
                         ["size"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "サイズで絞る場合（例: S2, 3）。省略で全サイズ" },
                         ["weight"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "アーマー (ヘルメット・胴・腕・脚・アンダースーツ・バックパック) の重さで絞る場合: light / medium / heavy (ライト / ミディアム / ヘビー)。部位を指定したときは、重さを指定するとその重さの全部の一覧、省略すると重さごとの件数と上位 10 件の要約を返す。質問に重さ (例: ヘビーアーマー) があれば指定する。アーマー以外では使わない" },
-                        ["ammo"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "船の武器を弾を使うかで絞る場合: 弾薬 / エネルギー。船の武器以外では使わない" },
+                        ["ammo"] = new Dictionary<string, object> { ["type"] = "string", ["description"] = "船の武器を弾 (弾倉) を使うかで絞る場合: 使う / 使わない。ダメージの種類 (物理・エネルギー等) ではない。船の武器以外では使わない" },
                         ["shop_only"] = new Dictionary<string, object> { ["type"] = "boolean", ["description"] = "true にすると店で買えるもの (販売データのあるもの) だけを表にする。服の部位など一覧が長くて要約になったとき、絞り込みに使う" }
                     },
                     ["required"] = new[] { "category" }
@@ -701,17 +711,12 @@ public class ChatService
         Log($"COMPARE: category='{categoryText}' -> {cat.Label}, size={size?.ToString() ?? "全て"}, weight={weight ?? "なし"}, shop_only={shopOnly}");
 
         var uex = cat.UexCategoryIds is { Length: > 0 } ids ? await GetUexItemPricesAsync(ids) : null;
-        // 船の武器の弾薬/エネルギー (弾薬 / ammo / ballistic → 弾薬、エネルギー / energy → エネルギー)。読めない値は指定し直してもらう
+        // 船の武器が弾を使うか (GameDataQueryService.NormalizeShipWeaponAmmo で 使う / 使わない にする)。読めない値は指定し直してもらう
         string? ammo = null;
         if (ammoText.Length > 0 && cat.Kind == GameDataQueryService.CompareKind.ShipWeapon)
         {
-            ammo = ammoText.ToLowerInvariant() switch
-            {
-                "弾薬" or "弾" or "ammo" or "ammunition" or "ballistic" => "弾薬",
-                "エネルギー" or "energy" => "エネルギー",
-                _ => null,
-            };
-            if (ammo == null) return $"弾薬/エネルギー (ammo) '{ammoText}' がわかりません。弾薬 / エネルギー のどちらかを指定してください。";
+            ammo = GameDataQueryService.NormalizeShipWeaponAmmo(ammoText);
+            if (ammo == null) return GameDataQueryService.ShipWeaponAmmoUnknownText(ammoText);
         }
         var (text, used) = _queryService.CompareItems(cat, size, uex, name => FindCachedShipScu(name)?.Scu, weight, shopOnly, ammo);
         foreach (var u in used) NotePriceItemUsed(u);
@@ -3347,7 +3352,7 @@ public class ChatService
     {
         Log($"SendChatAsync: backend={backend.Type}, model={backend.Model}, tools={useTools}");
         _currentChatBackend.Value = backend;
-        var system = useTools ? ChatSystemPrompt : ChatSystemPrompt.Split("【重要】")[0] + "回答は簡潔で分かりやすい日本語でお願いします。";
+        var system = useTools ? ChatSystemPrompt : ChatSystemPrompt.Split("【重要】")[0] + ShipDamageSpec + "回答は簡潔で分かりやすい日本語でお願いします。";
 
         // Extract the latest user question for domain-targeted knowledge injection
         var latestQuestion = history.LastOrDefault(m => m.Role == "user")?.Content ?? "";
@@ -3460,7 +3465,8 @@ public class ChatService
             "重要: 別の AI の回答は、最新のゲームデータベースから取得したデータに基づいています。あなたの知識は古い可能性があるので、データにある船・アイテム・場所を「存在しない」「未実装」「コンセプト段階」などと否定しないでください。Stanton, Pyro, Nyx の3星系が実装済みです。「Nyx は未実装」「Pyro は未実装」等の古い情報を回答しないでください。\n" +
             "参考データが付いている場合、それがゲームのデータベースから取得した正しい情報です。参考データに無い数値・事実を新たに書かないでください。参考データと食い違う修正もしないでください。データに基づかない推測（設計思想・運用・着艦できる場所など）は書かないでください。\n" +
             "回答が既に十分であれば「補足はありません」と答えてください。\n" +
-            "回答は簡潔に、箇条書きを使ってください。" +
+            "回答は簡潔に、箇条書きを使ってください。\n\n" +
+            ShipDamageSpec +
             GetKnowledgeSnippet(userQuestion);
 
         var consultHistory = new List<ChatMessage>
@@ -3580,7 +3586,8 @@ public class ChatService
             "重要: 別の AI の回答は、最新のゲームデータベースから取得したデータに基づいています。あなたの知識は古い可能性があるので、データにある船・アイテム・場所を「存在しない」「未実装」「コンセプト段階」などと否定しないでください。Stanton, Pyro, Nyx の3星系が実装済みです。「Nyx は未実装」「Pyro は未実装」等の古い情報を回答しないでください。\n" +
             "参考データが付いている場合、それがゲームのデータベースから取得した正しい情報です。回答の数値・事実が参考データと一致しているかを確かめてください。参考データに無い内容が回答に含まれていれば「データでは確認できない」と指摘してください。あなた自身の知識で新しい数値を足さないでください。\n" +
             "正確であれば「検証OK: 回答は正確です」と答えてください。\n" +
-            "誤りや不足があれば、正しい情報を簡潔に日本語で提供してください。" +
+            "誤りや不足があれば、正しい情報を簡潔に日本語で提供してください。\n\n" +
+            ShipDamageSpec +
             GetKnowledgeSnippet(userQuestion);
 
         var verifyHistory = new List<ChatMessage>

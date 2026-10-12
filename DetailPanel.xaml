@@ -1,0 +1,28 @@
+<UserControl x:Class="StarCitizenJapaneseTextCreater.DetailPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- ［詳細］タブ。上の名前の欄に入力すると候補を出し (item_index のあいまい検索。船・車両・武器・装備)、選ぶと下に詳細を出す。
+         表の名前のダブルクリックからも開く (DetailPanel.Request) -->
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <DockPanel Grid.Row="0" Margin="0,0,0,6">
+            <TextBlock Text="名前" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <TextBlock x:Name="txtStatus" DockPanel.Dock="Right" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
+            <TextBox x:Name="txtQuery" FontSize="14" TextChanged="TxtQuery_TextChanged" PreviewKeyDown="TxtQuery_PreviewKeyDown"
+                     ToolTip="名前の一部 (英語・日本語・record 名) を入力すると候補を出します。↓ で候補へ、Enter で開きます"/>
+        </DockPanel>
+
+        <!-- 候補 (入力中だけ出す) -->
+        <ListBox x:Name="lstCandidates" Grid.Row="1" MaxHeight="220" Margin="0,0,0,6" Visibility="Collapsed"
+                 MouseDoubleClick="LstCandidates_MouseDoubleClick" PreviewKeyDown="LstCandidates_PreviewKeyDown"/>
+
+        <!-- 詳細 (読み取り専用。選択して Ctrl+C でコピーできる) -->
+        <TextBox x:Name="txtDetail" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, Yu Gothic UI" FontSize="13"
+                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="1" Padding="6"/>
+    </Grid>
+</UserControl>

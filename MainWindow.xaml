@@ -23,7 +23,7 @@
             </StackPanel>
         </Border>
 
-        <TabControl Grid.Row="1" Margin="8,4,8,8">
+        <TabControl x:Name="tabMain" Grid.Row="1" Margin="8,4,8,8">
             <!-- 翻訳タブ -->
             <TabItem Header="翻訳">
                 <Grid Margin="8">
@@ -1223,7 +1223,7 @@
                             </Grid.RowDefinitions>
 
                             <TextBlock Grid.Row="0" Margin="0,0,0,8" Foreground="#333" TextWrapping="Wrap">
-                                所持しているコンポーネント (パワープラント / シールド / クーラー / 量子ドライブ / 武器 等) を使用可否を含めて登録し、保有船ごとに現在の装備を設定します。未設定のポートはデフォルト装備を表示します。設定内容は船名のツールチップに反映されます。
+                                所持しているコンポーネント (パワープラント / シールド / クーラー / 量子ドライブ / 武器 等) を使用可否を含めて登録し、保有船ごとに現在の装備を設定します。未設定の搭載枠はデフォルト装備を表示します。設定内容は船名のツールチップに反映されます。
                             </TextBlock>
 
                             <!-- 上段: 所持コンポーネント -->
@@ -1262,6 +1262,7 @@
                                                         <Setter Property="FontWeight" Value="Bold"/>
                                                         <Setter Property="ToolTip" Value=" "/>
                                                         <EventSetter Event="ToolTipOpening" Handler="ComponentTooltip_Opening"/>
+                                                        <EventSetter Event="MouseLeftButtonDown" Handler="ComponentName_MouseDown"/>
                                                     </Style>
                                                 </DataGridTextColumn.ElementStyle>
                                             </DataGridTextColumn>
@@ -1273,6 +1274,12 @@
                                             <DataGridTextColumn Header="Class" Binding="{Binding GradeDisplay}" Width="50" IsReadOnly="True">
                                                 <DataGridTextColumn.ElementStyle>
                                                     <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
+                                            <!-- 性能: 種類ごとに 1 つの代表の値 (MyComponentRow.PerfDisplay) -->
+                                            <DataGridTextColumn Header="性能" Binding="{Binding PerfDisplay}" Width="170" IsReadOnly="True">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
                                                 </DataGridTextColumn.ElementStyle>
                                             </DataGridTextColumn>
                                             <DataGridTextColumn Header="数量" Binding="{Binding Quantity}" Width="50" IsReadOnly="True">
@@ -1375,12 +1382,12 @@
                                             </Style>
                                         </DataGrid.RowStyle>
                                         <DataGrid.Columns>
-                                            <DataGridTextColumn Header="種別" Binding="{Binding TypeDisplay}" Width="110">
+                                            <DataGridTextColumn Header="種別" Binding="{Binding GridTypeDisplay}" Width="150">
                                                 <DataGridTextColumn.ElementStyle>
                                                     <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
                                                 </DataGridTextColumn.ElementStyle>
                                             </DataGridTextColumn>
-                                            <DataGridTextColumn Header="ポート" Binding="{Binding PortName}" Width="200">
+                                            <DataGridTextColumn Header="搭載枠" Binding="{Binding PortDisplay}" Width="260">
                                                 <DataGridTextColumn.ElementStyle>
                                                     <Style TargetType="TextBlock">
                                                         <Setter Property="VerticalAlignment" Value="Center"/>
@@ -1389,7 +1396,7 @@
                                                     </Style>
                                                 </DataGridTextColumn.ElementStyle>
                                             </DataGridTextColumn>
-                                            <DataGridTextColumn Header="ポートSize" Binding="{Binding PortSizeDisplay}" Width="70">
+                                            <DataGridTextColumn Header="搭載枠Size" Binding="{Binding PortSizeDisplay}" Width="75">
                                                 <DataGridTextColumn.ElementStyle>
                                                     <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
                                                 </DataGridTextColumn.ElementStyle>
@@ -1400,6 +1407,7 @@
                                                         <Setter Property="VerticalAlignment" Value="Center"/>
                                                         <Setter Property="ToolTip" Value=" "/>
                                                         <EventSetter Event="ToolTipOpening" Handler="LoadoutDefaultTooltip_Opening"/>
+                                                        <EventSetter Event="MouseLeftButtonDown" Handler="LoadoutDefaultName_MouseDown"/>
                                                     </Style>
                                                 </DataGridTextColumn.ElementStyle>
                                             </DataGridTextColumn>
@@ -1410,6 +1418,7 @@
                                                         <Setter Property="Foreground" Value="#666"/>
                                                         <Setter Property="ToolTip" Value=" "/>
                                                         <EventSetter Event="ToolTipOpening" Handler="LoadoutCurrentTooltip_Opening"/>
+                                                        <EventSetter Event="MouseLeftButtonDown" Handler="LoadoutCurrentName_MouseDown"/>
                                                         <Style.Triggers>
                                                             <!-- 設定済みポートだけ太字・青。未設定ポートは初期装備を控えめな色で出す -->
                                                             <DataTrigger Binding="{Binding IsCustom}" Value="True">
@@ -1437,7 +1446,7 @@
                                                                   SelectedItem="{Binding SelectedChoice, Mode=OneWay}"
                                                                   SelectionChanged="LoadoutItem_Changed"
                                                                   IsEnabled="{Binding HasCandidates}"
-                                                                  ToolTip="所持コンポーネントのうち同じ種別・ポート Size 以下・使用可のものが候補になります"
+                                                                  ToolTip="所持コンポーネントのうち同じ種別・搭載枠 Size 以下・使用可のものが候補になります"
                                                                   FontSize="11" Margin="2" VerticalAlignment="Center">
                                                             <ComboBox.ItemContainerStyle>
                                                                 <Style TargetType="ComboBoxItem">
@@ -1731,7 +1740,21 @@
                 <local:WeaponTablePanel IsShip="False"/>
             </TabItem>
 
+            <!-- ［船舶装備］［個人装備］: 装備を種類ごとに 1 つの表に出す (表の部品 FilterSortGrid。GearTablePanel) -->
+            <TabItem Header="船舶装備">
+                <local:GearTablePanel IsShip="True"/>
+            </TabItem>
+
+            <TabItem Header="個人装備">
+                <local:GearTablePanel IsShip="False"/>
+            </TabItem>
+
             <!-- チャットタブ -->
+            <!-- ［詳細］: 船・車両・武器・装備の詳細。名前で検索、表の名前のダブルクリックでも開く (DetailPanel) -->
+            <TabItem x:Name="tabDetail" Header="詳細">
+                <local:DetailPanel x:Name="detailPanel"/>
+            </TabItem>
+
             <TabItem Header="チャット">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>

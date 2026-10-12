@@ -1,0 +1,16 @@
+<UserControl x:Class="StarCitizenJapaneseTextCreater.GearTablePanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:StarCitizenJapaneseTextCreater">
+    <!-- 装備の表 (［船舶装備］［個人装備］タブ)。装備をすべて 1 つの表に出し、絞り込み・並べ替えは表の部品 (FilterSortGrid) で行う -->
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="txtMessage" Grid.Row="0" Foreground="#666" Margin="0,0,0,6" Visibility="Collapsed"/>
+
+        <local:FilterSortGrid x:Name="table" Grid.Row="1"/>
+    </Grid>
+</UserControl>

@@ -151,10 +151,41 @@ public class ShipPortLoadout
     public string CurrentItemName { get; set; } = "";
     public int ItemSize { get; set; }                     // 有効な装備 (上書き or デフォルト) の Size (未解決なら 0)
     public int ItemGrade { get; set; }
+    // ジンバル/マウントのポートか (既定の装備がジンバル/マウント)
+    public bool IsMount { get; set; }
+    // 今付いている品目 (上書き、無ければ既定) がジンバル/マウントか (ツールチップの装備行には入れない)
+    public bool IsMountNow { get; set; }
+    // 武器のハードポイントか (武器・ジンバルの行のうち、ジンバルの下の武器の行でないもの。武器もジンバルも付けられる)
+    public bool IsWeaponHardpoint { get; set; }
+    // ジンバルの下の武器の行か (既定のジンバルの下の行、または付け替えたジンバルの子ポートの定義から作った行)
+    public bool IsGimbalChild { get; set; }
+    // 付け替えると下の行が替わるポートか (武器のハードポイントとタレット。保存時に "{PortKey}/" で始まる下の付け替えを消す対象)
+    public bool HasReplaceableChildren => IsWeaponHardpoint || ItemType == "Turret";
+    // 付け替えたジンバル・タレットの子ポートの定義から作った行か (既定の装備は無い。何も付けていなければ空きのポート)
+    public bool IsGenerated { get; set; }
+    // ポートの本当の大きさと受け付ける種類 (船の XML のハードポイント、またはタレット・ジンバル自身の子ポートの定義。無ければ 0 / "")
+    public int MinSize { get; set; }
+    public int MaxSize { get; set; }
+    public string AcceptTypes { get; set; } = "";
+    // ツールチップの装備行の種別 (既定がジンバルの武器のハードポイントに武器を付けたときは「武器」)
+    public string EffectiveTypeDisplay => IsWeaponHardpoint && IsMount && !IsMountNow
+        ? new ShipPortInfo { ItemType = "WeaponGun" }.TypeDisplay : TypeDisplay;
     public bool IsCustom => CurrentItemRecord != null;
     public string EffectiveItemRecord => CurrentItemRecord ?? DefaultItemRecord;
     public string EffectiveItemName => CurrentItemRecord != null ? CurrentItemName : DefaultItemName;
-    public string PortSizeDisplay => PortSize > 0 ? $"S{PortSize}" : "-";
+    // 表の「搭載枠」の欄 (BuildShipLoadout が入れる。PortNameJa と親の行から作る表示だけの名前。保存のキーは PortKey のまま)
+    public string PortDisplay { get; set; } = "";
+    // 表の種別の欄の武器の種類 (今付いている品目が武器のとき、ダメージの種類で「エネルギー武器」「実弾武器」など。それ以外は "")
+    public string WeaponKindDisplay { get; set; } = "";
+    // 表の種別の欄 (武器はダメージの種類で分けたもの、それ以外はツールチップと同じ EffectiveTypeDisplay)
+    // 表の種別の欄の、武器の枠にジンバル/マウントが付いているときの名前 (「ジンバル/マウント」。それ以外は "")
+    public string MountKindDisplay { get; set; } = "";
+    // 表の種別の欄 (武器はダメージの種類で分けたもの、武器の枠に付いたジンバル/マウントは「ジンバル/マウント」、
+    // それ以外はツールチップと同じ EffectiveTypeDisplay)
+    public string GridTypeDisplay => WeaponKindDisplay.Length > 0 ? WeaponKindDisplay
+        : MountKindDisplay.Length > 0 ? MountKindDisplay : EffectiveTypeDisplay;
+    // 表の搭載枠のサイズ: 本当の大きさの最大 (MaxSize)。無ければ既定の装備から取った大きさ (PortSize)
+    public string PortSizeDisplay => MaxSize > 0 ? $"S{MaxSize}" : PortSize > 0 ? $"S{PortSize}" : "-";
     public string ItemSizeDisplay => ItemSize > 0 ? $"S{ItemSize}" : "";
     public string ItemGradeDisplay => MyComponent.GradeToClass(ItemGrade);
 }
@@ -1248,6 +1279,39 @@ public class HangarService
             ("@k", shipKey), ("@p", portName), ("@r", itemRecord));
     }
 
+    // ポート 1 つの装備を保存する (itemRecord が null なら上書きを消して既定に戻す)。
+    // 武器のハードポイント・タレット (replacesChildren) で、今の品目 (previousRecord) と保存後の品目 (itemRecord、null なら defaultRecord) が別のもの
+    // (ジンバル・タレットを外した・武器に替えた・既定に戻した・別のものに替えた) なら、その下の行 ("{portKey}/" で始まる保存キー) の付け替えも同じ処理で消す。
+    // 同じ record を選び直したときは替えていないので、下の行の付け替えは残す
+    public void SetLoadoutItem(string shipKey, string portKey, string? itemRecord, bool replacesChildren, string previousRecord, string defaultRecord)
+    {
+        if (_dbPath == null) return;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var tx = db.BeginTransaction();
+        using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.Parameters.AddWithValue("@k", shipKey);
+        cmd.Parameters.AddWithValue("@p", portKey);
+        if (replacesChildren && !SameRecord(previousRecord, itemRecord ?? defaultRecord))
+        {
+            cmd.Parameters.AddWithValue("@prefix", portKey + "/");
+            cmd.CommandText = "DELETE FROM ship_loadouts WHERE ship_key = @k AND substr(port_name, 1, length(@prefix)) = @prefix";
+            cmd.ExecuteNonQuery();
+        }
+        if (itemRecord == null)
+        {
+            cmd.CommandText = "DELETE FROM ship_loadouts WHERE ship_key = @k AND port_name = @p";
+        }
+        else
+        {
+            cmd.Parameters.AddWithValue("@r", itemRecord);
+            cmd.CommandText = "INSERT OR REPLACE INTO ship_loadouts (ship_key, port_name, item_record) VALUES (@k, @p, @r)";
+        }
+        cmd.ExecuteNonQuery();
+        tx.Commit();
+    }
+
     public void ClearLoadout(string shipKey)
     {
         if (_dbPath == null) return;
@@ -1263,8 +1327,10 @@ public class HangarService
     public List<ShipPortLoadout> GetShipLoadout(string shipKey, string shipRecordName, EquipmentService equip)
         => BuildShipLoadout(shipKey, equip.GetShipPorts(shipRecordName), equip);
 
-    // 子ポート行 (port_name = "{親port}/{子port}") も含めて集計する。ただしジンバル/マウント
-    // (エンティティ名の basename が mount_ / weaponmount で始まる行、または item_type = WeaponMount) の行は表示から除き、
+    // 子ポート行 (port_name = "{親port}/{子port}") も含めて集計する。ジンバル/マウント
+    // (エンティティ名の basename が mount_ / weaponmount で始まる行、または item_type = WeaponMount) の行は
+    // item_type = WeaponMount (ジンバル/マウント)・IsMount = true で返す (現在の装備の表で所持しているジンバルに付け替えるため。
+    // ツールチップの装備行には入れない)。
     // その直下の子行で WeaponGun / Turret 型の実体 (Carrack のタレット配下 hardpoint_class_2 の klwe_laserrepeater_s4 等) は
     // item_type / TypeDisplay を WeaponGun / 武器 として返す。
     // タレット本体 (anvl_carrack_scitem_turret_* / *_turret_s3。item_type = Turret) はそのまま「タレット」(ツールチップでは種別ごとに 1 行に集約)。
@@ -1306,6 +1372,75 @@ public class HangarService
             || entityName.Contains("missile", StringComparison.OrdinalIgnoreCase);
     }
 
+    // 現在の装備の表で、所持コンポーネント c をポート p の候補にするか。共通: 使用可で、サイズが範囲に入り、受け付ける種類に入る。
+    //   サイズの範囲は、ポートの本当の大きさ (MinSize〜MaxSize。船の XML のハードポイント、またはタレット・ジンバル自身の子ポートの定義) があればそれ、
+    //   無ければ (インデックスの作り直し前の DB 等) 既定の装備の Size (PortSize) 以下 (0 = 未収録のときはサイズで絞らない)。
+    //   受け付ける種類 (AcceptTypes。"Type:SubType,..|..") が分かるときは、品目の item_index の種類と形がそれに入るものだけ (分からないときは絞らない)。
+    //   武器のハードポイント (IsWeaponHardpoint) は、武器 (WeaponGun) とジンバル/マウント (WeaponMount) を候補にする。
+    //     ジンバルは船ごとに専用なので、どれかの船の既定の装備 (ship_ports) に使われている record はその船 (shipRecordName) の
+    //     既定の装備に使われているものだけ (どの船の既定の装備にも使われていない record はサイズと種類だけで照合)。
+    //   ジンバルの下の武器の行 (IsGimbalChild) は武器 (WeaponGun) だけ。
+    //   タレット (Turret) のポートは、種別が同じで、形 (item_index.sub_type。CanardTurret / BallTurret 等) がそのポートの既定の装備と同じもの
+    //     (既定の装備の形が分からないポートには、所持しているタレットを候補に出さない)。本当の大きさが無いときの上限は既定の装備の Size。
+    //   それ以外のポートは種別が同じもの
+    public static bool IsLoadoutCandidate(ShipPortLoadout p, MyComponent c, EquipmentService equip, string shipRecordName)
+    {
+        if (!c.Usable) return false;
+        if (!equip.PortAccepts(p.AcceptTypes, c.ItemRecord)) return false;
+        bool SizeOk(int fallbackMax)
+        {
+            if (p.MaxSize > 0) return c.Size <= p.MaxSize && (p.MinSize <= 0 || c.Size >= p.MinSize);
+            return fallbackMax <= 0 || c.Size <= fallbackMax;
+        }
+        if (p.IsWeaponHardpoint)
+        {
+            var isGun = c.ItemType.Equals(WeaponGunPortType, StringComparison.OrdinalIgnoreCase);
+            var isMount = c.ItemType.Equals(WeaponMountType, StringComparison.OrdinalIgnoreCase);
+            if (!isGun && !isMount) return false;
+            if (!SizeOk(p.PortSize)) return false;
+            if (isMount && equip.IsDefaultEquipOfAnyShip(c.ItemRecord) && !equip.IsDefaultEquipOfShip(c.ItemRecord, shipRecordName))
+                return false;
+            return true;
+        }
+        if (p.IsGimbalChild)
+        {
+            if (!c.ItemType.Equals(WeaponGunPortType, StringComparison.OrdinalIgnoreCase)) return false;
+            return SizeOk(p.PortSize);
+        }
+        if (!c.ItemType.Equals(p.ItemType, StringComparison.OrdinalIgnoreCase)) return false;
+        if (p.ItemType.Equals(TurretPortType, StringComparison.OrdinalIgnoreCase))
+        {
+            var portForm = equip.GetItemIndexSubType(p.DefaultItemRecord);
+            if (portForm.Length == 0) return false;
+            if (!portForm.Equals(equip.GetItemIndexSubType(c.ItemRecord), StringComparison.OrdinalIgnoreCase)) return false;
+            return SizeOk(equip.GetItemByRecord(p.DefaultItemRecord)?.Size ?? 0);
+        }
+        return SizeOk(p.PortSize);
+    }
+
+    // 2 つの record が同じ品目か (EntityClassDefinition. の有無と大文字小文字を無視して比べる。どちらも空なら同じ)
+    public static bool SameRecord(string? a, string? b)
+    {
+        static string Norm(string? r)
+        {
+            const string prefix = "EntityClassDefinition.";
+            var x = (r ?? "").Trim();
+            return x.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? x[prefix.Length..] : x;
+        }
+        return string.Equals(Norm(a), Norm(b), StringComparison.OrdinalIgnoreCase);
+    }
+
+    // 受け付ける種類に武器 (WeaponGun) かジンバル (Turret:GunTurret) が入っているか
+    private static bool AcceptsWeaponOrGimbal(string types) =>
+        (types ?? "").Split('|', StringSplitOptions.RemoveEmptyEntries).Any(t =>
+        {
+            var parts = t.Split(':', 2);
+            var type = parts[0].Trim();
+            if (type.Equals(WeaponGunPortType, StringComparison.OrdinalIgnoreCase)) return true;
+            return type.Equals(TurretPortType, StringComparison.OrdinalIgnoreCase) && parts.Length == 2
+                && parts[1].Split(',').Any(x => x.Trim().Equals("GunTurret", StringComparison.OrdinalIgnoreCase));
+        });
+
     private List<ShipPortLoadout> BuildShipLoadout(string shipKey, List<ShipPortInfo> ports, EquipmentService equip)
     {
         var overrides = LoadLoadout(shipKey);
@@ -1316,28 +1451,48 @@ public class HangarService
         var mountPorts = new HashSet<string>(StringComparer.Ordinal);
         // タレット本体 (item_type = Turret かつエンティティ名に "turret" を含む) の port_name (親がタレット本体かの判定用)
         var turretPorts = new HashSet<string>(StringComparer.Ordinal);
+        // port_name → 既定の装備 (子ポートの本当の大きさを親の品目の子ポートの定義から引くため。同名ポートは最初のもの)
+        var defaultByPort = new Dictionary<string, string>(StringComparer.Ordinal);
+        // 既定の装備がジンバルの port_name (マウントの行に加え、WeaponGun のポートに既定で付いているジンバル。
+        // 例 Starlancer MAX の MISC_Starlancer_Dual_Gimbal・Pulse の MRAI_Pulse_Mount_Gimbal_S2。下の武器の行をジンバルの下の行として扱う)
+        var gimbalPorts = new HashSet<string>(StringComparer.Ordinal);
         foreach (var p in ports)
         {
             var name = p.PortName ?? "";
             if (name.Length == 0) continue;
             if (p.ItemType == WeaponMountType || IsMountEntity(p.EquippedItem)) mountPorts.Add(name);
             else if (p.ItemType == TurretPortType && IsTurretEntity(p.EquippedItem)) turretPorts.Add(name);
+            defaultByPort.TryAdd(name, p.EquippedItem ?? "");
+            if (mountPorts.Contains(name) || (p.ItemType == WeaponGunPortType && equip.IsGimbalRecord(p.EquippedItem))) gimbalPorts.Add(name);
         }
 
         foreach (var p in ports)
         {
             if (string.IsNullOrEmpty(p.ItemType)) continue;
             var portName = p.PortName ?? "";
-            if (mountPorts.Contains(portName)) continue;   // ジンバル/マウント自体は表示しない
+            var isMount = mountPorts.Contains(portName);
+            var isGimbalChild = false;
 
             var itemType = p.ItemType;
             var typeDisplay = p.TypeDisplay;
-            if (p.IsChild && mountPorts.Contains(p.ParentPortName)
+            if (isMount)
+            {
+                // ジンバル/マウント自体の行
+                itemType = WeaponMountType;
+                typeDisplay = new ShipPortInfo { ItemType = WeaponMountType }.TypeDisplay;
+            }
+            else if (p.IsChild && mountPorts.Contains(p.ParentPortName)
                 && (itemType == WeaponGunPortType || itemType == TurretPortType))
             {
                 // ジンバル/マウント配下の実武器 (継承型が WeaponGun / Turret) → 武器
                 itemType = WeaponGunPortType;
                 typeDisplay = new ShipPortInfo { ItemType = WeaponGunPortType }.TypeDisplay;
+                isGimbalChild = true;
+            }
+            else if (p.IsChild && gimbalPorts.Contains(p.ParentPortName) && itemType == WeaponGunPortType)
+            {
+                // WeaponGun のポートに既定で付いているジンバルの下の武器 (種別・表示は今までどおり「武器」)
+                isGimbalChild = true;
             }
             else if (p.IsChild && turretPorts.Contains(p.ParentPortName) && !IsTurretOrMountEntity(p.EquippedItem)
                 && !IsMissileOrRackChild(itemType, p.EquippedItem))
@@ -1359,23 +1514,204 @@ public class HangarService
                 TypeDisplay = typeDisplay,
                 PortSize = p.Size,
                 DefaultItemRecord = p.EquippedItem ?? "",
+                IsMount = isMount,
+                IsGimbalChild = isGimbalChild,
+                // 武器のハードポイント: 武器・ジンバルの行のうち、ジンバルの下の武器の行でないもの
+                IsWeaponHardpoint = !isGimbalChild && (itemType == WeaponGunPortType || itemType == WeaponMountType),
             };
-            var def = row.DefaultItemRecord.Length > 0 ? equip.GetItemByRecord(row.DefaultItemRecord) : null;
-            row.DefaultItemName = def?.Name ?? row.DefaultItemRecord;
-
-            EquipmentItem? effective = def;
-            if (overrides.TryGetValue(portKey, out var ov))
+            // 本当の大きさ: 最上位は船の XML (ship_ports)、子は親の既定の装備の子ポートの定義 (item_ports)
+            if (!p.IsChild)
             {
-                row.CurrentItemRecord = ov;
-                var cur = ov.Length > 0 ? equip.GetItemByRecord(ov) : null;
-                row.CurrentItemName = cur?.Name ?? ov;
-                effective = cur;
+                row.MinSize = p.MinSize;
+                row.MaxSize = p.MaxSize;
+                row.AcceptTypes = p.PortTypes;
             }
-            row.ItemSize = effective?.Size ?? 0;
-            row.ItemGrade = effective?.Grade ?? 0;
+            else if (defaultByPort.TryGetValue(p.ParentPortName, out var parentRecord) && parentRecord.Length > 0)
+            {
+                var childName = portName[(portName.LastIndexOf('/') + 1)..];
+                var d = equip.GetItemPortDefs(parentRecord).FirstOrDefault(x => string.Equals(x.Name, childName, StringComparison.OrdinalIgnoreCase));
+                if (d != null)
+                {
+                    row.MinSize = d.MinSize;
+                    row.MaxSize = d.MaxSize;
+                    row.AcceptTypes = d.Types;
+                }
+            }
+            FillLoadoutItem(row, overrides, equip);
             result.Add(row);
         }
+
+        // 武器のハードポイント・タレットの付け替え: 既定の装備と別の品目 (武器・別のジンバル・別のタレット・空) に替えていれば、既定の装備の下の行
+        // (ジンバルの下の武器、タレットの下のマウント・武器等) を出さず、替えた品目の子ポートの定義 (item_ports) から下の行を作る
+        // (保存キーは "{PortKey}/{子ポート名}"。子ポートの定義が無い品目は下の行を作らない)。
+        // 同じ record を選び直したときは替えていないので既定の下の行をそのまま出す。作った行も同じように扱う (タレットの下のハードポイントにジンバル等)
+        for (int i = 0; i < result.Count; i++)
+        {
+            var hp = result[i];
+            if (!hp.HasReplaceableChildren || hp.CurrentItemRecord == null || SameRecord(hp.CurrentItemRecord, hp.DefaultItemRecord)) continue;
+            var prefix = hp.PortName + "/";
+            result.RemoveAll(r => !ReferenceEquals(r, hp) && r.PortName.StartsWith(prefix, StringComparison.Ordinal));
+            i = result.IndexOf(hp);
+            if (hp.CurrentItemRecord.Length == 0) continue;
+            var underGimbal = equip.IsGimbalRecord(hp.CurrentItemRecord);
+            // 下の行を作るのはジンバルとタレットだけ (武器自身の子ポート (付属品) は出さない)
+            var newType = equip.GetItemIndexType(hp.CurrentItemRecord).Type;
+            if (!underGimbal && newType is not ("Turret" or "TurretBase" or "UtilityTurret")) continue;
+            int at = i + 1;
+            foreach (var d in equip.GetItemPortDefs(hp.CurrentItemRecord))
+            {
+                var child = new ShipPortLoadout
+                {
+                    PortName = prefix + d.Name,
+                    PortKey = hp.PortKey + "/" + d.Name,
+                    PortSize = d.MaxSize,
+                    MinSize = d.MinSize,
+                    MaxSize = d.MaxSize,
+                    AcceptTypes = d.Types,
+                    DefaultItemRecord = "",
+                    IsGenerated = true,
+                };
+                if (underGimbal)
+                {
+                    // ジンバルの下は武器の行
+                    child.ItemType = WeaponGunPortType;
+                    child.IsGimbalChild = true;
+                }
+                else if (AcceptsWeaponOrGimbal(d.Types))
+                {
+                    // タレットの下の、武器・ジンバルを付けられるポートは武器のハードポイント
+                    child.ItemType = WeaponGunPortType;
+                    child.IsWeaponHardpoint = true;
+                }
+                else
+                {
+                    // それ以外 (ミサイルラック等) は受け付ける種類の最初のもの
+                    var names = ItemPortDef.ParseTypeNames(d.Types);
+                    child.ItemType = names.Count > 0 ? names[0] : "";
+                }
+                child.TypeDisplay = new ShipPortInfo { ItemType = child.ItemType }.TypeDisplay;
+                FillLoadoutItem(child, overrides, equip);
+                result.Insert(at++, child);
+            }
+        }
+
+        // 今付いている品目がジンバルか (ツールチップの装備行から外すため)。
+        // 上書きが無い、または既定と同じ record を選び直したときは、付け替え無しのときと同じ (既定のポートの IsMount)
+        foreach (var r in result)
+            r.IsMountNow = r.CurrentItemRecord == null || SameRecord(r.CurrentItemRecord, r.DefaultItemRecord)
+                ? r.IsMount : equip.IsGimbalRecord(r.CurrentItemRecord);
+        // 表の種別の欄: 今付いている品目が武器なら、ダメージの種類で分けた名前
+        foreach (var r in result)
+        {
+            var rec = r.EffectiveItemRecord;
+            r.WeaponKindDisplay = rec.Length > 0
+                && string.Equals(equip.GetItemByRecord(rec)?.ItemType, WeaponGunPortType, StringComparison.OrdinalIgnoreCase)
+                ? equip.WeaponDamageKindLabel(rec) : "";
+            // 武器の枠 (ジンバルの下の武器の行を除く) に、武器でなくジンバル/マウントと判定できる物が付いているときは「ジンバル/マウント」。
+            // 判定: ジンバルの record (IsGimbalRecord)、item_index の種類が WeaponMount、
+            // または表示名に mount / gimbal / マウント / ジンバル を含む (ノーズスクープ・カメラ・センサー等は「武器」のまま)。
+            // record 名で見るのは、表示名が無いとき (表示名が空、または record 名がそのまま表示名になっているとき) だけ
+            r.MountKindDisplay = "";
+            if (r.WeaponKindDisplay.Length == 0 && rec.Length > 0 && !r.IsGimbalChild
+                && string.Equals(r.ItemType, WeaponGunPortType, StringComparison.OrdinalIgnoreCase))
+            {
+                var t = equip.GetItemIndexType(rec).Type;
+                var nm = r.EffectiveItemName.Length > 0 ? r.EffectiveItemName : rec;
+                bool Has(string w) => nm.Contains(w, StringComparison.OrdinalIgnoreCase);
+                if (equip.IsGimbalRecord(rec) || t == WeaponMountType || Has("mount") || Has("gimbal") || Has("マウント") || Has("ジンバル"))
+                    r.MountKindDisplay = new ShipPortInfo { ItemType = WeaponMountType }.TypeDisplay;
+            }
+        }
+        FillPortDisplay(result, equip);
         return result;
+    }
+
+    // 表の「搭載枠」の欄 (PortDisplay) を入れる。
+    //   最上位の行: ポート名を日本語にしたもの (PortNameJa。例 hardpoint_weapon_right_nose → 武器右機首)
+    //   子の行で、親に今付いている物がジンバル/マウントかタレット: 「親の搭載枠の欄/親に今付いている物の名前」
+    //     (例 武器左機首/VariPuck S3 ジンバルマウント。その行の装備の欄が下に乗っている武器)
+    //   それ以外の子の行 (ミサイルラックの下のミサイル・量子ドライブの下のジャンプドライブ等): 「親の搭載枠の欄/自分の名前を日本語にしたもの」
+    //     (例 量子ドライブ/ジャンプドライブ)
+    //   親の行が見つからないときは、親のポート名をそのまま日本語にしたもの
+    private static void FillPortDisplay(List<ShipPortLoadout> rows, EquipmentService equip)
+    {
+        var byKey = new Dictionary<string, ShipPortLoadout>(StringComparer.Ordinal);
+        var byName = new Dictionary<string, ShipPortLoadout>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in rows)
+        {
+            byKey.TryAdd(r.PortKey, r);
+            byName.TryAdd(r.PortName, r);
+        }
+        foreach (var r in rows) r.PortDisplay = "";
+
+        string Display(ShipPortLoadout r, int depth)
+        {
+            if (r.PortDisplay.Length > 0) return r.PortDisplay;
+            var i = r.PortName.LastIndexOf('/');
+            if (i < 0 || depth > 16) return r.PortDisplay = PortNameJa.TranslatePath(r.PortName);
+            var parentName = r.PortName[..i];
+            var own = r.PortName[(i + 1)..];
+            var k = r.PortKey.LastIndexOf('/');
+            ShipPortLoadout? parent = null;
+            if (k > 0) byKey.TryGetValue(r.PortKey[..k], out parent);
+            if (parent == null) byName.TryGetValue(parentName, out parent);
+            if (parent == null || ReferenceEquals(parent, r))
+                return r.PortDisplay = PortNameJa.TranslatePath(parentName) + "/" + PortNameJa.Translate(own);
+            var parentDisplay = Display(parent, depth + 1);
+            var tail = PortNameJa.Translate(own);
+            if (CarriesChildren(parent, equip))
+                tail = parent.EffectiveItemName.Length > 0 ? parent.EffectiveItemName
+                    : parent.EffectiveItemRecord.Length > 0 ? parent.EffectiveItemRecord : tail;
+            return r.PortDisplay = parentDisplay + "/" + tail;
+        }
+        foreach (var r in rows) Display(r, 0);
+
+        // 同じ表示が重なる行 (タレットの下の左右など) だけ、自分の段の名前を日本語で添える (例「… (武器左)」「… (ミサイルラック)」)。
+        // 自分の段で見分けが付かないとき (ジンバルの下の武器はどちらも「クラス 2」) は、見分けが付くまで 1 つ上の段の名前にする。
+        // 子の行の表示は添える前の親の表示から作る (添えた名前は子に引き継がない)
+        foreach (var group in rows.Where(r => r.PortDisplay.Length > 0).GroupBy(r => r.PortDisplay, StringComparer.Ordinal).Where(g => g.Count() > 1).ToList())
+        {
+            var members = group.ToList();
+            var segsOf = members.Select(m => m.PortName.Split('/')).ToList();
+            var maxDepth = segsOf.Max(x => x.Length);
+            List<string>? labels = null;
+            for (var d = 0; d < maxDepth; d++)
+            {
+                var cand = segsOf.Select(x => x.Length > d ? PortNameJa.Translate(x[x.Length - 1 - d]) : "").ToList();
+                if (cand.Distinct(StringComparer.Ordinal).Count() == cand.Count) { labels = cand; break; }
+            }
+            labels ??= segsOf.Select(x => PortNameJa.Translate(x[^1])).ToList();
+            for (var j = 0; j < members.Count; j++)
+                if (labels[j].Length > 0) members[j].PortDisplay += $" ({labels[j]})";
+        }
+    }
+
+    // 親の行に今付いている物がジンバル/マウントかタレットか (子の行の搭載枠の欄を「親の搭載枠/親に付いている物の名前」にする)
+    private static bool CarriesChildren(ShipPortLoadout parent, EquipmentService equip)
+    {
+        if (parent.IsMountNow) return true;
+        var rec = parent.EffectiveItemRecord;
+        var type = rec.Length > 0 ? equip.GetItemIndexType(rec).Type : parent.ItemType;
+        if (type.Length == 0) type = parent.ItemType;
+        return type is "Turret" or "TurretBase" or "UtilityTurret" or WeaponMountType;
+    }
+
+    // 行の既定の装備の名前と、上書き (ship_loadouts) があれば今の装備を入れる
+    private static void FillLoadoutItem(ShipPortLoadout row, Dictionary<string, string> overrides, EquipmentService equip)
+    {
+        var def = row.DefaultItemRecord.Length > 0 ? equip.GetItemByRecord(row.DefaultItemRecord) : null;
+        row.DefaultItemName = def?.Name ?? row.DefaultItemRecord;
+
+        EquipmentItem? effective = def;
+        if (overrides.TryGetValue(row.PortKey, out var ov))
+        {
+            row.CurrentItemRecord = ov;
+            var cur = ov.Length > 0 ? equip.GetItemByRecord(ov) : null;
+            row.CurrentItemName = cur?.Name ?? ov;
+            effective = cur;
+        }
+        row.ItemSize = effective?.Size ?? 0;
+        row.ItemGrade = effective?.Grade ?? 0;
     }
 
     // 装備データ再抽出 (RebuildEquipmentDataAsync) 後に、ship_loadouts のうち現在のポートキー (GetShipLoadout の PortKey) に
@@ -1493,10 +1829,12 @@ public class HangarService
                 else
                 {
                     var allPorts = equip.GetShipPorts(record);
-                    var ports = allPorts.Count == 0 ? new List<ShipPortLoadout>() : BuildShipLoadout(shipKey, allPorts, equip);
+                    // 今ジンバル/マウントが付いている行は装備行に入れない (マウントの行を現在の装備の表に出す前と同じ内容にする)
+                    var ports = allPorts.Count == 0 ? new List<ShipPortLoadout>()
+                        : BuildShipLoadout(shipKey, allPorts, equip).Where(p => !p.IsMountNow).ToList();
                     if (allPorts.Count == 0)
                     {
-                        equipFallback = "装備: ポート情報なし (ゲームデータ未収録)";
+                        equipFallback = "装備: 搭載枠情報なし (ゲームデータ未収録)";
                     }
                     // ポート種別 (TypeDisplay。対訳の無い ItemType は英名のまま) ごとに 1 行。
                     // 表示名 (EffectiveItemName) と Size と Class の組が同じものはまとめて ×N (record が別でも同名なら 1 行。PortKey 単位で 1 ポート)。
@@ -1504,7 +1842,7 @@ public class HangarService
                     // Class は items.grade があるものだけ A〜D。
                     // 装備名が空: ロードアウトで明示的に空にした ('' 上書き) は "(空スロット)"、
                     // ゲームデータの equipped_item が空 (空か未収録か区別できない) は "(装備データなし)"
-                    foreach (var g in ports.GroupBy(p => p.TypeDisplay))
+                    foreach (var g in ports.GroupBy(p => p.EffectiveTypeDisplay))
                     {
                         var entries = g
                             .Select(p =>
@@ -1513,7 +1851,7 @@ public class HangarService
                                 var cls = p.ItemGrade > 0 ? MyComponent.GradeToClass(p.ItemGrade) : "";
                                 var label = p.EffectiveItemName.Length > 0 ? p.EffectiveItemName
                                     : p.EffectiveItemRecord.Length > 0 ? p.EffectiveItemRecord
-                                    : p.IsCustom ? "(空スロット)" : "(装備データなし)";
+                                    : p.IsCustom || p.IsGenerated ? "(空スロット)" : "(装備データなし)";
                                 return (Port: p, Size: size, Cls: cls, Label: label);
                             })
                             .GroupBy(e => (e.Label, e.Size, e.Cls))
@@ -2797,5 +3135,155 @@ public class HangarService
         foreach (var (name, value) in parms)
             cmd.Parameters.AddWithValue(name, value);
         cmd.ExecuteNonQuery();
+    }
+}
+
+// 船のポート名 (hardpoint_weapon_right_nose 等) を日本語の搭載枠の名前にする (装備タブの表の「搭載枠」の欄)。
+// ゲームデータの搭載枠の表示名 (船の XML の display_name) は抜け・訳の揺れがあり、利用者の示した形 (武器右機首) と合わないので使わない。
+// 語に分け、語を日本語に置き換えて「種類 → 向き (前後 → 左右 → 上下 → 中央・内外) → 場所 → 番号」の順に並べる
+// (例 weapon_right_nose → 武器右機首、turret_top_left → タレット左上、missile_01_attach → ミサイル 1)。
+// hardpoint・attach は捨てる。知らない語は英語のまま残す (捨てない)
+public static class PortNameJa
+{
+    private enum Kind { Noun, Dir, Loc, Num }
+
+    // 種類の語
+    private static readonly Dictionary<string, string> Nouns = new(StringComparer.Ordinal)
+    {
+        ["weapon"] = "武器", ["weapons"] = "武器", ["gun"] = "ガン", ["missile"] = "ミサイル", ["missiles"] = "ミサイル",
+        ["missilerack"] = "ミサイルラック", ["missilelauncher"] = "ミサイルランチャー", ["missilebay"] = "ミサイルベイ",
+        ["turret"] = "タレット", ["cooler"] = "クーラー", ["shield"] = "シールド", ["shieldgenerator"] = "シールド",
+        ["generator"] = "ジェネレーター", ["radar"] = "レーダー", ["avionics"] = "アビオニクス",
+        ["countermeasure"] = "カウンターメジャー", ["countermeasures"] = "カウンターメジャー", ["countermeasurelauncher"] = "カウンターメジャー",
+        ["flare"] = "フレア", ["chaff"] = "チャフ", ["torpedo"] = "魚雷", ["laser"] = "レーザー", ["cannon"] = "キャノン",
+        ["rifle"] = "ライフル", ["emp"] = "EMP", ["tractorbeam"] = "トラクタービーム", ["beam"] = "ビーム", ["launcher"] = "ランチャー",
+        ["rack"] = "ラック", ["mount"] = "マウント", ["gunmount"] = "マウント", ["gimbal"] = "ジンバル", ["fixed"] = "固定",
+        ["remote"] = "リモート", ["manned"] = "有人", ["pilot"] = "パイロット", ["gunner"] = "ガンナー", ["seat"] = "シート",
+        ["access"] = "アクセス", ["door"] = "ドア", ["console"] = "コンソール", ["cabinet"] = "キャビネット", ["locker"] = "ロッカー",
+        ["weaponlocker"] = "武器ロッカー", ["weaponrack"] = "武器ラック", ["gunrack"] = "武器ラック", ["camera"] = "カメラ",
+        ["special"] = "特殊", ["secondary"] = "サブ", ["main"] = "メイン", ["small"] = "小型", ["class"] = "クラス",
+        ["storage"] = "ストレージ", ["cockpit"] = "コックピット", ["exterior"] = "外部", ["ext"] = "外部", ["tray"] = "トレイ",
+        ["node"] = "ノード", ["cap"] = "キャップ", ["addon"] = "アドオン", ["quantumdrive"] = "量子ドライブ",
+        ["jumpdrive"] = "ジャンプドライブ", ["drive"] = "ドライブ", ["quantum"] = "量子", ["jump"] = "ジャンプ",
+        ["powerplant"] = "パワープラント", ["power"] = "パワー", ["plant"] = "プラント", ["lifesupport"] = "ライフサポート",
+        ["multitool"] = "マルチツール", ["size"] = "サイズ", ["tractor"] = "トラクター", ["thruster"] = "スラスター",
+    };
+
+    // 向きの語 (並べる順: 0 前後 → 1 左右 → 2 上下 → 3 中央・内外・側面)
+    private static readonly Dictionary<string, (int Order, string Ja)> Dirs = new(StringComparer.Ordinal)
+    {
+        ["front"] = (0, "前"), ["rear"] = (0, "後"), ["back"] = (0, "後"),
+        ["left"] = (1, "左"), ["right"] = (1, "右"), ["l"] = (1, "左"), ["r"] = (1, "右"),
+        ["top"] = (2, "上"), ["upper"] = (2, "上"), ["bottom"] = (2, "下"), ["lower"] = (2, "下"),
+        ["center"] = (3, "中央"), ["centre"] = (3, "中央"), ["middle"] = (3, "中央"), ["mid"] = (3, "中央"),
+        ["inner"] = (3, "内側"), ["outer"] = (3, "外側"), ["side"] = (3, "側面"),
+    };
+
+    // 場所の語
+    private static readonly Dictionary<string, string> Locs = new(StringComparer.Ordinal)
+    {
+        ["nose"] = "機首", ["wing"] = "翼", ["tail"] = "尾部", ["body"] = "胴体", ["arm"] = "アーム", ["spine"] = "背部",
+        ["neck"] = "首部", ["tip"] = "先端", ["base"] = "基部",
+    };
+
+    // 2 語で 1 つの語 (quantum + drive → quantumdrive)
+    private static readonly Dictionary<(string, string), string> Pairs = new()
+    {
+        [("quantum", "drive")] = "quantumdrive", [("jump", "drive")] = "jumpdrive", [("power", "plant")] = "powerplant",
+        [("shield", "generator")] = "shieldgenerator", [("shield", "gen")] = "shieldgenerator", [("life", "support")] = "lifesupport",
+        [("missile", "rack")] = "missilerack", [("missile", "launcher")] = "missilelauncher", [("missile", "bay")] = "missilebay",
+        [("countermeasure", "launcher")] = "countermeasurelauncher", [("gun", "mount")] = "gunmount", [("gun", "rack")] = "gunrack",
+        [("weapon", "locker")] = "weaponlocker", [("weapon", "rack")] = "weaponrack", [("tractor", "beam")] = "tractorbeam",
+    };
+
+    // 1 語に向き・種類がくっついたもの (fronttop → front + top)
+    private static readonly Dictionary<string, string[]> Splits = new(StringComparer.Ordinal)
+    {
+        ["fronttop"] = ["front", "top"], ["frontbottom"] = ["front", "bottom"], ["backtopright"] = ["back", "top", "right"],
+        ["backtopleft"] = ["back", "top", "left"], ["backbottom"] = ["back", "bottom"], ["frontleft"] = ["front", "left"],
+        ["frontright"] = ["front", "right"], ["rearleft"] = ["rear", "left"], ["rearright"] = ["rear", "right"],
+        ["tl"] = ["top", "left"], ["tr"] = ["top", "right"], ["bl"] = ["bottom", "left"], ["br"] = ["bottom", "right"],
+        ["centermount"] = ["center", "mount"], ["seataccess"] = ["seat", "access"],
+    };
+
+    private static readonly HashSet<string> Dropped = new(StringComparer.Ordinal) { "hardpoint", "attach" };
+    private static readonly Regex WordNumber = new(@"^([a-z]+?)(\d+)$", RegexOptions.Compiled);
+    private static readonly Regex SizeToken = new(@"^s\d{1,2}$", RegexOptions.Compiled);
+
+    // "/" で区切ったポート名の各段を日本語にして "/" でつなぐ
+    public static string TranslatePath(string portName) =>
+        string.Join("/", (portName ?? "").Split('/').Select(Translate));
+
+    // ポート名 1 段を日本語にする。知らない語は英語のまま
+    public static string Translate(string segment) => Translate(segment, out _);
+
+    // unknown: 日本語にできなかった語 (英語のまま残した語)
+    public static string Translate(string segment, out List<string> unknown)
+    {
+        unknown = new List<string>();
+        var raw = (segment ?? "").Trim();
+        if (raw.Length == 0) return raw;
+        // 語に分ける (語の後ろの数字は分ける。s3 などの大きさはそのまま)
+        var tokens = new List<(string Lower, string Original)>();
+        foreach (var t in Regex.Split(raw, @"[_\-\s]+").Where(t => t.Length > 0))
+        {
+            var lower = t.ToLowerInvariant();
+            var m = WordNumber.Match(lower);
+            if (m.Success && !SizeToken.IsMatch(lower) && (Nouns.ContainsKey(m.Groups[1].Value) || Dirs.ContainsKey(m.Groups[1].Value)
+                || Locs.ContainsKey(m.Groups[1].Value) || Dropped.Contains(m.Groups[1].Value)))
+            {
+                tokens.Add((m.Groups[1].Value, t[..m.Groups[1].Length]));
+                tokens.Add((m.Groups[2].Value, m.Groups[2].Value));
+            }
+            else if (Splits.TryGetValue(lower, out var parts)) tokens.AddRange(parts.Select(x => (x, x)));
+            else tokens.Add((lower, t));
+        }
+        // 2 語で 1 つの語をまとめる
+        var merged = new List<(string Lower, string Original)>();
+        for (var i = 0; i < tokens.Count; i++)
+        {
+            if (i + 1 < tokens.Count && Pairs.TryGetValue((tokens[i].Lower, tokens[i + 1].Lower), out var one))
+            {
+                merged.Add((one, one));
+                i++;
+            }
+            else merged.Add(tokens[i]);
+        }
+        var nouns = new List<string>();
+        var dirs = new List<(int Order, int Index, string Ja)>();
+        var locs = new List<string>();
+        var nums = new List<string>();
+        for (var i = 0; i < merged.Count; i++)
+        {
+            var (lower, original) = merged[i];
+            if (Dropped.Contains(lower)) continue;
+            if (Nouns.TryGetValue(lower, out var n)) nouns.Add(n);
+            else if (Dirs.TryGetValue(lower, out var d)) dirs.Add((d.Order, i, d.Ja));
+            else if (Locs.TryGetValue(lower, out var l)) locs.Add(l);
+            else if (lower.All(char.IsDigit)) nums.Add(int.TryParse(lower, out var v) ? v.ToString(CultureInfo.InvariantCulture) : lower);
+            else if (SizeToken.IsMatch(lower)) nums.Add(lower.ToUpperInvariant());
+            else if (lower.Length == 1 && lower[0] is >= 'a' and <= 'z') nums.Add(lower.ToUpperInvariant());
+            else
+            {
+                // 知らない語: 英語のまま、種類の語の並びに置く
+                nouns.Add(original);
+                unknown.Add(lower);
+            }
+        }
+        // 日本語の語はつなげ、英語の語・番号は空白で区切る
+        var sb = new System.Text.StringBuilder();
+        void Append(string piece)
+        {
+            if (piece.Length == 0) return;
+            var ascii = piece.All(c => c < 0x80);
+            var prevAscii = sb.Length > 0 && sb[^1] < 0x80;
+            if (sb.Length > 0 && (ascii || prevAscii)) sb.Append(' ');
+            sb.Append(piece);
+        }
+        foreach (var n in nouns) Append(n);
+        foreach (var d in dirs.OrderBy(d => d.Order).ThenBy(d => d.Index)) Append(d.Ja);
+        foreach (var l in locs) Append(l);
+        foreach (var n in nums) Append(n);
+        return sb.Length > 0 ? sb.ToString() : raw;
     }
 }

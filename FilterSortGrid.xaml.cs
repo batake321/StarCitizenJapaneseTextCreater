@@ -8,33 +8,40 @@ using System.Windows.Media;
 namespace StarCitizenJapaneseTextCreater;
 
 // 表の 1 列の定義。Text = 表に出す文字 (絞り込みの値にも使う)、Key = 並べ替えに使う値 (null は空欄。昇順・降順どちらでも最後)、
-// Numeric = 数値の列 (右寄せ。絞り込みの値も数値の順に並べる)
+// Numeric = 数値の列 (右寄せ。絞り込みの値も数値の順に並べる)、Filterable = 見出しに絞り込みのボタン (Select) を出すか (並べ替えはどの列でもできる)
 public sealed class GridColumnSpec
 {
+    public bool Filterable { get; init; } = true;
     public string Header { get; init; } = "";
     public Func<object, string> Text { get; init; } = _ => "";
     public Func<object, IComparable?> Key { get; init; } = _ => null;
     public bool Numeric { get; init; }
+    // セルのツールチップ (null・空なら出さない)。指定が無い列は出さない
+    public Func<object, string?>? Tooltip { get; init; }
 }
 
 // 絞り込み・複数列の並べ替えができる表 (［船舶戦闘］［個人戦闘］で共用)。
 //   表の上の検索欄: どれかの列の文字に含まれる行だけを出す (大文字小文字を区別しない)
-//   見出しの「▼」: その列の値の一覧 (検索欄・(すべて選択)・値ごとのチェックと件数) で、含む / 含まないを選ぶ。件数は全体の行数
+//   見出しの「Select」: その列の値の一覧 (検索欄・全て・値ごとのチェックと件数) で、含む / 含まないを選ぶ。件数は全体の行数
 //   見出しのクリック: その列で並べ替え (もう一度押すと逆順)。Shift を押しながらだと 2 つ目以降の並べ替えとして足す。
 //   見出しに並べ替えの順位と ▲ (昇順) / ▼ (降順) を出す。空欄は昇順・降順どちらでも最後
 public partial class FilterSortGrid : UserControl
 {
+    // 名前の列 (1 列目) のセルをダブルクリックしたとき。引数は行の元のオブジェクト (SetItems に渡したもの)
+    public event Action<object>? NameDoubleClicked;
+
     private sealed class GridRow
     {
         public object Source { get; init; } = new();
         public string[] Cells { get; init; } = [];
+        public string?[] Tips { get; init; } = [];          // セルのツールチップ (GridColumnSpec.Tooltip。無ければ null)
     }
 
     private List<GridColumnSpec> _columns = new();
     private List<GridRow> _rows = new();
     private readonly List<(int Column, bool Descending)> _sorts = new();
     private readonly Dictionary<int, HashSet<string>> _excluded = new();    // 列 → 含まない値
-    private readonly List<(TextBlock Mark, Button Filter)> _headerParts = new();
+    private readonly List<(TextBlock Title, TextBlock Mark, Button Filter)> _headerParts = new();
     private const string BlankLabel = "(空欄)";
 
     // 表に出している行 (絞り込み・並べ替えの後) が変わったとき
@@ -43,6 +50,15 @@ public partial class FilterSortGrid : UserControl
     public FilterSortGrid()
     {
         InitializeComponent();
+        // Ctrl+C で選んだセルの文字だけをコピーする (DataGridCellCopy)
+        DataGridCellCopy.Attach(grid);
+        // 名前の列 (1 列目) のダブルクリック → NameDoubleClicked
+        grid.MouseDoubleClick += (_, e) =>
+        {
+            var cell = FindParent<DataGridCell>(e.OriginalSource as DependencyObject);
+            if (cell == null || grid.Columns.IndexOf(cell.Column) != 0 || cell.DataContext is not GridRow row) return;
+            NameDoubleClicked?.Invoke(row.Source);
+        };
     }
 
     // 列を決める (行・絞り込み・並べ替えは消える)
@@ -60,20 +76,25 @@ public partial class FilterSortGrid : UserControl
             var mark = new TextBlock { Margin = new Thickness(4, 0, 0, 0), Foreground = Brushes.DimGray };
             var filter = new Button
             {
-                Content = "▼", Padding = new Thickness(3, 0, 3, 0), Margin = new Thickness(4, 0, 0, 0),
+                Content = "Select", Padding = new Thickness(2, 0, 2, 0), Margin = new Thickness(4, 0, 0, 0),
                 Background = Brushes.Transparent, BorderThickness = new Thickness(0), FontSize = 10, Cursor = Cursors.Hand,
+                VerticalAlignment = VerticalAlignment.Center,
+                Visibility = spec.Filterable ? Visibility.Visible : Visibility.Collapsed,
             };
             filter.Click += (_, _) => OpenFilter(index, filter);
             var header = new StackPanel { Orientation = Orientation.Horizontal };
-            header.Children.Add(new TextBlock { Text = spec.Header });
+            var title = new TextBlock { Text = spec.Header };
+            header.Children.Add(title);
             header.Children.Add(mark);
             header.Children.Add(filter);
-            _headerParts.Add((mark, filter));
+            _headerParts.Add((title, mark, filter));
             var column = new DataGridTextColumn { Header = header, Binding = new Binding($"Cells[{i}]"), SortMemberPath = $"Cells[{i}]" };
-            if (spec.Numeric)
+            if (spec.Numeric || spec.Tooltip != null)
             {
                 var style = new Style(typeof(TextBlock));
-                style.Setters.Add(new Setter(TextBlock.HorizontalAlignmentProperty, HorizontalAlignment.Right));
+                if (spec.Numeric) style.Setters.Add(new Setter(TextBlock.HorizontalAlignmentProperty, HorizontalAlignment.Right));
+                // ツールチップは null のセルでは出ない
+                if (spec.Tooltip != null) style.Setters.Add(new Setter(FrameworkElement.ToolTipProperty, new Binding($"Tips[{i}]")));
                 column.ElementStyle = style;
             }
             grid.Columns.Add(column);
@@ -84,9 +105,33 @@ public partial class FilterSortGrid : UserControl
     // 行を入れる。絞り込み (含まない値) と並べ替えはそのまま残す (新しく出てきた値は含む)
     public void SetItems(IEnumerable<object> items)
     {
-        _rows = items.Select(o => new GridRow { Source = o, Cells = _columns.Select(c => c.Text(o) ?? "").ToArray() }).ToList();
+        _rows = items.Select(o => new GridRow
+        {
+            Source = o,
+            Cells = _columns.Select(c => c.Text(o) ?? "").ToArray(),
+            Tips = _columns.Select(c => c.Tooltip?.Invoke(o) is { Length: > 0 } t ? t : null).ToArray(),
+        }).ToList();
         Refresh();
     }
+
+    // 1 列の定義 (見出し・値) を差し替える。その列は値が変わるので絞り込みを解除する。並べ替えと他の列の絞り込み・検索欄はそのまま残す
+    public void ReplaceColumn(int index, GridColumnSpec spec)
+    {
+        if (index < 0 || index >= _columns.Count) return;
+        _columns[index] = spec;
+        _headerParts[index].Title.Text = spec.Header;
+        _headerParts[index].Filter.Visibility = spec.Filterable ? Visibility.Visible : Visibility.Collapsed;
+        _excluded.Remove(index);
+        foreach (var r in _rows)
+        {
+            r.Cells[index] = spec.Text(r.Source) ?? "";
+            r.Tips[index] = spec.Tooltip?.Invoke(r.Source) is { Length: > 0 } t ? t : null;
+        }
+        Refresh();
+    }
+
+    // 表の上の検索欄の並び (右側) に、使う側の小さな部品 (選択など) を足す
+    public void AddToolbarItem(UIElement element) => toolbarExtra.Children.Add(element);
 
     private void TxtSearch_TextChanged(object sender, TextChangedEventArgs e) => Refresh();
 
@@ -130,7 +175,7 @@ public partial class FilterSortGrid : UserControl
             var pos = _sorts.FindIndex(s => s.Column == i);
             _headerParts[i].Mark.Text = pos >= 0 ? (_sorts[pos].Descending ? "▼" : "▲") + (pos + 1) : "";
             var filtered = _excluded.TryGetValue(i, out var ex) && ex.Count > 0;
-            _headerParts[i].Filter.Foreground = filtered ? Brushes.DodgerBlue : Brushes.Gray;
+            _headerParts[i].Filter.Foreground = filtered ? Brushes.Gold : Brushes.DodgerBlue;
             _headerParts[i].Filter.FontWeight = filtered ? FontWeights.Bold : FontWeights.Normal;
         }
         if (txtCount != null) txtCount.Text = list.Count == _rows.Count ? $"{_rows.Count} 件" : $"{list.Count} / {_rows.Count} 件";
@@ -153,7 +198,7 @@ public partial class FilterSortGrid : UserControl
         return 0;
     }
 
-    // 絞り込みの窓: 検索欄・(すべて選択)・値ごとのチェックと件数 (全体の行数)
+    // 絞り込みの窓: 検索欄・全て・値ごとのチェックと件数 (全体の行数)
     private void OpenFilter(int col, Button anchor)
     {
         var spec = _columns[col];
@@ -168,7 +213,7 @@ public partial class FilterSortGrid : UserControl
             .ToList();
 
         var search = new TextBox { Margin = new Thickness(0, 0, 0, 4), MinWidth = 160 };
-        var all = new CheckBox { Content = "(すべて選択)", Margin = new Thickness(0, 0, 0, 2) };
+        var all = new CheckBox { Content = "全て", Margin = new Thickness(0, 0, 0, 2) };
         var listPanel = new StackPanel();
         var boxes = new List<(string Value, CheckBox Box)>();
         bool updating = false;
@@ -226,5 +271,11 @@ public partial class FilterSortGrid : UserControl
         };
         popup.Opened += (_, _) => search.Focus();
         popup.IsOpen = true;
+    }
+
+    private static T? FindParent<T>(DependencyObject? d) where T : DependencyObject
+    {
+        while (d != null && d is not T) d = d is System.Windows.Media.Visual or System.Windows.Media.Media3D.Visual3D ? System.Windows.Media.VisualTreeHelper.GetParent(d) : LogicalTreeHelper.GetParent(d);
+        return d as T;
     }
 }

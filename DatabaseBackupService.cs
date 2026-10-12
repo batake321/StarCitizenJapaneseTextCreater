@@ -21,7 +21,9 @@ public static class DatabaseBackupService
     // ammo_params: 弾のデータ (Data.p4k の AmmoParams。武器の弾速・ダメージに使う)
     // item_variants: 色違いの表 (性能が基本品目と同じ色・柄違い。インデックス構築で作る)
     // player_damage_params: 何発で倒せるか (TTK) に使う体力・部位の倍率・アーマーの倍率 (インデックス構築で作る)
-    private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache", "item_shop_prices", "ammo_params", "item_variants", "player_damage_params"];
+    // item_ports: タレット・ジンバル・船の武器自身の子ポートの定義 (インデックス構築で作る)
+    // item_port_labels: 品目の中の枠の名前と表示名 (日本語化で itemPort_ キーを足すのに使う。インデックス構築で作る)
+    private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache", "item_shop_prices", "ammo_params", "item_variants", "player_damage_params", "item_ports", "item_port_labels"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
     private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "ship_loaners", "store_skus", "my_components", "ship_loadouts"];
 
@@ -775,7 +777,10 @@ public static class DatabaseBackupService
                 port_name TEXT,
                 item_type TEXT,
                 size INTEGER,
-                equipped_item TEXT
+                equipped_item TEXT,
+                min_size INTEGER,
+                max_size INTEGER,
+                port_types TEXT
             );
             CREATE TABLE IF NOT EXISTS items (
                 record_name TEXT PRIMARY KEY,
@@ -830,8 +835,12 @@ public static class DatabaseBackupService
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
-        """ + ShopPriceStore.TableDdl + GameDataExtractor.AmmoParamsDdl + GameDataQueryService.ItemVariantsDdl + GameDataQueryService.PlayerDamageParamsDdl;
+        """ + ShopPriceStore.TableDdl + GameDataExtractor.AmmoParamsDdl + GameDataQueryService.ItemVariantsDdl + GameDataQueryService.PlayerDamageParamsDdl
+          + GameDataExtractor.ItemPortsDdl + GameDataExtractor.ItemPortLabelsDdl;
         cmd.ExecuteNonQuery();
+
+        // 既存の ship_ports に min_size / max_size / port_types 列が無ければ足す (バックアップ側にあると INSERT が列不足で失敗するため)
+        GameDataExtractor.AddMissingShipPortsColumns(conn);
 
         // 既存の ships に name_en 列 (船の英語名) が無ければ足す。バックアップ側に name_en があると INSERT が列不足で失敗するため
         var shipCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

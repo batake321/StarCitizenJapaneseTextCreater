@@ -11,6 +11,8 @@
         <DockPanel Grid.Row="0" Margin="0,0,0,6">
             <TextBlock Text="検索" VerticalAlignment="Center" Margin="0,0,6,0"/>
             <TextBlock x:Name="txtCount" DockPanel.Dock="Right" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
+            <!-- 使う側が足す小さな選択 (AddToolbarItem)。検索欄の右に並べる -->
+            <StackPanel x:Name="toolbarExtra" DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center"/>
             <TextBox x:Name="txtSearch" MinWidth="200" TextChanged="TxtSearch_TextChanged"/>
         </DockPanel>
 

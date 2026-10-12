@@ -24,9 +24,11 @@ public class EquipmentService : IDisposable
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
     private static readonly TimeSpan CacheTtl = TimeSpan.FromHours(24);
 
-    // 装備カテゴリ。Key は items.item_type (船舶武器 WeaponGun のみ items に無く item_index から引く)。表示順はこの並び。
-    // uexCategoryIds は UEX の購入場所検索用 (不明なカテゴリは空 → 既定カテゴリで検索)
+    // 装備カテゴリ。Key は items.item_type (船舶武器 WeaponGun・タレット Turret・ジンバル/マウント WeaponMount は items に無く item_index から引く)。
+    // 表示順はこの並び。uexCategoryIds は UEX の購入場所検索用 (不明なカテゴリは空 → 既定カテゴリで検索)
     private const string WeaponGunType = "WeaponGun";
+    internal const string TurretType = "Turret";
+    internal const string WeaponMountType = "WeaponMount";
     private static readonly List<(string Key, string DisplayName, int[] UexCategoryIds)> ComponentCategories = new()
     {
         ("PowerPlant", "パワープラント", new[] { 21 }),
@@ -40,6 +42,8 @@ public class EquipmentService : IDisposable
         ("QuantumFuelTank", "量子燃料タンク", Array.Empty<int>()),
         ("FuelIntake", "燃料インテーク", Array.Empty<int>()),
         (WeaponGunType, "船舶武器", new[] { 32, 33, 34, 35 }),
+        (TurretType, "タレット", Array.Empty<int>()),
+        (WeaponMountType, "ジンバル/マウント", Array.Empty<int>()),
     };
 
     private static readonly Dictionary<string, (string stat1Label, string stat2Label)> StatLabels = new()
@@ -53,12 +57,18 @@ public class EquipmentService : IDisposable
 
     // item_index.size 列の有無 (再抽出前の旧 DB には無い。読み取り専用接続なので ALTER はここでは行わない)
     private readonly bool _hasItemIndexSize;
+    // ship_ports の min_size / max_size / port_types 列、item_ports 表の有無 (インデックスの作り直し前の DB には無い)
+    private readonly bool _hasShipPortSizes;
+    private readonly bool _hasItemPorts;
 
     public EquipmentService(string gamedataCacheDbPath)
     {
+        _gamedataDbPath = gamedataCacheDbPath;
         _conn = new SqliteConnection($"Data Source={gamedataCacheDbPath};Mode=ReadOnly");
         _conn.Open();
         _hasItemIndexSize = HasColumn("item_index", "size");
+        _hasShipPortSizes = HasColumn("ship_ports", "max_size") && HasColumn("ship_ports", "min_size") && HasColumn("ship_ports", "port_types");
+        _hasItemPorts = HasColumn("item_ports", "max_size");
         _cacheDbPath = Path.Combine(Path.GetDirectoryName(gamedataCacheDbPath) ?? ".", "equipment_cache.db");
         InitCacheDb();
         ReloadPriceIndex();
@@ -141,6 +151,7 @@ public class EquipmentService : IDisposable
     public List<EquipmentItem> GetShipComponents(string itemType, string? search = null, int? sizeFilter = null)
     {
         if (itemType == WeaponGunType) return GetShipWeapons(search);
+        if (itemType == TurretType || itemType == WeaponMountType) return GetTurretsOrMounts(itemType, search);
 
         using var cmd = _conn.CreateCommand();
         var conditions = new List<string> { "i.item_type = @ct" };
@@ -228,6 +239,258 @@ public class EquipmentService : IDisposable
         return items;
     }
 
+    // ジンバル/マウントの record か。
+    //   1. 船の既定の装備 (ship_ports.equipped_item) に使われていれば、そのポートの種別に合わせる
+    //      (WeaponMount のポート → ジンバル/マウント、Turret のポート → タレット。例 MISC_Starlancer_TAC_Missile_Gimbal は Turret のポートなのでタレット)
+    //   2. どちらのポートにも使われていなければ (使われていない・WeaponGun のポートだけ等)、IsMountRecordByName (record 名の規則)
+    // item_index の item_type / sub_type ではジンバル (Mount_Gimbal_S3 = Turret / GunTurret) とリモートタレット
+    // (AEGS_Reclaimer_SCItem_Remote_Turret = Turret / GunTurret) を見分けられないため、使われ方と record 名で分ける
+    private bool IsMountRecord(string? record)
+    {
+        if (DefaultEquipPortTypes().TryGetValue(RecordBaseName(record), out var types))
+        {
+            if (types.Contains(WeaponMountType)) return true;
+            if (types.Contains(TurretType)) return false;
+        }
+        return IsMountRecordByName(record);
+    }
+
+    // record 名の規則: record 名 (EntityClassDefinition. を除く) が mount_gimbal / weaponmount で始まるもの
+    // (ship_ports.item_type を WeaponMount にする規則 GameDataExtractor.OverridePortTypeByEntity と同じ)、
+    // または record 名に gimbal を含むもの (AEGS_Javelin_Manned_Turret_Gimbal_S5 等)。大文字小文字無視
+    internal static bool IsMountRecordByName(string? record)
+    {
+        var b = RecordBaseName(record);
+        return b.StartsWith("mount_gimbal", StringComparison.OrdinalIgnoreCase)
+            || b.StartsWith("weaponmount", StringComparison.OrdinalIgnoreCase)
+            || b.Contains("gimbal", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // record 名から "EntityClassDefinition." を除いた部分
+    private static string RecordBaseName(string? record)
+    {
+        const string prefix = "EntityClassDefinition.";
+        var r = record ?? "";
+        return r.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? r[prefix.Length..] : r;
+    }
+
+    // タレット (Turret) / ジンバル/マウント (WeaponMount) の候補 (item_index から)。
+    //   タレット         = item_index.item_type が Turret で、IsMountRecord (既定の装備のポートの種別、無ければ record 名) に当たらないもの
+    //                     (TurretBase・UtilityTurret は含めない)
+    //   ジンバル/マウント = item_index.item_type が Turret または WeaponMount で、IsMountRecord に当たるもの。ItemType は WeaponMount にする
+    //                     (ship_ports のマウントのポートの item_type と同じ。現在の装備の候補はこの種別で照合する)
+    // record ごとに 1 件 (同じ record の重複行だけをまとめる)。表示名とサイズが同じものが 2 件以上あるときは、見分けが付くよう
+    // 名前の後ろに「(…)」を付ける: その record を既定の装備に使っている船の名前 (ships.name_en。使っている行数の多い順に 2 隻まで、
+    // 3 隻以上なら「ほか」)。使っている船が無い (または船の名前が分からない) ときは record 名。
+    // それでも同じ文字になるものは、さらに「/ record 名」を付ける。表示名がプレースホルダ・空のものは除く
+    private List<EquipmentItem> GetTurretsOrMounts(string category, string? search)
+    {
+        var sizeExpr = _hasItemIndexSize ? "COALESCE(size, 0)" : "0";
+        var rows = new List<EquipmentItem>();
+        using (var cmd = _conn.CreateCommand())
+        {
+            cmd.CommandText = $"SELECT record_name, name, item_type, sub_type, manufacturer, {sizeExpr} FROM item_index WHERE item_type IN ('Turret', 'WeaponMount')";
+            using var reader = cmd.ExecuteReader();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (reader.Read())
+            {
+                var rec = reader.IsDBNull(0) ? "" : reader.GetString(0);
+                var name = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                var type = reader.IsDBNull(2) ? "" : reader.GetString(2);
+                if (rec.Length == 0 || IsPlaceholderName(name)) continue;
+                var isMount = IsMountRecord(rec);
+                if (category == WeaponMountType ? !isMount : (isMount || type != TurretType)) continue;
+                if (!seen.Add(rec)) continue;
+                var size = reader.IsDBNull(5) ? 0 : reader.GetInt32(5);
+                rows.Add(new EquipmentItem
+                {
+                    RecordName = rec,
+                    Name = name,
+                    ItemType = category,
+                    SubType = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                    Manufacturer = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                    Size = size > 0 ? size : SizeFromRecordName(rec),
+                });
+            }
+        }
+
+        // 表示名とサイズが同じものに区別を付ける
+        var usage = DefaultEquipShips();
+        string Note(EquipmentItem i)
+        {
+            if (usage.TryGetValue(RecordBaseName(i.RecordName), out var ships) && ships.Count > 0)
+                return string.Join("・", ships.Take(2)) + (ships.Count > 2 ? " ほか" : "");
+            return RecordBaseName(i.RecordName);
+        }
+        foreach (var g in rows.GroupBy(i => (i.Name, i.Size)).Where(g => g.Count() > 1))
+        {
+            var notes = g.Select(i => (Item: i, Note: Note(i))).ToList();
+            foreach (var n in notes)
+            {
+                var dup = notes.Count(x => x.Note == n.Note) > 1;
+                var baseName = RecordBaseName(n.Item.RecordName);
+                var text = dup && n.Note != baseName ? $"{n.Note} / {baseName}" : n.Note;
+                n.Item.Name = $"{n.Item.Name} ({text})";
+            }
+        }
+
+        return rows
+            .Where(i => string.IsNullOrWhiteSpace(search)
+                || i.Name.Contains(search, StringComparison.OrdinalIgnoreCase)
+                || i.Manufacturer.Contains(search, StringComparison.OrdinalIgnoreCase)
+                || i.RecordName.Contains(search, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(i => i.Name, StringComparer.Ordinal).ThenBy(i => i.Size).ThenBy(i => i.RecordName, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    // record がどれかの船の既定の装備 (ship_ports.equipped_item。ポートの種別は問わない) に使われているか
+    public bool IsDefaultEquipOfAnyShip(string? record) => DefaultEquipRecords(null).Contains(RecordBaseName(record));
+
+    // record が船 shipRecordName (ships.record_name) の既定の装備 (ship_ports.equipped_item。ポートの種別は問わない) に使われているか
+    public bool IsDefaultEquipOfShip(string? record, string shipRecordName) => DefaultEquipRecords(shipRecordName).Contains(RecordBaseName(record));
+
+    // 既定の装備の record 名 (EntityClassDefinition. を除く。大文字小文字無視) の集合。shipRecordName が null なら全部の船、
+    // それ以外はその船だけ。表が無ければ空
+    private readonly Dictionary<string, HashSet<string>> _defaultEquipRecords = new(StringComparer.OrdinalIgnoreCase);
+
+    private HashSet<string> DefaultEquipRecords(string? shipRecordName)
+    {
+        var key = shipRecordName ?? "";
+        if (_defaultEquipRecords.TryGetValue(key, out var cached)) return cached;
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = shipRecordName == null
+                ? "SELECT DISTINCT equipped_item FROM ship_ports WHERE equipped_item IS NOT NULL AND equipped_item <> ''"
+                : "SELECT DISTINCT equipped_item FROM ship_ports WHERE ship_record_name = @srn AND equipped_item IS NOT NULL AND equipped_item <> ''";
+            if (shipRecordName != null) cmd.Parameters.AddWithValue("@srn", shipRecordName);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) set.Add(RecordBaseName(reader.GetString(0)));
+        }
+        catch (SqliteException) { }
+        return _defaultEquipRecords[key] = set;
+    }
+
+    // 船の既定の装備 (ship_ports.equipped_item。小文字の basename のことがあるので大文字小文字無視) → それが付いているポートの種別
+    // (ship_ports.item_type のうち Turret / WeaponMount だけ)。表が無ければ空
+    private Dictionary<string, HashSet<string>>? _defaultEquipPortTypes;
+
+    private Dictionary<string, HashSet<string>> DefaultEquipPortTypes()
+    {
+        if (_defaultEquipPortTypes != null) return _defaultEquipPortTypes;
+        var d = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT DISTINCT equipped_item, item_type FROM ship_ports WHERE equipped_item IS NOT NULL AND equipped_item <> '' AND item_type IN ('Turret', 'WeaponMount')";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var k = RecordBaseName(reader.GetString(0));
+                if (!d.TryGetValue(k, out var set)) d[k] = set = new HashSet<string>(StringComparer.Ordinal);
+                set.Add(reader.GetString(1));
+            }
+        }
+        catch (SqliteException) { }
+        return _defaultEquipPortTypes = d;
+    }
+
+    // 船の既定の装備 (ship_ports.equipped_item。小文字の basename のことがあるので大文字小文字無視) → それを使っている船の名前
+    // (ships.name_en。同じ名前の船 (AI 用などの複製) は 1 つにまとめ、使っている行数の多い順、同数なら名前の順)。
+    // ships に name_en 列が無い古い DB・表が無いときは空
+    private Dictionary<string, List<string>>? _defaultEquipShips;
+
+    private Dictionary<string, List<string>> DefaultEquipShips()
+    {
+        if (_defaultEquipShips != null) return _defaultEquipShips;
+        var counts = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
+        if (HasColumn("ships", "name_en"))
+        {
+            try
+            {
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = """
+                    SELECT p.equipped_item, s.name_en, COUNT(*)
+                    FROM ship_ports p JOIN ships s ON s.record_name = p.ship_record_name
+                    WHERE p.equipped_item IS NOT NULL AND p.equipped_item <> '' AND s.name_en IS NOT NULL AND s.name_en <> ''
+                    GROUP BY p.equipped_item, s.name_en
+                    """;
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    var k = RecordBaseName(reader.GetString(0));
+                    if (!counts.TryGetValue(k, out var byShip)) counts[k] = byShip = new Dictionary<string, int>(StringComparer.Ordinal);
+                    var ship = reader.GetString(1);
+                    byShip[ship] = (byShip.TryGetValue(ship, out var n) ? n : 0) + reader.GetInt32(2);
+                }
+            }
+            catch (SqliteException) { }
+        }
+        return _defaultEquipShips = counts.ToDictionary(
+            kv => kv.Key,
+            kv => kv.Value.OrderByDescending(x => x.Value).ThenBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Key).ToList(),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
+    // record (ship_ports.equipped_item の basename / record_name のどちらの形でもよい) の item_index.sub_type
+    // (タレットの形 CanardTurret / BallTurret 等)。record は GetItemByRecord と同じ順 (RecordCandidates) に照合する。見つからなければ ""
+    private readonly Dictionary<string, string> _subTypeByRecordCache = new(StringComparer.Ordinal);
+
+    public string GetItemIndexSubType(string? record)
+    {
+        var key = (record ?? "").Trim();
+        if (key.Length == 0) return "";
+        if (_subTypeByRecordCache.TryGetValue(key, out var cached)) return cached;
+        var result = "";
+        foreach (var cand in RecordCandidates(key))
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT sub_type FROM item_index WHERE record_name = @rn COLLATE NOCASE AND sub_type IS NOT NULL AND sub_type <> '' LIMIT 1";
+            cmd.Parameters.AddWithValue("@rn", cand);
+            if (cmd.ExecuteScalar() is string st && st.Length > 0) { result = st; break; }
+        }
+        _subTypeByRecordCache[key] = result;
+        return result;
+    }
+
+    // record の item_index の種類 (AttachDef.Type) と形 (SubType)。record は RecordCandidates の順に照合する。見つからなければ ("", "")
+    private readonly Dictionary<string, (string Type, string SubType)> _typeByRecordCache = new(StringComparer.Ordinal);
+
+    public (string Type, string SubType) GetItemIndexType(string? record)
+    {
+        var key = (record ?? "").Trim();
+        if (key.Length == 0) return ("", "");
+        if (_typeByRecordCache.TryGetValue(key, out var cached)) return cached;
+        (string, string) result = ("", "");
+        foreach (var cand in RecordCandidates(key))
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT item_type, sub_type FROM item_index WHERE record_name = @rn COLLATE NOCASE AND item_type IS NOT NULL AND item_type <> '' LIMIT 1";
+            cmd.Parameters.AddWithValue("@rn", cand);
+            using var reader = cmd.ExecuteReader();
+            if (reader.Read()) { result = (reader.GetString(0), reader.IsDBNull(1) ? "" : reader.GetString(1)); break; }
+        }
+        return _typeByRecordCache[key] = result;
+    }
+
+    // ポートの受け付ける種類 ("Type:SubType,SubType|Type:...") に、record の品目 (item_index の種類と形) が入るか。
+    // ポートの種類に形の指定が無ければ種類だけで照合する。受け付ける種類が空、または品目の種類が分からないときは true (絞れない)
+    public bool PortAccepts(string? portTypes, string? record)
+    {
+        if (string.IsNullOrWhiteSpace(portTypes)) return true;
+        var (type, sub) = GetItemIndexType(record);
+        if (type.Length == 0) return true;
+        foreach (var t in portTypes.Split('|', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = t.Split(':', 2);
+            if (!parts[0].Trim().Equals(type, StringComparison.OrdinalIgnoreCase)) continue;
+            if (parts.Length < 2 || parts[1].Trim().Length == 0) return true;
+            if (parts[1].Split(',').Any(x => x.Trim().Equals(sub, StringComparison.OrdinalIgnoreCase))) return true;
+        }
+        return false;
+    }
+
     public List<EquipmentItem> GetPersonalWeapons(string? search = null, string? manufacturerFilter = null)
     {
         using var cmd = _conn.CreateCommand();
@@ -282,7 +545,8 @@ public class EquipmentService : IDisposable
     public List<ShipPortInfo> GetShipPorts(string shipRecordName)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT port_name, item_type, size, equipped_item FROM ship_ports WHERE ship_record_name = @srn ORDER BY item_type, size DESC, port_name";
+        var sizeCols = _hasShipPortSizes ? "min_size, max_size, port_types" : "NULL, NULL, NULL";
+        cmd.CommandText = $"SELECT port_name, item_type, size, equipped_item, {sizeCols} FROM ship_ports WHERE ship_record_name = @srn ORDER BY item_type, size DESC, port_name";
         cmd.Parameters.AddWithValue("@srn", shipRecordName);
         using var reader = cmd.ExecuteReader();
 
@@ -295,10 +559,45 @@ public class EquipmentService : IDisposable
                 ItemType = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 Size = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
                 EquippedItem = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                MinSize = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+                MaxSize = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+                PortTypes = reader.IsDBNull(6) ? "" : reader.GetString(6),
             });
         }
         return ports;
     }
+
+    // 品目 (タレット・ジンバル・船の武器) 自身の子ポートの定義 (item_ports)。record は GetItemByRecord と同じ順 (RecordCandidates) に照合する。
+    // 表が無い古い DB・定義が無い品目は空
+    private readonly Dictionary<string, List<ItemPortDef>> _itemPortDefsCache = new(StringComparer.Ordinal);
+
+    public List<ItemPortDef> GetItemPortDefs(string? record)
+    {
+        var key = (record ?? "").Trim();
+        if (key.Length == 0 || !_hasItemPorts) return new List<ItemPortDef>();
+        if (_itemPortDefsCache.TryGetValue(key, out var cached)) return cached;
+        var list = new List<ItemPortDef>();
+        foreach (var cand in RecordCandidates(key))
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT port_name, min_size, max_size, port_types FROM item_ports WHERE record_name = @rn COLLATE NOCASE ORDER BY rowid";
+            cmd.Parameters.AddWithValue("@rn", cand);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                list.Add(new ItemPortDef
+                {
+                    Name = reader.GetString(0),
+                    MinSize = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                    MaxSize = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                    Types = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                });
+            if (list.Count > 0) break;
+        }
+        return _itemPortDefsCache[key] = list;
+    }
+
+    // record がジンバル/マウントか (IsMountRecord: 既定の装備のポートの種別、無ければ record 名の規則)
+    public bool IsGimbalRecord(string? record) => !string.IsNullOrWhiteSpace(record) && IsMountRecord(record);
 
     // record 名 1 件を items から引く (ツールチップ / 装備インベントリ用)。
     // ship_ports.equipped_item は "POWR_AEGS_S01_Regulus_SCItem" 形式、items.record_name / item_index.record_name は
@@ -931,8 +1230,94 @@ public class EquipmentService : IDisposable
         return el.ToString();
     }
 
+    // 武器のダメージの種類で分けた名前 (装備タブの表の種別の欄)。［船舶戦闘］の「ダメージの種類」と同じ判定
+    // (GameDataQueryService.WeaponDamageTypesOf) で、物理 → 実弾武器、エネルギー → エネルギー武器、ディストーション → ディストーション武器。
+    // 種類が複数なら「・」でつなぐ (例 エネルギー・ディストーション武器)。ダメージが無い・読めないときは ""
+    private readonly string _gamedataDbPath;
+    private GameDataQueryService? _damageQuery;
+    private bool _damageQueryFailed;
+    private readonly Dictionary<string, string> _weaponKindCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly (string Key, string Label)[] WeaponDamageLabels =
+        [("Physical", "実弾"), ("Energy", "エネルギー"), ("Distortion", "ディストーション"), ("Thermal", "熱"), ("Biochemical", "生化学"), ("Stun", "スタン")];
+
+    public string WeaponDamageKindLabel(string? record)
+    {
+        var key = (record ?? "").Trim();
+        if (key.Length == 0) return "";
+        if (_weaponKindCache.TryGetValue(key, out var cached)) return cached;
+        var label = "";
+        try
+        {
+            if (_damageQuery == null && !_damageQueryFailed)
+            {
+                try { _damageQuery = new GameDataQueryService(_gamedataDbPath); }
+                catch { _damageQueryFailed = true; }
+            }
+            if (_damageQuery != null)
+            {
+                var types = _damageQuery.WeaponDamageTypesOf(key);
+                var parts = WeaponDamageLabels.Where(t => types.Contains(t.Key)).Select(t => t.Label).ToList();
+                if (parts.Count > 0) label = string.Join("・", parts) + "武器";
+            }
+        }
+        catch { label = ""; }
+        _weaponKindCache[key] = label;
+        return label;
+    }
+
+    // 所持コンポーネントの表の「性能」の欄 (種類ごとに 1 つの代表の値を「項目名 値」で。record の基本値)。
+    //   タレット・ジンバル/マウント: 下に付けられる物のサイズと数 (item_ports。例 搭載 S3×2)。武器 (WeaponGun) を受け付けるポートはサイズだけ、
+    //     それ以外 (ミサイルラック等) は受け付ける種類の最初の名前を前に付ける (例 搭載 S3×2 + ミサイルラック S4×1)
+    //   それ以外: GameDataQueryService.ComponentPerfOf (出力・冷却・HP・速度・感度・Alpha・ミサイルラックの搭載数など)
+    // 値が無い・読めないときは ""
+    private readonly Dictionary<string, string> _perfCache = new(StringComparer.OrdinalIgnoreCase);
+
+    public string ComponentPerfLabel(string? record, string? itemType)
+    {
+        var key = (record ?? "").Trim();
+        var type = (itemType ?? "").Trim();
+        if (key.Length == 0) return "";
+        var cacheKey = type + "|" + key;
+        if (_perfCache.TryGetValue(cacheKey, out var cached)) return cached;
+        var label = "";
+        try
+        {
+            if (type == TurretType || type == WeaponMountType)
+            {
+                var parts = GetItemPortDefs(key)
+                    .Select(d =>
+                    {
+                        var names = d.TypeNames;
+                        var isGun = names.Any(n => n.Equals(WeaponGunType, StringComparison.OrdinalIgnoreCase));
+                        var prefix = isGun || names.Count == 0 ? "" : new ShipPortInfo { ItemType = names[0] }.TypeDisplay + " ";
+                        return (Order: isGun ? 0 : 1, Text: prefix + GameDataQueryService.PortSizeText(d.MinSize, d.MaxSize), d.MaxSize);
+                    })
+                    .Where(x => x.MaxSize > 0)
+                    .GroupBy(x => (x.Order, x.Text))
+                    .OrderBy(g => g.Key.Order).ThenByDescending(g => g.First().MaxSize)
+                    .Select(g => $"{g.Key.Text}×{g.Count()}")
+                    .ToList();
+                if (parts.Count > 0) label = "搭載 " + string.Join(" + ", parts);
+            }
+            else
+            {
+                if (_damageQuery == null && !_damageQueryFailed)
+                {
+                    try { _damageQuery = new GameDataQueryService(_gamedataDbPath); }
+                    catch { _damageQueryFailed = true; }
+                }
+                if (_damageQuery != null) label = _damageQuery.ComponentPerfOf(key, type);
+            }
+        }
+        catch { label = ""; }
+        _perfCache[cacheKey] = label;
+        return label;
+    }
+
     public void Dispose()
     {
+        _damageQuery?.Dispose();
+        _damageQuery = null;
         _conn?.Dispose();
     }
 }
@@ -966,6 +1351,21 @@ public class EquipmentItem
     public string Stat2Display => !string.IsNullOrEmpty(Stat2Value) ? $"{Stat2Label}: {Stat2Value}" : "";
 }
 
+// 品目自身の子ポートの定義 1 件 (item_ports)。Types は受け付ける種類 "Type:SubType,SubType|Type:..."
+public class ItemPortDef
+{
+    public string Name { get; set; } = "";
+    public int MinSize { get; set; }
+    public int MaxSize { get; set; }
+    public string Types { get; set; } = "";
+    // 受け付ける種類の名前 (Type の部分) の一覧
+    public List<string> TypeNames => ParseTypeNames(Types);
+
+    public static List<string> ParseTypeNames(string types) =>
+        (types ?? "").Split('|', StringSplitOptions.RemoveEmptyEntries)
+            .Select(t => t.Split(':')[0].Trim()).Where(t => t.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+}
+
 public class ShipPortInfo
 {
     // ship_ports.port_name。子ポート行は "{親port}/{子port}" (例 hardpoint_weapon_left_nose/hardpoint_class_2)
@@ -973,6 +1373,11 @@ public class ShipPortInfo
     public string ItemType { get; set; } = "";
     public int Size { get; set; }
     public string EquippedItem { get; set; } = "";
+    // 船の XML のハードポイントの本当の大きさと受け付ける種類 (ship_ports.min_size / max_size / port_types。最上位のポートだけ。
+    // 列が無い古い DB・値が無いときは 0 / "")
+    public int MinSize { get; set; }
+    public int MaxSize { get; set; }
+    public string PortTypes { get; set; } = "";
     // 子ポート行か (port_name に "/" を含む)
     public bool IsChild => PortName.Contains('/');
     // 直接の親ポートの port_name (最後の "/" より前)。最上位ポートは ""

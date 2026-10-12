@@ -4,6 +4,7 @@ using System.IO.Compression;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Xml.Linq;
 using Microsoft.Data.Sqlite;
 
 namespace StarCitizenJapaneseTextCreater;
@@ -57,7 +58,10 @@ public class GameDataExtractor : IDisposable
                 port_name TEXT,
                 item_type TEXT,
                 size INTEGER,
-                equipped_item TEXT
+                equipped_item TEXT,
+                min_size INTEGER,
+                max_size INTEGER,
+                port_types TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_ship_ports_ship ON ship_ports(ship_record_name);
             CREATE INDEX IF NOT EXISTS idx_ship_ports_type ON ship_ports(item_type);
@@ -134,6 +138,8 @@ public class GameDataExtractor : IDisposable
                 MigrateWikiColumns();
                 MigrateItemIndexSizeColumn();
                 MigrateShipsNameEnColumn();
+                MigrateShipPortsSizeColumns();
+                EnsureItemPortsTable();
                 return;
             }
             catch { try { _db?.Dispose(); } catch { } _db = null; }
@@ -319,6 +325,592 @@ public class GameDataExtractor : IDisposable
         MigrateShipPortsTable();   // 旧スキーマの ship_ports (CREATE TABLE IF NOT EXISTS では作り直されない) を現行 DDL に移行
         MigrateItemIndexSizeColumn();
         MigrateShipsNameEnColumn();
+        MigrateShipPortsSizeColumns();
+        EnsureItemPortsTable();
+    }
+
+    // 既存 DB の ship_ports に min_size / max_size / port_types 列 (船の XML のハードポイントの本当の大きさと受け付ける種類) が無ければ足す
+    private void MigrateShipPortsSizeColumns()
+    {
+        if (_db == null) return;
+        try { AddMissingShipPortsColumns(_db); }
+        catch { }
+    }
+
+    // ship_ports に min_size / max_size / port_types 列が無ければ足す (DatabaseBackupService の復元先でも使う)。表が無ければ何もしない
+    internal static void AddMissingShipPortsColumns(SqliteConnection db)
+    {
+        var cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var chk = db.CreateCommand())
+        {
+            chk.CommandText = "PRAGMA table_info(ship_ports)";
+            using var reader = chk.ExecuteReader();
+            while (reader.Read()) cols.Add(reader.GetString(1));
+        }
+        if (cols.Count == 0) return;
+        foreach (var (col, type) in new[] { ("min_size", "INTEGER"), ("max_size", "INTEGER"), ("port_types", "TEXT") })
+        {
+            if (cols.Contains(col)) continue;
+            using var alt = db.CreateCommand();
+            alt.CommandText = $"ALTER TABLE ship_ports ADD COLUMN {col} {type}";
+            alt.ExecuteNonQuery();
+        }
+    }
+
+    private void EnsureItemPortsTable()
+    {
+        if (_db == null) return;
+        try
+        {
+            using var cmd = _db.CreateCommand();
+            cmd.CommandText = ItemPortsDdl + ItemPortLabelsDdl;
+            cmd.ExecuteNonQuery();
+        }
+        catch { }
+    }
+
+    // 品目 (タレット・ジンバル・船の武器) 自身の子ポートの定義 (record の SItemPortContainerComponentParams.Ports)。
+    // port_types は受け付ける種類 "Type:SubType,SubType|Type:..." (例 "WeaponGun:Gun")。インデックス構築で作る
+    internal const string ItemPortsDdl = """
+
+        CREATE TABLE IF NOT EXISTS item_ports (
+            record_name TEXT NOT NULL,
+            port_name TEXT NOT NULL,
+            min_size INTEGER,
+            max_size INTEGER,
+            port_types TEXT,
+            flags TEXT,
+            PRIMARY KEY (record_name, port_name)
+        );
+        """;
+
+    // 品目 (種類を問わない) の中の枠 (SItemPortContainerComponentParams.Ports) の名前と表示名 (DisplayName。"@port_NameJDrive" 等のキー)。
+    // item_type は品目の AttachDef.Type。日本語化 (IniMerger) で、英語 ini に無い "itemPort_<枠の名前>" を足すのに使う。
+    // 機体ロードアウトマネージャーは枠の名前を "@itemPort_<枠の名前>" で引き、キーが無いと生のキーが出る (利用者がゲームで確認)。インデックス構築で作る
+    internal const string ItemPortLabelsDdl = """
+
+        CREATE TABLE IF NOT EXISTS item_port_labels (
+            record_name TEXT NOT NULL,
+            port_name TEXT NOT NULL,
+            display_name TEXT,
+            item_type TEXT,
+            PRIMARY KEY (record_name, port_name)
+        );
+        """;
+
+    // dcb query (EntityClassDefinition) の出力から、品目の中の枠の名前と表示名を item_port_labels に入れる (INSERT OR REPLACE)。
+    // 品目の種類で絞らない (item_ports と違う)。入れた行数を返す
+    internal static int InsertItemPortLabelsFromJson(SqliteConnection db, SqliteTransaction? tx, string rawJson, HashSet<string>? onlyRecords = null)
+    {
+        using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "INSERT OR REPLACE INTO item_port_labels(record_name, port_name, display_name, item_type) VALUES(@rn, @pn, @dn, @it)";
+        var pRn = cmd.Parameters.Add("@rn", SqliteType.Text);
+        var pPn = cmd.Parameters.Add("@pn", SqliteType.Text);
+        var pDn = cmd.Parameters.Add("@dn", SqliteType.Text);
+        var pIt = cmd.Parameters.Add("@it", SqliteType.Text);
+        int count = 0;
+        foreach (var block in SplitJsonBlocks(rawJson))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+                if (recordName.Length == 0) continue;
+                if (onlyRecords != null && !onlyRecords.Contains(recordName)) continue;
+                if (!root.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("Components", out var components)
+                    || components.ValueKind != JsonValueKind.Array) continue;
+                string itemType = "";
+                JsonElement? container = null;
+                foreach (var comp in components.EnumerateArray())
+                {
+                    if (comp.ValueKind != JsonValueKind.Object) continue;
+                    var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
+                    if (type == "SAttachableComponentParams" && comp.TryGetProperty("AttachDef", out var ad))
+                        itemType = ad.TryGetProperty("Type", out var it) ? it.GetString() ?? "" : "";
+                    else if (type == "SItemPortContainerComponentParams")
+                        container = comp;
+                }
+                if (container == null || !container.Value.TryGetProperty("Ports", out var ports) || ports.ValueKind != JsonValueKind.Array) continue;
+                foreach (var p in ports.EnumerateArray())
+                {
+                    if (p.ValueKind != JsonValueKind.Object) continue;
+                    var name = p.TryGetProperty("Name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() ?? "" : "";
+                    if (name.Length == 0) continue;
+                    var display = p.TryGetProperty("DisplayName", out var d) && d.ValueKind == JsonValueKind.String ? d.GetString() ?? "" : "";
+                    pRn.Value = recordName; pPn.Value = name; pDn.Value = display; pIt.Value = itemType;
+                    cmd.ExecuteNonQuery();
+                    count++;
+                }
+            }
+            catch { }
+        }
+        return count;
+    }
+
+    // 子ポートの定義を保存する品目の種類 (AttachDef.Type)
+    internal static readonly HashSet<string> ItemPortRecordTypes = new(StringComparer.Ordinal)
+        { "Turret", "TurretBase", "UtilityTurret", "WeaponMount", "WeaponGun" };
+
+    // SItemPortContainerComponentParams の Ports を (名前, 最小, 最大, 受け付ける種類, flags) にする
+    internal static List<(string Name, int Min, int Max, string Types, string Flags)> ReadItemPortDefs(JsonElement portContainer)
+    {
+        var list = new List<(string, int, int, string, string)>();
+        if (!portContainer.TryGetProperty("Ports", out var ports) || ports.ValueKind != JsonValueKind.Array) return list;
+        foreach (var p in ports.EnumerateArray())
+        {
+            if (p.ValueKind != JsonValueKind.Object) continue;
+            var name = p.TryGetProperty("Name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() ?? "" : "";
+            if (name.Length == 0) continue;
+            int Int(string key) => p.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i) ? i : 0;
+            var types = new List<string>();
+            if (p.TryGetProperty("Types", out var ts) && ts.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var t in ts.EnumerateArray())
+                {
+                    if (t.ValueKind != JsonValueKind.Object) continue;
+                    var type = t.TryGetProperty("Type", out var tv) && tv.ValueKind == JsonValueKind.String ? tv.GetString() ?? "" : "";
+                    if (type.Length == 0) continue;
+                    var subs = t.TryGetProperty("SubTypes", out var sv) && sv.ValueKind == JsonValueKind.Array
+                        ? string.Join(",", sv.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()))
+                        : "";
+                    types.Add(subs.Length > 0 ? $"{type}:{subs}" : type);
+                }
+            }
+            var flags = p.TryGetProperty("Flags", out var f) && f.ValueKind == JsonValueKind.String ? f.GetString() ?? "" : "";
+            list.Add((name, Int("MinSize"), Int("MaxSize"), string.Join("|", types.Distinct(StringComparer.Ordinal)), flags));
+        }
+        return list;
+    }
+
+    // dcb query (EntityClassDefinition) の出力から、ItemPortRecordTypes の品目の子ポートの定義を item_ports に入れる (INSERT OR REPLACE)。
+    // 入れた行数を返す。インデックス構築とハーネスの両方から使う
+    internal static int InsertItemPortsFromJson(SqliteConnection db, SqliteTransaction? tx, string rawJson, HashSet<string>? onlyRecords = null)
+    {
+        using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "INSERT OR REPLACE INTO item_ports(record_name, port_name, min_size, max_size, port_types, flags) VALUES(@rn, @pn, @mn, @mx, @pt, @fl)";
+        var pRn = cmd.Parameters.Add("@rn", SqliteType.Text);
+        var pPn = cmd.Parameters.Add("@pn", SqliteType.Text);
+        var pMn = cmd.Parameters.Add("@mn", SqliteType.Integer);
+        var pMx = cmd.Parameters.Add("@mx", SqliteType.Integer);
+        var pPt = cmd.Parameters.Add("@pt", SqliteType.Text);
+        var pFl = cmd.Parameters.Add("@fl", SqliteType.Text);
+        int count = 0;
+        foreach (var block in SplitJsonBlocks(rawJson))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
+                if (recordName.Length == 0) continue;
+                if (onlyRecords != null && !onlyRecords.Contains(recordName)) continue;
+                if (!root.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("Components", out var components)
+                    || components.ValueKind != JsonValueKind.Array) continue;
+                string itemType = "";
+                JsonElement? container = null;
+                foreach (var comp in components.EnumerateArray())
+                {
+                    if (comp.ValueKind != JsonValueKind.Object) continue;
+                    var type = comp.TryGetProperty("_Type_", out var t) ? t.GetString() ?? "" : "";
+                    if (type == "SAttachableComponentParams" && comp.TryGetProperty("AttachDef", out var ad))
+                        itemType = ad.TryGetProperty("Type", out var it) ? it.GetString() ?? "" : "";
+                    else if (type == "SItemPortContainerComponentParams")
+                        container = comp;
+                }
+                if (container == null || !ItemPortRecordTypes.Contains(itemType)) continue;
+                foreach (var (name, min, max, types, flags) in ReadItemPortDefs(container.Value))
+                {
+                    pRn.Value = recordName; pPn.Value = name; pMn.Value = min; pMx.Value = max; pPt.Value = types; pFl.Value = flags;
+                    cmd.ExecuteNonQuery();
+                    count++;
+                }
+            }
+            catch { }
+        }
+        return count;
+    }
+
+    // 船の XML (Scripts/Entities/Vehicles/Implementations/Xml。CryXmlB を XML に直したもの) のハードポイントの本当の大きさと
+    // 受け付ける種類を、ship_ports の最上位のポート (port_name に "/" が無い行) に入れる。
+    //   船 (ships.raw_json の VehicleComponentParams) の vehicleDefinition が XML、modification が改造 (同じ XML の <Modification name>)。
+    //   改造は patchFile (Modifications/ の XML。中の id の付いた要素で同じ id の要素を置き換える) と
+    //   <Elems><Elem idRef name value> (id の要素の属性を書き換える) を当てる。
+    //   ハードポイントは <Part class="ItemPort"> の <ItemPort minSize maxSize> と <Types><Type type subtypes>。
+    // convertedXmlDir は Xml フォルダを XML に直したもの (Modifications/ を含む)。更新した行数を返す
+    internal static int FillShipPortSizesFromXml(SqliteConnection db, string convertedXmlDir, Action<string>? status = null)
+    {
+        var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in Directory.EnumerateFiles(convertedXmlDir, "*.xml", SearchOption.AllDirectories))
+            files[Path.GetRelativePath(convertedXmlDir, f).Replace(Path.DirectorySeparatorChar, '/')] = f;
+        var parsed = new Dictionary<string, XElement?>(StringComparer.OrdinalIgnoreCase);
+        XElement? Load(string rel)
+        {
+            if (parsed.TryGetValue(rel, out var e)) return e;
+            XElement? root = null;
+            try { if (files.TryGetValue(rel, out var path)) root = XElement.Load(path); } catch { }
+            return parsed[rel] = root;
+        }
+
+        var ships = new List<(string Record, string Definition, string Modification)>();
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.CommandText = "SELECT record_name, raw_json FROM ships";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(reader.GetString(1));
+                    if (!doc.RootElement.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("Components", out var comps)
+                        || comps.ValueKind != JsonValueKind.Array) continue;
+                    foreach (var c in comps.EnumerateArray())
+                    {
+                        if (c.ValueKind != JsonValueKind.Object || !c.TryGetProperty("_Type_", out var t) || t.GetString() != "VehicleComponentParams") continue;
+                        var def = c.TryGetProperty("vehicleDefinition", out var d) && d.ValueKind == JsonValueKind.String ? d.GetString() ?? "" : "";
+                        var mod = c.TryGetProperty("modification", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() ?? "" : "";
+                        if (def.Length > 0) ships.Add((reader.GetString(0), def, mod));
+                        break;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        int updated = 0, noFile = 0;
+        using var tx = db.BeginTransaction();
+        using var up = db.CreateCommand();
+        up.Transaction = tx;
+        up.CommandText = "UPDATE ship_ports SET min_size = @mn, max_size = @mx, port_types = @pt WHERE ship_record_name = @s AND port_name = @p COLLATE NOCASE AND instr(port_name, '/') = 0";
+        var uMn = up.Parameters.Add("@mn", SqliteType.Integer);
+        var uMx = up.Parameters.Add("@mx", SqliteType.Integer);
+        var uPt = up.Parameters.Add("@pt", SqliteType.Text);
+        var uS = up.Parameters.Add("@s", SqliteType.Text);
+        var uP = up.Parameters.Add("@p", SqliteType.Text);
+        foreach (var (record, definition, modification) in ships)
+        {
+            var baseRoot = Load(definition.Replace("\\", "/").Split('/').Last());
+            if (baseRoot == null) { noFile++; continue; }
+            var root = new XElement(baseRoot);   // 改造を当てるので複製する
+            if (modification.Length > 0) ApplyVehicleModification(root, modification, Load);
+            foreach (var (port, min, max, types) in ReadVehicleItemPorts(root))
+            {
+                uMn.Value = min; uMx.Value = max; uPt.Value = types; uS.Value = record; uP.Value = port;
+                updated += up.ExecuteNonQuery();
+            }
+        }
+        tx.Commit();
+        status?.Invoke($"船のハードポイントの大きさ: {updated} 行 (XML の無い船 {noFile} 隻)");
+        return updated;
+    }
+
+    // 船の XML に改造 (<Modifications><Modification name>) を当てる
+    private static void ApplyVehicleModification(XElement root, string modification, Func<string, XElement?> load)
+    {
+        var mod = root.Elements("Modifications").Elements("Modification")
+            .FirstOrDefault(m => string.Equals((string?)m.Attribute("name"), modification, StringComparison.OrdinalIgnoreCase));
+        if (mod == null) return;
+        // 同じ id の要素が複数あるときは全部に当てる
+        Dictionary<string, List<XElement>> ById() => root.Descendants()
+            .Where(e => e.Attribute("id") != null && !e.Ancestors("Modifications").Any())
+            .GroupBy(e => (string)e.Attribute("id")!, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+        var patchFile = (string?)mod.Attribute("patchFile");
+        if (!string.IsNullOrEmpty(patchFile))
+        {
+            var patch = load(patchFile.Replace("\\", "/") + ".xml");
+            if (patch != null)
+            {
+                var byId = ById();
+                foreach (var el in patch.Elements())
+                {
+                    var id = (string?)el.Attribute("id");
+                    if (id == null || !byId.TryGetValue(id, out var targets)) continue;
+                    foreach (var target in targets)
+                        if (target.Parent != null) target.ReplaceWith(new XElement(el));
+                }
+            }
+        }
+        var ids = ById();
+        foreach (var elem in mod.Descendants("Elem"))
+        {
+            var idRef = (string?)elem.Attribute("idRef");
+            var name = (string?)elem.Attribute("name");
+            if (idRef == null || string.IsNullOrEmpty(name) || !ids.TryGetValue(idRef, out var targets)) continue;
+            foreach (var target in targets)
+            {
+                var attr = target.Attributes().FirstOrDefault(a => string.Equals(a.Name.LocalName, name, StringComparison.OrdinalIgnoreCase));
+                if (attr != null) attr.Value = (string?)elem.Attribute("value") ?? "";
+                else target.SetAttributeValue(name, (string?)elem.Attribute("value") ?? "");
+            }
+        }
+    }
+
+    // 船の XML のハードポイント (<Part class="ItemPort"> の <ItemPort>)。同じ名前が複数あれば最初のもの
+    private static List<(string Port, int Min, int Max, string Types)> ReadVehicleItemPorts(XElement root)
+    {
+        var list = new List<(string, int, int, string)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var part in root.Descendants("Part"))
+        {
+            if (!string.Equals((string?)part.Attribute("class"), "ItemPort", StringComparison.OrdinalIgnoreCase)) continue;
+            if (part.Ancestors("Modifications").Any()) continue;
+            var name = (string?)part.Attribute("name");
+            var ip = part.Element("ItemPort");
+            if (string.IsNullOrEmpty(name) || ip == null || !seen.Add(name)) continue;
+            int Int(string key)
+            {
+                var a = ip.Attributes().FirstOrDefault(x => string.Equals(x.Name.LocalName, key, StringComparison.OrdinalIgnoreCase));
+                return a != null && double.TryParse(a.Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? (int)v : 0;
+            }
+            var types = ip.Elements("Types").Elements("Type")
+                .Select(t => ((string?)t.Attribute("type") ?? "", (string?)t.Attribute("subtypes") ?? ""))
+                .Where(t => t.Item1.Length > 0)
+                .Select(t => t.Item2.Length > 0 ? $"{t.Item1}:{t.Item2}" : t.Item1)
+                .Distinct(StringComparer.Ordinal);
+            list.Add((name, Int("minSize"), Int("maxSize"), string.Join("|", types)));
+        }
+        return list;
+    }
+
+    // 船の XML を Data.p4k から取り出して XML に直し、ship_ports にハードポイントの本当の大きさを入れる。
+    // 失敗しても例外にしない (大きさが無いときは装備タブが既定の装備の大きさで代わりにする)
+    private async Task UpdateShipPortSizesAsync(string p4kPath, CancellationToken ct)
+    {
+        var workDir = Path.Combine(Path.GetDirectoryName(DbPath) ?? ".", "vehicle_xml_tmp");
+        try
+        {
+            StatusChanged?.Invoke("船のハードポイントの大きさを読み込み中...");
+            if (Directory.Exists(workDir)) Directory.Delete(workDir, true);
+            var rawDir = Path.Combine(workDir, "raw");
+            var convDir = Path.Combine(workDir, "xml");
+            Directory.CreateDirectory(rawDir);
+            await RunStarBreakerAsync($"p4k extract --p4k \"{p4kPath}\" -o \"{rawDir}\" --filter \"Data/Scripts/Entities/Vehicles/Implementations/Xml/**\"", ct);
+            var xmlDir = Path.Combine(rawDir, "Data", "Scripts", "Entities", "Vehicles", "Implementations", "Xml");
+            if (!Directory.Exists(xmlDir)) { StatusChanged?.Invoke("船の XML を取り出せませんでした (ハードポイントの大きさは既定の装備の大きさで代わりにします)"); return; }
+            await RunStarBreakerAsync($"cryxml convert-all -i \"{xmlDir}\" -o \"{convDir}\"", ct);
+            if (!Directory.Exists(convDir)) { StatusChanged?.Invoke("船の XML を変換できませんでした (ハードポイントの大きさは既定の装備の大きさで代わりにします)"); return; }
+            FillShipPortSizesFromXml(_db!, convDir, m => StatusChanged?.Invoke(m));
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            StatusChanged?.Invoke($"船のハードポイントの大きさの読み込みに失敗しました (既定の装備の大きさで代わりにします): {ex.Message}");
+        }
+        finally
+        {
+            try { if (Directory.Exists(workDir)) Directory.Delete(workDir, true); } catch { }
+        }
+    }
+
+    // 構築の間だけ使う、Data.p4k から取り出した Game2.dcb (null なら dcb query は --p4k で読む)
+    private string? _dcbPath;
+    private int _dcbScopeDepth;
+    // 構築の後の段階で同じ問い合わせ (種類, フィルタ) をし直すもの。最初の問い合わせの出力を dcb_tmp/cache に置き、2 回目はそれを読む。
+    // starbreaker の出力は同じ問い合わせなら毎回同じ (実測でバイト単位で一致) なので、結果は問い合わせ直したときと同じ。
+    // Game2.dcb を取り出せていて、空きが十分なときだけ使う
+    private readonly HashSet<(string Type, string Filter)> _reuseQueries = new();
+    private string? _queryCacheDir;
+    private int _queryCacheSeq;
+    private readonly Dictionary<(string Type, string Filter), string> _queryCacheFiles = new();
+    private readonly object _queryCacheLock = new();
+
+    private string DcbTmpDir => Path.Combine(Path.GetDirectoryName(DbPath) ?? ".", "dcb_tmp");
+
+    // Data.p4k から Game2.dcb を作業ディレクトリの dcb_tmp に 1 回だけ取り出し、返したものを破棄するまで dcb query をそこから読ませる。
+    // starbreaker は --p4k だと呼ぶたびに p4k から dcb を開き直す (1 回あたり約 3.6 秒。--dcb なら約 0.4 秒。出力は同じ。実測)。
+    // 入れ子で呼ばれたら (装備データの再抽出の中の評判報酬の取り込み等) 外側の取り出しをそのまま使う。
+    // 取り出せなかったら知らせて、今までどおり --p4k で続ける
+    private async Task<IDisposable> UseExtractedDcbAsync(string p4kPath, CancellationToken ct)
+    {
+        var scope = new DcbScope(this);
+        if (_dcbScopeDepth++ > 0) return scope;
+        var dir = DcbTmpDir;
+        try
+        {
+            var sw = Stopwatch.StartNew();
+            StatusChanged?.Invoke("Data.p4k から Game2.dcb を取り出し中...");
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+            Directory.CreateDirectory(dir);
+            await RunStarBreakerAsync($"p4k extract --p4k \"{p4kPath}\" -o \"{dir}\" --filter \"Data/Game2.dcb\"", ct);
+            var path = Path.Combine(dir, "Data", "Game2.dcb");
+            if (File.Exists(path) && new FileInfo(path).Length > 0)
+            {
+                _dcbPath = path;
+                StatusChanged?.Invoke($"Game2.dcb を取り出しました ({new FileInfo(path).Length / 1024 / 1024}MB, {sw.Elapsed.TotalSeconds:F1}秒)");
+                // 問い合わせの出力の使い回しは、空きが 4GB 以上あるときだけ (置くのは 1GB 前後の見込み。推定)
+                try
+                {
+                    if (new DriveInfo(Path.GetPathRoot(Path.GetFullPath(dir))!).AvailableFreeSpace >= 4L * 1024 * 1024 * 1024)
+                    {
+                        _queryCacheDir = Path.Combine(dir, "cache");
+                        Directory.CreateDirectory(_queryCacheDir);
+                    }
+                }
+                catch { _queryCacheDir = null; }
+            }
+            else
+                StatusChanged?.Invoke("Game2.dcb を取り出せませんでした (Data.p4k から直接読みます)");
+        }
+        catch (OperationCanceledException) { scope.Dispose(); throw; }
+        catch (Exception ex)
+        {
+            StatusChanged?.Invoke($"Game2.dcb を取り出せませんでした (Data.p4k から直接読みます): {ex.Message}");
+        }
+        return scope;
+    }
+
+    private void EndDcbScope()
+    {
+        if (--_dcbScopeDepth > 0) return;
+        _dcbScopeDepth = 0;
+        _dcbPath = null;
+        lock (_queryCacheLock)
+        {
+            _queryCacheDir = null;
+            _queryCacheFiles.Clear();
+            _reuseQueries.Clear();
+        }
+        try
+        {
+            if (Directory.Exists(DcbTmpDir)) Directory.Delete(DcbTmpDir, true);
+        }
+        catch { }   // 消せなくても次の取り出しの前に消す
+    }
+
+    private sealed class DcbScope(GameDataExtractor owner) : IDisposable
+    {
+        private bool _disposed;
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            owner.EndDcbScope();
+        }
+    }
+
+    // 後の段階で同じ問い合わせをし直すものを登録する (最初の問い合わせの出力を置いておき、2 回目はそれを読む)
+    private void RegisterReuseQueries(IEnumerable<string> entityClassFilters)
+    {
+        lock (_queryCacheLock)
+            foreach (var f in entityClassFilters) _reuseQueries.Add(("EntityClassDefinition", f));
+    }
+
+    // 置いておいた出力があれば読む (無ければ null)
+    private string? TryReadCachedQuery(string recordType, string filter)
+    {
+        string? file;
+        lock (_queryCacheLock)
+        {
+            if (_queryCacheDir == null || !_queryCacheFiles.TryGetValue((recordType, filter), out file)) return null;
+        }
+        try { return File.ReadAllText(file, new UTF8Encoding(false)); }
+        catch { return null; }
+    }
+
+    // 登録された問い合わせなら、出力を置いておく (置けなくても構築は続ける)
+    private void TryWriteCachedQuery(string recordType, string filter, string output)
+    {
+        string? file;
+        lock (_queryCacheLock)
+        {
+            if (_queryCacheDir == null || !_reuseQueries.Contains((recordType, filter)) || _queryCacheFiles.ContainsKey((recordType, filter))) return;
+            file = Path.Combine(_queryCacheDir, $"{++_queryCacheSeq}.json");
+        }
+        try
+        {
+            File.WriteAllText(file, output, new UTF8Encoding(false));
+            lock (_queryCacheLock)
+                if (_queryCacheDir != null) _queryCacheFiles[(recordType, filter)] = file;
+        }
+        catch { try { File.Delete(file); } catch { } }
+    }
+
+    // 問い合わせを先に (同時に maxParallel 個まで) 動かしておき、結果を元の順番で受け取る。
+    // DB への書き込みは呼び出し側が今までどおり順番に行うので、入る順番 (rowid) は変わらない
+    private sealed class DcbPrefetcher : IDisposable
+    {
+        private readonly Func<int, CancellationToken, Task<string>> _run;
+        private readonly int _count;
+        private readonly int _maxParallel;
+        private readonly Task<string>?[] _tasks;
+        private readonly CancellationTokenSource _cts;
+
+        public DcbPrefetcher(int count, Func<int, CancellationToken, Task<string>> run, CancellationToken ct, int maxParallel = 4)
+        {
+            _count = count;
+            _run = run;
+            _maxParallel = maxParallel;
+            _tasks = new Task<string>?[count];
+            _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        }
+
+        // i 番目の結果を待つ。待つ前に i から maxParallel 個先までを動かし始める
+        public Task<string> GetAsync(int i)
+        {
+            for (int k = i; k < Math.Min(_count, i + _maxParallel); k++)
+                _tasks[k] ??= _run(k, _cts.Token);
+            var t = _tasks[i]!;
+            _tasks[i] = null;   // 受け取った出力を早く手放す
+            return t;
+        }
+
+        public void Dispose()
+        {
+            // 途中で抜けたら (取り消し・例外)、先に動かしていた分を止め、例外を拾っておく
+            _cts.Cancel();
+            foreach (var t in _tasks)
+                t?.ContinueWith(x => _ = x.Exception, TaskScheduler.Default);
+            _cts.Dispose();
+        }
+    }
+
+    // starbreaker を引数 args で動かし、終わるまで待つ (標準出力は読み捨てる)。
+    // 終了コードが 0 でなければ、標準エラーの末尾を添えて例外にする。取り消されたら starbreaker を止めてから取り消しの例外を上げる
+    private async Task RunStarBreakerAsync(string args, CancellationToken ct)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = StarBreakerExe,
+            Arguments = args,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        using var proc = Process.Start(psi)!;
+        var stderr = new StringBuilder();
+        proc.ErrorDataReceived += (_, e) => { if (e.Data != null) lock (stderr) stderr.AppendLine(e.Data); };
+        proc.BeginOutputReadLine();
+        proc.BeginErrorReadLine();
+        await WaitStarBreakerExitAsync(proc, ct);
+        if (proc.ExitCode != 0)
+            throw new InvalidOperationException($"starbreaker が失敗しました (終了コード {proc.ExitCode}): {StderrTail(stderr)}");
+    }
+
+    // starbreaker の終わりを待つ。取り消されたらプロセス (子プロセスも) を止めてから取り消しの例外を上げる
+    private static async Task WaitStarBreakerExitAsync(Process proc, CancellationToken ct)
+    {
+        try
+        {
+            await proc.WaitForExitAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
+            throw;
+        }
+    }
+
+    // 標準エラーの末尾 (長すぎる場合は最後の 500 文字)
+    private static string StderrTail(StringBuilder stderr)
+    {
+        string text;
+        lock (stderr) text = stderr.ToString().Trim();
+        if (text.Length == 0) return "(標準エラーの出力なし)";
+        return text.Length > 500 ? "…" + text[^500..] : text;
     }
 
     public void Dispose()
@@ -558,6 +1150,7 @@ public class GameDataExtractor : IDisposable
 
         await EnsureStarBreakerAsync();
         EnsureDb();
+        using var dcbScope = await UseExtractedDcbAsync(dataP4kPath, ct);
 
         StatusChanged?.Invoke("ゲームデータの構造化インデックスを構築中...");
         var sw = Stopwatch.StartNew();
@@ -577,6 +1170,19 @@ public class GameDataExtractor : IDisposable
         ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] アイテムインデックスを構築中...");
         // 全エンティティの種類 (AttachDef.Type) の一覧。決め打ちの接頭辞で漏れる武器 (新しい製造元など) を種類で拾うために使う
         var typeMap = await QueryEntityTypesAsync(dataP4kPath, ct);
+        var componentQueries = new[]
+        {
+            ("SHLD_*", "SCItemShieldGeneratorParams"),
+            ("POWR_*", "SCItemPowerPlantParams"),
+            ("QDRV_*", "SCItemQuantumDriveParams"),
+            ("COOL_*", "SCItemCoolerParams"),
+        };
+        // 船・車両 (Step 2) と装備アイテム (Step 3) は、アイテムインデックスと同じ問い合わせ (種類・フィルタが全く同じもの) をし直すので、
+        // 最初の出力を置いておいて使い回す (starbreaker の出力は同じ問い合わせなら毎回同じ)
+        RegisterReuseQueries(VehicleManufacturerPrefixes.Select(p => $"EntityClassDefinition.{p}_*")
+            .Concat(componentQueries.Select(q => $"EntityClassDefinition.{q.Item1}"))
+            .Concat(ItemPrefixes.Where(p => p.Length <= 4).Select(p => $"EntityClassDefinition.{p}_*"))
+            .Concat(BuildTypedExtraFilters(typeMap, ItemPrefixes.Where(p => p.Length <= 4)).Select(x => x.Filter)));
         int indexCount = await ExtractItemIndexAsync(dataP4kPath, now, ct, typeMap);
 
         // Step 1b: FTS5 全文検索インデックス
@@ -588,18 +1194,12 @@ public class GameDataExtractor : IDisposable
         ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] 船・車両データを抽出中...");
         int shipCount = await ExtractShipsAsync(dataP4kPath, now, ct);
         UpdateShipEnglishNames();
+        await UpdateShipPortSizesAsync(dataP4kPath, ct);
 
         // Step 3: アイテム詳細（装備コンポーネント）
         step++;
         ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] 装備アイテムを抽出中...");
         int itemCount = 0;
-        var componentQueries = new[]
-        {
-            ("SHLD_*", "SCItemShieldGeneratorParams"),
-            ("POWR_*", "SCItemPowerPlantParams"),
-            ("QDRV_*", "SCItemQuantumDriveParams"),
-            ("COOL_*", "SCItemCoolerParams"),
-        };
         foreach (var (filter, compType) in componentQueries)
         {
             StatusChanged?.Invoke($"[{step}/{totalSteps}] 装備抽出: {filter}");
@@ -1342,6 +1942,9 @@ public class GameDataExtractor : IDisposable
         {
             // 売り場・価格の裏の取得を止めてから再抽出する (成功すれば最後の ShopPriceFetchRequested、失敗すれば下の catch で再開)
             await PauseShopPriceFetchAsync();
+            using var dcbScope = await UseExtractedDcbAsync(p4kPath, ct);
+            // 船・車両の段階は、アイテムインデックスと同じ問い合わせ (製造元の接頭辞) をし直すので、出力を使い回す
+            RegisterReuseQueries(VehicleManufacturerPrefixes.Select(p => $"EntityClassDefinition.{p}_*"));
             var sw = Stopwatch.StartNew();
             var now = DateTime.UtcNow.ToString("o");
             StatusChanged?.Invoke("装備データ (item_index / ships / ship_ports) を再構築中...");
@@ -1374,6 +1977,7 @@ public class GameDataExtractor : IDisposable
 
                 int shipCount = await ExtractShipsAsync(p4kPath, now, ct);
                 UpdateShipEnglishNames();
+                await UpdateShipPortSizesAsync(p4kPath, ct);
 
                 SetMeta("equipment_rebuilt_at", now);
                 try { await RebuildMissionReputationAsync(progress, ct); }
@@ -1426,8 +2030,8 @@ public class GameDataExtractor : IDisposable
         }
     }
 
-    // RebuildEquipmentDataAsync が作り直す 3 表 (バックアップ表 "{name}_bak" の対象)
-    private static readonly string[] EquipmentTables = ["item_index", "ship_ports", "ships"];
+    // RebuildEquipmentDataAsync が作り直す 5 表 (バックアップ表 "{name}_bak" の対象)
+    private static readonly string[] EquipmentTables = ["item_index", "ship_ports", "ships", "item_ports", "item_port_labels"];
 
     // ミッションの評判報酬 (派閥・貢献度) を DCB から取り込む。
     // 全件インデックス構築とは独立していて、starbreaker の 3 クエリだけで済む (実測で合計 30 秒程度)。
@@ -1444,6 +2048,7 @@ public class GameDataExtractor : IDisposable
         if (relay != null) StatusChanged += relay;
         try
         {
+            using var dcbScope = await UseExtractedDcbAsync(p4kPath, ct);
             var sw = Stopwatch.StartNew();
 
             // 派閥 (FactionReputation)
@@ -1809,6 +2414,15 @@ public class GameDataExtractor : IDisposable
         var pSz = cmd.Parameters.Add("@sz", SqliteType.Integer);
         var pEa = cmd.Parameters.Add("@ea", SqliteType.Text);
 
+        // 品目自身の子ポートの定義 (item_ports) も同じ出力から作り直す
+        using (var del = _db.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM item_ports; DELETE FROM item_port_labels;";
+            del.ExecuteNonQuery();
+        }
+        int portRows = 0, labelRows = 0;
+
         // --filter は大文字小文字を区別するので、重複排除も大小区別 (Ordinal) で行う ("BEHR_*" と "behr_*" は別クエリ)
         var basePrefixes = VehicleManufacturerPrefixes.Concat(ItemPrefixes).Distinct(StringComparer.Ordinal).ToList();
         var allPrefixes = basePrefixes.Select(p => (Filter: $"EntityClassDefinition.{p}_*", Only: (HashSet<string>?)null)).ToList();
@@ -1816,6 +2430,9 @@ public class GameDataExtractor : IDisposable
         typeMap ??= await QueryEntityTypesAsync(p4kPath, ct);
         allPrefixes.AddRange(BuildTypedExtraFilters(typeMap, basePrefixes).Select(x => (x.Filter, (HashSet<string>?)x.Records)));
 
+        // 問い合わせは先に同時に 4 つまで動かしておく (DcbPrefetcher)。DB への書き込みは下で今までどおりこの順番に行う
+        using var prefetch = new DcbPrefetcher(allPrefixes.Count,
+            (k, token) => RunDcbQueryAsync(p4kPath, "EntityClassDefinition", allPrefixes[k].Filter, token), ct);
         for (int i = 0; i < allPrefixes.Count; i++)
         {
             var (filter, only) = allPrefixes[i];
@@ -1823,9 +2440,12 @@ public class GameDataExtractor : IDisposable
             StatusChanged?.Invoke($"[1/{4}] インデックス構築 ({prefix}, {i + 1}/{allPrefixes.Count})");
 
             string rawJson;
-            try { rawJson = await RunDcbQueryAsync(p4kPath, "EntityClassDefinition", filter, ct); }
+            try { rawJson = await prefetch.GetAsync(i); }
             catch { continue; }
             if (string.IsNullOrEmpty(rawJson)) continue;
+            // 種類で拾った追加分 (only) は、下の item_index と同じく only の record だけを入れる
+            portRows += InsertItemPortsFromJson(_db, tx, rawJson, only);
+            labelRows += InsertItemPortLabelsFromJson(_db, tx, rawJson, only);
 
             foreach (var block in SplitJsonBlocks(rawJson))
             {
@@ -1891,7 +2511,7 @@ public class GameDataExtractor : IDisposable
             }
         }
         tx.Commit();
-        StatusChanged?.Invoke($"[1/4] インデックス構築完了: {count} 件 (名前解決: {resolved} 件)");
+        StatusChanged?.Invoke($"[1/4] インデックス構築完了: {count} 件 (名前解決: {resolved} 件、子ポートの定義: {portRows} 行、枠の表示名: {labelRows} 行)");
         return count;
     }
 
@@ -2166,17 +2786,29 @@ public class GameDataExtractor : IDisposable
     // 小さくした raw_json に残す部品 (比べるツール・lookup の GameDataQueryService.FillItemStats / 装弾数・弾の参照が読むもの)。
     // 説明文の参照と大きさ (SAttachableComponentParams)、温度・放射線 (SCItemClothingParams)、防御の参照 (SCItemSuitArmorParams)、
     // 収納 (SCItemInventoryContainerComponentParams)、装弾数と弾の参照 (SAmmoContainerComponentParams)、
-    // シールド・動力装置・冷却装置・クアンタムドライブの性能 (SCItemShieldGeneratorParams / ItemResourceComponentParams / SCItemQuantumDriveParams)
+    // シールド・動力装置・冷却装置・クアンタムドライブの性能 (SCItemShieldGeneratorParams / ItemResourceComponentParams / SCItemQuantumDriveParams)、
+    // ミサイル・ロケットのダメージ・速度・追尾 (SCItemMissileParams。決め打ちの接頭辞に無い NOVP_Rocket_* や地上車両用の GMISL_* など)
     private static readonly HashSet<string> SlimRawJsonComponents = new(StringComparer.Ordinal)
     {
         "SAttachableComponentParams", "SCItemClothingParams", "SCItemSuitArmorParams", "SCItemInventoryContainerComponentParams",
         "SAmmoContainerComponentParams", "SCItemShieldGeneratorParams", "ItemResourceComponentParams", "SCItemQuantumDriveParams",
+        "SCItemMissileParams",
+    };
+
+    // 種類 (AttachDef.Type) ごとに、小さくした raw_json にさらに残す部品。アーマー・服も持っていて大きいので、読む種類だけに残す。
+    //   MissileLauncher: 搭載するミサイルのポート (SItemPortContainerComponentParams。GameDataQueryService.FillItemStats の「搭載」)
+    //   WeaponGun: 種類の語の displayType (SCItemPurchasableParams。GameDataQueryService.ShipWeaponTypeWords)
+    private static readonly Dictionary<string, string[]> SlimRawJsonComponentsByType = new(StringComparer.Ordinal)
+    {
+        ["MissileLauncher"] = ["SItemPortContainerComponentParams"],
+        ["WeaponGun"] = ["SCItemPurchasableParams"],
     };
 
     // record の JSON を、形 ({"_RecordName_", "_RecordId_", "_RecordValue_": {"_Type_", "Components": [...]}}) はそのままに、
-    // Components を SlimRawJsonComponents だけにしたものにする
-    internal static string SlimItemRawJson(JsonElement root)
+    // Components を SlimRawJsonComponents と、種類 itemType の SlimRawJsonComponentsByType だけにしたものにする
+    internal static string SlimItemRawJson(JsonElement root, string itemType = "")
     {
+        SlimRawJsonComponentsByType.TryGetValue(itemType ?? "", out var extra);
         using var ms = new MemoryStream();
         using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
         {
@@ -2197,8 +2829,11 @@ public class GameDataExtractor : IDisposable
                     w.WritePropertyName("Components");
                     w.WriteStartArray();
                     foreach (var comp in p2.Value.EnumerateArray())
-                        if (comp.ValueKind == JsonValueKind.Object && comp.TryGetProperty("_Type_", out var t) && SlimRawJsonComponents.Contains(t.GetString() ?? ""))
-                            comp.WriteTo(w);
+                    {
+                        if (comp.ValueKind != JsonValueKind.Object || !comp.TryGetProperty("_Type_", out var t)) continue;
+                        var type = t.GetString() ?? "";
+                        if (SlimRawJsonComponents.Contains(type) || (extra != null && extra.Contains(type))) comp.WriteTo(w);
+                    }
                     w.WriteEndArray();
                 }
                 w.WriteEndObject();
@@ -2271,7 +2906,7 @@ public class GameDataExtractor : IDisposable
                 var slim = onlyRecords != null || IsSlimRawJsonType(itemType);
                 pRn.Value = recordName; pNm.Value = name; pIt.Value = itemType; pIst.Value = subType;
                 pSz.Value = size; pGr.Value = grade; pMf.Value = mfr;
-                pCt.Value = componentType; pCj.Value = compJson; pRj.Value = slim ? SlimItemRawJson(root) : block; pEa.Value = now;
+                pCt.Value = componentType; pCj.Value = compJson; pRj.Value = slim ? SlimItemRawJson(root, itemType) : block; pEa.Value = now;
                 cmd.ExecuteNonQuery();
                 count++;
             }
@@ -3475,10 +4110,19 @@ public class GameDataExtractor : IDisposable
 
     private async Task<string> RunDcbQueryRawAsync(string p4kPath, string recordType, string filter, CancellationToken ct = default, Action<long>? onProgress = null)
     {
+        // 構築の前の段階で同じ問い合わせをしていれば、置いておいた出力を使う (RegisterReuseQueries)
+        if (TryReadCachedQuery(recordType, filter) is { } cached)
+        {
+            onProgress?.Invoke(cached.Length);
+            return cached;
+        }
         var psi = new ProcessStartInfo
         {
             FileName = StarBreakerExe,
-            Arguments = $"dcb query \"{recordType}\" --p4k \"{p4kPath}\" --filter \"{filter}\"",
+            // 構築中は最初に取り出した Game2.dcb を読む (UseExtractedDcbAsync)
+            Arguments = _dcbPath is { } dcb
+                ? $"dcb query \"{recordType}\" --dcb \"{dcb}\" --filter \"{filter}\""
+                : $"dcb query \"{recordType}\" --p4k \"{p4kPath}\" --filter \"{filter}\"",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -3487,19 +4131,43 @@ public class GameDataExtractor : IDisposable
         };
 
         using var proc = Process.Start(psi)!;
+        var stderr = new StringBuilder();
+        proc.ErrorDataReceived += (_, e) => { if (e.Data != null) lock (stderr) stderr.AppendLine(e.Data); };
         proc.BeginErrorReadLine();
         var sb = new StringBuilder();
         var buffer = new char[65536];
         int bytesRead;
         long totalChars = 0;
-        while ((bytesRead = await proc.StandardOutput.ReadAsync(buffer, ct)) > 0)
+        try
         {
-            sb.Append(buffer, 0, bytesRead);
-            totalChars += bytesRead;
-            onProgress?.Invoke(totalChars);
+            while ((bytesRead = await proc.StandardOutput.ReadAsync(buffer, ct)) > 0)
+            {
+                sb.Append(buffer, 0, bytesRead);
+                totalChars += bytesRead;
+                onProgress?.Invoke(totalChars);
+            }
         }
-        await proc.WaitForExitAsync(ct);
-        return sb.ToString();
+        catch (OperationCanceledException)
+        {
+            // 取り消されたら starbreaker を止めてから取り消しの例外を上げる
+            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
+            throw;
+        }
+        await WaitStarBreakerExitAsync(proc, ct);
+        // 終了コードが 0 でなければ知らせる。ただし当てはまる record が無いとき (starbreaker は終了コード 1 で
+        // "error: no ... records matching filter" を出す) は失敗ではないので知らせない。
+        // 呼び出し側は今までどおり取れた出力 (失敗なら空) で続ける (例外にはしない)
+        if (proc.ExitCode != 0)
+        {
+            string err;
+            lock (stderr) err = stderr.ToString();
+            if (!err.Contains("records matching filter", StringComparison.Ordinal))
+                StatusChanged?.Invoke($"starbreaker dcb query が失敗しました (終了コード {proc.ExitCode}, {recordType} / {filter}): {StderrTail(stderr)}");
+        }
+        var output = sb.ToString();
+        // 失敗したもの (終了コードが 0 でない) は置いておかない (後の段階では今までどおり問い合わせ直す)
+        if (proc.ExitCode == 0 && output.Length > 0) TryWriteCachedQuery(recordType, filter, output);
+        return output;
     }
 
     private async Task<string> RunDcbQueryAsync(string p4kPath, string path, string filter, CancellationToken ct = default)
