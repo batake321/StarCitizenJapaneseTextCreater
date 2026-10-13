@@ -2065,9 +2065,10 @@ public class ChatService
                         if (!string.IsNullOrEmpty(r.Gamepad))
                             parts.Add($"GP: {r.GamepadDisplay}");
                         if (!string.IsNullOrEmpty(r.Joystick1))
-                            parts.Add($"HOTAS R: {r.Joystick1Display}");
+                            parts.Add($"HOTAS {_keybindData.GetJsSideLabel(1)}: {r.Joystick1Display}");
                         if (!string.IsNullOrEmpty(r.Joystick2))
-                            parts.Add($"HOTAS L: {r.Joystick2Display}");
+                        // HOTAS の R/L はエディターと同じ js 番号と物理スティックの対応で決める (判定材料が無ければ従来どおり js1 = R)
+                            parts.Add($"HOTAS {_keybindData.GetJsSideLabel(2)}: {r.Joystick2Display}");
                         var bindStr = parts.Count > 0 ? string.Join(" / ", parts) : "(未割当)";
 
                         var actMode = ActivationModeHelper.GetDisplayName(r.EffectiveKeyboardActivationMode);

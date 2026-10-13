@@ -104,19 +104,91 @@ public partial class HotasLayoutPanel : UserControl
         return parts.Count > 0 ? string.Join("+", parts) + "+" : "";
     }
 
+    // 「表示の入れ替え」の設定が変わったときに呼ぶ (呼び出し元が保存フォルダごとに覚える)
+    public Action<bool>? DisplaySwapChanged { get; set; }
+
+    // 物理スティックを押したときに強調している行
+    private Border? _pressHighlight;
+
+    private int LeftJs => _data.LeftJs;
+    private int RightJs => 3 - _data.LeftJs;
+
+    private static string GetJoystickValue(ActionBinding a, int js) => js == 1 ? a.Joystick1 : a.Joystick2;
+
     public void UpdateBindingTables()
     {
+        int leftJs = LeftJs, rightJs = RightJs;
+        txtHeaderLeft.Text = $"HOTAS L ({_data.GetJsHeading(leftJs)})";
+        txtHeaderRight.Text = $"HOTAS R ({_data.GetJsHeading(rightJs)})";
+
         if (_data.Categories.Count == 0) return;
 
         var modPrefix = BuildModifierPrefix();
         var allActions = _data.Categories.SelectMany(c => c.Actions).ToList();
 
-        BuildStickPanel(panelRight, "js1_", "joystick1", allActions, modPrefix);
-        BuildStickPanel(panelLeft, "js2_", "joystick2", allActions, modPrefix);
+        _pressHighlight = null;
+        txtPressInfo.Text = "";
+        BuildStickPanel(panelRight, $"js{rightJs}_", $"joystick{rightJs}", allActions, modPrefix);
+        BuildStickPanel(panelLeft, $"js{leftJs}_", $"joystick{leftJs}", allActions, modPrefix);
 
-        int rCount = allActions.Count(a => !string.IsNullOrEmpty(a.Joystick1));
-        int lCount = allActions.Count(a => !string.IsNullOrEmpty(a.Joystick2));
+        int rCount = allActions.Count(a => !string.IsNullOrEmpty(GetJoystickValue(a, rightJs)));
+        int lCount = allActions.Count(a => !string.IsNullOrEmpty(GetJoystickValue(a, leftJs)));
         txtInfo.Text = $"HOTAS R: {rCount} バインド | HOTAS L: {lCount} バインド";
+    }
+
+    // 物理スティックが押されたとき: js 番号のパネルで、今の修飾キーのチェックを加味した行を強調してスクロールする
+    public void HighlightInput(int js, string inputCode)
+    {
+        ClearPressHighlight();
+        var panel = js == LeftJs ? panelLeft : panelRight;
+        var fullCode = InputCodeHelper.ToGameForm(BuildModifierPrefix() + $"js{js}_" + inputCode, null);
+        var row = panel.Children.OfType<Border>()
+            .FirstOrDefault(b => b.Tag is HotasRowTag t && string.Equals(t.FullCode, fullCode, StringComparison.OrdinalIgnoreCase));
+        if (row == null)
+        {
+            txtPressInfo.Text = $"js{js} {inputCode}: 該当する行がありません";
+            return;
+        }
+        txtPressInfo.Text = "";
+        row.BorderBrush = new SolidColorBrush(Color.FromRgb(255, 111, 0));
+        row.BorderThickness = new Thickness(2);
+        _pressHighlight = row;
+        row.BringIntoView();
+    }
+
+    // 押された入力についての知らせ (js 番号が分からないときなど)
+    public void ShowPressMessage(string message)
+    {
+        ClearPressHighlight();
+        txtPressInfo.Text = message;
+    }
+
+    private void ClearPressHighlight()
+    {
+        if (_pressHighlight == null) return;
+        _pressHighlight.BorderBrush = new SolidColorBrush(Color.FromRgb(224, 224, 224));
+        _pressHighlight.BorderThickness = new Thickness(0, 0, 0, 1);
+        _pressHighlight = null;
+    }
+
+    private void DisplaySwap_Click(object sender, RoutedEventArgs e)
+    {
+        _data.JoystickDisplaySwapped = !_data.JoystickDisplaySwapped;
+        DisplaySwapChanged?.Invoke(_data.JoystickDisplaySwapped);
+        UpdateBindingTables();
+        _onBindingChanged?.Invoke();   // 機能別タブの HOTAS 列の R/L 表記を更新するため
+    }
+
+    private void InstanceSwap_Click(object sender, RoutedEventArgs e)
+    {
+        var msg = "全ての機能の js1 と js2 の割り当てを入れ替えます。\n" +
+                  "保存すると actionmaps.xml の joystick の instance=\"1\" と instance=\"2\" の設定 (Product など) も入れ替わります。\n\n" +
+                  "入れ替えますか？";
+        if (MessageBox.Show(msg, "js1/js2 の入れ替え", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+            return;
+        _data.SwapJoystick1And2Bindings();
+        UpdateBindingTables();
+        _onBindingChanged?.Invoke();
     }
 
     private void BuildStickPanel(StackPanel panel, string prefix, string deviceType, List<ActionBinding> allActions, string modPrefix)
@@ -130,7 +202,7 @@ public partial class HotasLayoutPanel : UserControl
 
             foreach (var input in group.Inputs)
             {
-                var fullCode = modPrefix + prefix + input.Code;
+                var fullCode = InputCodeHelper.ToGameForm(modPrefix + prefix + input.Code, null);   // ゲームの形 "js1_rctrl+button3"
                 var bindings = MouseLayoutPanel.FindBindingsForInput(allActions, fullCode, deviceType);
 
                 var row = CreateBindingRow(input.Label, fullCode, bindings, deviceType);
@@ -233,7 +305,7 @@ public partial class HotasLayoutPanel : UserControl
         if (bindings.Count > 0)
         {
             var sp = new StackPanel { MaxWidth = 400 };
-            sp.Children.Add(new TextBlock { Text = InputDisplayHelper.FormatInput(fullCode), FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 4) });
+            sp.Children.Add(new TextBlock { Text = InputDisplayHelper.FormatInputJa(fullCode), FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 4) });
             foreach (var b in bindings)
             {
                 sp.Children.Add(new TextBlock { Text = $"• {b.DisplayName}", TextWrapping = TextWrapping.Wrap });
@@ -290,7 +362,7 @@ public partial class HotasLayoutPanel : UserControl
         var allActions = _data.Categories.SelectMany(c => c.Actions).ToList();
         var bindings = MouseLayoutPanel.FindBindingsForInput(allActions, tag.FullCode, tag.DeviceType);
 
-        var dlg = new InputAssignDialog(_data, tag.DeviceType, tag.FullCode, InputDisplayHelper.FormatInput(tag.FullCode), bindings)
+        var dlg = new InputAssignDialog(_data, tag.DeviceType, tag.FullCode, InputDisplayHelper.FormatInputJa(tag.FullCode), bindings)
         {
             Owner = Window.GetWindow(this)
         };
@@ -302,12 +374,12 @@ public partial class HotasLayoutPanel : UserControl
     }
 
     private void ImageR_Click(object sender, MouseButtonEventArgs e) =>
-        ShowImageEditor("pack://application:,,,/image/hotas/vkb_scg_R.png", "VKB Gladiator NXT R", "js1_", "joystick1");
+        ShowImageEditor("pack://application:,,,/image/hotas/vkb_scg_R.png", $"HOTAS R ({_data.GetJsHeading(RightJs)})", $"js{RightJs}_", $"joystick{RightJs}", isRight: true);
 
     private void ImageL_Click(object sender, MouseButtonEventArgs e) =>
-        ShowImageEditor("pack://application:,,,/image/hotas/vkb_scg_L.png", "VKB Gladiator NXT L", "js2_", "joystick2");
+        ShowImageEditor("pack://application:,,,/image/hotas/vkb_scg_L.png", $"HOTAS L ({_data.GetJsHeading(LeftJs)})", $"js{LeftJs}_", $"joystick{LeftJs}", isRight: false);
 
-    private void ShowImageEditor(string imageUri, string title, string jsPrefix, string deviceType)
+    private void ShowImageEditor(string imageUri, string title, string jsPrefix, string deviceType, bool isRight)
     {
         var win = new Window
         {
@@ -387,7 +459,7 @@ public partial class HotasLayoutPanel : UserControl
 
             foreach (var input in group.Inputs)
             {
-                var fullCode = modPrefix + jsPrefix + input.Code;
+                var fullCode = InputCodeHelper.ToGameForm(modPrefix + jsPrefix + input.Code, null);
                 var bindings = MouseLayoutPanel.FindBindingsForInput(allActions, fullCode, deviceType);
 
                 var row = new Grid();
@@ -448,7 +520,7 @@ public partial class HotasLayoutPanel : UserControl
                 {
                     var bds = MouseLayoutPanel.FindBindingsForInput(allActions, capturedFullCode, capturedDeviceType);
                     var dlg = new InputAssignDialog(_data, capturedDeviceType, capturedFullCode,
-                        InputDisplayHelper.FormatInput(capturedFullCode), bds)
+                        InputDisplayHelper.FormatInputJa(capturedFullCode), bds)
                     {
                         Owner = win
                     };
@@ -490,7 +562,8 @@ public partial class HotasLayoutPanel : UserControl
             FontWeight = FontWeights.Bold,
             FontSize = 13,
             Padding = new Thickness(8, 6, 8, 6),
-            Background = new SolidColorBrush(deviceType == "joystick1" ? Color.FromRgb(255, 243, 224) : Color.FromRgb(227, 242, 253))
+            // 見出し色はタブの左右の見出しと同じ (右 = オレンジ、左 = 青)
+            Background = new SolidColorBrush(isRight ? Color.FromRgb(255, 243, 224) : Color.FromRgb(227, 242, 253))
         };
         var rightPanel = new Grid();
         rightPanel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });

@@ -42,6 +42,8 @@ public partial class GamepadLayoutPanel : UserControl
     {
         canvas.Children.Clear();
         _buttonElements.Clear();
+        _pressHighlight = null;
+        _pressHighlightPrevBrush = null;
 
         double cx = 350, cy = 160;
         double padW = 500, padH = 300;
@@ -198,7 +200,7 @@ public partial class GamepadLayoutPanel : UserControl
 
         foreach (var (code, border) in _buttonElements)
         {
-            var fullCode = modPrefix + code;
+            var fullCode = InputCodeHelper.ToGameForm(modPrefix + code, null);   // ゲームの形 "gp1_shoulderl+a"
             var isModifier = ModifierCodes.Contains(code);
             var isActiveModifier = isModifier && activeModifiers.Contains(code);
 
@@ -241,7 +243,7 @@ public partial class GamepadLayoutPanel : UserControl
             if (bindings.Count > 0)
             {
                 var sp = new StackPanel { MaxWidth = 350 };
-                sp.Children.Add(new TextBlock { Text = InputDisplayHelper.FormatInput(fullCode), FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 4) });
+                sp.Children.Add(new TextBlock { Text = InputDisplayHelper.FormatInputJa(fullCode), FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 4) });
                 foreach (var b in bindings)
                 {
                     var modeDisplay = ActivationModeHelper.GetDisplayName(b.EffectiveGamepadActivationMode);
@@ -255,7 +257,7 @@ public partial class GamepadLayoutPanel : UserControl
                 {
                     var entry = new TextBlock
                     {
-                        Text = $"{InputDisplayHelper.FormatInput(code)} → {b.DisplayName}",
+                        Text = $"{InputDisplayHelper.FormatInputJa(code)} → {b.DisplayName}",
                         FontSize = 12,
                         Foreground = new SolidColorBrush(Color.FromRgb(51, 51, 51)),
                         Tag = "binding_entry"
@@ -273,16 +275,49 @@ public partial class GamepadLayoutPanel : UserControl
         }
 
         txtInfo.Text = $"{boundCount} / {_buttonElements.Count} ボタンにバインド済み";
+
+        // 押されたボタンの強調は色の塗り直しの後もかけ直す
+        if (_pressHighlight != null)
+        {
+            _pressHighlightPrevBrush = _pressHighlight.BorderBrush;
+            ApplyPressHighlight(_pressHighlight);
+        }
+    }
+
+    // 物理ゲームパッドを押したときに強調している図形と、強調前の枠の色
+    private Border? _pressHighlight;
+    private Brush? _pressHighlightPrevBrush;
+
+    // 物理ゲームパッドが押されたとき: 該当ボタンの図形を強調する (inputCode は gp1_ を付けない部分コード)
+    public void HighlightInput(string inputCode)
+    {
+        if (_pressHighlight != null)
+        {
+            _pressHighlight.BorderBrush = _pressHighlightPrevBrush ?? new SolidColorBrush(Color.FromRgb(180, 180, 180));
+            _pressHighlight.BorderThickness = new Thickness(1);
+            _pressHighlight = null;
+            _pressHighlightPrevBrush = null;
+        }
+        if (!_buttonElements.TryGetValue("gp1_" + inputCode, out var border)) return;
+        _pressHighlight = border;
+        _pressHighlightPrevBrush = border.BorderBrush;
+        ApplyPressHighlight(border);
+    }
+
+    private static void ApplyPressHighlight(Border border)
+    {
+        border.BorderBrush = new SolidColorBrush(Color.FromRgb(229, 57, 53));
+        border.BorderThickness = new Thickness(3);
     }
 
     private void Btn_MouseEnter(object sender, MouseEventArgs e)
     {
-        if (sender is Border border) border.BorderThickness = new Thickness(2);
+        if (sender is Border border && border != _pressHighlight) border.BorderThickness = new Thickness(2);
     }
 
     private void Btn_MouseLeave(object sender, MouseEventArgs e)
     {
-        if (sender is Border border) border.BorderThickness = new Thickness(1);
+        if (sender is Border border && border != _pressHighlight) border.BorderThickness = new Thickness(1);
     }
 
     private void Btn_Click(object sender, MouseButtonEventArgs e)
@@ -291,11 +326,11 @@ public partial class GamepadLayoutPanel : UserControl
         if (ModifierCodes.Contains(code)) return;
 
         var modPrefix = BuildModifierPrefix();
-        var fullCode = modPrefix + code;
+        var fullCode = InputCodeHelper.ToGameForm(modPrefix + code, null);
         var allActions = _data.Categories.SelectMany(c => c.Actions).ToList();
         var bindings = MouseLayoutPanel.FindBindingsForInput(allActions, fullCode, "gamepad");
 
-        var dlg = new InputAssignDialog(_data, "gamepad", fullCode, InputDisplayHelper.FormatInput(fullCode), bindings)
+        var dlg = new InputAssignDialog(_data, "gamepad", fullCode, InputDisplayHelper.FormatInputJa(fullCode), bindings)
         {
             Owner = Window.GetWindow(this)
         };

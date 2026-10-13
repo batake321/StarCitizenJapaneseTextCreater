@@ -1,13 +1,14 @@
 <Window x:Class="StarCitizenJapaneseTextCreater.BindingEditDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="バインディング編集" Height="560" Width="600"
+        Title="バインディング編集" Height="700" Width="600"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
@@ -49,12 +50,12 @@
                          Background="#E3F2FD" FontFamily="Consolas"/>
                 <Button Content="設定" Grid.Row="2" Grid.Column="2" Margin="4,4,0,4" Click="SetGamepad_Click"/>
 
-                <TextBlock Text="HOTAS R:" Grid.Row="3" VerticalAlignment="Center" FontWeight="Bold" Margin="0,4"/>
+                <TextBlock x:Name="lblJoystick1" Text="HOTAS R:" Grid.Row="3" VerticalAlignment="Center" FontWeight="Bold" Margin="0,4"/>
                 <TextBox x:Name="txtJoystickR" Grid.Row="3" Grid.Column="1" Margin="0,4" IsReadOnly="True"
                          Background="#FFF3E0" FontFamily="Consolas"/>
                 <Button Content="設定" Grid.Row="3" Grid.Column="2" Margin="4,4,0,4" Click="SetJoystickR_Click"/>
 
-                <TextBlock Text="HOTAS L:" Grid.Row="4" VerticalAlignment="Center" FontWeight="Bold" Margin="0,4"/>
+                <TextBlock x:Name="lblJoystick2" Text="HOTAS L:" Grid.Row="4" VerticalAlignment="Center" FontWeight="Bold" Margin="0,4"/>
                 <TextBox x:Name="txtJoystickL" Grid.Row="4" Grid.Column="1" Margin="0,4" IsReadOnly="True"
                          Background="#FFF3E0" FontFamily="Consolas"/>
                 <Button Content="設定" Grid.Row="4" Grid.Column="2" Margin="4,4,0,4" Click="SetJoystickL_Click"/>
@@ -75,12 +76,12 @@
                 <!-- Modifiers -->
                 <WrapPanel Grid.Row="0" Margin="0,0,0,8">
                     <TextBlock Text="修飾キー:" VerticalAlignment="Center" Margin="0,0,8,0" FontWeight="Bold"/>
-                    <CheckBox x:Name="chkLShift" Content="L-Shift" Margin="0,0,8,0" VerticalAlignment="Center"/>
-                    <CheckBox x:Name="chkRShift" Content="R-Shift" Margin="0,0,8,0" VerticalAlignment="Center"/>
-                    <CheckBox x:Name="chkLCtrl" Content="L-Ctrl" Margin="0,0,8,0" VerticalAlignment="Center"/>
-                    <CheckBox x:Name="chkRCtrl" Content="R-Ctrl" Margin="0,0,8,0" VerticalAlignment="Center"/>
-                    <CheckBox x:Name="chkLAlt" Content="L-Alt" Margin="0,0,8,0" VerticalAlignment="Center"/>
-                    <CheckBox x:Name="chkRAlt" Content="R-Alt" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                    <CheckBox x:Name="chkLShift" Content="左Shift" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                    <CheckBox x:Name="chkRShift" Content="右Shift" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                    <CheckBox x:Name="chkLCtrl" Content="左Ctrl" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                    <CheckBox x:Name="chkRCtrl" Content="右Ctrl" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                    <CheckBox x:Name="chkLAlt" Content="左Alt" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                    <CheckBox x:Name="chkRAlt" Content="右Alt" Margin="0,0,8,0" VerticalAlignment="Center"/>
                     <CheckBox x:Name="chkGpLB" Content="LB" Margin="0,0,8,0" VerticalAlignment="Center"
                               Foreground="#1565C0" FontWeight="Bold"/>
                     <CheckBox x:Name="chkGpRB" Content="RB" Margin="0,0,8,0" VerticalAlignment="Center"
@@ -109,8 +110,30 @@
             </Grid>
         </GroupBox>
 
+        <!-- 物理コントローラー / HOTAS を押したときの確認欄 -->
+        <Border x:Name="pnlPressConfirm" Grid.Row="3" Visibility="Collapsed" Margin="0,8,0,0" Padding="8"
+                Background="#FFFDE7" BorderBrush="#FBC02D" BorderThickness="1" CornerRadius="4">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                    <TextBlock x:Name="txtPressInput" FontWeight="Bold" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="txtPressCurrent" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                    <ScrollViewer MaxHeight="72" VerticalScrollBarVisibility="Auto" Margin="0,4,0,0">
+                        <TextBlock x:Name="txtPressOthers" TextWrapping="Wrap"/>
+                    </ScrollViewer>
+                </StackPanel>
+                <StackPanel Grid.Column="1" VerticalAlignment="Top" Margin="8,0,0,0">
+                    <Button x:Name="btnPressApply" Content="反映" Click="PressApply_Click" Padding="16,4" Margin="0,0,0,4"/>
+                    <Button Content="キャンセル" Click="PressCancel_Click" Padding="12,4"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
         <!-- Buttons -->
-        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
             <Button Content="デフォルトに戻す" Click="ResetDefault_Click" Padding="12,6" Margin="0,0,8,0"/>
             <Button Content="クリア" Click="Clear_Click" Padding="12,6" Margin="0,0,8,0"/>
             <Button Content="OK" Click="Ok_Click" Padding="20,6" FontWeight="Bold" IsDefault="True"/>

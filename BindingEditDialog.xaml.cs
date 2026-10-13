@@ -6,7 +6,13 @@ namespace StarCitizenJapaneseTextCreater;
 public partial class BindingEditDialog : Window
 {
     private readonly ActionBinding _original;
+    private readonly ActionMapData _data;   // js 番号の対応と、他の機能の一覧に使う (binding.Owner)
     private string _editTarget = "keyboard";
+
+    // 物理コントローラー / HOTAS の押下の待ち受け (ダイアログを開いている間)
+    private GameControllerInput? _controllerInput;
+    // 確認欄に出している、反映待ちの入力 (null = 反映できない / 確認欄なし)
+    private (string DeviceType, string Value)? _pendingPress;
 
     // Editing copies - not applied until OK
     private string _keyboard;
@@ -88,6 +94,7 @@ public partial class BindingEditDialog : Window
     {
         InitializeComponent();
         _original = binding;
+        _data = binding.Owner ?? new ActionMapData();
 
         _keyboard = binding.Keyboard;
         _mouse = binding.Mouse;
@@ -99,30 +106,56 @@ public partial class BindingEditDialog : Window
         txtActionName.Text = $"{binding.DisplayName} ({binding.ActionName})";
         txtCategory.Text = ActionMapNames.GetCategoryName(binding.CategoryName);
 
+        lblJoystick1.Text = $"HOTAS {_data.GetJsSideLabel(1)}:";
+        lblJoystick2.Text = $"HOTAS {_data.GetJsSideLabel(2)}:";
+
         UpdateFields();
         ShowKeyList("keyboard");
+
+        try
+        {
+            _controllerInput = new GameControllerInput();
+            _controllerInput.InputPressed += ControllerInput_Pressed;
+            _controllerInput.Start();
+        }
+        catch (Exception)
+        {
+            // 待ち受けを始められない環境では押下での入力は使えない (リストからの選択は従来どおり)
+            _controllerInput?.Dispose();
+            _controllerInput = null;
+        }
+        Closed += (_, _) =>
+        {
+            if (_controllerInput != null)
+            {
+                _controllerInput.InputPressed -= ControllerInput_Pressed;
+                _controllerInput.Dispose();
+                _controllerInput = null;
+            }
+        };
     }
 
     private void UpdateFields()
     {
-        txtKeyboard.Text = InputDisplayHelper.FormatInput(_keyboard);
-        txtMouse.Text = InputDisplayHelper.FormatInput(_mouse);
-        txtGamepad.Text = InputDisplayHelper.FormatInput(_gamepad);
-        txtJoystickR.Text = InputDisplayHelper.FormatInput(_joystick1);
-        txtJoystickL.Text = InputDisplayHelper.FormatInput(_joystick2);
+        txtKeyboard.Text = InputDisplayHelper.FormatInputJa(_keyboard);
+        txtMouse.Text = InputDisplayHelper.FormatInputJa(_mouse);
+        txtGamepad.Text = InputDisplayHelper.FormatInputJa(_gamepad);
+        txtJoystickR.Text = InputDisplayHelper.FormatInputJa(_joystick1);
+        txtJoystickL.Text = InputDisplayHelper.FormatInputJa(_joystick2);
         chkLongPress.IsChecked = _isLongPress;
     }
 
     private void ShowKeyList(string target)
     {
         _editTarget = target;
+        UpdateModifierAvailability(target);
         grpSelector.Header = target switch
         {
             "keyboard" => "キーボード入力を選択",
             "mouse" => "マウス入力を選択",
             "gamepad" => "ゲームパッド入力を選択",
-            "joystick1" => "HOTAS R 入力を選択 (VKB Gladiator NXT R)",
-            "joystick2" => "HOTAS L 入力を選択 (VKB Gladiator NXT L)",
+            "joystick1" => $"HOTAS {_data.GetJsSideLabel(1)} 入力を選択 ({_data.GetJsHeading(1)})",
+            "joystick2" => $"HOTAS {_data.GetJsSideLabel(2)} 入力を選択 ({_data.GetJsHeading(2)})",
             _ => "入力を選択"
         };
 
@@ -147,16 +180,6 @@ public partial class BindingEditDialog : Window
     {
         if (lstKeys.SelectedItem is not InputItem item) return;
 
-        var modifiers = new List<string>();
-        if (chkLShift.IsChecked == true) modifiers.Add("kb1_lshift");
-        if (chkRShift.IsChecked == true) modifiers.Add("kb1_rshift");
-        if (chkLCtrl.IsChecked == true) modifiers.Add("kb1_lctrl");
-        if (chkRCtrl.IsChecked == true) modifiers.Add("kb1_rctrl");
-        if (chkLAlt.IsChecked == true) modifiers.Add("kb1_lalt");
-        if (chkRAlt.IsChecked == true) modifiers.Add("kb1_ralt");
-        if (chkGpLB.IsChecked == true) modifiers.Add("gp1_shoulderl");
-        if (chkGpRB.IsChecked == true) modifiers.Add("gp1_shoulderr");
-
         var inputValue = _editTarget switch
         {
             "keyboard" => $"kb1_{item.Value}",
@@ -165,8 +188,7 @@ public partial class BindingEditDialog : Window
             _ => item.Value,
         };
 
-        if (modifiers.Count > 0)
-            inputValue = string.Join("+", modifiers) + "+" + inputValue;
+        inputValue = AddCheckedModifiers(inputValue, _editTarget);
 
         switch (_editTarget)
         {
@@ -178,7 +200,130 @@ public partial class BindingEditDialog : Window
         }
 
         UpdateFields();
-        txtSelectedInput.Text = $"設定: {InputDisplayHelper.FormatInput(inputValue)}  ({inputValue})";
+        txtSelectedInput.Text = $"設定: {InputDisplayHelper.FormatInputJa(inputValue)}  ({inputValue})";
+    }
+
+    // 編集中の機器に合わない修飾キーのチェックは選べないようにする (無効にしたチェックは外す)。
+    //   ゲームパッドの編集中はキーボード修飾 (L/R Shift・Ctrl・Alt) を無効、それ以外 (キーボード・マウス・ジョイスティック) は LB/RB を無効
+    private void UpdateModifierAvailability(string target)
+    {
+        bool isGamepad = target == "gamepad";
+        foreach (var chk in new[] { chkLShift, chkRShift, chkLCtrl, chkRCtrl, chkLAlt, chkRAlt })
+        {
+            chk.IsEnabled = !isGamepad;
+            if (isGamepad) chk.IsChecked = false;
+        }
+        foreach (var chk in new[] { chkGpLB, chkGpRB })
+        {
+            chk.IsEnabled = isGamepad;
+            if (!isGamepad) chk.IsChecked = false;
+        }
+    }
+
+    // 修飾キーのチェックを付け、ゲームの形にする (例 "js1_rctrl+button3"、"gp1_shoulderl+a"、"kb1_lshift+w")。
+    //   deviceType に合わない修飾は付けない (ゲームパッドにはキーボード修飾を、それ以外には LB/RB を付けない)
+    private string AddCheckedModifiers(string inputValue, string deviceType)
+    {
+        bool isGamepad = deviceType == "gamepad";
+        var modifiers = new List<string>();
+        if (!isGamepad)
+        {
+            if (chkLShift.IsChecked == true) modifiers.Add("kb1_lshift");
+            if (chkRShift.IsChecked == true) modifiers.Add("kb1_rshift");
+            if (chkLCtrl.IsChecked == true) modifiers.Add("kb1_lctrl");
+            if (chkRCtrl.IsChecked == true) modifiers.Add("kb1_rctrl");
+            if (chkLAlt.IsChecked == true) modifiers.Add("kb1_lalt");
+            if (chkRAlt.IsChecked == true) modifiers.Add("kb1_ralt");
+        }
+        else
+        {
+            if (chkGpLB.IsChecked == true) modifiers.Add("gp1_shoulderl");
+            if (chkGpRB.IsChecked == true) modifiers.Add("gp1_shoulderr");
+        }
+
+        if (modifiers.Count > 0)
+            inputValue = string.Join("+", modifiers) + "+" + inputValue;
+        return InputCodeHelper.ToGameForm(inputValue, null);
+    }
+
+    // 物理コントローラー / HOTAS が押されたら確認欄を出す
+    private void ControllerInput_Pressed(object? sender, GameControllerInputEventArgs e)
+    {
+        string deviceType;
+        string deviceLabel;
+        string baseValue;
+        if (e.Kind == GameControllerKind.Gamepad)
+        {
+            deviceType = "gamepad";
+            deviceLabel = "ゲームパッド";
+            baseValue = $"gp1_{e.InputCode}";
+        }
+        else
+        {
+            if (!_data.TryGetJsForDevice(e.VendorId, e.ProductId, out var js))
+            {
+                _pendingPress = null;
+                txtPressInput.Text = $"押された入力: {e.DisplayName} — {e.InputCode}";
+                txtPressCurrent.Text = "どの js 番号か判別できません";
+                txtPressOthers.Text = "";
+                btnPressApply.IsEnabled = false;
+                pnlPressConfirm.Visibility = Visibility.Visible;
+                return;
+            }
+            deviceType = $"joystick{js}";
+            deviceLabel = $"HOTAS {_data.GetJsSideLabel(js)} (js{js})";
+            baseValue = $"js{js}_{e.InputCode}";
+        }
+
+        var value = AddCheckedModifiers(baseValue, deviceType);
+
+        var current = deviceType switch
+        {
+            "gamepad" => _gamepad,
+            "joystick1" => _joystick1,
+            "joystick2" => _joystick2,
+            _ => "",
+        };
+
+        var allActions = _data.Categories.SelectMany(c => c.Actions).ToList();
+        var others = MouseLayoutPanel.FindBindingsForInput(allActions, value, deviceType)
+            .Where(a => !ReferenceEquals(a, _original))
+            .ToList();
+
+        txtPressInput.Text = $"押された入力: {e.DisplayName} ({deviceLabel}) — {InputDisplayHelper.FormatInputJa(value)}  ({value})";
+        txtPressCurrent.Text = string.IsNullOrEmpty(current)
+            ? $"この機能の{deviceLabel}の今の割り当て: なし"
+            : $"この機能の{deviceLabel}の今の割り当て: {InputDisplayHelper.FormatInputJa(current)}  ({current})";
+        txtPressOthers.Text = others.Count == 0
+            ? "この入力を使っている他の機能: なし"
+            : "この入力を使っている他の機能:\n" + string.Join("\n", others.Select(a => $"・{a.DisplayName}  ({a.CategoryDisplayName})"));
+        btnPressApply.IsEnabled = true;
+        _pendingPress = (deviceType, value);
+        pnlPressConfirm.Visibility = Visibility.Visible;
+    }
+
+    // [反映]: Key_Selected と同じく編集中のコピーに入れる (確定は従来どおり OK)
+    private void PressApply_Click(object sender, RoutedEventArgs e)
+    {
+        if (_pendingPress is not { } p) return;
+        switch (p.DeviceType)
+        {
+            case "gamepad": _gamepad = p.Value; break;
+            case "joystick1": _joystick1 = p.Value; break;
+            case "joystick2": _joystick2 = p.Value; break;
+        }
+        UpdateFields();
+        txtSelectedInput.Text = $"設定: {InputDisplayHelper.FormatInputJa(p.Value)}  ({p.Value})";
+        HidePressConfirm();
+    }
+
+    // [キャンセル]: 何もせず確認欄を閉じる
+    private void PressCancel_Click(object sender, RoutedEventArgs e) => HidePressConfirm();
+
+    private void HidePressConfirm()
+    {
+        _pendingPress = null;
+        pnlPressConfirm.Visibility = Visibility.Collapsed;
     }
 
     private void ResetDefault_Click(object sender, RoutedEventArgs e)

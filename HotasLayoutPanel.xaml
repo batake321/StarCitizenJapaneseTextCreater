@@ -11,10 +11,15 @@
         <Border Grid.Row="0" Background="#F5F5F5" Padding="8,6" BorderBrush="#DDD" BorderThickness="0,0,0,1">
             <WrapPanel VerticalAlignment="Center">
                 <TextBlock Text="修飾キー:" VerticalAlignment="Center" Margin="0,0,8,0" FontWeight="Bold"/>
-                <CheckBox x:Name="chkRCtrl" Content="R-Ctrl" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
-                <CheckBox x:Name="chkLShift" Content="L-Shift" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
-                <CheckBox x:Name="chkRShift" Content="R-Shift" Margin="0,0,20,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
+                <CheckBox x:Name="chkRCtrl" Content="右Ctrl" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
+                <CheckBox x:Name="chkLShift" Content="左Shift" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
+                <CheckBox x:Name="chkRShift" Content="右Shift" Margin="0,0,20,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
                 <TextBlock x:Name="txtInfo" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
+                <Button Content="表示の入れ替え" Click="DisplaySwap_Click" Padding="8,2" Margin="16,0,4,0" VerticalAlignment="Center"
+                        ToolTip="アプリ内の 物理スティック↔js 番号 の対応と左右の表示を入れ替えます (ファイルは変わりません)"/>
+                <Button Content="js1/js2 の入れ替え" Click="InstanceSwap_Click" Padding="8,2" Margin="0,0,8,0" VerticalAlignment="Center"
+                        ToolTip="全ての機能の js1 と js2 の割り当てを入れ替えます (保存時に actionmaps.xml に反映)"/>
+                <TextBlock x:Name="txtPressInfo" VerticalAlignment="Center" Foreground="#D32F2F" FontSize="12"/>
             </WrapPanel>
         </Border>
 
@@ -40,7 +45,7 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <!-- HOTAS L (Joystick 2) - 左列 -->
+            <!-- HOTAS L - 左列 (js 番号は Product 名と表示の入れ替えで決まる) -->
             <Border Grid.Column="0" BorderBrush="#DDD" BorderThickness="0,0,1,0">
                 <Grid>
                     <Grid.RowDefinitions>
@@ -48,7 +53,7 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
-                    <TextBlock Text="HOTAS L (VKB Gladiator NXT L)" FontWeight="Bold" Padding="8,6" Background="#E3F2FD"/>
+                    <TextBlock x:Name="txtHeaderLeft" Text="HOTAS L (js2)" FontWeight="Bold" Padding="8,6" Background="#E3F2FD"/>
                     <Border Grid.Row="1" Background="#FEFEFE" Padding="4" MaxHeight="200" Cursor="Hand"
                             MouseLeftButtonDown="ImageL_Click" ToolTip="クリックで拡大表示">
                         <Image Source="/image/hotas/vkb_scg_L.png" Stretch="Uniform" VerticalAlignment="Top"/>
@@ -59,14 +64,14 @@
                 </Grid>
             </Border>
 
-            <!-- HOTAS R (Joystick 1) - 右列 -->
+            <!-- HOTAS R - 右列 -->
             <Grid Grid.Column="1">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <TextBlock Text="HOTAS R (VKB Gladiator NXT R)" FontWeight="Bold" Padding="8,6" Background="#FFF3E0"/>
+                <TextBlock x:Name="txtHeaderRight" Text="HOTAS R (js1)" FontWeight="Bold" Padding="8,6" Background="#FFF3E0"/>
                 <Border Grid.Row="1" Background="#FEFEFE" Padding="4" MaxHeight="200" Cursor="Hand"
                         MouseLeftButtonDown="ImageR_Click" ToolTip="クリックで拡大表示">
                     <Image Source="/image/hotas/vkb_scg_R.png" Stretch="Uniform" VerticalAlignment="Top"/>

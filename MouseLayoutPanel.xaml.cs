@@ -193,7 +193,7 @@ public partial class MouseLayoutPanel : UserControl
             if (bindings.Count > 0)
             {
                 var sp = new StackPanel { MaxWidth = 350 };
-                sp.Children.Add(new TextBlock { Text = InputDisplayHelper.FormatInput(fullCode), FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 4) });
+                sp.Children.Add(new TextBlock { Text = InputDisplayHelper.FormatInputJa(fullCode), FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 4) });
                 foreach (var b in bindings)
                 {
                     sp.Children.Add(new TextBlock { Text = $"• {b.DisplayName}", TextWrapping = TextWrapping.Wrap });
@@ -218,7 +218,7 @@ public partial class MouseLayoutPanel : UserControl
         {
             var entry = new TextBlock
             {
-                Text = $"{b.MouseDisplay} → {b.DisplayName}",
+                Text = $"{b.MouseDisplayJa} → {b.DisplayName}",
                 FontSize = 12,
                 Foreground = new SolidColorBrush(Color.FromRgb(51, 51, 51)),
                 Tag = "list_entry"
@@ -289,7 +289,7 @@ public partial class MouseLayoutPanel : UserControl
         var allActions = _data.Categories.SelectMany(c => c.Actions).ToList();
         var bindings = FindBindingsForInput(allActions, fullCode, "mouse");
 
-        var dlg = new InputAssignDialog(_data, "mouse", fullCode, InputDisplayHelper.FormatInput(fullCode), bindings)
+        var dlg = new InputAssignDialog(_data, "mouse", fullCode, InputDisplayHelper.FormatInputJa(fullCode), bindings)
         {
             Owner = Window.GetWindow(this)
         };

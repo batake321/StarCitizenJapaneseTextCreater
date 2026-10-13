@@ -126,7 +126,7 @@
                                         </Style>
                                     </DataGridTextColumn.ElementStyle>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Header="キーボード" Binding="{Binding KeyboardDisplay}" Width="150">
+                                <DataGridTextColumn Header="キーボード" Binding="{Binding KeyboardDisplayJa}" Width="150">
                                     <DataGridTextColumn.ElementStyle>
                                         <Style TargetType="TextBlock">
                                             <Setter Property="VerticalAlignment" Value="Center"/>
@@ -141,7 +141,7 @@
                                         </Style>
                                     </DataGridTextColumn.ElementStyle>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Header="マウス" Binding="{Binding MouseDisplay}" Width="120">
+                                <DataGridTextColumn Header="マウス" Binding="{Binding MouseDisplayJa}" Width="120">
                                     <DataGridTextColumn.ElementStyle>
                                         <Style TargetType="TextBlock">
                                             <Setter Property="VerticalAlignment" Value="Center"/>
@@ -156,7 +156,7 @@
                                         </Style>
                                     </DataGridTextColumn.ElementStyle>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Header="ゲームパッド" Binding="{Binding GamepadDisplay}" Width="160">
+                                <DataGridTextColumn Header="ゲームパッド" Binding="{Binding GamepadDisplayJa}" Width="160">
                                     <DataGridTextColumn.ElementStyle>
                                         <Style TargetType="TextBlock">
                                             <Setter Property="VerticalAlignment" Value="Center"/>

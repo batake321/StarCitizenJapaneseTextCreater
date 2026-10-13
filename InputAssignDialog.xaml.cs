@@ -17,10 +17,10 @@ public partial class InputAssignDialog : Window
         InitializeComponent();
         _data = data;
         _deviceType = deviceType;
-        _inputCode = inputCode;
+        _inputCode = InputCodeHelper.ToGameForm(inputCode, null);   // ゲームの形 ("kb1_rctrl+js1_button3" → "js1_rctrl+button3")
         _allActions = data.Categories.SelectMany(c => c.Actions).OrderBy(a => a.DisplayName).ToList();
 
-        txtInputName.Text = $"{displayName}  ({inputCode})";
+        txtInputName.Text = $"{displayName}  ({_inputCode})";
         lstCurrentBindings.ItemsSource = currentBindings;
 
         cmbActionCategory.Items.Add("全カテゴリ");
@@ -42,10 +42,10 @@ public partial class InputAssignDialog : Window
 
     private string GetBindingDisplay(ActionBinding a) => _deviceType switch
     {
-        "mouse" => a.MouseDisplay,
-        "gamepad" => a.GamepadDisplay,
-        "joystick1" => a.Joystick1Display,
-        "joystick2" => a.Joystick2Display,
+        "mouse" => a.MouseDisplayJa,
+        "gamepad" => a.GamepadDisplayJa,
+        "joystick1" => a.Joystick1DisplayJa,
+        "joystick2" => a.Joystick2DisplayJa,
         _ => ""
     };
 
@@ -91,8 +91,8 @@ public partial class InputAssignDialog : Window
 
         var existing = GetBindingDisplay(action);
         var msg = string.IsNullOrEmpty(existing)
-            ? $"「{action.DisplayName}」に {InputDisplayHelper.FormatInput(_inputCode)} を割り当てますか？"
-            : $"「{action.DisplayName}」の入力を\n{existing} → {InputDisplayHelper.FormatInput(_inputCode)}\nに変更しますか？";
+            ? $"「{action.DisplayName}」に {InputDisplayHelper.FormatInputJa(_inputCode)} を割り当てますか？"
+            : $"「{action.DisplayName}」の入力を\n{existing} → {InputDisplayHelper.FormatInputJa(_inputCode)}\nに変更しますか？";
 
         if (MessageBox.Show(msg, "確認", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
             return;
@@ -122,8 +122,8 @@ public partial class InputAssignDialog : Window
         {
             "mouse" => "マウス",
             "gamepad" => "ゲームパッド",
-            "joystick1" => "HOTAS R",
-            "joystick2" => "HOTAS L",
+            "joystick1" => $"HOTAS {_data.GetJsSideLabel(1)}",
+            "joystick2" => $"HOTAS {_data.GetJsSideLabel(2)}",
             _ => "入力"
         };
 
@@ -152,8 +152,9 @@ public partial class InputAssignDialog : Window
     {
         var parts = input.Split('+');
         var normalized = new List<string>();
+        // 接頭辞は先頭の部分にしか付かない (ゲームの形) ので、並べ替えの前に各部分の接頭辞を外す
         foreach (var part in parts)
-            normalized.Add(part.Trim().ToLowerInvariant());
+            normalized.Add(InputCodeHelper.StripDevicePrefix(part).ToLowerInvariant());
         normalized.Sort();
         return string.Join("+", normalized);
     }

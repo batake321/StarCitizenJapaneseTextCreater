@@ -11,12 +11,12 @@
         <Border Grid.Row="0" Background="#F5F5F5" Padding="8,6" BorderBrush="#DDD" BorderThickness="0,0,0,1">
             <WrapPanel VerticalAlignment="Center">
                 <TextBlock Text="修飾キー:" VerticalAlignment="Center" Margin="0,0,8,0" FontWeight="Bold"/>
-                <CheckBox x:Name="chkLShift" Content="L-Shift" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
-                <CheckBox x:Name="chkRShift" Content="R-Shift" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
-                <CheckBox x:Name="chkLCtrl" Content="L-Ctrl" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
-                <CheckBox x:Name="chkRCtrl" Content="R-Ctrl" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
-                <CheckBox x:Name="chkLAlt" Content="L-Alt" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
-                <CheckBox x:Name="chkRAlt" Content="R-Alt" Margin="0,0,20,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
+                <CheckBox x:Name="chkLShift" Content="左Shift" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
+                <CheckBox x:Name="chkRShift" Content="右Shift" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
+                <CheckBox x:Name="chkLCtrl" Content="左Ctrl" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
+                <CheckBox x:Name="chkRCtrl" Content="右Ctrl" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
+                <CheckBox x:Name="chkLAlt" Content="左Alt" Margin="0,0,12,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
+                <CheckBox x:Name="chkRAlt" Content="右Alt" Margin="0,0,20,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
                 <TextBlock x:Name="txtInfo" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
             </WrapPanel>
         </Border>

@@ -9,6 +9,126 @@ public class ActionMapData
     public List<ActionCategory> Categories { get; set; } = new();
     public Dictionary<string, ActionBinding> AllBindings { get; set; } = new();
     public Dictionary<string, string> Localization { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    // actionmaps.xml の <options type="joystick" instance="N" Product="..."> (読み込んだ保存データのもの)
+    public List<JoystickDeviceOption> JoystickOptions { get; set; } = new();
+
+    // 「表示の入れ替え」(アプリ側だけ): true なら 物理スティック↔js 番号 の対応と左右表示を入れ替える
+    public bool JoystickDisplaySwapped { get; set; }
+
+    // 「js1/js2 の入れ替え」を奇数回行い、まだ保存していない (保存時に options の instance 1 と 2 を交換する)
+    public bool JoystickInstancesSwapPending { get; set; }
+
+    // js 番号 (1/2) に対応する options。表示の入れ替え中は instance (3 - js) のもの
+    public JoystickDeviceOption? GetJoystickOptionForJs(int js)
+    {
+        var instance = JoystickDisplaySwapped ? 3 - js : js;
+        return JoystickOptions.FirstOrDefault(o => o.Instance == instance);
+    }
+
+    // js 番号の Product 名 (GUID を除いたもの)。無ければ ""
+    public string GetJsProductName(int js) => GetJoystickOptionForJs(js)?.Name ?? "";
+
+    // 見出し用 "js1: VKBsim Gladiator EVO L" (Product が無ければ "js1")
+    public string GetJsHeading(int js)
+    {
+        var name = GetJsProductName(js);
+        return string.IsNullOrEmpty(name) ? $"js{js}" : $"js{js}: {name}";
+    }
+
+    // 左側に表示する js 番号 (1 or 2)。Product 名の末尾の L / R から決める。決められなければ従来どおり js2 が左
+    //   (表示の入れ替え中で Product から決められないときは js1 が左)
+    public int LeftJs
+    {
+        get
+        {
+            var s1 = JoystickDeviceOption.GetSide(GetJsProductName(1));
+            var s2 = JoystickDeviceOption.GetSide(GetJsProductName(2));
+            if (s1 == "L" && s2 != "L") return 1;
+            if (s1 == "R" && s2 != "R") return 2;
+            if (s2 == "L" && s1 != "L") return 2;
+            if (s2 == "R" && s1 != "R") return 1;
+            return JoystickDisplaySwapped ? 1 : 2;
+        }
+    }
+
+    // "L" / "R" (HOTAS L / HOTAS R の表記用)
+    public string GetJsSideLabel(int js) => js == LeftJs ? "L" : "R";
+
+    // 物理スティック (VID/PID) → js 番号。instance 1 / 2 のうち VID/PID が一致するものがちょうど 1 つのときだけ決まる
+    public bool TryGetJsForDevice(ushort vendorId, ushort productId, out int js)
+    {
+        js = 0;
+        var matches = JoystickOptions
+            .Where(o => (o.Instance == 1 || o.Instance == 2) && o.HasVidPid && o.VendorId == vendorId && o.ProductId == productId)
+            .ToList();
+        if (matches.Count != 1) return false;
+        var instance = matches[0].Instance;
+        js = JoystickDisplaySwapped ? 3 - instance : instance;
+        return true;
+    }
+
+    // 「js1/js2 の入れ替え」: 全 action の Joystick1 と Joystick2 の値を js1_↔js2_ を付け替えて交換し、
+    //   options の instance 1 / 2 の情報もメモリ上で交換する (ファイルの options は保存時に交換)
+    public void SwapJoystick1And2Bindings()
+    {
+        foreach (var b in Categories.SelectMany(c => c.Actions))
+        {
+            var j1 = b.Joystick1;
+            var j2 = b.Joystick2;
+            b.Joystick1 = SwapJsPrefix(j2);
+            b.Joystick2 = SwapJsPrefix(j1);
+        }
+        foreach (var o in JoystickOptions)
+        {
+            if (o.Instance == 1) o.Instance = 2;
+            else if (o.Instance == 2) o.Instance = 1;
+        }
+        JoystickInstancesSwapPending = !JoystickInstancesSwapPending;
+    }
+
+    internal static string SwapJsPrefix(string value)
+    {
+        if (string.IsNullOrEmpty(value)) return value;
+        var parts = value.Split('+');
+        for (int i = 0; i < parts.Length; i++)
+        {
+            var p = parts[i];
+            var lead = p.Length - p.TrimStart().Length;
+            var body = p[lead..];
+            if (body.StartsWith("js1_", StringComparison.OrdinalIgnoreCase)) parts[i] = p[..lead] + "js2_" + body[4..];
+            else if (body.StartsWith("js2_", StringComparison.OrdinalIgnoreCase)) parts[i] = p[..lead] + "js1_" + body[4..];
+        }
+        return string.Join("+", parts);
+    }
+}
+
+// actionmaps.xml の <options type="joystick"> 1 つ分
+public class JoystickDeviceOption
+{
+    public int Instance { get; set; }
+    public string Product { get; set; } = "";   // 属性値そのまま (例 " VKBsim Gladiator EVO L    {0201231D-...}")
+    public bool HasVidPid { get; set; }
+    public ushort VendorId { get; set; }
+    public ushort ProductId { get; set; }
+
+    // GUID を除いて前後の空白を落とした名前 (例 "VKBsim Gladiator EVO L")
+    public string Name => System.Text.RegularExpressions.Regex.Replace(Product ?? "", @"\{[^}]*\}", "").Trim();
+
+    // 名前の最後の語が L / Left なら "L"、R / Right なら "R"、それ以外は null
+    public static string? GetSide(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        var tokens = name.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length == 0) return null;
+        var last = tokens[^1].ToUpperInvariant();
+        return last switch
+        {
+            "L" or "LEFT" => "L",
+            "R" or "RIGHT" => "R",
+            _ => null,
+        };
+    }
 }
 
 public class ActionCategory
@@ -76,31 +196,46 @@ public class ActionBinding : INotifyPropertyChanged
     public string EffectiveJoystick2ActivationMode =>
         !string.IsNullOrEmpty(Joystick2ActivationMode) ? Joystick2ActivationMode : ActivationMode;
 
-    public string Keyboard { get => _keyboard; set { _keyboard = value; OnPropertyChanged(); OnPropertyChanged(nameof(KeyboardDisplay)); } }
-    public string Mouse { get => _mouse; set { _mouse = value; OnPropertyChanged(); OnPropertyChanged(nameof(MouseDisplay)); } }
-    public string Gamepad { get => _gamepad; set { _gamepad = value; OnPropertyChanged(); OnPropertyChanged(nameof(GamepadDisplay)); } }
-    public string Joystick1 { get => _joystick1; set { _joystick1 = value; OnPropertyChanged(); OnPropertyChanged(nameof(Joystick1Display)); OnPropertyChanged(nameof(HotasDisplay)); } }
-    public string Joystick2 { get => _joystick2; set { _joystick2 = value; OnPropertyChanged(); OnPropertyChanged(nameof(Joystick2Display)); OnPropertyChanged(nameof(HotasDisplay)); } }
+    // 値は代入時にゲームの形 (機器接頭辞を先頭に 1 回: "js1_rctrl+button3"、"gp1_shoulderl+a"、"kb1_lshift+w") に直す
+    public string Keyboard { get => _keyboard; set { _keyboard = InputCodeHelper.ToGameForm(value, "kb1_"); OnPropertyChanged(); OnPropertyChanged(nameof(KeyboardDisplay)); OnPropertyChanged(nameof(KeyboardDisplayJa)); } }
+    public string Mouse { get => _mouse; set { _mouse = InputCodeHelper.ToGameForm(value, "mo1_"); OnPropertyChanged(); OnPropertyChanged(nameof(MouseDisplay)); OnPropertyChanged(nameof(MouseDisplayJa)); } }
+    public string Gamepad { get => _gamepad; set { _gamepad = InputCodeHelper.ToGameForm(value, "gp1_"); OnPropertyChanged(); OnPropertyChanged(nameof(GamepadDisplay)); OnPropertyChanged(nameof(GamepadDisplayJa)); } }
+    public string Joystick1 { get => _joystick1; set { _joystick1 = InputCodeHelper.ToGameForm(value, "js1_"); OnPropertyChanged(); OnPropertyChanged(nameof(Joystick1Display)); OnPropertyChanged(nameof(Joystick1DisplayJa)); OnPropertyChanged(nameof(HotasDisplay)); } }
+    public string Joystick2 { get => _joystick2; set { _joystick2 = InputCodeHelper.ToGameForm(value, "js2_"); OnPropertyChanged(); OnPropertyChanged(nameof(Joystick2Display)); OnPropertyChanged(nameof(Joystick2DisplayJa)); OnPropertyChanged(nameof(HotasDisplay)); } }
     public bool IsLongPress { get => _isLongPress; set { _isLongPress = value; OnPropertyChanged(); } }
 
     // Legacy alias (kept for searching/text matching from external services like ChatService).
     public string Joystick => string.IsNullOrEmpty(_joystick1) ? _joystick2 : _joystick1;
     public string JoystickDisplay => HotasDisplay;
 
+    // 従来の表記 (チャット (ChatService) が使う。変更前のまま)
     public string KeyboardDisplay => InputDisplayHelper.FormatInput(Keyboard);
     public string MouseDisplay => InputDisplayHelper.FormatInput(Mouse);
     public string GamepadDisplay => InputDisplayHelper.FormatInput(Gamepad);
     public string Joystick1Display => InputDisplayHelper.FormatInput(Joystick1);
     public string Joystick2Display => InputDisplayHelper.FormatInput(Joystick2);
+
+    // 画面用の日本語表記
+    public string KeyboardDisplayJa => InputDisplayHelper.FormatInputJa(Keyboard);
+    public string MouseDisplayJa => InputDisplayHelper.FormatInputJa(Mouse);
+    public string GamepadDisplayJa => InputDisplayHelper.FormatInputJa(Gamepad);
+    public string Joystick1DisplayJa => InputDisplayHelper.FormatInputJa(Joystick1);
+    public string Joystick2DisplayJa => InputDisplayHelper.FormatInputJa(Joystick2);
+    // 画面用 (機能別タブの HOTAS 列・印刷・検索)。"R (js2): ...\nL (js1): ..." の形で日本語表記。
+    //   R/L は js 番号と物理スティックの対応 (Owner) に従う。Owner が無ければ従来どおり js1 = R
     public string HotasDisplay
     {
         get
         {
-            var r = Joystick1Display;
-            var l = Joystick2Display;
-            if (!string.IsNullOrEmpty(r) && !string.IsNullOrEmpty(l)) return $"R: {r}\nL: {l}";
-            if (!string.IsNullOrEmpty(r)) return $"R: {r}";
-            if (!string.IsNullOrEmpty(l)) return $"L: {l}";
+            int leftJs = Owner?.LeftJs ?? 2;
+            int rightJs = 3 - leftJs;
+            var r = rightJs == 1 ? Joystick1DisplayJa : Joystick2DisplayJa;
+            var l = leftJs == 1 ? Joystick1DisplayJa : Joystick2DisplayJa;
+            var rTag = $"R (js{rightJs})";
+            var lTag = $"L (js{leftJs})";
+            if (!string.IsNullOrEmpty(r) && !string.IsNullOrEmpty(l)) return $"{rTag}: {r}\n{lTag}: {l}";
+            if (!string.IsNullOrEmpty(r)) return $"{rTag}: {r}";
+            if (!string.IsNullOrEmpty(l)) return $"{lTag}: {l}";
             return "";
         }
     }
@@ -109,11 +244,13 @@ public class ActionBinding : INotifyPropertyChanged
                                   !string.IsNullOrEmpty(Gamepad) || !string.IsNullOrEmpty(Joystick1) || !string.IsNullOrEmpty(Joystick2);
 
     // Default bindings (from defaultProfile.xml) - stored separately for reset
-    public string DefaultKeyboard { get; set; } = "";
-    public string DefaultMouse { get; set; } = "";
-    public string DefaultGamepad { get; set; } = "";
-    public string DefaultJoystick1 { get; set; } = "";
-    public string DefaultJoystick2 { get; set; } = "";
+    //   既定値もゲームの形に直して持つ (「既定値に戻す」で書かれる値もゲームの形になる)
+    private string _defaultKeyboard = "", _defaultMouse = "", _defaultGamepad = "", _defaultJoystick1 = "", _defaultJoystick2 = "";
+    public string DefaultKeyboard { get => _defaultKeyboard; set => _defaultKeyboard = InputCodeHelper.ToGameForm(value, "kb1_"); }
+    public string DefaultMouse { get => _defaultMouse; set => _defaultMouse = InputCodeHelper.ToGameForm(value, "mo1_"); }
+    public string DefaultGamepad { get => _defaultGamepad; set => _defaultGamepad = InputCodeHelper.ToGameForm(value, "gp1_"); }
+    public string DefaultJoystick1 { get => _defaultJoystick1; set => _defaultJoystick1 = InputCodeHelper.ToGameForm(value, "js1_"); }
+    public string DefaultJoystick2 { get => _defaultJoystick2; set => _defaultJoystick2 = InputCodeHelper.ToGameForm(value, "js2_"); }
 
     public bool IsModified => Keyboard != DefaultKeyboard || Mouse != DefaultMouse ||
                               Gamepad != DefaultGamepad ||
@@ -278,6 +415,7 @@ public static class ActionMapParser
             {
                 var doc = XDocument.Load(saveOverridePath);
                 ApplyUserOverrides(doc, data);
+                ParseJoystickOptions(doc, data);
             }
             catch (Exception ex)
             {
@@ -370,8 +508,10 @@ public static class ActionMapParser
                 if (!string.IsNullOrEmpty(gp)) { binding.Gamepad = gp; binding.DefaultGamepad = gp; }
                 if (!string.IsNullOrEmpty(js))
                 {
-                    if (js.StartsWith("js2_")) { binding.Joystick2 = js; binding.DefaultJoystick2 = js; }
-                    else { binding.Joystick1 = js; binding.DefaultJoystick1 = js; }
+                    var jsDev = InputCodeHelper.GetMainDevicePrefix(js);
+                    if (jsDev == "js2_") { binding.Joystick2 = js; binding.DefaultJoystick2 = js; }
+                    else if (!InputCodeHelper.IsJoystick3OrLater(jsDev)) { binding.Joystick1 = js; binding.DefaultJoystick1 = js; }
+                    // js3 以降はアプリでは扱わない (どの欄にも入れない)
                 }
 
                 // Per-device child elements with their own activationMode and input
@@ -400,10 +540,15 @@ public static class ActionMapParser
                         case "joystick":
                             if (!string.IsNullOrEmpty(devInput))
                             {
-                                if (devInput.StartsWith("js2_"))
+                                var devJs = InputCodeHelper.GetMainDevicePrefix(devInput);
+                                if (devJs == "js2_")
                                 {
                                     if (!string.IsNullOrEmpty(devActMode)) binding.Joystick2ActivationMode = devActMode;
                                     binding.Joystick2 = devInput; binding.DefaultJoystick2 = devInput;
+                                }
+                                else if (InputCodeHelper.IsJoystick3OrLater(devJs))
+                                {
+                                    // js3 以降はアプリでは扱わない
                                 }
                                 else
                                 {
@@ -503,6 +648,23 @@ public static class ActionMapParser
 
     private static void ClassifyInput(string input, ActionBinding binding, bool setDefault)
     {
+        // 本体入力の機器接頭辞で振り分ける (以前アプリが保存した "kb1_rctrl+js1_button30" も js1 の欄へ)。
+        //   値は代入時にゲームの形に直る。js3 以降はアプリでは扱わない (どの欄にも入れない)
+        var dev = InputCodeHelper.GetMainDevicePrefix(input);
+        if (dev != null)
+        {
+            switch (dev)
+            {
+                case "kb1_": binding.Keyboard = input; if (setDefault) binding.DefaultKeyboard = input; return;
+                case "mo1_": binding.Mouse = input; if (setDefault) binding.DefaultMouse = input; return;
+                case "gp1_": binding.Gamepad = input; if (setDefault) binding.DefaultGamepad = input; return;
+                case "js1_": binding.Joystick1 = input; if (setDefault) binding.DefaultJoystick1 = input; return;
+                case "js2_": binding.Joystick2 = input; if (setDefault) binding.DefaultJoystick2 = input; return;
+            }
+            if (InputCodeHelper.IsJoystick3OrLater(dev)) return;
+            // それ以外の接頭辞 (kb2_ など) は従来の判定へ
+        }
+
         if (input.StartsWith("kb") || input.StartsWith("key_") ||
             (!input.StartsWith("mo") && !input.StartsWith("gp") && !input.StartsWith("js") &&
              !input.Contains("thumb") && !input.Contains("shoulder") && !input.Contains("trigger")))
@@ -586,6 +748,155 @@ public static class ActionMapParser
         root.Add(profiles);
         new XDocument(root).Save(outputPath);
     }
+
+    // <options type="joystick" instance="N" Product="..."> を読む
+    private static void ParseJoystickOptions(XDocument doc, ActionMapData data)
+    {
+        data.JoystickOptions.Clear();
+        var root = doc.Root;
+        if (root == null) return;
+        var profiles = root.Element("ActionProfiles") ?? root;
+        foreach (var opt in profiles.Elements("options"))
+        {
+            if ((string?)opt.Attribute("type") != "joystick") continue;
+            if (!int.TryParse((string?)opt.Attribute("instance"), out var instance)) continue;
+            var product = (string?)opt.Attribute("Product") ?? "";
+            var o = new JoystickDeviceOption { Instance = instance, Product = product };
+            if (GameControllerInput.TryParseProductVidPid(product, out var vid, out var pid))
+            {
+                o.HasVidPid = true;
+                o.VendorId = vid;
+                o.ProductId = pid;
+            }
+            data.JoystickOptions.Add(o);
+        }
+    }
+
+    // メモリ上の値 → ファイルに書く input 値。
+    //   空 = 割り当て解除 → ゲームの書式 "<接頭辞> " (例 "js1_ ")
+    //   機器接頭辞が無い値 (defaultProfile 由来の "button1" など) → 先頭に接頭辞を付ける
+    //   別の機器の接頭辞の値 → null (書かない)
+    private static string? ToFileInputValue(string value, string slotPrefix)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return slotPrefix + " ";
+        var dev = InputCodeHelper.GetMainDevicePrefix(value);
+        if (dev == null) return slotPrefix + value;
+        if (dev != slotPrefix) return null;
+        return value;
+    }
+
+    // 既存の actionmaps.xml を読み、<options>・<modifiers> などはそのまま残して、各 action の rebind だけを書き換える。
+    //   各 action・各機器 (kb1/mo1/gp1/js1/js2) について:
+    //     既存の rebind (input の本体入力の機器接頭辞が同じもの。複数あれば最後のもの) があれば input 属性だけ新しい値にする
+    //     (js3 以降の rebind はどの欄とも一致しないので触らない)
+    //     無ければ、値が既定値と違うときだけ rebind を追加する (actionmap / action 要素が無ければ作る)
+    //   swapJoystickInstances = true なら <options type="joystick"> の instance="1" と "2" を交換する
+    public static void SaveMergedOverrides(ActionMapData data, string path, bool swapJoystickInstances)
+    {
+        var doc = XDocument.Load(path);
+        var root = doc.Root ?? throw new InvalidDataException("actionmaps.xml にルート要素がありません。");
+        var profiles = root.Element("ActionProfiles") ?? root;
+
+        // js1/js2 の入れ替え: メモリ上の値と同じく、ファイルの rebind の input も js1_↔js2_ を付け替える
+        //   (activationMode などの属性を、その割り当てに付けたまま移すため)
+        if (swapJoystickInstances)
+        {
+            foreach (var rb in profiles.Elements("actionmap").Elements("action").Elements("rebind"))
+            {
+                var input = (string?)rb.Attribute("input");
+                if (input != null) rb.SetAttributeValue("input", ActionMapData.SwapJsPrefix(input));
+            }
+        }
+
+        foreach (var cat in data.Categories)
+        {
+            XElement? amEl = null;
+            bool amLooked = false;
+            foreach (var action in cat.Actions)
+            {
+                if (!amLooked)
+                {
+                    amEl = profiles.Elements("actionmap").FirstOrDefault(e => (string?)e.Attribute("name") == cat.Name);
+                    amLooked = true;
+                }
+                var actEl = amEl?.Elements("action").FirstOrDefault(e => (string?)e.Attribute("name") == action.ActionName);
+
+                var slots = new (string Prefix, string Value, string Default)[]
+                {
+                    ("kb1_", action.Keyboard, action.DefaultKeyboard),
+                    ("mo1_", action.Mouse, action.DefaultMouse),
+                    ("gp1_", action.Gamepad, action.DefaultGamepad),
+                    ("js1_", action.Joystick1, action.DefaultJoystick1),
+                    ("js2_", action.Joystick2, action.DefaultJoystick2),
+                };
+
+                foreach (var (prefix, value, def) in slots)
+                {
+                    var existing = actEl?.Elements("rebind")
+                        .LastOrDefault(r => InputCodeHelper.GetMainDevicePrefix((string?)r.Attribute("input") ?? "") == prefix);
+                    if (existing != null)
+                    {
+                        var fv = ToFileInputValue(value ?? "", prefix);
+                        if (fv == null) continue;
+                        existing.SetAttributeValue("input", fv);
+                    }
+                    else
+                    {
+                        if ((value ?? "") == (def ?? "")) continue;
+                        var fv = ToFileInputValue(value ?? "", prefix);
+                        if (fv == null) continue;
+                        if (amEl == null)
+                        {
+                            amEl = new XElement("actionmap", new XAttribute("name", cat.Name));
+                            profiles.Add(amEl);
+                        }
+                        if (actEl == null)
+                        {
+                            actEl = new XElement("action", new XAttribute("name", action.ActionName));
+                            amEl.Add(actEl);
+                        }
+                        actEl.Add(new XElement("rebind", new XAttribute("input", fv)));
+                    }
+                }
+            }
+        }
+
+        if (swapJoystickInstances)
+        {
+            var jsOptions = profiles.Elements("options").Where(o => (string?)o.Attribute("type") == "joystick").ToList();
+            var inst1 = jsOptions.Where(o => (string?)o.Attribute("instance") == "1").ToList();
+            var inst2 = jsOptions.Where(o => (string?)o.Attribute("instance") == "2").ToList();
+            foreach (var o in inst1) o.SetAttributeValue("instance", "2");
+            foreach (var o in inst2) o.SetAttributeValue("instance", "1");
+        }
+
+        // 元ファイルの書式 (宣言なし・BOM なし・CRLF・1 字下げ) に寄せて書く。一時ファイルに書いてから置き換える
+        var settings = new System.Xml.XmlWriterSettings
+        {
+            OmitXmlDeclaration = doc.Declaration == null,
+            Indent = true,
+            IndentChars = " ",
+            NewLineChars = "\r\n",
+            Encoding = new System.Text.UTF8Encoding(false),
+        };
+        var tmp = path + ".tmp";
+        try
+        {
+            using var ms = new MemoryStream();
+            using (var w = System.Xml.XmlWriter.Create(ms, settings))
+                doc.Save(w);
+            var written = new System.Text.UTF8Encoding(false).GetString(ms.ToArray());
+            // XmlWriter は自己終了タグを ' />' で書く。ゲームの書いたファイルは属性のある要素では '"/>'、
+            //   属性の無い要素では ' />' (例 <modifiers />) なので、属性の後の ' />' だけを '/>' に直す
+            var text = System.Text.RegularExpressions.Regex.Replace(written, "\" />", "\"/>");
+            File.WriteAllText(tmp, text + "\r\n", new System.Text.UTF8Encoding(false));   // 元ファイルと同じく末尾に改行
+            File.Move(tmp, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tmp)) { try { File.Delete(tmp); } catch { } }
+        }
+    }
 }
 
 public static class ActivationModeHelper
@@ -622,8 +933,67 @@ public static class ActivationModeHelper
     };
 }
 
+// 入力コードの機器接頭辞の扱い。
+//   ゲームの書く形: 機器接頭辞を先頭に 1 回だけ付け、修飾キーと本体入力は接頭辞なしで "+" でつなぐ
+//     例 (実ファイル): "js1_rctrl+button22"、"gp1_shoulderl+thumbly"、"kb1_lshift+w"。割り当て解除は "js1_ "
+public static class InputCodeHelper
+{
+    private static readonly System.Text.RegularExpressions.Regex PrefixRegex = new(
+        @"^(kb\d+_|mo\d+_|gp\d+_|js\d+_)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    // 1 つの部分の機器接頭辞 (小文字。"kb1_" など)。無ければ null
+    public static string? GetDevicePrefix(string part)
+    {
+        var m = PrefixRegex.Match((part ?? "").TrimStart());
+        return m.Success ? m.Value.ToLowerInvariant() : null;
+    }
+
+    // 本体入力の機器接頭辞: 最後の部分に接頭辞があればそれ、無ければ最初に見つかった接頭辞。どこにも無ければ null
+    //   "kb1_rctrl+js1_button30" → "js1_"、"js1_rctrl+button22" → "js1_"、"kb1_lshift+gp1_a" → "gp1_"、"js1_ " → "js1_"
+    public static string? GetMainDevicePrefix(string? input)
+    {
+        if (string.IsNullOrEmpty(input)) return null;
+        var parts = input.Split('+');
+        var last = GetDevicePrefix(parts[^1]);
+        if (last != null) return last;
+        foreach (var p in parts)
+        {
+            var d = GetDevicePrefix(p);
+            if (d != null) return d;
+        }
+        return null;
+    }
+
+    // 部分から機器接頭辞を除く (前後の空白も除く)
+    public static string StripDevicePrefix(string part)
+    {
+        var t = (part ?? "").Trim();
+        var m = PrefixRegex.Match(t);
+        return m.Success ? t[m.Length..].Trim() : t;
+    }
+
+    // "js3_" 以降のジョイスティック接頭辞か
+    public static bool IsJoystick3OrLater(string? prefix) =>
+        prefix != null && prefix.StartsWith("js") && prefix.EndsWith("_") &&
+        int.TryParse(prefix[2..^1], out var n) && n >= 3;
+
+    // ゲームの形に直す。機器は本体入力の接頭辞で決め、接頭辞がどこにも無ければ hintPrefix を使う (それも無ければそのまま)。
+    //   "kb1_rctrl+js1_button30" → "js1_rctrl+button30"、"gp1_shoulderl+gp1_y" → "gp1_shoulderl+y"、
+    //   "kb1_lshift+kb1_w" → "kb1_lshift+w"、"button1" (hint js1_) → "js1_button1"、"js1_ " → "js1_ "
+    public static string ToGameForm(string? value, string? hintPrefix)
+    {
+        if (string.IsNullOrEmpty(value)) return value ?? "";
+        var device = GetMainDevicePrefix(value) ?? hintPrefix;
+        if (device == null) return value;
+        var bodies = value.Split('+').Select(StripDevicePrefix).Where(b => b.Length > 0).ToList();
+        if (bodies.Count == 0) return device + " ";   // 割り当て解除
+        return device + string.Join("+", bodies);
+    }
+}
+
 public static class InputDisplayHelper
 {
+    // 従来の表記 (変更前のまま。チャット (ChatService) に渡る値などに使う)
     public static string FormatInput(string input)
     {
         if (string.IsNullOrEmpty(input)) return "";
@@ -637,6 +1007,130 @@ public static class InputDisplayHelper
         return string.Join(" + ", result);
     }
 
+    // 画面表示用の日本語表記。機器接頭辞は表示しない。割り当て解除 ("js1_ " など) は「（解除）」
+    public static string FormatInputJa(string input)
+    {
+        if (string.IsNullOrEmpty(input)) return "";
+
+        var device = InputCodeHelper.GetMainDevicePrefix(input);
+        var bodies = input.Split('+').Select(InputCodeHelper.StripDevicePrefix).ToList();
+        if (bodies.All(b => b.Length == 0)) return device != null ? "（解除）" : "";
+
+        var result = new List<string>();
+        foreach (var body in bodies)
+        {
+            if (body.Length == 0) continue;
+            result.Add(FormatPart(body, device));
+        }
+        return string.Join(" + ", result);
+    }
+
+    private static string FormatPart(string body, string? device)
+    {
+        if (KeyboardModifierNames.TryGetValue(body, out var mod)) return mod;
+        var kind = device != null && device.Length >= 2 ? device[..2] : "";
+        switch (kind)
+        {
+            case "kb": return FormatKeyboardJa(body);
+            case "mo": return MouseNamesJa.TryGetValue(body, out var mn) ? mn : body;
+            case "gp": return GamepadNamesJa.TryGetValue(body, out var gn) ? gn : body;
+            case "js": return FormatJoystick(body);
+        }
+        // 接頭辞の無い値: 従来の判定の順 (パッド名 → マウス名 → キーボード) で日本語表記にする
+        if (GamepadNamesJa.TryGetValue(body, out var gpName)) return gpName;
+        if (MouseNamesJa.TryGetValue(body, out var moName)) return moName;
+        return FormatKeyboardJa(body);
+    }
+
+    // 画面用のキーボードのキー名。刻印そのもの (英字・数字・記号・F1〜F12・Esc・Tab・Enter・Delete など) はそのまま、
+    //   言葉のもの (スペース・バックスペース・矢印・テンキー) を日本語にする。該当しないものは従来の FormatKeyboard の表記
+    private static string FormatKeyboardJa(string key)
+    {
+        var k = key.ToLowerInvariant();
+        switch (k)
+        {
+            case "space": return "スペース";
+            case "backspace": return "バックスペース";
+            case "capslock": return "英数";   // キーボード図の刻印と揃える
+            case "apps": return "アプリ";
+            case "up": return "↑";
+            case "down": return "↓";
+            case "left": return "←";
+            case "right": return "→";
+            case "np_enter": return "テンキーEnter";
+            case "np_period": return "テンキー.";
+            case "np_add" or "np_plus": return "テンキー+";
+            case "np_subtract" or "np_minus": return "テンキー-";
+            case "np_multiply": return "テンキー*";
+            case "np_divide": return "テンキー/";
+        }
+        if (k.Length == 4 && k.StartsWith("np_") && char.IsDigit(k[3])) return $"テンキー{k[3]}";
+        if (System.Text.RegularExpressions.Regex.IsMatch(k, @"^f([1-9]|1[0-9]|2[0-4])$")) return k.ToUpperInvariant();   // F1〜F24 は刻印どおり大文字
+        return FormatKeyboard(key);
+    }
+
+    // 修飾キー (キーボードの修飾名。ジョイスティック・パッドの値でも同じ名前で書かれる)
+    private static readonly Dictionary<string, string> KeyboardModifierNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["lshift"] = "左Shift", ["rshift"] = "右Shift",
+        ["lctrl"] = "左Ctrl", ["rctrl"] = "右Ctrl",
+        ["lalt"] = "左Alt", ["ralt"] = "右Alt",
+    };
+
+    private static readonly Dictionary<string, string> GamepadNamesJa = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["shoulderl"] = "LB", ["shoulderr"] = "RB",
+        ["triggerl_btn"] = "LT", ["triggerr_btn"] = "RT",
+        ["thumbl"] = "左スティック押し込み", ["thumbr"] = "右スティック押し込み",
+        ["thumblx"] = "左スティック左右", ["thumbly"] = "左スティック上下",
+        ["thumbrx"] = "右スティック左右", ["thumbry"] = "右スティック上下",
+        ["thumbl_up"] = "左スティック上", ["thumbl_down"] = "左スティック下",
+        ["thumbl_left"] = "左スティック左", ["thumbl_right"] = "左スティック右",
+        ["thumbr_up"] = "右スティック上", ["thumbr_down"] = "右スティック下",
+        ["thumbr_left"] = "右スティック左", ["thumbr_right"] = "右スティック右",
+        ["dpad_up"] = "十字キー上", ["dpad_down"] = "十字キー下",
+        ["dpad_left"] = "十字キー左", ["dpad_right"] = "十字キー右",
+        ["btn_a"] = "A", ["a"] = "A", ["btn_b"] = "B", ["b"] = "B",
+        ["btn_x"] = "X", ["x"] = "X", ["btn_y"] = "Y", ["y"] = "Y",
+        ["start"] = "Start", ["back"] = "Back",
+    };
+
+    private static readonly Dictionary<string, string> MouseNamesJa = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["mouse1"] = "左クリック", ["mouse2"] = "右クリック", ["mouse3"] = "中クリック",
+        ["mouse4"] = "マウスボタン4", ["mouse5"] = "マウスボタン5",
+        ["maxis_x"] = "マウス左右", ["maxis_y"] = "マウス上下",
+        ["mwheel_up"] = "ホイール↑", ["mwheel_down"] = "ホイール↓",
+    };
+
+    private static readonly Dictionary<string, string> JoystickAxisNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["x"] = "X軸", ["y"] = "Y軸", ["z"] = "Z軸",
+        ["rotx"] = "RX軸", ["roty"] = "RY軸", ["rotz"] = "RZ軸",
+        ["slider1"] = "スライダー1", ["slider2"] = "スライダー2",
+    };
+
+    private static readonly System.Text.RegularExpressions.Regex JoystickButtonRegex = new(@"^button(\d+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    private static readonly System.Text.RegularExpressions.Regex JoystickHatRegex = new(@"^hat(\d+)_(up|down|left|right)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    // ジョイスティックの入力: "button3" → "ボタン3"、"hat1_up" → "ハット1 上"、"rotz" → "RZ軸"
+    private static string FormatJoystick(string body)
+    {
+        var b = JoystickButtonRegex.Match(body);
+        if (b.Success) return $"ボタン{b.Groups[1].Value}";
+        var h = JoystickHatRegex.Match(body);
+        if (h.Success)
+        {
+            var dir = h.Groups[2].Value.ToLowerInvariant() switch
+            {
+                "up" => "上", "down" => "下", "left" => "左", _ => "右",
+            };
+            return $"ハット{h.Groups[1].Value} {dir}";
+        }
+        return JoystickAxisNames.TryGetValue(body, out var an) ? an : body;
+    }
+
+    // 従来の表記用 (変更前のまま)
     private static readonly Dictionary<string, string> GamepadNames = new(StringComparer.OrdinalIgnoreCase)
     {
         ["shoulderl"] = "LB", ["shoulderr"] = "RB",

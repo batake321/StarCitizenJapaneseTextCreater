@@ -56,10 +56,10 @@ public partial class KeyAssignDialog : Window
     {
         if (dgAvailableActions.SelectedItem is not ActionBinding action) return;
 
-        var existing = action.KeyboardDisplay;
+        var existing = action.KeyboardDisplayJa;
         var msg = string.IsNullOrEmpty(existing)
-            ? $"「{action.DisplayName}」に {_keyCode} を割り当てますか？"
-            : $"「{action.DisplayName}」のキーを\n{existing} → {InputDisplayHelper.FormatInput(_keyCode)}\nに変更しますか？";
+            ? $"「{action.DisplayName}」に {InputDisplayHelper.FormatInputJa(_keyCode)} を割り当てますか？"
+            : $"「{action.DisplayName}」のキーを\n{existing} → {InputDisplayHelper.FormatInputJa(_keyCode)}\nに変更しますか？";
 
         if (MessageBox.Show(msg, "確認", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
             return;

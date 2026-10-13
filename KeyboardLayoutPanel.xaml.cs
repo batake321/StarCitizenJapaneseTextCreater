@@ -86,7 +86,7 @@ public partial class KeyboardLayoutPanel : UserControl
         // Row 3: Home row
         y += KeyH + Gap;
         x = 0;
-        keys.Add(new(x, y, U * 1.6, KeyH, "CapsLk", "capslock")); x += U * 1.6 + Gap;
+        keys.Add(new(x, y, U * 1.6, KeyH, "英数", "capslock")); x += U * 1.6 + Gap;
         string[] row3 = ["A", "S", "D", "F", "G", "H", "J", "K", "L"];
         foreach (var k in row3) { keys.Add(new(x, y, U, KeyH, k, k.ToLower())); x += U + Gap; }
         keys.Add(new(x, y, U, KeyH, ";", "semicolon")); x += U + Gap;
@@ -96,14 +96,14 @@ public partial class KeyboardLayoutPanel : UserControl
         // Row 4: Shift row
         y += KeyH + Gap;
         x = 0;
-        keys.Add(new(x, y, U * 2.1, KeyH, "L-Shift", "lshift")); x += U * 2.1 + Gap;
+        keys.Add(new(x, y, U * 2.1, KeyH, "左Shift", "lshift")); x += U * 2.1 + Gap;
         string[] row4 = ["Z", "X", "C", "V", "B", "N", "M"];
         foreach (var k in row4) { keys.Add(new(x, y, U, KeyH, k, k.ToLower())); x += U + Gap; }
         keys.Add(new(x, y, U, KeyH, ",", "comma")); x += U + Gap;
         keys.Add(new(x, y, U, KeyH, ".", "period")); x += U + Gap;
         keys.Add(new(x, y, U, KeyH, "/", "slash")); x += U + Gap;
         keys.Add(new(x, y, U, KeyH, "\\_", "backslash3")); x += U + Gap;
-        keys.Add(new(x, y, U * 1.7, KeyH, "R-Shift", "rshift"));
+        keys.Add(new(x, y, U * 1.7, KeyH, "右Shift", "rshift"));
         // Arrow up
         x = navX0 + U + Gap;
         keys.Add(new(x, y, U, KeyH, "↑", "up"));
@@ -111,17 +111,17 @@ public partial class KeyboardLayoutPanel : UserControl
         // Row 5: Bottom row
         y += KeyH + Gap;
         x = 0;
-        keys.Add(new(x, y, U * 1.3, KeyH, "L-Ctrl", "lctrl")); x += U * 1.3 + Gap;
+        keys.Add(new(x, y, U * 1.3, KeyH, "左Ctrl", "lctrl")); x += U * 1.3 + Gap;
         keys.Add(new(x, y, U, KeyH, "Win", "win")); x += U + Gap;
-        keys.Add(new(x, y, U * 1.1, KeyH, "L-Alt", "lalt")); x += U * 1.1 + Gap;
+        keys.Add(new(x, y, U * 1.1, KeyH, "左Alt", "lalt")); x += U * 1.1 + Gap;
         keys.Add(new(x, y, U * 1.1, KeyH, "無変換", "muhenkan")); x += U * 1.1 + Gap;
-        keys.Add(new(x, y, U * 4, KeyH, "Space", "space")); x += U * 4 + Gap;
+        keys.Add(new(x, y, U * 4, KeyH, "スペース", "space")); x += U * 4 + Gap;
         keys.Add(new(x, y, U * 1.1, KeyH, "変換", "henkan")); x += U * 1.1 + Gap;
         keys.Add(new(x, y, U * 1.1, KeyH, "カナ", "kana")); x += U * 1.1 + Gap;
-        keys.Add(new(x, y, U * 1.1, KeyH, "R-Alt", "ralt")); x += U * 1.1 + Gap;
+        keys.Add(new(x, y, U * 1.1, KeyH, "右Alt", "ralt")); x += U * 1.1 + Gap;
         keys.Add(new(x, y, U, KeyH, "Win", "rwin")); x += U + Gap;
-        keys.Add(new(x, y, U, KeyH, "App", "apps")); x += U + Gap;
-        keys.Add(new(x, y, U * 1.3, KeyH, "R-Ctrl", "rctrl"));
+        keys.Add(new(x, y, U, KeyH, "アプリ", "apps")); x += U + Gap;
+        keys.Add(new(x, y, U * 1.3, KeyH, "右Ctrl", "rctrl"));
         // Arrow keys
         x = navX0;
         keys.Add(new(x, y, U, KeyH, "←", "left")); x += U + Gap;
@@ -300,7 +300,7 @@ public partial class KeyboardLayoutPanel : UserControl
                 var sp = new StackPanel { MaxWidth = 350 };
                 sp.Children.Add(new TextBlock
                 {
-                    Text = InputDisplayHelper.FormatInput(fullCode),
+                    Text = InputDisplayHelper.FormatInputJa(fullCode),
                     FontWeight = FontWeights.Bold,
                     Margin = new Thickness(0, 0, 0, 4)
                 });
@@ -334,7 +334,7 @@ public partial class KeyboardLayoutPanel : UserControl
         var totalBound = _keyElements.Keys
             .Where(c => !ModifierCodes.Contains(c))
             .Count(c => FindBindingsForKey(allActions, modPrefix + "kb1_" + c).Count > 0);
-        var modText = string.IsNullOrEmpty(modPrefix) ? "修飾キーなし" : modPrefix.Replace("kb1_", "").TrimEnd('+').Replace("+", " + ");
+        var modText = string.IsNullOrEmpty(modPrefix) ? "修飾キーなし" : InputDisplayHelper.FormatInputJa(modPrefix.TrimEnd('+'));   // 例 "左Shift + 右Ctrl"
         txtKeyInfo.Text = $"{modText} — {totalBound} キーにバインド済み";
     }
 
@@ -384,7 +384,7 @@ public partial class KeyboardLayoutPanel : UserControl
         var allActions = _data.Categories.SelectMany(c => c.Actions).ToList();
         var bindings = FindBindingsForKey(allActions, fullCode);
 
-        var displayKey = InputDisplayHelper.FormatInput(fullCode);
+        var displayKey = InputDisplayHelper.FormatInputJa(fullCode);
         var dlg = new KeyAssignDialog(_data, fullCode, displayKey, bindings)
         {
             Owner = Window.GetWindow(this)

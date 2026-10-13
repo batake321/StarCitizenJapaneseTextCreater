@@ -15,7 +15,10 @@ public partial class KeybindEditorWindow : Window
     private List<ActionBinding> _allActions = new();
     private List<ActionBinding> _filteredActions = new();
     private readonly string _gamePath;
-    private readonly string _savePath;
+    private string _savePath;   // 「新規作成」で保存したら新しいフォルダに切り替わる
+
+    // 物理コントローラー / HOTAS の押下の待ち受け (エディターを開いている間)
+    private GameControllerInput? _controllerInput;
 
     public KeybindEditorWindow(string gamePath, string savePath)
     {
@@ -23,7 +26,99 @@ public partial class KeybindEditorWindow : Window
         _gamePath = gamePath ?? "";
         _savePath = savePath ?? "";
         Title = $"キーバインド エディタ — {Path.GetFileName(savePath)}";
+        hotasPanel.DisplaySwapChanged = swapped => SaveDisplaySwapSetting(_savePath, swapped);
         LoadData();
+        StartControllerInput();
+        Closed += (_, _) => StopControllerInput();
+    }
+
+    private void StartControllerInput()
+    {
+        try
+        {
+            _controllerInput = new GameControllerInput();
+            _controllerInput.InputPressed += ControllerInput_Pressed;
+            _controllerInput.Start();
+        }
+        catch (Exception)
+        {
+            // 待ち受けを始められない環境では押下での強調は使えない (他の機能は従来どおり)
+            StopControllerInput();
+        }
+    }
+
+    private void StopControllerInput()
+    {
+        if (_controllerInput == null) return;
+        _controllerInput.InputPressed -= ControllerInput_Pressed;
+        _controllerInput.Dispose();
+        _controllerInput = null;
+    }
+
+    // HOTAS タブ表示中はスティック、コントローラータブ表示中はゲームパッドの押下を強調する
+    private void ControllerInput_Pressed(object? sender, GameControllerInputEventArgs e)
+    {
+        if (tabMain.SelectedIndex == 4 && e.Kind == GameControllerKind.Joystick)
+        {
+            if (_data.TryGetJsForDevice(e.VendorId, e.ProductId, out var js))
+                hotasPanel.HighlightInput(js, e.InputCode);
+            else
+                hotasPanel.ShowPressMessage($"{e.DisplayName} {e.InputCode}: どの js 番号か判別できません");
+        }
+        else if (tabMain.SelectedIndex == 3 && e.Kind == GameControllerKind.Gamepad)
+        {
+            gamepadPanel.HighlightInput(e.InputCode);
+        }
+    }
+
+    // ===== 「表示の入れ替え」の設定 (保存フォルダごと) =====
+    //   保存フォルダの中には置かない (フォルダ内の全ファイルがゲームへコピーされるため)。
+    //   作業フォルダ直下の JSON に {保存フォルダのフルパス(小文字): true} で覚える
+    private static string DisplaySwapSettingsPath =>
+        Path.Combine(App.Config.WorkingDirectory ?? "", "keybind_hotas_display_swap.json");
+
+    private static string DisplaySwapKey(string savePath) =>
+        Path.GetFullPath(savePath).TrimEnd('\\', '/').ToLowerInvariant();
+
+    private static Dictionary<string, bool> LoadDisplaySwapSettings()
+    {
+        try
+        {
+            var path = DisplaySwapSettingsPath;
+            if (File.Exists(path))
+                return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, bool>>(File.ReadAllText(path))
+                       ?? new Dictionary<string, bool>();
+        }
+        catch { }
+        return new Dictionary<string, bool>();
+    }
+
+    private static bool LoadDisplaySwapSetting(string savePath)
+    {
+        if (string.IsNullOrEmpty(savePath)) return false;
+        try
+        {
+            return LoadDisplaySwapSettings().TryGetValue(DisplaySwapKey(savePath), out var v) && v;
+        }
+        catch { return false; }
+    }
+
+    private static void SaveDisplaySwapSetting(string savePath, bool swapped)
+    {
+        if (string.IsNullOrEmpty(savePath)) return;
+        try
+        {
+            var settings = LoadDisplaySwapSettings();
+            var key = DisplaySwapKey(savePath);
+            if (swapped) settings[key] = true;
+            else settings.Remove(key);
+            File.WriteAllText(DisplaySwapSettingsPath,
+                System.Text.Json.JsonSerializer.Serialize(settings, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"表示の入れ替えの設定を保存できませんでした:\n{ex.Message}", "エラー");
+        }
     }
 
     private void LoadData()
@@ -37,6 +132,8 @@ public partial class KeybindEditorWindow : Window
             MessageBox.Show($"キーバインドデータの読み込みに失敗しました:\n{ex.Message}\n\n{ex.StackTrace}", "エラー");
             _data = new ActionMapData();
         }
+
+        _data.JoystickDisplaySwapped = LoadDisplaySwapSetting(_savePath);
 
         _allActions = _data.Categories.SelectMany(c => c.Actions).ToList();
 
@@ -116,8 +213,8 @@ public partial class KeybindEditorWindow : Window
                 a.ActionName.Contains(search, StringComparison.OrdinalIgnoreCase) ||
                 a.DisplayName.Contains(search, StringComparison.OrdinalIgnoreCase) ||
                 a.CategoryName.Contains(search, StringComparison.OrdinalIgnoreCase) ||
-                a.KeyboardDisplay.Contains(search, StringComparison.OrdinalIgnoreCase) ||
-                a.GamepadDisplay.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+                a.KeyboardDisplayJa.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+                a.GamepadDisplayJa.Contains(search, StringComparison.OrdinalIgnoreCase) ||
                 a.HotasDisplay.Contains(search, StringComparison.OrdinalIgnoreCase)
             ).ToList();
 
@@ -220,9 +317,9 @@ public partial class KeybindEditorWindow : Window
 
             var row = new TableRow();
             row.Cells.Add(new TableCell(new Paragraph(new Run(action.DisplayName))));
-            row.Cells.Add(new TableCell(new Paragraph(new Run(action.KeyboardDisplay))));
-            row.Cells.Add(new TableCell(new Paragraph(new Run(action.MouseDisplay))));
-            row.Cells.Add(new TableCell(new Paragraph(new Run(action.GamepadDisplay))));
+            row.Cells.Add(new TableCell(new Paragraph(new Run(action.KeyboardDisplayJa))));
+            row.Cells.Add(new TableCell(new Paragraph(new Run(action.MouseDisplayJa))));
+            row.Cells.Add(new TableCell(new Paragraph(new Run(action.GamepadDisplayJa))));
             row.Cells.Add(new TableCell(new Paragraph(new Run(action.HotasDisplay))));
             bodyGroup.Rows.Add(row);
         }
@@ -248,10 +345,14 @@ public partial class KeybindEditorWindow : Window
             if (dlg.FileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
             {
                 using var writer = new StreamWriter(dlg.FileName, false, new UTF8Encoding(true));
-                writer.WriteLine("Category,Action,Keyboard,Mouse,Gamepad,HotasR,HotasL");
+                // HOTAS 列は 右・左 の順。見出しに実際の js 番号を付ける (例 HotasR(js2),HotasL(js1))
+                int leftJs = _data.LeftJs, rightJs = 3 - leftJs;
+                writer.WriteLine($"Category,Action,Keyboard,Mouse,Gamepad,HotasR(js{rightJs}),HotasL(js{leftJs})");
                 foreach (var a in _filteredActions)
                 {
-                    writer.WriteLine($"{Csv(a.CategoryName)},{Csv(a.ActionName)},{Csv(a.KeyboardDisplay)},{Csv(a.MouseDisplay)},{Csv(a.GamepadDisplay)},{Csv(a.Joystick1Display)},{Csv(a.Joystick2Display)}");
+                    var r = rightJs == 1 ? a.Joystick1Display : a.Joystick2Display;
+                    var l = leftJs == 1 ? a.Joystick1Display : a.Joystick2Display;
+                    writer.WriteLine($"{Csv(a.CategoryName)},{Csv(a.ActionName)},{Csv(a.KeyboardDisplay)},{Csv(a.MouseDisplay)},{Csv(a.GamepadDisplay)},{Csv(r)},{Csv(l)}");
                 }
             }
             else
@@ -301,17 +402,138 @@ public partial class KeybindEditorWindow : Window
 
     private void SaveApply_Click(object sender, RoutedEventArgs e)
     {
-        var outputPath = Path.Combine(_savePath, "Profiles", "default", "actionmaps.xml");
+        switch (AskSaveMode())
+        {
+            case "overwrite": SaveOverwrite(); break;
+            case "new": SaveAsNew(); break;
+        }
+    }
+
+    // 保存方法の選択: "overwrite" / "new" / null (キャンセル)
+    private string? AskSaveMode()
+    {
+        string? result = null;
+        var win = new Window
+        {
+            Title = "保存",
+            SizeToContent = SizeToContent.WidthAndHeight,
+            ResizeMode = ResizeMode.NoResize,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Owner = this,
+        };
+        var root = new StackPanel { Margin = new Thickness(16) };
+        root.Children.Add(new TextBlock
+        {
+            Text = $"保存方法を選んでください。\n\n" +
+                   $"上書き保存: 「{Path.GetFileName(_savePath)}」の actionmaps.xml の割り当てだけを書き換えます。\n" +
+                   $"新規作成: 「{Path.GetFileName(_savePath)}」を複製した新しい保存データに書き込みます。",
+            Margin = new Thickness(0, 0, 0, 12),
+        });
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+        var btnOverwrite = new Button { Content = "上書き保存", Padding = new Thickness(12, 4, 12, 4), Margin = new Thickness(0, 0, 8, 0) };
+        btnOverwrite.Click += (_, _) => { result = "overwrite"; win.DialogResult = true; };
+        var btnNew = new Button { Content = "新規作成", Padding = new Thickness(12, 4, 12, 4), Margin = new Thickness(0, 0, 8, 0) };
+        btnNew.Click += (_, _) => { result = "new"; win.DialogResult = true; };
+        var btnCancel = new Button { Content = "キャンセル", Padding = new Thickness(12, 4, 12, 4), IsCancel = true };
+        buttons.Children.Add(btnOverwrite);
+        buttons.Children.Add(btnNew);
+        buttons.Children.Add(btnCancel);
+        root.Children.Add(buttons);
+        win.Content = root;
+        win.ShowDialog();
+        return result;
+    }
+
+    // 保存フォルダの actionmaps.xml に書く。既存ファイルがあれば rebind だけを書き換え、無ければ従来どおり新規に作る
+    private string WriteActionMaps(string saveDir)
+    {
+        var outputPath = Path.Combine(saveDir, "Profiles", "default", "actionmaps.xml");
+        if (File.Exists(outputPath))
+        {
+            ActionMapParser.SaveMergedOverrides(_data, outputPath, _data.JoystickInstancesSwapPending);
+        }
+        else
+        {
+            Directory.CreateDirectory(saveDir);
+            ActionMapParser.SaveUserOverrides(_data, outputPath);
+        }
+        _data.JoystickInstancesSwapPending = false;
+        return outputPath;
+    }
+
+    private void SaveOverwrite()
+    {
         try
         {
-            Directory.CreateDirectory(_savePath);
-            ActionMapParser.SaveUserOverrides(_data, outputPath);
+            var outputPath = WriteActionMaps(_savePath);
             MessageBox.Show($"セーブに保存しました。\n{outputPath}\n\nゲームに反映するには「ゲームに反映」ボタンを使用してください。", "保存完了");
         }
         catch (Exception ex)
         {
             MessageBox.Show($"エラー: {ex.Message}", "エラー");
         }
+    }
+
+    private void SaveAsNew()
+    {
+        var dlg = new InputDialog("新しい保存データの名前を入力してください:") { Owner = this };
+        if (dlg.ShowDialog() != true) return;
+        var rawName = dlg.txtInput.Text ?? "";
+        if (rawName.Any(char.IsWhiteSpace))   // 全角の空白も含む
+        {
+            MessageBox.Show("名前に空白 (全角を含む) は使えません。", "エラー");
+            return;
+        }
+        var name = dlg.ResponseText;
+        if (string.IsNullOrEmpty(name)) return;
+        if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name == "." || name == "..")
+        {
+            MessageBox.Show($"「{name}」はフォルダ名に使えません。", "エラー");
+            return;
+        }
+
+        var parentDir = Path.GetDirectoryName(Path.GetFullPath(_savePath).TrimEnd('\\', '/'));
+        if (string.IsNullOrEmpty(parentDir))
+        {
+            MessageBox.Show("保存先のフォルダを決められません。", "エラー");
+            return;
+        }
+        var newPath = Path.Combine(parentDir, name);
+        if (Directory.Exists(newPath) || File.Exists(newPath))
+        {
+            MessageBox.Show($"「{name}」は既にあります。別の名前を指定してください。", "エラー");
+            return;
+        }
+
+        try
+        {
+            // 元の保存フォルダの全ファイルを複製してから、そこに上書き保存と同じ方式で書く
+            if (Directory.Exists(_savePath))
+                CopyDirectory(_savePath, newPath);
+            else
+                Directory.CreateDirectory(newPath);
+            var outputPath = WriteActionMaps(newPath);
+
+            var swapped = _data.JoystickDisplaySwapped;
+            _savePath = newPath;
+            Title = $"キーバインド エディタ — {Path.GetFileName(_savePath)}";
+            SaveDisplaySwapSetting(_savePath, swapped);
+
+            MessageBox.Show($"新しい保存データ「{name}」に保存しました。\n{outputPath}\n\nゲームに反映するには「ゲームに反映」ボタンを使用してください。", "保存完了");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+        }
+    }
+
+    private static void CopyDirectory(string srcDir, string destDir)
+    {
+        Directory.CreateDirectory(destDir);
+        foreach (var file in Directory.GetFiles(srcDir))
+            File.Copy(file, Path.Combine(destDir, Path.GetFileName(file)), overwrite: false);
+        foreach (var dir in Directory.GetDirectories(srcDir))
+            CopyDirectory(dir, Path.Combine(destDir, Path.GetFileName(dir)));
     }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();

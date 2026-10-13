@@ -68,7 +68,7 @@
                           MouseDoubleClick="AvailableAction_DoubleClick">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="機能" Binding="{Binding DisplayName}" Width="200"/>
-                        <DataGridTextColumn Header="現在のキー" Binding="{Binding KeyboardDisplay}" Width="140">
+                        <DataGridTextColumn Header="現在のキー" Binding="{Binding KeyboardDisplayJa}" Width="140">
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">
                                     <Setter Property="Foreground" Value="#888"/>
