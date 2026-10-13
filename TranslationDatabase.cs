@@ -8,6 +8,13 @@ public class TranslationDatabase : IDisposable
     private readonly SqliteConnection _conn;
     public SqliteConnection Connection => _conn;
 
+    // 公式の日本語 ini で、訳の代わりに入っている「訳が無い」印 (例: "! JAPANESE_(JAPAN) TRANSLATION NOT FOUND FOR LOCID: <key> !")。
+    // 判定は IniMerger の出力時の処理と同じ文字列・大文字小文字を区別しない比較に合わせる
+    public const string MissingTranslationMarker = "TRANSLATION NOT FOUND FOR LOCID:";
+
+    public static bool IsMissingTranslationMarker(string? value) =>
+        value != null && value.Contains(MissingTranslationMarker, StringComparison.OrdinalIgnoreCase);
+
     public TranslationDatabase(string dbPath)
     {
         _conn = new SqliteConnection($"Data Source={dbPath}");
@@ -150,32 +157,43 @@ public class TranslationDatabase : IDisposable
                     WHEN translations.source IN ('manual', 'ai', 'csv', 'glossary') THEN translations.japanese
                     WHEN excluded.japanese IS NOT NULL AND excluded.japanese != '' THEN excluded.japanese
                     WHEN translations.english != excluded.english THEN NULL
+                    WHEN translations.source = 'official' AND $marked = 1 THEN NULL
                     ELSE translations.japanese
                 END,
                 source = CASE
                     WHEN translations.source IN ('original', 'manual', 'ai', 'csv', 'glossary') THEN translations.source
                     WHEN excluded.japanese IS NOT NULL AND excluded.japanese != '' THEN excluded.source
                     WHEN translations.english != excluded.english AND translations.japanese IS NOT NULL AND translations.japanese != '' THEN 'stale'
+                    WHEN translations.source = 'official' AND $marked = 1 AND translations.english = excluded.english THEN 'untranslated'
                     ELSE translations.source
                 END,
                 translator = CASE
                     WHEN translations.source IN ('original', 'manual', 'ai', 'csv', 'glossary') THEN translations.translator
+                    WHEN translations.source = 'official' AND $marked = 1 AND translations.english = excluded.english THEN ''
                     ELSE translations.translator
                 END,
                 modified_at = datetime('now', 'localtime')
             """;
+        // ↑ $marked = 1: 公式 ini の値が「訳が無い」印。source='official' の行で英語が同じなら、公式が訳を取り下げたとみなし、
+        //   古い公式訳を捨てて未翻訳 (ClearTranslations と同じ japanese=NULL, source='untranslated', translator='') にする。
+        //   英語も変わった場合は従来どおり (japanese=NULL, 訳があった行は source='stale')。manual・ai などの行は変えない
         var pKey = cmd.Parameters.Add("$key", SqliteType.Text);
         var pEn = cmd.Parameters.Add("$en", SqliteType.Text);
         var pJa = cmd.Parameters.Add("$ja", SqliteType.Text);
         var pSrc = cmd.Parameters.Add("$src", SqliteType.Text);
         var pTr = cmd.Parameters.Add("$tr", SqliteType.Text);
+        var pMarked = cmd.Parameters.Add("$marked", SqliteType.Integer);
 
         int count = 0;
         foreach (var (key, enVal) in english)
         {
             pKey.Value = key;
             pEn.Value = enVal;
-            var hasJa = japanese.TryGetValue(key, out var jaVal) && !string.IsNullOrWhiteSpace(jaVal);
+            // 「訳が無い」印は訳として取り込まない
+            var hasJaVal = japanese.TryGetValue(key, out var jaVal);
+            var isMarker = hasJaVal && IsMissingTranslationMarker(jaVal);
+            var hasJa = hasJaVal && !string.IsNullOrWhiteSpace(jaVal) && !isMarker;
+            pMarked.Value = isMarker ? 1 : 0;
             pJa.Value = hasJa ? jaVal : (object)DBNull.Value;
             pSrc.Value = hasJa ? "official" : "untranslated";
             pTr.Value = hasJa ? "official" : "";
@@ -195,10 +213,13 @@ public class TranslationDatabase : IDisposable
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             UPDATE translations SET japanese = $ja, source = 'ai', translator = $tr, modified_at = datetime('now', 'localtime')
-            WHERE key = $key AND (japanese IS NULL OR japanese = '' OR source = 'ai' OR source = 'untranslated')
+            WHERE key = $key AND (japanese IS NULL OR japanese = '' OR source = 'ai' OR source = 'untranslated'
+                                  OR instr(upper(japanese), upper($marker)) > 0)
               AND trim($ja, ' ' || char(9) || char(10) || char(13)) <> trim(english, ' ' || char(9) || char(10) || char(13))
             """;
         // ↑ 訳文が英語原文と同じ (前後の空白・タブ・改行を除いて一致) ものは保存しない (AI が原文をそのまま返したもの。未翻訳のまま残す)
+        // ↑ japanese が「訳が無い」印の行 (公式 ini から取り込まれた source='official' の行) は、AI の訳で上書きする
+        cmd.Parameters.AddWithValue("$marker", MissingTranslationMarker);
         var pKey = cmd.Parameters.Add("$key", SqliteType.Text);
         var pJa = cmd.Parameters.Add("$ja", SqliteType.Text);
         var pTr = cmd.Parameters.Add("$tr", SqliteType.Text);

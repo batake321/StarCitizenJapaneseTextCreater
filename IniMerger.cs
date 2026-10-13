@@ -88,7 +88,7 @@ public static class IniMerger
         // Clean up "TRANSLATION NOT FOUND" errors from official Japanese file
         int cleaned = 0;
         var keysToFix = merged.Where(kv =>
-            kv.Value.Contains("TRANSLATION NOT FOUND FOR LOCID:", StringComparison.OrdinalIgnoreCase))
+            TranslationDatabase.IsMissingTranslationMarker(kv.Value))
             .Select(kv => kv.Key).ToList();
         foreach (var key in keysToFix)
         {

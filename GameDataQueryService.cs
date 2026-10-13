@@ -1354,6 +1354,8 @@ public partial class GameDataQueryService : IDisposable
         public List<ShopListing> Shops = new();      // 店で買える売り場 (MinPrice を決めたデータの購入の行。色違いのほうが安ければその色違いのもの)
         public string ShopsNote = "";                // 売り場の一覧の注 (例 色違いの X の売り場)
         public string DisplayName => Name + NameSuffix;
+        public string? NameJa;                       // 日本語の品目名 (ResolveItemNameJa。無ければ null)。照合には使わず、［表］の名前の欄にだけ使う
+        public string DisplayNameJaEn => ItemNameJaEn(Name, NameJa) + NameSuffix;   // ［表］の名前の欄「日本語名 (英語名)」
     }
 
     // 種類全体を比べる表を作る (チャットの compare_items)。
@@ -1624,6 +1626,7 @@ public partial class GameDataQueryService : IDisposable
                     Record = record,
                     Short = shortName,
                     Name = name,
+                    NameJa = ResolveItemNameJa(itemsName, loc),
                     ItemType = r.IsDBNull(3) ? "" : r.GetString(3),
                     Size = size,
                     ComponentJson = r.IsDBNull(7) ? "" : r.GetString(7),
@@ -2272,8 +2275,9 @@ public partial class GameDataQueryService : IDisposable
     }
 
     // lookup 用: 品目の性能 (ゲームデータ) と、色違いの関係。色違いなら基本品目の性能を返し、「この品目は ○○ の色違い」を付ける。
-    // 基本品目に色違いがあれば、色違いの名前の一覧を付ける。items に無ければ ""
-    public string GetItemStatsText(string recordName)
+    // 基本品目に色違いがあれば、色違いの名前の一覧を付ける。items に無ければ ""。
+    // japaneseNames: true なら色違いの品名を「日本語名 (英語名)」で書く (［詳細］タブ)。false (チャット) は英語名
+    public string GetItemStatsText(string recordName, bool japaneseNames = false)
     {
         if (string.IsNullOrEmpty(recordName)) return "";
         using var loc = new LocReader(_translationsDbPath);
@@ -2293,15 +2297,15 @@ public partial class GameDataQueryService : IDisposable
 
         // 色違いの一覧を引く基本品目
         var listBase = baseRecord ?? recordName;
-        var variants = VariantNames(listBase, loc);
+        var variants = VariantNames(listBase, loc, japaneseNames);
         if (variants.Count == 0 && baseRecord == null)
             foreach (var g in Group())
             {
-                var v = VariantNames(g, loc);
+                var v = VariantNames(g, loc, japaneseNames);
                 if (v.Count > 0) { listBase = g; variants = v; break; }
             }
 
-        var baseName = ItemDisplayName(listBase, loc);
+        var baseName = japaneseNames ? ItemDisplayNameJaEn(listBase, loc) : ItemDisplayName(listBase, loc);
         if (baseRecord != null)
             sb.AppendLine($"【色違い】この品目は {baseName} の色違い (色・柄: {label}) です。性能は {baseName} と同じです。");
         if (variants.Count > 0)
@@ -2329,8 +2333,8 @@ public partial class GameDataQueryService : IDisposable
         return (null, null);
     }
 
-    // 基本品目の色違いの英語名の一覧 (重複を除いて名前順)
-    private List<string> VariantNames(string baseRecord, LocReader loc)
+    // 基本品目の色違いの英語名の一覧 (重複を除いて名前順)。japaneseNames なら「日本語名 (英語名)」の一覧 (並びは英語名の順のまま)
+    private List<string> VariantNames(string baseRecord, LocReader loc, bool japaneseNames = false)
     {
         var records = new List<string>();
         try
@@ -2342,7 +2346,8 @@ public partial class GameDataQueryService : IDisposable
             while (r.Read()) records.Add(r.GetString(0));
         }
         catch { }
-        return records.Select(x => ItemDisplayName(x, loc)).Distinct().OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+        return records.Select(x => (En: ItemDisplayName(x, loc), Name: japaneseNames ? ItemDisplayNameJaEn(x, loc) : ItemDisplayName(x, loc)))
+            .Distinct().OrderBy(x => x.En, StringComparer.OrdinalIgnoreCase).Select(x => x.Name).ToList();
     }
 
     // 同じ名前 (英語名)・同じ種類の別の record (比べるツールで 1 つにまとめられる複製)。名前が未設定なら空
@@ -2395,6 +2400,16 @@ public partial class GameDataQueryService : IDisposable
             if (n != null) return n;
         }
         return recordName.StartsWith("EntityClassDefinition.", StringComparison.Ordinal) ? recordName["EntityClassDefinition.".Length..] : recordName;
+    }
+
+    // 品目の画面用の名前「日本語名 (英語名)」(ItemDisplayName の英語名に、items.name のキーの日本語を添える。日本語が無ければ英語名だけ)
+    private string ItemDisplayNameJaEn(string recordName, LocReader loc)
+    {
+        var en = ItemDisplayName(recordName, loc);
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT name FROM items WHERE record_name = @rn";
+        cmd.Parameters.AddWithValue("@rn", recordName);
+        return ItemNameJaEn(en, cmd.ExecuteScalar() is string itemsName ? ResolveItemNameJa(itemsName, loc) : null);
     }
 
     // 品目 1 件の性能の行 (種類ごとの表の欄の順)。武器は計算式の注記も付ける
@@ -2826,6 +2841,23 @@ public partial class GameDataQueryService : IDisposable
         return name;
     }
 
+    // 日本語の品目名。items.name がローカライズキー (@item_Name…) なら翻訳 DB の日本語 (LocReader.Text。"!" で始まる訳は英語として扱う)。
+    // キーでない・訳が無い・プレースホルダなら null
+    private static string? ResolveItemNameJa(string itemsName, LocReader loc)
+    {
+        if (!itemsName.StartsWith('@')) return null;
+        var ja = loc.Text(itemsName);
+        if (ja == itemsName) return null;
+        ja = ja.Replace(' ', ' ').Trim();
+        if (ja.Length == 0 || ja.StartsWith('@') || ja.StartsWith("<=", StringComparison.Ordinal)
+            || ja.Contains("PLACEHOLDER", StringComparison.OrdinalIgnoreCase) || ja.Contains("プレースホルダ")) return null;
+        return ja;
+    }
+
+    // 画面に出す品目名「日本語名 (英語名)」。日本語が無い・英語と同じなら英語名だけ
+    private static string ItemNameJaEn(string nameEn, string? nameJa) =>
+        !string.IsNullOrEmpty(nameJa) && !nameJa.Equals(nameEn, StringComparison.OrdinalIgnoreCase) ? $"{nameJa} ({nameEn})" : nameEn;
+
     // 基本モデルの判定。品目 e の基本モデルは、同じ item_type で名前に二重引用符 ("…") を含まない品目 b のうち、次のどれかに当たるもの:
     //   1. e の名前から "…" の部分を除いたものが b の名前と同じ (例: Atzkav "Venom" Sniper Rifle → Atzkav Sniper Rifle)
     //   2. e の record_name が b の record_name + "_" で始まる (例: gmni_sniper_ballistic_01_store02 → gmni_sniper_ballistic_01)
@@ -2964,11 +2996,11 @@ public partial class GameDataQueryService : IDisposable
                     var beams = ReadBeamDamage(e.ComponentJson);
                     if (beams.Count > 0)
                     {
-                        var beamText = string.Join("、", beams.Select(b => $"{FireModeJa(b.Mode)} (ビーム) {b.Total:#,0.##} / {b.Total:#,0.##} (平均は待ち時間を含まない)"));
+                        var beamText = string.Join("、", beams.Select(b => $"{BeamModeLabel(b.Mode)} {b.Total:#,0.##} / {b.Total:#,0.##} (平均は待ち時間を含まない)"));
                         e.Cells["DPS (バースト / 平均)"] = e.Cells.TryGetValue("DPS (バースト / 平均)", out var prev) ? prev + "、" + beamText : beamText;
-                        var beamMax = string.Join(" / ", beams.Select(b => $"{FireModeJa(b.Mode)} (ビーム) {b.Total:#,0.##}"));
+                        var beamMax = string.Join(" / ", beams.Select(b => $"{BeamModeLabel(b.Mode)} {b.Total:#,0.##}"));
                         e.Cells["バースト DPS"] = e.Cells.TryGetValue("バースト DPS", out var pm) ? pm + " / " + beamMax : beamMax;
-                        var beamAvg = string.Join(" / ", beams.Select(b => $"{FireModeJa(b.Mode)} (ビーム) {b.Total:#,0.##} (待ち時間を含まない)"));
+                        var beamAvg = string.Join(" / ", beams.Select(b => $"{BeamModeLabel(b.Mode)} {b.Total:#,0.##} (待ち時間を含まない)"));
                         e.Cells["平均 DPS (推定)"] = e.Cells.TryGetValue("平均 DPS (推定)", out var pa) ? pa + " / " + beamAvg : beamAvg;
                         e.Cells["ビームのダメージ (毎秒)"] = string.Join("、", beams.Select(b => $"{FireModeJa(b.Mode)}: {FormatDamageParts(b.Damage)}"));
                         var bm = beams.Max(b => b.Total);
@@ -3472,6 +3504,13 @@ public partial class GameDataQueryService : IDisposable
     private static string FormatDamageParts(Dictionary<string, double> d) =>
         $"{d.Values.Sum():#,0.##} (" + string.Join(" / ", DamageTypeLabels.Where(t => d.ContainsKey(t.Key)).Select(t => $"{t.Label} {d[t.Key]:#,0.##}")) + ")";
 
+    // ビームの DPS の欄の「モード名 (ビーム)」。モード名がちょうど「ビーム」のときだけ「(ビーム)」を付けない (連射ビーム・採掘ビームなどには付ける)
+    private static string BeamModeLabel(string mode)
+    {
+        var ja = FireModeJa(mode);
+        return ja == "ビーム" ? ja : ja + " (ビーム)";
+    }
+
     private static string FireModeJa(string mode) => mode switch
     {
         "Single" => "単発",
@@ -3479,6 +3518,17 @@ public partial class GameDataQueryService : IDisposable
         "Burst" => "バースト",
         "Charge" => "チャージ",
         "SWeaponActionSequenceParams" => "連続",   // 名前の無い連続動作 (船の武器のリピーター等)
+        "Sequence" => "連続",   // 名前の付いた連続動作 (船の武器のリピーター等。同じ単発を順に撃つ。中身は上と同じ形)
+        "Beam" or "Damage Beam" => "ビーム",   // ビームの射撃モード
+        "RapidBeam" => "連射ビーム",
+        "Repair" => "修理",
+        "Heal" => "回復",
+        "Salvage" => "サルベージ",
+        "Mining beam" or "Mining beam and scanning" => "採掘ビーム",
+        "TractorBeam" or "Detach" => "トラクタービーム",   // Detach は SWeaponActionFireTractorBeamParams の動作の名前 (マルチツール)
+        "Shotgun" => "散弾",
+        "Extinguisher" => "消火",
+        "SelfHeal" => "自己回復",
         _ => mode
     };
 
@@ -3560,8 +3610,9 @@ public partial class GameDataQueryService : IDisposable
             cmd.Parameters.AddWithValue("@rn", "AmmoParams." + stem);
             using var r = cmd.ExecuteReader();
             if (!r.Read()) return null;
-            return new AmmoInfo(r.GetString(0), r.IsDBNull(1) ? 0 : r.GetDouble(1),
-                ParseDamageJson(r.IsDBNull(2) ? null : r.GetString(2)), ParseDamageJson(r.IsDBNull(3) ? null : r.GetString(3)));
+            // ［ダメージ判定］のアタッチメントの補正 (ApplyAmmoMultipliers。補正を入れて計算している間だけ。それ以外はそのまま返す)
+            return ApplyAmmoMultipliers(new AmmoInfo(r.GetString(0), r.IsDBNull(1) ? 0 : r.GetDouble(1),
+                ParseDamageJson(r.IsDBNull(2) ? null : r.GetString(2)), ParseDamageJson(r.IsDBNull(3) ? null : r.GetString(3))));
         }
         catch { return null; }   // ammo_params の無い古い DB
     }
@@ -3722,7 +3773,7 @@ public partial class GameDataQueryService : IDisposable
         }
         else
         {
-            var note = rows?.FirstOrDefault(r => r.Kind == ShopPriceStore.KindNone)?.Note;
+            var note = ShopPriceStore.DisplayNote(rows?.FirstOrDefault(r => r.Kind == ShopPriceStore.KindNone)?.Note);
             e.PriceText = "店の販売データ無し" + (!string.IsNullOrEmpty(note) ? $" ({note})" : "");
         }
         if (rents.Count > 0)
@@ -3794,6 +3845,29 @@ public partial class GameDataQueryService : IDisposable
                     using var cmd = _c.CreateCommand();
                     cmd.CommandText = "SELECT japanese FROM translations WHERE key LIKE 'item_displayType%' AND english = @e COLLATE NOCASE " +
                                       "AND japanese IS NOT NULL AND japanese <> '' ORDER BY key LIMIT 1";
+                    cmd.Parameters.AddWithValue("@e", english.Trim());
+                    ja = cmd.ExecuteScalar() as string;
+                }
+            }
+            catch { }
+            if (ja != null && (ja.StartsWith('!') || string.IsNullOrWhiteSpace(ja))) ja = null;
+            _cache[cacheKey] = (english, ja);
+            return ja;
+        }
+
+        // 船の種別の英語 (例 Fighter) と同じ英語の訳がある船の分類のキー (vehicle_class_ / item_ShipFocus_ / vehicle_focus_) の日本語。無ければ null
+        public string? ShipClassJapanese(string english)
+        {
+            var cacheKey = "\u0001shipClass\u0001" + english;
+            if (_cache.TryGetValue(cacheKey, out var v)) return v.Ja;
+            string? ja = null;
+            try
+            {
+                if (_c != null)
+                {
+                    using var cmd = _c.CreateCommand();
+                    cmd.CommandText = "SELECT japanese FROM translations WHERE (key LIKE 'vehicle_class%' OR key LIKE 'item_ShipFocus%' OR key LIKE 'vehicle_focus%') " +
+                                      "AND english = @e COLLATE NOCASE AND japanese IS NOT NULL AND japanese <> '' ORDER BY key LIMIT 1";
                     cmd.Parameters.AddWithValue("@e", english.Trim());
                     ja = cmd.ExecuteScalar() as string;
                 }
@@ -3911,6 +3985,9 @@ public static class ShopPriceStore
     // cstone に品目そのものが無かったことの記録 (「なし」の行の備考)。/search/{uuid} が検索のトップページへ転送されたときに入れる。
     // 裏の取得・チャットの取り直しでは取り直さず、次のインデックス構築・装備データの再抽出 (新しいパッチ) の後に消して取り直す
     public const string CstoneNotFoundNote = "cstone に品目無し";
+
+    // 「なし」の行の備考を表示用にする。保存済みの「cstone: 販売なし (Not Sold directly or at all)」は、括弧の英文を外す (保存データは書き換えない)
+    public static string? DisplayNote(string? note) => note?.Replace(" (Not Sold directly or at all)", "");
 
     // 1 品目の行が「cstone に品目無し」の記録だけか
     public static bool IsCstoneNotFound(IReadOnlyCollection<ShopPriceRow> rows) =>

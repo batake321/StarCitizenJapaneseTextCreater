@@ -13,11 +13,12 @@ namespace StarCitizenJapaneseTextCreater;
 // Tracking = 追尾する信号 (ミサイル・魚雷。赤外線 (IR) / 電磁 (EM) / 断面積 (CS)。それ以外は "")
 // Shops / ShopsNote = 店の最安値の売り場の一覧とその注 (CompareEntry.Shops / ShopsNote。「店の最安値」のセルのツールチップ)
 // Record = 代表の record 名 (［詳細］タブで開くのに使う)
+// NameJaEn = 名前の欄に出す「日本語名 (英語名)」(CompareEntry.DisplayNameJaEn。空なら Name)。Name は英語名のまま (並べ替え・［詳細］タブで引くのに使う)
 public sealed record WeaponTableRow(string Name, int Size, double? Damage, double? MaxDps, double? AvgDps, double? Speed,
     int? Magazine, int? HeavyTorso, int? HeavyHead, double? MinPrice, int? Pellets, bool ChargeNote = false, bool MixedRateNote = false,
     string Kind = "", string Manufacturer = "", string DamageTypes = "", string Ammo = "",
     int? LightTorso = null, int? LightHead = null, int? MediumTorso = null, int? MediumHead = null, string Tracking = "",
-    IReadOnlyList<ShopListing>? Shops = null, string ShopsNote = "", string Record = "")
+    IReadOnlyList<ShopListing>? Shops = null, string ShopsNote = "", string Record = "", string NameJaEn = "")
 {
     // Damage/Alpha = 1 回撃ったときの合計ダメージ = 1発のダメージ × 1回の弾数 (弾数が無ければ 1 発として。1発のダメージが無ければ null)
     public double? Alpha => Damage is { } d ? GameDataQueryService.WeaponAlpha(d, Pellets ?? 1) : null;
@@ -26,7 +27,7 @@ public sealed record WeaponTableRow(string Name, int Size, double? Damage, doubl
     public string? PriceTooltip => MinPrice != null ? ShopListing.Tooltip(Shops, ShopsNote) : null;
 
     // 表の名前の欄 (注の印を付ける)
-    public string DisplayName => Name + (ChargeNote ? " (注1)" : "") + (MixedRateNote ? " (注2)" : "");
+    public string DisplayName => (NameJaEn.Length > 0 ? NameJaEn : Name) + (ChargeNote ? " (注1)" : "") + (MixedRateNote ? " (注2)" : "");
 
     // アーマー ('H' ヘビー / 'M' ミディアム / 'L' ライト) の相手を胴 / 頭に当ててダウンまでの発数
     public int? DownShots(char armor, bool head) => armor switch
@@ -386,7 +387,7 @@ public partial class GameDataQueryService
         var damage = N("1発のダメージ");
         return new WeaponTableRow(e.DisplayName, e.Size, damage, null, null, N("弾速"), null, null, null, e.Buyable ? e.MinPrice : null, damage != null ? 1 : null,
             Kind: MissileKindLabel(e.SubType), Manufacturer: ManufacturerName(e.ManufacturerRef, loc), DamageTypes: C("ダメージの種類"), Tracking: C("追尾"),
-            Shops: e.Buyable ? e.Shops : null, ShopsNote: e.ShopsNote, Record: e.Record);
+            Shops: e.Buyable ? e.Shops : null, ShopsNote: e.ShopsNote, Record: e.Record, NameJaEn: e.DisplayNameJaEn);
     }
 
     private WeaponTableRow ToWeaponTableRow(CompareEntry e, LocReader loc)
@@ -400,7 +401,7 @@ public partial class GameDataQueryService
             I("装弾数"), I(TtkHeavyTorsoKey), I(TtkHeavyHeadKey), e.Buyable ? e.MinPrice : null, pellets, e.DpsNoteCharge, e.DpsNoteMixed,
             C("種類"), ManufacturerName(e.ManufacturerRef, loc), C("ダメージの種類"), C("弾"),
             I(TtkDownKey("ライト", false)), I(TtkDownKey("ライト", true)), I(TtkDownKey("ミディアム", false)), I(TtkDownKey("ミディアム", true)),
-            Shops: e.Buyable ? e.Shops : null, ShopsNote: e.ShopsNote, Record: e.Record);
+            Shops: e.Buyable ? e.Shops : null, ShopsNote: e.ShopsNote, Record: e.Record, NameJaEn: e.DisplayNameJaEn);
     }
 
 

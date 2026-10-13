@@ -947,7 +947,7 @@ public class ChatService
     }
 
     // ベクトル検索。ベクトル構築 (MainWindow のベクトル構築ボタン) と同じく、チェックの付いた (Enabled) 使用可能なバックエンドのうち
-    // Ollama → OpenAI → Gemini の順で最初のものを使い、Ollama なら nomic-embed-text、それ以外はそのバックエンドの Model で検索語を埋め込む。
+    // Ollama → OpenAI → Gemini の順で最初のものを使い、GameDataExtractor.GetEmbeddingModelName の埋め込み専用モデルで検索語を埋め込む。
     // インデックスが無い・埋め込みに失敗した・次元が合わない (類似度がすべて 0) ときは空を返す
     private static async Task<List<(string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double score)>> TrySemanticSearchAsync(string query, int limit)
     {
@@ -968,7 +968,7 @@ public class ChatService
                 Type = embeddingBackend.Type,
                 ApiKey = embeddingBackend.ApiKey,
                 BaseUrl = embeddingBackend.BaseUrl,
-                Model = embeddingBackend.Type.Equals("Ollama", StringComparison.OrdinalIgnoreCase) ? "nomic-embed-text" : embeddingBackend.Model,
+                Model = GameDataExtractor.GetEmbeddingModelName(embeddingBackend.Type)!,
                 Name = embeddingBackend.Name,
             };
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -1160,6 +1160,9 @@ public class ChatService
                 // (色違いなら「この品目は ○○ の色違い」と基本品目の性能、基本品目なら色違いの名前の一覧)
                 var itemStats = _queryService.GetItemStatsText(item.recordName);
                 if (!string.IsNullOrEmpty(itemStats)) sb.AppendLine(itemStats);
+                // 個人武器は枠ごとに付けられるアタッチメントの一覧 (詳細パネルの【装着できるアタッチメント】と同じ)
+                // (一覧は末尾に改行を持つので Append。枠が無い武器は "" で何も足さない)
+                if (item.itemType == "WeaponPersonal") sb.Append(_queryService.WeaponAttachmentListText(item.recordName));
             }
             catch { }
         }
@@ -1773,7 +1776,7 @@ public class ChatService
         if (buyLocations.Count == 0 && rentRows.Count == 0)
         {
             sb.AppendLine("販売場所が見つかりませんでした。");
-            var note = rows.FirstOrDefault(r => r.Kind == ShopPriceStore.KindNone)?.Note;
+            var note = ShopPriceStore.DisplayNote(rows.FirstOrDefault(r => r.Kind == ShopPriceStore.KindNone)?.Note);
             if (!string.IsNullOrEmpty(note)) sb.AppendLine($"  備考: {note}");
         }
 
@@ -1797,7 +1800,7 @@ public class ChatService
     {
         if (rows.Count > 0) return rows;
         if (html.Contains("Not Sold directly or at all", StringComparison.OrdinalIgnoreCase))
-            return new List<ShopPriceRow> { new(ShopPriceStore.KindNone, "", null, null, "", "cstone: 販売なし (Not Sold directly or at all)", "cstone") };
+            return new List<ShopPriceRow> { new(ShopPriceStore.KindNone, "", null, null, "", "cstone: 販売なし", "cstone") };
         if (IsCstoneItemPage(html))
             return new List<ShopPriceRow> { new(ShopPriceStore.KindNone, "", null, null, "", "cstone に売り場の記載無し", "cstone") };
         if (IsCstoneNotFoundPage(html, finalPath))
@@ -2064,10 +2067,10 @@ public class ChatService
                             parts.Add($"Mouse: {r.MouseDisplay}");
                         if (!string.IsNullOrEmpty(r.Gamepad))
                             parts.Add($"GP: {r.GamepadDisplay}");
+                        // HOTAS の R/L はエディターと同じ js 番号と物理スティックの対応で決める (判定材料が無ければ従来どおり js1 = R)
                         if (!string.IsNullOrEmpty(r.Joystick1))
                             parts.Add($"HOTAS {_keybindData.GetJsSideLabel(1)}: {r.Joystick1Display}");
                         if (!string.IsNullOrEmpty(r.Joystick2))
-                        // HOTAS の R/L はエディターと同じ js 番号と物理スティックの対応で決める (判定材料が無ければ従来どおり js1 = R)
                             parts.Add($"HOTAS {_keybindData.GetJsSideLabel(2)}: {r.Joystick2Display}");
                         var bindStr = parts.Count > 0 ? string.Join(" / ", parts) : "(未割当)";
 

@@ -1,0 +1,41 @@
+<UserControl x:Class="StarCitizenJapaneseTextCreater.WeaponDamageCheckPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:StarCitizenJapaneseTextCreater">
+    <!-- ［個人戦闘］の［ダメージ判定］: 銃とアタッチメント (スコープ・マズル・アンダーバレル・マガジン) を選び、
+         オプションなし (既定) と選んだオプションの値を表の 2 行で比べる。列は［表］と同じ (WeaponTablePanel.PersonalColumns) -->
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="txtMessage" Grid.Row="0" Foreground="#666" Margin="0,0,0,6" Visibility="Collapsed"/>
+
+        <WrapPanel Grid.Row="1" Margin="0,0,0,6">
+            <TextBlock Text="銃の分類" VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <ComboBox x:Name="cmbKind" MinWidth="150" Margin="0,0,12,4"/>
+            <TextBlock Text="銃の名前" VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <ComboBox x:Name="cmbWeapon" MinWidth="220" Margin="0,0,12,4"/>
+            <TextBlock Text="スコープ" VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <ComboBox x:Name="cmbScope" MinWidth="180" Margin="0,0,12,4"/>
+            <TextBlock Text="マズル" VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <ComboBox x:Name="cmbMuzzle" MinWidth="180" Margin="0,0,12,4"/>
+            <TextBlock Text="アンダーバレル" VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <ComboBox x:Name="cmbUnderbarrel" MinWidth="180" Margin="0,0,12,4"/>
+            <TextBlock Text="マガジン" VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <ComboBox x:Name="cmbMagazine" MinWidth="180" Margin="0,0,12,4"/>
+        </WrapPanel>
+
+        <!-- 枠が取れない武器の知らせ -->
+        <TextBlock x:Name="txtPortInfo" Grid.Row="2" Foreground="#A05000" Margin="0,0,0,6" TextWrapping="Wrap" Visibility="Collapsed"/>
+
+        <local:FilterSortGrid x:Name="table" Grid.Row="3"/>
+
+        <!-- 補正の合成方法の注記と、バースト DPS の注 (注1 / 注2 の印がある行のとき) -->
+        <TextBlock x:Name="txtNotes" Grid.Row="4" Foreground="#666" Margin="0,6,0,0" TextWrapping="Wrap"/>
+    </Grid>
+</UserControl>

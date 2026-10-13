@@ -37,7 +37,7 @@ public partial class WeaponTablePanel : UserControl
     }
 
     // gamedata_cache.db の場所 (MainWindow.InitGameDataExtractor と同じ作業ディレクトリ)
-    private static string DbPath()
+    internal static string DbPath()
     {
         var workDir = App.Config.WorkingDirectory;
         if (string.IsNullOrEmpty(workDir)) workDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -83,11 +83,11 @@ public partial class WeaponTablePanel : UserControl
     ];
 
     // ダウンまでの発数の列 (［個人戦闘］)。armor は 'H' ヘビー / 'M' ミディアム / 'L' ライト。見出しは「ダウン(H/body)」「ダウン(M/head)」など
-    private static GridColumnSpec DownColumn(char armor, bool head) =>
+    internal static GridColumnSpec DownColumn(char armor, bool head) =>
         Number($"ダウン({armor}/{(head ? "head" : "body")})", r => r.DownShots(armor, head), "0");
 
     // ［個人戦闘］のダウンまでの発数の列の位置 (PersonalColumns の並び)
-    private const int TorsoDownColumn = 10, HeadDownColumn = 11;
+    internal const int TorsoDownColumn = 10, HeadDownColumn = 11;
 
     // 表の上 (検索欄の並び) に「胴: [H|M|L]」「頭: [H|M|L]」の選択を置く (初期は H)。選び直すとその列の値と見出しを差し替える
     // (並べ替え・他の列の絞り込みは残し、その列の絞り込みは値が変わるので解除する)
@@ -106,7 +106,7 @@ public partial class WeaponTablePanel : UserControl
     }
 
     // 個人武器の列: 名前、種類、メーカー、ダメージの種類、1発のダメージ、1回の弾数、バーストDPS、平均DPS、弾速、装弾数、ダウンまで 胴・頭 (初期はヘビー)、店の最安値
-    private static List<GridColumnSpec> PersonalColumns() =>
+    internal static List<GridColumnSpec> PersonalColumns() =>
     [
         NameColumn(),
         Text("種類", r => r.Kind),

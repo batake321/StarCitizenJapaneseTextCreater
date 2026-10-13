@@ -175,7 +175,7 @@ public class TranslationOrchestrator
             else if (resultMap != null && resultMap.TryGetValue(entry.Key, out translated) && !string.IsNullOrWhiteSpace(translated)
                 && BrokenTranslationReason(entry.English, translated) is string brokenReason)
             {
-                // 韓国語が混じった訳・強調タグが壊れた訳は保存せず失敗扱いにする (別の AI で訳し直される)
+                // 韓国語が混じった訳・トークンやタブが壊れた訳・強調タグが壊れた訳は保存せず失敗扱いにする (別の AI で訳し直される)
                 fail++;
                 _failedEntries.Add(entry);
                 Console.WriteLine($"[{Now}] [{backend.Name}] {brokenReason}ため保存しません: {entry.Key}");
@@ -243,15 +243,31 @@ public class TranslationOrchestrator
     private static readonly System.Text.RegularExpressions.Regex EmphasisTagRegex = new(@"</?EM[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     private static readonly System.Text.RegularExpressions.Regex ValidEmphasisTagRegex = new(@"^</?EM[1-4]?>$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     private static readonly System.Text.RegularExpressions.Regex HangulRegex = new(@"[가-힣]");
+    // ~mission(…) ~action(…) 等のトークン (英語の global.ini のトークンの中には空白・タブが無い)
+    private static readonly System.Text.RegularExpressions.Regex TokenRegex = new(@"~\w+\([^)]*\)");
+    private static readonly System.Text.RegularExpressions.Regex WhitespaceRegex = new(@"\s");
 
     // 保存してはいけない訳なら理由を返す。問題なければ null
     // ・原文に無い韓国語の文字が混じっている (AI の誤り)
+    // ・~mission( ) 等のトークンの中に空白・タブが入っている (原文に同じトークンがあるものは除く。例 ~mission(MissionMaxSCU\t\t\t\t\tSize))
+    // ・原文より多くタブが入っている。応答は 1 行が「キー\t訳」の形で、最初のタブより後ろを訳として読むため、
+    //   AI が「キー\t英語原文\t訳」と原文を写して返すと「原文\t訳」が訳になる (実例 'Anti-Air\t対空防御')。
+    //   ほかの項目の原文・訳がタブでつながったものも同じ。英語の global.ini にも生のタブがある値があり (30 件)、
+    //   その訳がタブを写すのは正しいので、原文のタブの数までは通す
     // ・強調タグの名前が壊れている (</EMCA> など)、または開きと閉じの数が合わない
     //   (原文の閉じ忘れを AI が補ったものは、名前が正しく数が合っているので通す)
     internal static string? BrokenTranslationReason(string english, string translated)
     {
         if (HangulRegex.IsMatch(translated) && !HangulRegex.IsMatch(english))
             return "韓国語の文字が混じっている";
+        if (TokenRegex.Matches(translated).Any(m => WhitespaceRegex.IsMatch(m.Value) && !english.Contains(m.Value, StringComparison.Ordinal)))
+            return "トークンの中に空白・タブが入っている";
+        if (translated.Count(c => c == '\t') > english.Count(c => c == '\t'))
+            // 原文は前後の空白を除いて比べる (英語が空白で終わっていて AI がその空白も写したもの。例 item_Descksar_gren_frag_01)
+            return english.Trim().Length > 0
+                   && System.Text.RegularExpressions.Regex.IsMatch(translated, "^" + System.Text.RegularExpressions.Regex.Escape(english.Trim()) + @"[^\S\t]*\t")
+                ? "英語の原文が前に付いている"
+                : "タブが入っている";
         var tags = EmphasisTagRegex.Matches(translated).Select(m => m.Value).ToList();
         if (tags.Count > 0)
         {
@@ -297,6 +313,8 @@ public class TranslationOrchestrator
                     var en = reader.IsDBNull(2) ? "" : reader.GetString(2);
                     var source = reader.IsDBNull(3) ? "" : reader.GetString(3);
                     if (source == "ai" && ja.Trim() == en.Trim()) continue;
+                    // 公式 ini の「訳が無い」印が入った行は翻訳済みとして扱わない (DB の行は書き換えない)
+                    if (TranslationDatabase.IsMissingTranslationMarker(ja)) continue;
                     dbTranslated.Add(key);
                 }
             }
@@ -314,7 +332,8 @@ public class TranslationOrchestrator
             if (dbTranslated.Contains(key))
                 continue;
 
-            if (japanese.TryGetValue(key, out var jaVal) && !string.IsNullOrWhiteSpace(jaVal))
+            if (japanese.TryGetValue(key, out var jaVal) && !string.IsNullOrWhiteSpace(jaVal)
+                && !TranslationDatabase.IsMissingTranslationMarker(jaVal))
                 continue;
 
             if (string.IsNullOrWhiteSpace(enVal))

@@ -2310,8 +2310,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        var modelName = embeddingBackend.Type.Equals("Ollama", StringComparison.OrdinalIgnoreCase)
-            ? "nomic-embed-text" : embeddingBackend.Model;
+        // チャット用の Model ではなく埋め込み専用のモデルを使う (チャットの検索語の埋め込みと同じ関数で決める)
+        var modelName = GameDataExtractor.GetEmbeddingModelName(embeddingBackend.Type)!;
 
         if (embeddingBackend.Type.Equals("Ollama", StringComparison.OrdinalIgnoreCase))
         {

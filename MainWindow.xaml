@@ -1735,9 +1735,16 @@
                 <local:WeaponTablePanel IsShip="True"/>
             </TabItem>
 
-            <!-- 個人戦闘タブ (個人武器を 1 つの表に。医療ガンは除く) -->
+            <!-- 個人戦闘タブ: ［表］(個人武器を 1 つの表に。医療ガンは除く) と［ダメージ判定］(アタッチメントを付けたときの値) -->
             <TabItem Header="個人戦闘">
-                <local:WeaponTablePanel IsShip="False"/>
+                <TabControl Margin="4">
+                    <TabItem Header="表">
+                        <local:WeaponTablePanel IsShip="False"/>
+                    </TabItem>
+                    <TabItem Header="ダメージ判定">
+                        <local:WeaponDamageCheckPanel/>
+                    </TabItem>
+                </TabControl>
             </TabItem>
 
             <!-- ［船舶装備］［個人装備］: 装備を種類ごとに 1 つの表に出す (表の部品 FilterSortGrid。GearTablePanel) -->

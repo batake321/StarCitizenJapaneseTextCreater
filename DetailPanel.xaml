@@ -1,28 +1,51 @@
 <UserControl x:Class="StarCitizenJapaneseTextCreater.DetailPanel"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <!-- ［詳細］タブ。上の名前の欄に入力すると候補を出し (item_index のあいまい検索。船・車両・武器・装備)、選ぶと下に詳細を出す。
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf">
+    <!-- ［詳細］タブ。
+         1 行目: 名前の入力欄。2 行目: 分類・種類・サイズ。その下に条件に合う品目のリスト、その下に詳細 (罫線の入った表。WebView2)。
+         分類が (すべて) のときは名前で全部 (船・車両を含む) からあいまい検索する (item_index)。
+         分類を選ぶと、船・車両 (船舶) またはその表 (［船舶戦闘］［船舶装備］［個人戦闘］［個人装備］) の品目を種類・サイズ・名前で絞り込む。
          表の名前のダブルクリックからも開く (DetailPanel.Request) -->
     <Grid Margin="8">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
+            <RowDefinition x:Name="rowList" Height="200" MinHeight="60"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*" MinHeight="80"/>
         </Grid.RowDefinitions>
 
         <DockPanel Grid.Row="0" Margin="0,0,0,6">
             <TextBlock Text="名前" VerticalAlignment="Center" Margin="0,0,6,0"/>
             <TextBlock x:Name="txtStatus" DockPanel.Dock="Right" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
             <TextBox x:Name="txtQuery" FontSize="14" TextChanged="TxtQuery_TextChanged" PreviewKeyDown="TxtQuery_PreviewKeyDown"
-                     ToolTip="名前の一部 (英語・日本語・record 名) を入力すると候補を出します。↓ で候補へ、Enter で開きます"/>
+                     ToolTip="名前の一部 (英語・日本語・record 名) を入力するとリストを絞り込みます。↓ でリストへ、Enter で最初の品目を開きます"/>
         </DockPanel>
 
-        <!-- 候補 (入力中だけ出す) -->
-        <ListBox x:Name="lstCandidates" Grid.Row="1" MaxHeight="220" Margin="0,0,0,6" Visibility="Collapsed"
-                 MouseDoubleClick="LstCandidates_MouseDoubleClick" PreviewKeyDown="LstCandidates_PreviewKeyDown"/>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
+            <TextBlock Text="分類" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <ComboBox x:Name="cmbCategory" MinWidth="110" SelectionChanged="CmbCategory_SelectionChanged"/>
+            <TextBlock Text="種類" VerticalAlignment="Center" Margin="12,0,6,0"/>
+            <ComboBox x:Name="cmbKind" MinWidth="170" SelectionChanged="CmbFilter_SelectionChanged"/>
+            <TextBlock Text="サイズ" VerticalAlignment="Center" Margin="12,0,6,0"/>
+            <ComboBox x:Name="cmbSize" MinWidth="80" SelectionChanged="CmbFilter_SelectionChanged"/>
+        </StackPanel>
 
-        <!-- 詳細 (読み取り専用。選択して Ctrl+C でコピーできる) -->
-        <TextBox x:Name="txtDetail" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, Yu Gothic UI" FontSize="13"
-                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="1" Padding="6"/>
+        <!-- 条件に合う品目。選ぶと下に詳細を出す。品目が無いときはリストと仕切りを隠す (DetailPanel.SetList) -->
+        <ListBox x:Name="lstCandidates" Grid.Row="2" DisplayMemberPath="Display"
+                 SelectionChanged="LstCandidates_SelectionChanged" PreviewKeyDown="LstCandidates_PreviewKeyDown"/>
+
+        <GridSplitter x:Name="splitList" Grid.Row="3" Height="5" HorizontalAlignment="Stretch" Background="#E0E0E0" Margin="0,4"/>
+
+        <!-- 詳細 (Markdown を HTML にして WebView2 で出す。文字を選んでコピーできる)。WebView2 が使えないときは下の文字の欄で出す -->
+        <Border Grid.Row="4" BorderBrush="#CCC" BorderThickness="1">
+            <Grid>
+                <wv2:WebView2 x:Name="webDetail"/>
+                <TextBox x:Name="txtDetail" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, Yu Gothic UI" FontSize="13"
+                         VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Padding="6"
+                         Visibility="Collapsed"/>
+            </Grid>
+        </Border>
     </Grid>
 </UserControl>

@@ -137,6 +137,7 @@ public class GameDataExtractor : IDisposable
                 MigrateShipPortsTable();
                 MigrateWikiColumns();
                 MigrateItemIndexSizeColumn();
+                MigrateItemIndexNameKeyColumn();
                 MigrateShipsNameEnColumn();
                 MigrateShipPortsSizeColumns();
                 EnsureItemPortsTable();
@@ -284,7 +285,8 @@ public class GameDataExtractor : IDisposable
                 manufacturer TEXT,
                 name_ja TEXT,
                 extracted_at TEXT NOT NULL,
-                size INTEGER DEFAULT 0
+                size INTEGER DEFAULT 0,
+                name_key TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_item_index_name ON item_index(name COLLATE NOCASE);
             CREATE INDEX IF NOT EXISTS idx_item_index_type ON item_index(item_type);
@@ -324,6 +326,7 @@ public class GameDataExtractor : IDisposable
         cmd.ExecuteNonQuery();
         MigrateShipPortsTable();   // 旧スキーマの ship_ports (CREATE TABLE IF NOT EXISTS では作り直されない) を現行 DDL に移行
         MigrateItemIndexSizeColumn();
+        MigrateItemIndexNameKeyColumn();
         MigrateShipsNameEnColumn();
         MigrateShipPortsSizeColumns();
         EnsureItemPortsTable();
@@ -940,6 +943,44 @@ public class GameDataExtractor : IDisposable
         catch { }
     }
 
+    // 既存 DB の item_index に name_key 列 (名前のローカライズキー。"@" を除いたもの、例 item_Namevolt_smg_energy_01) が無ければ追加する。
+    // 足しただけの列は NULL のままで、次のインデックス構築・装備データの再抽出 (ExtractItemIndexAsync) で埋まる
+    private void MigrateItemIndexNameKeyColumn()
+    {
+        if (_db == null) return;
+        try
+        {
+            using var chk = _db.CreateCommand();
+            chk.CommandText = "PRAGMA table_info(item_index)";
+            using var reader = chk.ExecuteReader();
+            bool hasTable = false;
+            while (reader.Read())
+            {
+                hasTable = true;
+                if (string.Equals(reader.GetString(1), "name_key", StringComparison.OrdinalIgnoreCase)) return;
+            }
+            reader.Close();
+            if (!hasTable) return;
+            // 列を足すのと同時に (同じトランザクションで)、チャットのベクトル検索の埋め込み (item_vectors) の行をすべて消す。
+            // name_key 列が無かった版の name_ja (英語名の一致で取り違えた訳を含む) で作った埋め込みが残らないよう、
+            // 次のベクトル検索の構築 (BuildVectorIndexAsync は item_vectors に無い uuid の分だけ作る) で全件を作り直させるため。
+            // 列を足したときだけ行うので、作り直しは一度だけ
+            using var tx = _db.BeginTransaction();
+            using var alt = _db.CreateCommand();
+            alt.Transaction = tx;
+            alt.CommandText = "ALTER TABLE item_index ADD COLUMN name_key TEXT";
+            alt.ExecuteNonQuery();
+            alt.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='item_vectors'";
+            if ((long)(alt.ExecuteScalar() ?? 0L) > 0)
+            {
+                alt.CommandText = "DELETE FROM item_vectors";
+                alt.ExecuteNonQuery();
+            }
+            tx.Commit();
+        }
+        catch { }
+    }
+
     // 既存 DB の ships に name_en 列 (英語 ini で解決した船名) が無ければ追加する
     private void MigrateShipsNameEnColumn()
     {
@@ -1547,7 +1588,10 @@ public class GameDataExtractor : IDisposable
     }
 
     // 売り場・価格を取る武器・装備 (item_index)。個人武器・道具 (WeaponPersonal)、手榴弾・設置型の爆発物・医療用具 (FPS_Consumable)、
-    // 武器の付属品のうち個人武器用 (照準器・アンダーバレル・マガジン・マルチツール用・ランチャー用。Barrel 等は船の武器の部品なので除く)、
+    // 武器の付属品のうち個人武器用 (照準器・アンダーバレル・マガジン・マルチツール用・ランチャー用と、マズル。Barrel 等は船の武器の部品なので除く)、
+    // マズル (個人武器のバレルの付属品 arma_barrel_* など) は SubType が船の武器のバレルと同じ Barrel なので、items.raw_json の
+    // SAttachableComponentParams の AttachDef.Tags (空白区切り) に FPS_Barrel があるものだけを入れる
+    // (色違いで raw_json を空にした行は json_each に渡すと malformed JSON で問い合わせ全体が失敗するので、json_valid で NULL にして飛ばす)
     // アーマー・アンダースーツ・バックパック・服、船の部品 (シールド・動力装置・クアンタムドライブ・冷却装置・レーダー)、
     // 船の武器・ミサイル・ミサイルラック・爆弾、船のトラクタービーム・サルベージヘッド。名前の無いもの・プレースホルダは除く。
     // プレースホルダは、名前のローカライズキーが @LOC_PLACEHOLDER のもの。item_index.name はキーを訳した文 (英語の global.ini に
@@ -1559,7 +1603,13 @@ public class GameDataExtractor : IDisposable
                        'WeaponGun', 'Missile', 'MissileLauncher', 'Bomb', 'BombLauncher',
                        'TractorBeam', 'SalvageHead', 'TowingBeam')
          OR item_type LIKE 'Char_Armor_%' OR item_type LIKE 'Char_Clothing_%'
-         OR (item_type = 'WeaponAttachment' AND sub_type IN ('IronSight', 'BottomAttachment', 'Magazine', 'Utility', 'Missile')))
+         OR (item_type = 'WeaponAttachment' AND sub_type IN ('IronSight', 'BottomAttachment', 'Magazine', 'Utility', 'Missile'))
+         OR (item_type = 'WeaponAttachment' AND sub_type = 'Barrel'
+             AND EXISTS (SELECT 1 FROM items,
+                                json_each(CASE WHEN json_valid(items.raw_json) THEN items.raw_json END, '$._RecordValue_.Components') AS comp
+                         WHERE items.record_name = item_index.record_name
+                           AND json_extract(comp.value, '$._Type_') = 'SAttachableComponentParams'
+                           AND ' ' || json_extract(comp.value, '$.AttachDef.Tags') || ' ' LIKE '% FPS_Barrel %')))
         AND name IS NOT NULL AND TRIM(name) <> '' AND name NOT IN ('<= PLACEHOLDER =>', '<= プレースホルダー =>', '@LOC_PLACEHOLDER')
         AND NOT EXISTS (SELECT 1 FROM items WHERE items.record_name = item_index.record_name AND items.name = '@LOC_PLACEHOLDER')
         """;
@@ -2403,7 +2453,7 @@ public class GameDataExtractor : IDisposable
         int count = 0;
         using var tx = _db!.BeginTransaction();
         using var cmd = _db.CreateCommand();
-        cmd.CommandText = "INSERT OR IGNORE INTO item_index(uuid, record_name, name, name_ja, item_type, sub_type, manufacturer, size, extracted_at) VALUES(@uuid, @rn, @nm, @ja, @it, @st, @mf, @sz, @ea)";
+        cmd.CommandText = "INSERT OR IGNORE INTO item_index(uuid, record_name, name, name_ja, item_type, sub_type, manufacturer, size, extracted_at, name_key) VALUES(@uuid, @rn, @nm, @ja, @it, @st, @mf, @sz, @ea, @nk)";
         var pUuid = cmd.Parameters.Add("@uuid", SqliteType.Text);
         var pRn = cmd.Parameters.Add("@rn", SqliteType.Text);
         var pNm = cmd.Parameters.Add("@nm", SqliteType.Text);
@@ -2413,6 +2463,7 @@ public class GameDataExtractor : IDisposable
         var pMf = cmd.Parameters.Add("@mf", SqliteType.Text);
         var pSz = cmd.Parameters.Add("@sz", SqliteType.Integer);
         var pEa = cmd.Parameters.Add("@ea", SqliteType.Text);
+        var pNk = cmd.Parameters.Add("@nk", SqliteType.Text);
 
         // 品目自身の子ポートの定義 (item_ports) も同じ出力から作り直す
         using (var del = _db.CreateCommand())
@@ -2484,9 +2535,12 @@ public class GameDataExtractor : IDisposable
                     if (size <= 0) size = InferSizeFromEntityName(recordName);
 
                     string nameJa = "";
+                    // 名前のローカライズキー ("@" を除いたもの)。PopulateJapaneseNames が translations.db のキーと照合する
+                    string? nameKey = null;
                     if (name.StartsWith("@") && name.Length > 1)
                     {
                         var locKey = name[1..];
+                        nameKey = locKey;
                         if (enDict.TryGetValue(locKey, out var enName) && !enName.StartsWith("!"))
                         {
                             name = enName;
@@ -2504,6 +2558,7 @@ public class GameDataExtractor : IDisposable
                     pUuid.Value = uuid; pRn.Value = recordName; pNm.Value = name;
                     pJa.Value = string.IsNullOrEmpty(nameJa) ? DBNull.Value : nameJa;
                     pIt.Value = itemType; pSt.Value = subType; pMf.Value = manufacturer; pSz.Value = size; pEa.Value = now;
+                    pNk.Value = nameKey is null ? DBNull.Value : nameKey;
                     cmd.ExecuteNonQuery();
                     count++;
                 }
@@ -2798,10 +2853,14 @@ public class GameDataExtractor : IDisposable
     // 種類 (AttachDef.Type) ごとに、小さくした raw_json にさらに残す部品。アーマー・服も持っていて大きいので、読む種類だけに残す。
     //   MissileLauncher: 搭載するミサイルのポート (SItemPortContainerComponentParams。GameDataQueryService.FillItemStats の「搭載」)
     //   WeaponGun: 種類の語の displayType (SCItemPurchasableParams。GameDataQueryService.ShipWeaponTypeWords)
+    //   WeaponPersonal / WeaponAttachment: アタッチメントの差し口 (SItemPortContainerComponentParams の Ports) と
+    //     アタッチメントによる武器の性能の補正 (SWeaponModifierComponentParams の modifier.weaponStats)。種類で拾った追加分の個人武器・付属品で使う
     private static readonly Dictionary<string, string[]> SlimRawJsonComponentsByType = new(StringComparer.Ordinal)
     {
         ["MissileLauncher"] = ["SItemPortContainerComponentParams"],
         ["WeaponGun"] = ["SCItemPurchasableParams"],
+        ["WeaponPersonal"] = ["SItemPortContainerComponentParams", "SWeaponModifierComponentParams"],
+        ["WeaponAttachment"] = ["SItemPortContainerComponentParams", "SWeaponModifierComponentParams"],
     };
 
     // record の JSON を、形 ({"_RecordName_", "_RecordId_", "_RecordValue_": {"_Type_", "Components": [...]}}) はそのままに、
@@ -4189,46 +4248,81 @@ public class GameDataExtractor : IDisposable
         cmd.ExecuteNonQuery();
     }
 
+    // item_index.name_ja を translations.db の item_Name 行の訳で埋める。
+    //   1. 名前のローカライズキー (item_index.name_key) と translations.key の一致。キーそのもの、無ければ "キー,P" (GameDataQueryService.LookupLoc と同じ順)。
+    //      それぞれ大文字小文字まで同じものを先に、無ければ大文字小文字を区別せずに引く (ExtractItemIndexAsync の ini の辞書が区別しないのに合わせる)
+    //   2. キーで見つからない品目だけ、英語名 (item_index.name) と translations.english の完全一致 (大文字小文字は区別しない)。
+    //      同じ英語名に違う訳が複数あるときは、読み出し順で後の行の訳 (以前の UPDATE を行ごとに繰り返す書き方で後の行が上書きしていたのと同じ)
+    //   どちらでも見つからない品目の name_ja は変えない (ExtractItemIndexAsync が公式の日本語 ini から入れた値のまま)
     public void PopulateJapaneseNames(string translationDbPath)
     {
         EnsureDb();
         if (!File.Exists(translationDbPath)) return;
 
-        using var transConn = new SqliteConnection($"Data Source={translationDbPath};Mode=ReadOnly");
-        transConn.Open();
-
-        using var readCmd = transConn.CreateCommand();
-        readCmd.CommandText = "SELECT key, japanese FROM translations WHERE key LIKE 'item_Name%' AND japanese IS NOT NULL AND japanese != ''";
-        using var reader = readCmd.ExecuteReader();
-
-        using var tx = _db!.BeginTransaction();
-        using var updateCmd = _db.CreateCommand();
-        updateCmd.CommandText = "UPDATE item_index SET name_ja = @ja WHERE name LIKE @en";
-        var pJa = updateCmd.Parameters.Add("@ja", SqliteType.Text);
-        var pEn = updateCmd.Parameters.Add("@en", SqliteType.Text);
-
-        int updated = 0;
-        while (reader.Read())
+        var byKey = new Dictionary<string, string>(StringComparer.Ordinal);
+        var byKeyIgnoreCase = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var byEnglish = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        using (var transConn = new SqliteConnection($"Data Source={translationDbPath};Mode=ReadOnly"))
         {
-            var key = reader.GetString(0);
-            var ja = reader.GetString(1);
-            var enName = key.Replace("item_Name", "").Replace("item_name", "");
-
-            using var enCmd = transConn.CreateCommand();
-            enCmd.CommandText = "SELECT english FROM translations WHERE key = @k";
-            enCmd.Parameters.AddWithValue("@k", key);
-            var english = enCmd.ExecuteScalar() as string;
-            if (string.IsNullOrEmpty(english)) continue;
-
-            pJa.Value = ja;
-            pEn.Value = $"%{english}%";
-            updated += updateCmd.ExecuteNonQuery();
+            transConn.Open();
+            using var readCmd = transConn.CreateCommand();
+            readCmd.CommandText = "SELECT key, english, japanese FROM translations WHERE key LIKE 'item_Name%' AND japanese IS NOT NULL AND japanese != ''";
+            using var reader = readCmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var key = reader.GetString(0);
+                var english = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                var ja = reader.GetString(2);
+                // 公式の日本語ファイルの「訳が無い」印 ("! JAPANESE_(JAPAN) TRANSLATION NOT FOUND FOR LOCID: ... !") は name_ja に入れない
+                // (ExtractItemIndexAsync の StartsWith("!") と IniMerger の TranslationDatabase.IsMissingTranslationMarker の判定に合わせる)
+                if (ja.StartsWith("!") || TranslationDatabase.IsMissingTranslationMarker(ja)) continue;
+                byKey[key] = ja;
+                byKeyIgnoreCase[key] = ja;
+                if (!string.IsNullOrEmpty(english)) byEnglish[english] = ja;
+            }
         }
-        tx.Commit();
-        transConn.Close();
+
+        string? LookupKey(string k)
+            => byKey.TryGetValue(k, out var v) ? v : byKeyIgnoreCase.TryGetValue(k, out var vi) ? vi : null;
+
+        var updates = new List<(string Uuid, string Ja)>();
+        int byKeyCount = 0, byEnglishCount = 0, notFound = 0;
+        using (var cmd = _db!.CreateCommand())
+        {
+            cmd.CommandText = "SELECT uuid, name_key, name FROM item_index";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var uuid = reader.GetString(0);
+                var nameKey = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                var name = reader.IsDBNull(2) ? "" : reader.GetString(2);
+                string? ja = null;
+                if (nameKey.Length > 0)
+                    ja = LookupKey(nameKey) ?? LookupKey(nameKey + ",P");
+                if (ja != null) { byKeyCount++; updates.Add((uuid, ja)); continue; }
+                if (name.Length > 0 && byEnglish.TryGetValue(name, out var jaEn)) { byEnglishCount++; updates.Add((uuid, jaEn)); continue; }
+                notFound++;
+            }
+        }
+
+        using (var tx = _db.BeginTransaction())
+        using (var updateCmd = _db.CreateCommand())
+        {
+            updateCmd.Transaction = tx;
+            updateCmd.CommandText = "UPDATE item_index SET name_ja = @ja WHERE uuid = @u";
+            var pJa = updateCmd.Parameters.Add("@ja", SqliteType.Text);
+            var pU = updateCmd.Parameters.Add("@u", SqliteType.Text);
+            foreach (var (uuid, ja) in updates)
+            {
+                pJa.Value = ja;
+                pU.Value = uuid;
+                updateCmd.ExecuteNonQuery();
+            }
+            tx.Commit();
+        }
 
         RebuildFts5Index();
-        StatusChanged?.Invoke($"日本語名を {updated} 件更新し、FTS5 インデックスを再構築しました");
+        StatusChanged?.Invoke($"日本語名を {updates.Count} 件更新し (キーで {byKeyCount} 件、英語名で {byEnglishCount} 件。見つからない {notFound} 件は変更なし)、FTS5 インデックスを再構築しました");
     }
 
     public int GetItemIndexCount()
@@ -4359,6 +4453,43 @@ public class GameDataExtractor : IDisposable
         StatusChanged?.Invoke(msg);
     }
 
+    // 埋め込み専用のモデル名 (チャット用の Model は埋め込みに使えないため、種類ごとにここで固定する)
+    // Gemini: https://ai.google.dev/gemini-api/docs/embeddings ・ text-embedding-004 は 2026-01-14 に提供終了 (https://ai.google.dev/gemini-api/docs/deprecations)
+    // OpenAI: https://developers.openai.com/api/docs/guides/embeddings
+    public const string OllamaEmbeddingModel = "nomic-embed-text";
+    public const string OpenAiEmbeddingModel = "text-embedding-3-small";
+    public const string GeminiEmbeddingModel = "gemini-embedding-001";
+
+    // ベクトル構築 (MainWindow) とチャットの検索語の埋め込み (ChatService) の両方がこれでモデルを決める。
+    // 構築と検索でモデルが違うとベクトルの次元が合わないため、必ずここを通す。対応外の種類は null
+    public static string? GetEmbeddingModelName(string backendType)
+    {
+        if (backendType.Equals("Ollama", StringComparison.OrdinalIgnoreCase)) return OllamaEmbeddingModel;
+        if (backendType.Equals("OpenAI", StringComparison.OrdinalIgnoreCase)) return OpenAiEmbeddingModel;
+        if (backendType.Equals("Gemini", StringComparison.OrdinalIgnoreCase)) return GeminiEmbeddingModel;
+        return null;
+    }
+
+    // 埋め込みの API がエラーを返したとき、返事の本文をチャットのログに出してから、今までどおり EnsureSuccessStatusCode で例外にする。
+    // URL の key= と本文中のキーの値は伏せる
+    private static async Task EnsureEmbeddingSuccessAsync(HttpResponseMessage resp, string url, string? apiKey, CancellationToken ct)
+    {
+        if (resp.IsSuccessStatusCode) return;
+        string body;
+        try { body = await resp.Content.ReadAsStringAsync(ct); }
+        catch (Exception ex) { body = $"(本文の読み取りに失敗: {ex.Message})"; }
+        if (body.Length > 2000) body = body[..2000] + "...";
+        ChatService.LogExternal($"[埋め込み] HTTP {(int)resp.StatusCode} {resp.ReasonPhrase} {MaskApiKey(url, apiKey)}: {MaskApiKey(body, apiKey)}");
+        resp.EnsureSuccessStatusCode();
+    }
+
+    internal static string MaskApiKey(string text, string? apiKey)
+    {
+        var masked = System.Text.RegularExpressions.Regex.Replace(text, @"([?&]key=)[^&\s]*", "$1***");
+        if (!string.IsNullOrEmpty(apiKey)) masked = masked.Replace(apiKey, "***");
+        return masked;
+    }
+
     // チャットの検索語の埋め込み用 (ベクトル構築と同じ API・同じモデル指定で作る)
     public static Task<List<float[]>?> GetQueryEmbeddingsAsync(BackendConfig backend, List<string> texts, CancellationToken ct) =>
         GetEmbeddingsAsync(backend, texts, ct);
@@ -4375,16 +4506,17 @@ public class GameDataExtractor : IDisposable
     private static async Task<List<float[]>?> GetOllamaEmbeddingsAsync(BackendConfig backend, List<string> texts, CancellationToken ct)
     {
         var baseUrl = string.IsNullOrEmpty(backend.BaseUrl) ? "http://localhost:11434" : backend.BaseUrl.TrimEnd('/');
-        var model = string.IsNullOrEmpty(backend.Model) ? "nomic-embed-text" : backend.Model;
+        var model = string.IsNullOrEmpty(backend.Model) ? OllamaEmbeddingModel : backend.Model;
 
         var results = new List<float[]>();
         foreach (var text in texts)
         {
             ct.ThrowIfCancellationRequested();
             var body = JsonSerializer.Serialize(new { model, input = text });
-            var resp = await Http.PostAsync($"{baseUrl}/api/embed",
+            var url = $"{baseUrl}/api/embed";
+            var resp = await Http.PostAsync(url,
                 new StringContent(body, Encoding.UTF8, "application/json"), ct);
-            resp.EnsureSuccessStatusCode();
+            await EnsureEmbeddingSuccessAsync(resp, url, backend.ApiKey, ct);
             var json = await resp.Content.ReadAsStringAsync(ct);
             using var doc = JsonDocument.Parse(json);
             if (doc.RootElement.TryGetProperty("embeddings", out var embs) && embs.GetArrayLength() > 0)
@@ -4399,16 +4531,17 @@ public class GameDataExtractor : IDisposable
 
     private static async Task<List<float[]>?> GetOpenAiEmbeddingsAsync(BackendConfig backend, List<string> texts, CancellationToken ct)
     {
-        var model = string.IsNullOrEmpty(backend.Model) ? "text-embedding-3-small" : backend.Model;
+        var model = string.IsNullOrEmpty(backend.Model) ? OpenAiEmbeddingModel : backend.Model;
         var baseUrl = string.IsNullOrEmpty(backend.BaseUrl) ? "https://api.openai.com/v1" : backend.BaseUrl.TrimEnd('/');
         var body = JsonSerializer.Serialize(new { model, input = texts });
 
-        using var req = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/embeddings");
+        var url = $"{baseUrl}/embeddings";
+        using var req = new HttpRequestMessage(HttpMethod.Post, url);
         req.Headers.Add("Authorization", $"Bearer {backend.ApiKey}");
         req.Content = new StringContent(body, Encoding.UTF8, "application/json");
 
         var resp = await Http.SendAsync(req, ct);
-        resp.EnsureSuccessStatusCode();
+        await EnsureEmbeddingSuccessAsync(resp, url, backend.ApiKey, ct);
         var json = await resp.Content.ReadAsStringAsync(ct);
         using var doc = JsonDocument.Parse(json);
         if (!doc.RootElement.TryGetProperty("data", out var data)) return null;
@@ -4421,7 +4554,7 @@ public class GameDataExtractor : IDisposable
 
     private static async Task<List<float[]>?> GetGeminiEmbeddingsAsync(BackendConfig backend, List<string> texts, CancellationToken ct)
     {
-        var model = string.IsNullOrEmpty(backend.Model) ? "text-embedding-004" : backend.Model;
+        var model = string.IsNullOrEmpty(backend.Model) ? GeminiEmbeddingModel : backend.Model;
         var results = new List<float[]>();
 
         foreach (var batch in texts.Chunk(100))
@@ -4430,12 +4563,12 @@ public class GameDataExtractor : IDisposable
             var requests = batch.Select(t => new { model = $"models/{model}", content = new { parts = new[] { new { text = t } } } }).ToArray();
             var body = JsonSerializer.Serialize(new { requests });
 
-            using var req = new HttpRequestMessage(HttpMethod.Post,
-                $"https://generativelanguage.googleapis.com/v1beta/models/{model}:batchEmbedContents?key={backend.ApiKey}");
+            var url = $"https://generativelanguage.googleapis.com/v1beta/models/{model}:batchEmbedContents?key={backend.ApiKey}";
+            using var req = new HttpRequestMessage(HttpMethod.Post, url);
             req.Content = new StringContent(body, Encoding.UTF8, "application/json");
 
             var resp = await Http.SendAsync(req, ct);
-            resp.EnsureSuccessStatusCode();
+            await EnsureEmbeddingSuccessAsync(resp, url, backend.ApiKey, ct);
             var json = await resp.Content.ReadAsStringAsync(ct);
             using var doc = JsonDocument.Parse(json);
             if (!doc.RootElement.TryGetProperty("embeddings", out var embs)) return null;
