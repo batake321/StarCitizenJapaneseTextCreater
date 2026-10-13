@@ -2018,6 +2018,10 @@
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
+            <!-- ［ゲームログ］: Game.log と過去のログから出来事を拾って表に出す (GameLogPanel) -->
+            <TabItem Header="ゲームログ">
+                <local:GameLogPanel/>
+            </TabItem>
             <!-- ログタブ -->
             <TabItem Header="ログ">
                 <Grid Margin="8">
