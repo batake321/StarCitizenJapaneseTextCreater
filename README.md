@@ -25,9 +25,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v2.0.0-win-x64.zip (最新 v2.0.0 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.0.0/StarCitizenJapaneseTextCreater-v2.0.0-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v2.0.1-win-x64.zip (最新 v2.0.1 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.0.1/StarCitizenJapaneseTextCreater-v2.0.1-win-x64.zip)**
 >
-> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.0.0-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
+> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.0.1-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
 >
 > **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/13 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.0.0/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
 
@@ -48,7 +48,12 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v2.0.0 更新内容（メジャーアップデート）
+### 🚀 v2.0.1 更新内容
+
+- **アプリのアイコンを新しくしました**: 交差したライフルと輪のある惑星の部隊章 (exe・インストーラー)
+
+<details>
+<summary>v2.0.0 更新内容（メジャーアップデート）</summary>
 
 - **［個人戦闘］に「ダメージ判定」タブを追加**:
   - 銃を選び、スコープ・マズル・アンダーバレル・マガジンを付けたときの DPS・1発のダメージ・弾速・ダウンまでの発数を、付けないときと並べて表示
@@ -78,6 +83,8 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - 個人武器とアタッチメントの差し口・補正値を取り込むように
   - マズルの販売価格を取得するように
 - 翻訳DB・ゲームデータ (4.10.2) を更新
+
+</details>
 
 <details>
 <summary>v1.22.3 更新内容</summary>
