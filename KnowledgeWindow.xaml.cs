@@ -123,7 +123,12 @@ public partial class KnowledgeWindow : Window
         if (MessageBox.Show($"{selected.Count} 件の記憶を削除しますか？", "確認",
                 MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
             return;
-        _queryService.DeleteKnowledgeByIds(selected.Select(x => x.Id));
+        try { _queryService.DeleteKnowledgeByIds(selected.Select(x => x.Id)); }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+            return;
+        }
         LoadEntries();
     }
 
@@ -199,8 +204,19 @@ public partial class KnowledgeWindow : Window
             line = line.Trim();
             if (line.Length < 2) continue;
 
-            var (_, isDup) = _queryService.AddKnowledgeSafe(line, category);
-            if (!isDup) count++;
+            try
+            {
+                var (_, isDup) = _queryService.AddKnowledgeSafe(line, category);
+                if (!isDup) count++;
+            }
+            catch (Exception ex)
+            {
+                // 書き込めない (作業フォルダに書けない等) ときは、取り込めた分だけ出し直して知らせる
+                LoadEntries();
+                txtStatus.Text = $"{count} 件を取り込んだところで止まりました";
+                MessageBox.Show($"エラー: {ex.Message}", "エラー");
+                return;
+            }
         }
 
         txtImport.Text = "";

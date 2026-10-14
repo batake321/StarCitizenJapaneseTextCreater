@@ -2,12 +2,12 @@ using System.Windows;
 
 namespace StarCitizenJapaneseTextCreater;
 
+// 取り込み方。.sql.gz 形式の古いバックアップの取り込み (DatabaseBackupService.ImportAsync) だけが使う
 public enum ImportMode { Add, Overwrite, Drop }
 
 public partial class ImportSelectionDialog : Window
 {
     public List<BackupCategory> SelectedCategories { get; private set; } = new();
-    public ImportMode Mode { get; private set; } = ImportMode.Add;
 
     public ImportSelectionDialog()
     {
@@ -98,10 +98,6 @@ public partial class ImportSelectionDialog : Window
             MessageBox.Show("インポートするデータを1つ以上選択してください。", "選択なし", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
-
-        Mode = rbDrop.IsChecked == true ? ImportMode.Drop
-             : rbOverwrite.IsChecked == true ? ImportMode.Overwrite
-             : ImportMode.Add;
 
         DialogResult = true;
     }

@@ -1472,21 +1472,27 @@ public partial class MainWindow : Window
             txtBackupStatus.Text = "インポート中...";
             var tradeDbImportPath = Path.Combine(WorkDir, "trade_cache.db");
             // インデックス (gamedata_cache.db) を取り込むときは、装備タブの読み込み口の覚えた結果が古くなるので、閉じてから取り込み、後で作り直す
-            var reopenEquip = selectDlg.SelectedCategories.Contains(BackupCategory.Index);
+            // (翻訳データを取り込むときも、gamedata_cache.db の日本語名を付け直すので同じ)
+            var reopenEquip = selectDlg.SelectedCategories.Contains(BackupCategory.Index)
+                              || selectDlg.SelectedCategories.Contains(BackupCategory.Translations);
             if (reopenEquip)
             {
                 _hangarEquip?.Dispose();
                 _hangarEquip = null;
             }
+            // インデックス構築と同じく、取り込みの間は売り場・価格の裏の取得 (とチャットの価格の取り直し) を止め、
+            // 終わったら (成功・失敗とも) 構築が失敗したときと同じ方法 (止めた取得が途中だったときだけ続きを再開) で戻す
+            await GameDataExtractor.PauseShopPriceFetchAsync();
             try
             {
                 await DatabaseBackupService.ImportFromZipAsync(dlg.FileName, DbPath, IndexDbPath,
-                    selectDlg.SelectedCategories, selectDlg.Mode,
+                    selectDlg.SelectedCategories,
                     s => Dispatcher.Invoke(() => txtBackupStatus.Text = s), tradeDbImportPath);
             }
             finally
             {
                 if (reopenEquip) ReopenHangarEquip();
+                OnShopPriceFetchResumeRequested(IndexDbPath);
             }
 
             txtBackupStatus.Text = "インポート完了";
@@ -1502,6 +1508,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             txtBackupStatus.Text = "";
+            Log($"[インポート] 失敗: {ex}");
             MessageBox.Show($"インポートに失敗しました: {ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
@@ -1908,7 +1915,11 @@ public partial class MainWindow : Window
         InitGameDataExtractor();
         LoadMissionsAsync();
 
-        if (_gameDataExtractor != null && !_gameDataExtractor.HasStructuredData())
+        // 作業フォルダに書けない・DB を開けないときは、案内を足さずに続ける (落ちないように。DB の状態は設定タブの表示 (InitGameDataExtractor) に出る)
+        bool hasStructuredData;
+        try { hasStructuredData = _gameDataExtractor == null || _gameDataExtractor.HasStructuredData(); }
+        catch { hasStructuredData = true; }
+        if (!hasStructuredData)
             welcomeLines.Add("\n💡 ミッション・契約の検索には、設定タブの「インデックス構築」の実行が必要です（約2分半）。");
 
         _chatBubbles.Add(new ChatBubble { Text = string.Join("", welcomeLines), IsUser = false });
@@ -2285,7 +2296,15 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_gameDataExtractor.GetItemIndexCount() == 0)
+        // 作業フォルダに書けない・DB を開けないときに落ちないよう、件数の読み出しを囲む
+        int itemIndexCount;
+        try { itemIndexCount = _gameDataExtractor.GetItemIndexCount(); }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+        if (itemIndexCount == 0)
         {
             MessageBox.Show("先にインデックス構築を実行してください。", "エラー", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
@@ -2361,7 +2380,7 @@ public partial class MainWindow : Window
             $"ベクトル検索インデックスを構築します。\n\n" +
             $"バックエンド: {embeddingBackend.Name} ({embeddingBackend.Type})\n" +
             $"モデル: {modelName}\n" +
-            $"対象: {_gameDataExtractor.GetItemIndexCount()} アイテム\n" +
+            $"対象: {itemIndexCount} アイテム\n" +
             $"予測時間: 約2分15秒\n\n" +
             "バックグラウンドで実行します。続行しますか？",
             "ベクトル検索構築", MessageBoxButton.YesNo, MessageBoxImage.Question);
@@ -3169,7 +3188,13 @@ public partial class MainWindow : Window
     private void KnowledgeManage_Click(object sender, RoutedEventArgs e)
     {
         if (_gameDataExtractor == null) { MessageBox.Show("先にゲームデータを読み込んでください。"); return; }
-        var qs = new GameDataQueryService(_gameDataExtractor.DbPath);
+        GameDataQueryService qs;
+        try { qs = new GameDataQueryService(_gameDataExtractor.DbPath); }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+            return;
+        }
         try
         {
             var verifyBackend = GetVerifyBackend();
@@ -4725,7 +4750,16 @@ public partial class MainWindow : Window
     }
 
     // 同期済み保有船のうち、正規化名が所持船に無いものを所持船に追加する (同型は 1 件)
-    private void ImportHangarShips_Click(object sender, RoutedEventArgs e) => ImportHangarShipsIntoMyShips(confirm: true);
+    private void ImportHangarShips_Click(object sender, RoutedEventArgs e)
+    {
+        try { ImportHangarShipsIntoMyShips(confirm: true); }
+        catch (Exception ex)
+        {
+            // 途中まで足したものは一覧に出し直す
+            try { RefreshMyShips(); } catch { }
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+        }
+    }
 
     // 同期済み保有船を所持船へ追加する。confirm=true のときだけ確認ダイアログを出す。追加件数を返す。
     // 既存の所持船行は変更・削除しない (手入力の保護)。
@@ -5280,7 +5314,12 @@ public partial class MainWindow : Window
             }
         }
 
-        _tradeService.AddMyShip(name, mfr, scu, notes);
+        try { _tradeService.AddMyShip(name, mfr, scu, notes); }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+            return;
+        }
         RefreshMyShips();
         SetAddShipName("");
         cmbAddShipMfr.Text = "";
@@ -5313,7 +5352,12 @@ public partial class MainWindow : Window
         if (dgMyShips.SelectedItem is not MyShipRow ship) return;
         if (MessageBox.Show($"「{ship.Name}」を削除しますか？", "確認", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
 
-        _tradeService.DeleteMyShip(ship.Id);
+        try { _tradeService.DeleteMyShip(ship.Id); }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+            return;
+        }
         RefreshMyShips();
         Log($"[Ship] 削除: {ship.Name}");
     }
@@ -5350,7 +5394,17 @@ public partial class MainWindow : Window
         if (MessageBox.Show($"所持船 {ids.Count} 隻を削除しますか？\n\n{preview}",
                 "ワイプ", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
 
-        foreach (var id in ids) _tradeService.DeleteMyShip(id);
+        try
+        {
+            foreach (var id in ids) _tradeService.DeleteMyShip(id);
+        }
+        catch (Exception ex)
+        {
+            // 途中まで消えたものは一覧に出し直す
+            try { RefreshMyShips(); } catch { }
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+            return;
+        }
         RefreshMyShips();
         Log($"[Ship] ワイプ: {ids.Count} 隻を削除");
         txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻 | ワイプで {ids.Count} 隻を削除";
@@ -5419,7 +5473,12 @@ public partial class MainWindow : Window
         if (string.IsNullOrEmpty(name)) return;
         int.TryParse(txtAddShipScu.Text.Trim(), out var scu);
         var notes = ApplyInGameMarker(txtAddShipNotes.Text.Trim(), chkAddShipInGame.IsChecked == true);
-        _tradeService.UpdateMyShip(ship.Id, name, cmbAddShipMfr.Text.Trim(), scu, notes);
+        try { _tradeService.UpdateMyShip(ship.Id, name, cmbAddShipMfr.Text.Trim(), scu, notes); }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"エラー: {ex.Message}", "エラー");
+            return;
+        }
         RefreshMyShips();
         Log($"[Ship] 更新: {name} ({scu} SCU){(IsInGameNotes(notes) ? " [ゲーム内購入]" : "")}");
     }
@@ -5613,16 +5672,16 @@ public partial class MainWindow : Window
     {
         try
         {
+            // build_manifest.id は JSON ({"Data": {"Branch": "sc-alpha-4.10.2", "Version": "4.10.197.2878", "RequestedP4ChangeNum": ..., ...}})。
+            // 今までどおり、版の「数字.数字」(例 4.10) を返し、無ければ Branch をそのまま返す
             var manifestPath = Path.Combine(txtGamePath.Text.Trim(), "build_manifest.id");
-            if (File.Exists(manifestPath))
+            var (version, _, branch) = GameDataExtractor.ReadBuildManifestFile(manifestPath);
+            if (version != null)
             {
-                var content = File.ReadAllText(manifestPath);
-                var match = System.Text.RegularExpressions.Regex.Match(content, @"""RequestedP4ChangeNum""\s*""(\d+)""");
-                var branchMatch = System.Text.RegularExpressions.Regex.Match(content, @"""Branch""\s*""([^""]+)""");
-                var versionMatch = System.Text.RegularExpressions.Regex.Match(content, @"""Data""\s*""[^""]*?(\d+\.\d+)");
-                if (versionMatch.Success) return versionMatch.Groups[1].Value;
-                if (branchMatch.Success) return branchMatch.Groups[1].Value;
+                var versionMatch = System.Text.RegularExpressions.Regex.Match(version, @"\d+\.\d+");
+                if (versionMatch.Success) return versionMatch.Value;
             }
+            if (branch != null) return branch;
         }
         catch { }
         return "4.0";

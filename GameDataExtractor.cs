@@ -32,6 +32,13 @@ public class GameDataExtractor : IDisposable
         StarBreakerExe = Path.Combine(ToolsDir, "starbreaker.exe");
     }
 
+    // DB のファイルを指定して開く (起動時に同梱 DB を作り直すとき、正式名にする前の "gamedata_cache.db.tmp" に対して
+    // 日本語名の付け直し (PopulateJapaneseNames) をするために App から使う)
+    internal GameDataExtractor(string workingDirectory, string dbPath) : this(workingDirectory)
+    {
+        DbPath = dbPath;
+    }
+
     public bool IsStarBreakerInstalled => File.Exists(StarBreakerExe);
     public bool IsReady => IsStarBreakerInstalled && FindDataP4k() != null;
 
@@ -128,6 +135,41 @@ public class GameDataExtractor : IDisposable
         StatusChanged?.Invoke($"ship_ports テーブルを現行スキーマへ移行しました ({copied} 件を保持)");
     }
 
+    // DB を開き、表・列を今の形に揃える (起動時に同梱 DB を取り込む前に、古い版の DB に無い列・表を足すために App から呼ぶ)
+    internal void EnsureSchema() => EnsureDb();
+
+    // 起動時に App (PlanBundledDbSync → CheckWorkDbHealth) が quick_check を済ませて ok だった DB (パスと更新日時)。
+    // EnsureDb で同じパス・同じ更新日時のファイルを開くときに 1 回だけ quick_check を省く (使ったら消す)
+    private static readonly object QuickCheckOkLock = new();
+    private static (string Path, DateTime LastWriteUtc)? _quickCheckOk;
+
+    internal static void NoteQuickCheckOk(string path)
+    {
+        try
+        {
+            var full = Path.GetFullPath(path);
+            var stamp = File.GetLastWriteTimeUtc(full);
+            lock (QuickCheckOkLock) _quickCheckOk = (full, stamp);
+        }
+        catch { lock (QuickCheckOkLock) _quickCheckOk = null; }   // 調べられなければ省かない
+    }
+
+    private static bool TakeQuickCheckOk(string path)
+    {
+        lock (QuickCheckOkLock)
+        {
+            if (_quickCheckOk is not { } ok) return false;
+            try
+            {
+                var full = Path.GetFullPath(path);
+                if (!string.Equals(ok.Path, full, StringComparison.OrdinalIgnoreCase)) return false;
+                _quickCheckOk = null;   // 同じパスなら、省くかどうかに関わらず 1 回で使い切る
+                return File.Exists(full) && File.GetLastWriteTimeUtc(full) == ok.LastWriteUtc;
+            }
+            catch { return false; }
+        }
+    }
+
     private void EnsureDb()
     {
         if (_db != null)
@@ -148,15 +190,20 @@ public class GameDataExtractor : IDisposable
         _db = new SqliteConnection($"Data Source={DbPath}");
         string? corruptReason = null;
         SqliteException? corruptEx = null;   // 退避に失敗したとき再スローする元の例外 (quick_check 不一致の場合は null)
+        // 起動時に App が同じファイル (パスと更新日時が同じ) の quick_check を済ませて ok だったら、ここでの quick_check を 1 回省く
+        var skipQuickCheck = TakeQuickCheckOk(DbPath);
         try
         {
             _db.Open();
-            using var qc = _db.CreateCommand();
-            qc.CommandText = "PRAGMA quick_check";
-            // quick_check は例外を投げずに "ok" 以外の文字列 (例 "*** in database main ***") を返すことがあるので、
-            // その場合も破損とみなして退避経路に入れる
-            var qcResult = qc.ExecuteScalar()?.ToString();
-            if (qcResult != "ok") corruptReason = $"quick_check: {qcResult}";
+            if (!skipQuickCheck)
+            {
+                using var qc = _db.CreateCommand();
+                qc.CommandText = "PRAGMA quick_check";
+                // quick_check は例外を投げずに "ok" 以外の文字列 (例 "*** in database main ***") を返すことがあるので、
+                // その場合も破損とみなして退避経路に入れる
+                var qcResult = qc.ExecuteScalar()?.ToString();
+                if (qcResult != "ok") corruptReason = $"quick_check: {qcResult}";
+            }
         }
         catch (SqliteException ex)
         {
@@ -325,6 +372,9 @@ public class GameDataExtractor : IDisposable
         """ + ShopPriceStore.TableDdl + AmmoParamsDdl + GameDataQueryService.ItemVariantsDdl + GameDataQueryService.PlayerDamageParamsDdl;
         cmd.ExecuteNonQuery();
         MigrateShipPortsTable();   // 旧スキーマの ship_ports (CREATE TABLE IF NOT EXISTS では作り直されない) を現行 DDL に移行
+        // missions の wiki の列も、初めて開いたときに足す (今までは 2 回目の EnsureDb でだけ足していたので、
+        // 1 回だけ開いて取り込むインポート (DatabaseBackupService) で古い DB に列が無いまま wiki の情報が入らなかった)
+        MigrateWikiColumns();
         MigrateItemIndexSizeColumn();
         MigrateItemIndexNameKeyColumn();
         MigrateShipsNameEnColumn();
@@ -1162,8 +1212,8 @@ public class GameDataExtractor : IDisposable
 
     // 構築の前に売り場・価格の裏の取得を止める (構築中・VACUUM 中に取得が DB に書かないように)。
     // 成功すれば最後の ShopPriceFetchRequested で、失敗すれば ShopPriceFetchResumeRequested で続きを裏で再開する
-    // 構築は最初に gamedata_meta を消すので、売り場・価格の取得の印 (手動中止・途中) を先に退避し、失敗したら元に戻してから再開を頼む
-    // (成功したときは印を戻さず、ShopPriceFetchRequested の受け手が手動中止の印を消して取得を始める)
+    // 売り場・価格の取得の印 (手動中止・途中) は構築では消さないが、失敗したときは構築前の控えから戻すのに加えて、先に退避した印を入れ直してから再開を頼む
+    // (成功したときは、ShopPriceFetchRequested の受け手が手動中止の印を消して取得を始める)
     public async Task BuildStructuredIndexAsync(string dataP4kPath, CancellationToken ct = default, bool requestShopPriceFetch = true)
     {
         await PauseShopPriceFetchAsync();
@@ -1185,24 +1235,105 @@ public class GameDataExtractor : IDisposable
 
     private async Task BuildStructuredIndexCoreAsync(string dataP4kPath, CancellationToken ct, bool requestShopPriceFetch)
     {
+        // 構築の作業に 500MB、加えて構築前の控え (BuildIndexAsync が今の gamedata_cache.db を丸ごと控える) の分が要る
         var dbDrive = new DriveInfo(Path.GetPathRoot(DbPath)!);
-        if (dbDrive.AvailableFreeSpace < 500 * 1024 * 1024)
-            throw new IOException($"ディスク容量不足: {dbDrive.Name} の空き {dbDrive.AvailableFreeSpace / 1024 / 1024}MB (500MB以上必要)");
+        long backupBytes = File.Exists(DbPath) ? new FileInfo(DbPath).Length : 0;
+        long needBytes = 500L * 1024 * 1024 + backupBytes;
+        if (dbDrive.AvailableFreeSpace < needBytes)
+            throw new IOException($"ディスク容量不足: {dbDrive.Name} の空き {dbDrive.AvailableFreeSpace / 1024 / 1024}MB ({needBytes / 1024 / 1024}MB以上必要。構築の作業に 500MB と構築前の控えに {backupBytes / 1024 / 1024}MB)");
 
         await EnsureStarBreakerAsync();
         EnsureDb();
         using var dcbScope = await UseExtractedDcbAsync(dataP4kPath, ct);
 
+        // 構築は最初に表を消してから段階ごとに入れ直す。各段階が自分のトランザクションを使い、最後に VACUUM (トランザクションの中では
+        // 実行できない) をするので、全体を 1 つのトランザクションでは包めない。消す前に DB を丸ごと控え (VACUUM INTO)、
+        // 途中で失敗・中止したら控えから元に戻す (名前だけ並んで詳細が空、のまま残さない)。控えを作れなければ何も消さずに止める
+        var preBuildBackup = CreatePreBuildBackup();
+        try
+        {
+            await BuildStructuredIndexStepsAsync(dataP4kPath, ct, requestShopPriceFetch);
+        }
+        catch (Exception ex)
+        {
+            RestorePreBuildBackup(preBuildBackup, ex);
+            throw;
+        }
+        DeletePreBuildBackup(preBuildBackup);
+    }
+
+    // インデックス構築の前の控えの置き場所 (gamedata_cache.db と同じフォルダ)
+    private string PreBuildBackupPath => DbPath + ".prebuild.bak";
+
+    private string CreatePreBuildBackup()
+    {
+        var path = PreBuildBackupPath;
+        StatusChanged?.Invoke("構築前のデータを控えています...");
+        try
+        {
+            // 前回の控えが残っていたら消す (VACUUM INTO は既にあるファイルへは書けない)
+            if (File.Exists(path)) File.Delete(path);
+            using var cmd = _db!.CreateCommand();
+            cmd.CommandTimeout = 0;
+            cmd.CommandText = "VACUUM INTO @p";
+            cmd.Parameters.AddWithValue("@p", path);
+            cmd.ExecuteNonQuery();
+        }
+        catch (Exception ex)
+        {
+            try { if (File.Exists(path)) File.Delete(path); } catch { }
+            throw new IOException($"構築前のデータを控えられなかったため、インデックス構築を中止しました (データは消していません): {ex.Message}", ex);
+        }
+        return path;
+    }
+
+    // 控えから構築前の状態に戻す (同じ接続へ SQLite のバックアップで書き戻すので、他で開いている接続があっても戻せる)。
+    // 戻せなかったら控えは消さずに残し、場所を知らせる
+    private void RestorePreBuildBackup(string backupPath, Exception cause)
+    {
+        StatusChanged?.Invoke($"インデックス構築が途中で終わったため ({cause.Message})、構築前のデータへ戻しています...");
+        try
+        {
+            EnsureDb();
+            using (var bak = new SqliteConnection($"Data Source={backupPath};Mode=ReadOnly;Pooling=False"))
+            {
+                bak.Open();
+                bak.BackupDatabase(_db!);
+            }
+            StatusChanged?.Invoke("構築前のデータへ戻しました");
+            DeletePreBuildBackup(backupPath);
+        }
+        catch (Exception ex)
+        {
+            StatusChanged?.Invoke($"構築前のデータへ戻せませんでした: {ex.Message} (控えは {backupPath} に残しています)");
+        }
+    }
+
+    private void DeletePreBuildBackup(string backupPath)
+    {
+        try { if (File.Exists(backupPath)) File.Delete(backupPath); }
+        catch (Exception ex) { StatusChanged?.Invoke($"構築前の控え {backupPath} を消せませんでした: {ex.Message}"); }
+    }
+
+    private async Task BuildStructuredIndexStepsAsync(string dataP4kPath, CancellationToken ct, bool requestShopPriceFetch)
+    {
         StatusChanged?.Invoke("ゲームデータの構造化インデックスを構築中...");
         var sw = Stopwatch.StartNew();
         int step = 0;
         int totalSteps = 6;
         var now = DateTime.UtcNow.ToString("o");
 
+        // wiki から取って missions に入れた分 (wiki_* 列) は、構築が missions を作り直すと消えるので、消す前に控え、
+        // ミッションを抽出した後に同じ record_name の行へ戻す (構築後に無くなったミッションの分は捨てる)
+        SaveWikiColumns(_db!);
+
         // クリア
         using (var cmd = _db!.CreateCommand())
         {
-            cmd.CommandText = "DELETE FROM item_index; DELETE FROM ship_ports; DELETE FROM ships; DELETE FROM items; DELETE FROM missions; DELETE FROM commodities; DELETE FROM gamedata_cache; DELETE FROM gamedata_meta;";
+            // gamedata_meta は、この構築が作り直すデータについての記録 (RebuiltDataMetaKeys) だけ消す。作り直さないデータ
+            // (ベクトル検索の埋め込み・派閥と貢献度) の記録と、この PC だけの印 (LocalOnlyMetaKeys) は残す
+            cmd.CommandText = "DELETE FROM item_index; DELETE FROM ship_ports; DELETE FROM ships; DELETE FROM items; DELETE FROM missions; DELETE FROM commodities; DELETE FROM gamedata_cache; "
+                + $"DELETE FROM gamedata_meta WHERE key IN ({string.Join(", ", RebuiltDataMetaKeys.Select(k => $"'{k}'"))});";
             cmd.ExecuteNonQuery();
         }
 
@@ -1271,6 +1402,8 @@ public class GameDataExtractor : IDisposable
         step++;
         ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] ミッション・契約を抽出中...");
         int missionCount = await ExtractMissionsAsync(dataP4kPath, now, ct);
+        var wikiRestored = RestoreWikiColumns(_db!);
+        StatusChanged?.Invoke($"[{step}/{totalSteps}] wiki のミッション情報を {wikiRestored} 件引き継ぎました");
 
         // Step 5: コモディティ
         step++;
@@ -1284,6 +1417,10 @@ public class GameDataExtractor : IDisposable
         SetMeta("p4k_last_modified", p4kModified.ToString("o"));
         SetMeta("indexed_at", now);
         SetMeta("p4k_path", dataP4kPath);
+        // ゲームの版 (Data.p4k と同じフォルダの build_manifest.id)。パッチ更新ありの判定 (IsP4kUpdated) で日時より優先して比べる
+        var (buildVersion, buildChangeNum) = ReadBuildManifest(dataP4kPath);
+        if (!string.IsNullOrEmpty(buildVersion)) SetMeta(BuildVersionMetaKey, buildVersion);
+        if (!string.IsNullOrEmpty(buildChangeNum)) SetMeta(BuildChangeNumMetaKey, buildChangeNum);
 
         // 中身を消して入れ直したページが空きとして残り、ファイルが大きいままになるので VACUUM で詰める。
         // 売り場・価格の裏の取得 (ShopPriceFetchRequested) はこの後に始まる。失敗しても構築の結果は使えるので、知らせて続ける
@@ -1333,7 +1470,8 @@ public class GameDataExtractor : IDisposable
     // 構築・再抽出が失敗したとき、止めた取得の続きを裏で再開してほしいときに起きる (引数は gamedata_cache.db の場所)
     public static event Action<string>? ShopPriceFetchResumeRequested;
 
-    private static async Task PauseShopPriceFetchAsync()
+    // (バックアップのインポートの前にも MainWindow から呼ぶ)
+    internal static async Task PauseShopPriceFetchAsync()
     {
         if (ShopPriceFetchPauseRequested is not { } handlers) return;
         foreach (var h in handlers.GetInvocationList().Cast<Func<Task>>())
@@ -1970,8 +2108,97 @@ public class GameDataExtractor : IDisposable
         if (string.IsNullOrEmpty(stored)) return true;
         var p4kPath = FindDataP4k();
         if (p4kPath == null) return false;
+
+        // 構築したときのゲームの版と今の版が両方分かれば、版で比べる (配布の DB を受け取っただけでは
+        // Data.p4k の更新日時が作者の PC と違うので、日時では「パッチ更新あり」と出てしまうため)
+        var (curVersion, curChangeNum) = ReadBuildManifest(p4kPath);
+        var storedVersion = GetMeta(BuildVersionMetaKey);
+        var storedChangeNum = GetMeta(BuildChangeNumMetaKey);
+        bool comparable = false, differs = false;
+        if (!string.IsNullOrEmpty(storedVersion) && !string.IsNullOrEmpty(curVersion))
+        {
+            comparable = true;
+            differs |= storedVersion != curVersion;
+        }
+        if (!string.IsNullOrEmpty(storedChangeNum) && !string.IsNullOrEmpty(curChangeNum))
+        {
+            comparable = true;
+            differs |= storedChangeNum != curChangeNum;
+        }
+        if (comparable) return differs;
+
+        // 版が分からないときは今までどおり Data.p4k の更新日時で比べる
         var current = File.GetLastWriteTimeUtc(p4kPath).ToString("o");
         return current != stored;
+    }
+
+    // missions の wiki の列 (FetchWikiMissionsAsync が入れるもの。MigrateWikiColumns で足す列)
+    private static readonly string[] WikiMissionColumns =
+        ["wiki_title", "wiki_faction", "wiki_reward", "wiki_legality", "wiki_enemy_min", "wiki_enemy_max", "wiki_duration_min", "wiki_uuid"];
+
+    // 構築の前に、missions の wiki の列が入っている行を一時表 (temp.wiki_keep) に控える
+    internal static void SaveWikiColumns(SqliteConnection db)
+    {
+        using var cmd = db.CreateCommand();
+        var cols = string.Join(", ", WikiMissionColumns);
+        cmd.CommandText = "DROP TABLE IF EXISTS temp.wiki_keep; "
+            + $"CREATE TEMP TABLE wiki_keep AS SELECT record_name, {cols} FROM main.missions WHERE "
+            + string.Join(" OR ", WikiMissionColumns.Select(c => $"{c} IS NOT NULL"));
+        cmd.ExecuteNonQuery();
+    }
+
+    // 控えた wiki の列を、構築後の missions の同じ record_name の行へ戻す (無くなったミッションの分は捨てる)。戻した行数を返す
+    internal static int RestoreWikiColumns(SqliteConnection db)
+    {
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM temp.sqlite_master WHERE type = 'table' AND name = 'wiki_keep'";
+        if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0) return 0;
+        cmd.CommandText = $"UPDATE main.missions SET {string.Join(", ", WikiMissionColumns.Select(c => $"{c} = k.{c}"))} "
+            + "FROM temp.wiki_keep AS k WHERE main.missions.record_name = k.record_name";
+        var n = cmd.ExecuteNonQuery();
+        cmd.CommandText = "DROP TABLE IF EXISTS temp.wiki_keep";
+        cmd.ExecuteNonQuery();
+        return n;
+    }
+
+    // インデックス構築 (BuildStructuredIndexStepsAsync) が作り直すデータについての gamedata_meta の記録。構築の最初に消す。
+    // game_version / p4k_last_modified / indexed_at / p4k_path / 版: 構築の手順6で書き直す。
+    // equipment_rebuilt_at: 構築が作り直す装備データ (item_index / ships / ship_ports) を前に再抽出した時刻。
+    internal static readonly string[] RebuiltDataMetaKeys =
+    [
+        "game_version", "p4k_last_modified", "indexed_at", "p4k_path", BuildVersionMetaKey, BuildChangeNumMetaKey,
+        "equipment_rebuilt_at",
+    ];
+
+    // gamedata_meta に残すゲームの版 (build_manifest.id の Data.Version と Data.RequestedP4ChangeNum)
+    internal const string BuildVersionMetaKey = "build_version";
+    internal const string BuildChangeNumMetaKey = "build_p4_change_num";
+
+    // Data.p4k と同じフォルダの build_manifest.id から、版 (Data.Version 例 "4.10.197.2878") と
+    // RequestedP4ChangeNum (例 "12913470") を読む。ファイルが無い・読めない・値が無ければ null
+    internal static (string? Version, string? ChangeNum) ReadBuildManifest(string p4kPath)
+    {
+        var dir = Path.GetDirectoryName(p4kPath);
+        if (string.IsNullOrEmpty(dir)) return (null, null);
+        var (version, changeNum, _) = ReadBuildManifestFile(Path.Combine(dir, "build_manifest.id"));
+        return (version, changeNum);
+    }
+
+    // build_manifest.id (JSON。{"Data": {"Branch": "sc-alpha-4.10.2", "Version": "4.10.197.2878", "RequestedP4ChangeNum": "12913470", ...}}) の
+    // Data.Version・Data.RequestedP4ChangeNum・Data.Branch を読む。ファイルが無い・読めない・値が無ければ null
+    internal static (string? Version, string? ChangeNum, string? Branch) ReadBuildManifestFile(string manifestPath)
+    {
+        try
+        {
+            if (!File.Exists(manifestPath)) return (null, null, null);
+            using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
+            if (!doc.RootElement.TryGetProperty("Data", out var data) || data.ValueKind != JsonValueKind.Object) return (null, null, null);
+            static string? Str(JsonElement e, string key) =>
+                e.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(v.GetString())
+                    ? v.GetString()!.Trim() : null;
+            return (Str(data, "Version"), Str(data, "RequestedP4ChangeNum"), Str(data, "Branch"));
+        }
+        catch { return (null, null, null); }
     }
 
     // 装備データ (item_index / ships / ship_ports) だけを再抽出する。全体インデックス (BuildStructuredIndexAsync) とは別扱いで、
@@ -4234,10 +4461,13 @@ public class GameDataExtractor : IDisposable
         return await RunDcbQueryRawAsync(p4kPath, path, filter, ct);
     }
 
+    // DROP → CREATE → INSERT を 1 つのトランザクションで行う (途中で失敗しても前の item_index_fts が残り、全文検索の表が欠けない)
     public void RebuildFts5Index()
     {
         EnsureDb();
-        using var cmd = _db!.CreateCommand();
+        using var tx = _db!.BeginTransaction();
+        using var cmd = _db.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = "DROP TABLE IF EXISTS item_index_fts";
         cmd.ExecuteNonQuery();
 
@@ -4246,6 +4476,7 @@ public class GameDataExtractor : IDisposable
 
         cmd.CommandText = "INSERT INTO item_index_fts(uuid, name, name_ja, record_name, item_type, sub_type, manufacturer) SELECT uuid, name, COALESCE(name_ja,''), record_name, item_type, sub_type, manufacturer FROM item_index";
         cmd.ExecuteNonQuery();
+        tx.Commit();
     }
 
     // item_index.name_ja を translations.db の item_Name 行の訳で埋める。

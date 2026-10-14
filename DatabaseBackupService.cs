@@ -23,12 +23,12 @@ public static class DatabaseBackupService
     // player_damage_params: 何発で倒せるか (TTK) に使う体力・部位の倍率・アーマーの倍率 (インデックス構築で作る)
     // item_ports: タレット・ジンバル・船の武器自身の子ポートの定義 (インデックス構築で作る)
     // item_port_labels: 品目の中の枠の名前と表示名 (日本語化で itemPort_ キーを足すのに使う。インデックス構築で作る)
-    private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache", "item_shop_prices", "ammo_params", "item_variants", "player_damage_params", "item_ports", "item_port_labels"];
+    // item_index: 品目の索引 (全文検索の表 item_index_fts は取り込まず、取り込んだ後に item_index から作り直す)。item_vectors: チャットのベクトル検索の埋め込み。
+    // mission_reputation / faction_reputation / reputation_reward_amount: ミッションの派閥・貢献度 (日本語化で使う)
+    private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache", "item_shop_prices", "ammo_params", "item_variants", "player_damage_params", "item_ports", "item_port_labels",
+        "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
     private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "ship_loaners", "store_skus", "my_components", "ship_loadouts"];
-
-    // 個人資産テーブル。バックアップ側にデータがある場合のみ反映する (ship_matrix は公開データなので含めない)
-    private static readonly string[] PersonalTables = ["my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "my_components", "ship_loadouts"];
 
     public static string[] GetTables(BackupCategory category) => category switch
     {
@@ -188,8 +188,24 @@ public static class DatabaseBackupService
         return result;
     }
 
+    // ===== インポート (復元) =====
+    // 決まり: 利用者が入力したもの (個人データ) は今の DB (a) を残し、バックアップ (b) の分は a とぶつからないものだけ足す (a 優先の和集合)。
+    // ゲームやネットから取得したデータは、選んだカテゴリについてバックアップ (b) の内容で置き換える。
+    // 3 つの DB をまとめて扱い、どこかで失敗したら、取り込みの前に取った控えから全部を元に戻す
+
+    // 交易 DB (trade_cache.db) の表の扱い
+    // ネット由来 (b で置き換え): UEX の価格・船・端末・取得時刻、RSI の Ship Matrix・ローナー・ストア
+    private static readonly string[] TradeNetTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "ship_matrix", "ship_loaners", "store_skus"];
+    // 個人で、行を見分けるキー (主キー) があるもの: キーで a 優先の和集合
+    private static readonly string[] TradePersonalKeyedTables = ["hangar_pledges", "hangar_ccus", "hangar_ship_marks", "ship_loadouts"];
+    // 個人で、行を見分けるキーが無いもの (主キーが無い、または中身と関係の無い連番の id だけのもの):
+    // a にその表の行が 1 行でもあれば a だけ、a が空 (表が無い) なら b の行を使う
+    private static readonly string[] TradePersonalUnkeyedTables = ["my_ships", "my_components", "hangar_items", "hangar_nameable_ships"];
+    // hangar_meta のうちネット由来のデータ (ship_matrix / ship_loaners / store_skus) の取得時刻のキー (b を使う)。ほかのキー (同期の時刻・残高) は個人
+    private static readonly string[] HangarMetaNetKeys = ["ship_matrix_fetched_at", "loaners_fetched_at", "store_fetched_at"];
+
     public static async Task ImportFromZipAsync(string zipPath, string translationDbPath, string indexDbPath,
-        IEnumerable<BackupCategory> categories, ImportMode mode, Action<string>? onStatus = null, string? tradeDbPath = null)
+        IEnumerable<BackupCategory> categories, Action<string>? onStatus = null, string? tradeDbPath = null)
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"sc_backup_{Guid.NewGuid():N}");
         try
@@ -197,64 +213,454 @@ public static class DatabaseBackupService
             Directory.CreateDirectory(tempDir);
             onStatus?.Invoke("ZIP を展開中...");
             await Task.Run(() => ZipFile.ExtractToDirectory(zipPath, tempDir));
-
-            foreach (var dbFile in Directory.GetFiles(tempDir, "*.db"))
-            {
-                onStatus?.Invoke($"{Path.GetFileName(dbFile)} をインポート中...");
-                await ImportFromDbAsync(dbFile, translationDbPath, indexDbPath, categories, mode, onStatus, tradeDbPath);
-            }
+            await ImportFromDbFilesAsync(Directory.GetFiles(tempDir, "*.db"), translationDbPath, indexDbPath, categories, onStatus, tradeDbPath);
         }
         finally { try { Directory.Delete(tempDir, true); } catch { } }
-
-        onStatus?.Invoke("インポート完了");
     }
 
-    public static async Task ImportFromDbAsync(string sourceDbPath, string translationDbPath, string indexDbPath,
-        IEnumerable<BackupCategory> categories, ImportMode mode, Action<string>? onStatus = null, string? tradeDbPath = null)
+    // 展開したバックアップの DB ファイル (translations.db / gamedata_cache.db / trade_cache.db。どれかだけでもよい) から取り込む。
+    // どの DB かはファイルの名前ではなく、中の表で見分ける
+    public static Task ImportFromDbFilesAsync(IEnumerable<string> sourceDbPaths, string translationDbPath, string indexDbPath,
+        IEnumerable<BackupCategory> categories, Action<string>? onStatus = null, string? tradeDbPath = null)
     {
+        var sources = sourceDbPaths.ToList();
         var cats = categories.ToHashSet();
-        var allowedTables = new HashSet<string>();
-        foreach (var cat in cats)
-            foreach (var t in GetTables(cat))
-                allowedTables.Add(t);
+        return Task.Run(() => ImportCore(sources, translationDbPath, indexDbPath, cats, onStatus, tradeDbPath));
+    }
 
-        await Task.Run(() =>
+    private static void ImportCore(List<string> sources, string translationDbPath, string indexDbPath,
+        HashSet<BackupCategory> cats, Action<string>? onStatus, string? tradeDbPath)
+    {
+        string? srcTrans = null, srcIndex = null, srcTrade = null;
+        foreach (var p in sources)
         {
-            using var srcConn = new SqliteConnection($"Data Source={sourceDbPath};Mode=ReadOnly");
-            srcConn.Open();
+            using var conn = new SqliteConnection($"Data Source={p};Mode=ReadOnly;Pooling=False");
+            conn.Open();
+            if (srcTrans == null && (TableExists(conn, "translations") || TableExists(conn, "glossary"))) srcTrans = p;
+            if (srcIndex == null && (TableExists(conn, "items") || TableExists(conn, "item_index") || TableExists(conn, "knowledge") || TableExists(conn, "gamedata_meta"))) srcIndex = p;
+            if (srcTrade == null && (TableExists(conn, "trade_prices") || TableExists(conn, "my_ships") || TableExists(conn, "hangar_pledges"))) srcTrade = p;
+        }
 
-            var translationTables = allowedTables.Intersect(TranslationTables.Concat(GlossaryTables)).ToHashSet();
-            var indexTables = allowedTables.Intersect(IndexTables.Concat(KnowledgeTables)).ToHashSet();
-            var tradeTables = allowedTables.Intersect(TradeTables).ToHashSet();
+        var doTrans = srcTrans != null && (cats.Contains(BackupCategory.Translations) || cats.Contains(BackupCategory.Glossary));
+        var doIndex = srcIndex != null && (cats.Contains(BackupCategory.Index) || cats.Contains(BackupCategory.Knowledge));
+        var doTrade = srcTrade != null && cats.Contains(BackupCategory.Trade) && !string.IsNullOrEmpty(tradeDbPath);
+        // 翻訳かゲームデータを置き換えたら、ゲームデータの日本語名 (item_index.name_ja) を今の個人訳で付け直し、全文検索の表を作り直す
+        var repopulate = (doTrans && cats.Contains(BackupCategory.Translations)) || (doIndex && cats.Contains(BackupCategory.Index));
+        if (!doTrans && !doIndex && !doTrade)
+        {
+            onStatus?.Invoke("取り込むデータがありません");
+            return;
+        }
 
-            if (translationTables.Count > 0)
+        // 取り込み先 (控えを作る DB)
+        var targets = new List<string>();
+        if (doTrans) targets.Add(translationDbPath);
+        var doIndexSchema = doIndex || (repopulate && File.Exists(indexDbPath));
+        if (doIndexSchema) targets.Add(indexDbPath);
+        if (doTrade) targets.Add(tradeDbPath!);
+
+        // 控え (取り込みの前の状態)。空きが足りなければ何もしない。取り込みで増える分 (取り込むバックアップの DB の大きさの合計) も見込む
+        var importBytes = new[] { doTrans ? srcTrans : null, doIndex ? srcIndex : null, doTrade ? srcTrade : null }
+            .OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).Sum(p => new FileInfo(p).Length);
+        EnsureFreeSpaceForBackups(targets, importBytes);
+
+        // 今ある取り込み先の控えは、DB の形を揃える (EnsureSchema は開けない・壊れた DB を .corrupt- へ退避して作り直すことがある) より前に作る。
+        // 控えを作れなければ (壊れた DB など) 何も取り込まずに知らせる
+        var backups = new Dictionary<string, string>();
+        string? current = null;
+        try
+        {
+            foreach (var t in targets.Where(File.Exists))
+            {
+                current = t;
+                onStatus?.Invoke($"{Path.GetFileName(t)} の取り込み前の控えを作っています...");
+                backups[t] = CreateImportBackup(t);
+            }
+        }
+        catch (Exception ex)
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var b in backups.Values) TryDelete(b);
+            throw new IOException($"{Path.GetFileName(current)} の取り込み前の控えを作れなかったため、何も取り込んでいません: {ex.Message}", ex);
+        }
+
+        try
+        {
+            // 取り込み先の DB の形を今のものに揃える (無ければ作る)
+            onStatus?.Invoke("取り込み先の DB を確かめています...");
+            if (doTrans)
+            {
+                using (new TranslationDatabase(translationDbPath)) { }
+            }
+            if (doIndexSchema)
+            {
+                using (var gx = new GameDataExtractor(Path.GetDirectoryName(indexDbPath) ?? ".", indexDbPath)) gx.EnsureSchema();
+                using (var conn = new SqliteConnection($"Data Source={indexDbPath};Pooling=False"))
+                {
+                    conn.Open();
+                    EnsureIndexSchema(conn);
+                }
+            }
+            if (doTrade)
+            {
+                using (var conn = new SqliteConnection($"Data Source={tradeDbPath};Pooling=False"))
+                {
+                    conn.Open();
+                    EnsureTradeSchema(conn);
+                    // id 列の無い古い trade_terminals は、TradeService が開いたときに作り直される (取り込んだ端末が消える) ので、
+                    // 取り込む前に同じ移行をしておく
+                    TradeService.MigrateTerminalsSchema(conn);
+                }
+            }
+            SqliteConnection.ClearAllPools();
+
+            // 取り込みの前には無かった DB (上で作ったもの) の控えは、今までどおり形を揃えた後に作る
+            foreach (var t in targets.Where(t => !backups.ContainsKey(t)))
+            {
+                onStatus?.Invoke($"{Path.GetFileName(t)} の取り込み前の控えを作っています...");
+                backups[t] = CreateImportBackup(t);
+            }
+
+            if (doTrans)
             {
                 onStatus?.Invoke("翻訳DBにインポート中...");
-                using var db = new TranslationDatabase(translationDbPath);
-                CopyTables(srcConn, db.Connection, translationTables, mode, onStatus);
+                ImportTranslationsDb(translationDbPath, srcTrans!, cats, onStatus);
             }
-
-            if (indexTables.Count > 0)
+            if (doIndex)
             {
                 onStatus?.Invoke("インデックスDBにインポート中...");
-                using var destConn = new SqliteConnection($"Data Source={indexDbPath}");
-                destConn.Open();
-                EnsureIndexSchema(destConn);
-                CopyTables(srcConn, destConn, indexTables, mode, onStatus);
+                ImportIndexDb(indexDbPath, srcIndex!, cats, onStatus);
             }
-
-            if (tradeTables.Count > 0 && !string.IsNullOrEmpty(tradeDbPath))
+            if (doTrade)
             {
                 onStatus?.Invoke("交易DBにインポート中...");
-                using var destConn = new SqliteConnection($"Data Source={tradeDbPath}");
-                destConn.Open();
-                EnsureTradeSchema(destConn);
-                CopyTables(srcConn, destConn, tradeTables, mode, onStatus);
+                ImportTradeDb(tradeDbPath!, srcTrade!, onStatus);
             }
-        });
+            if (repopulate && File.Exists(indexDbPath))
+            {
+                onStatus?.Invoke("日本語名を付け直し、全文検索の表を作り直しています...");
+                using var gx = new GameDataExtractor(Path.GetDirectoryName(indexDbPath) ?? ".", indexDbPath);
+                if (File.Exists(translationDbPath)) gx.PopulateJapaneseNames(translationDbPath);
+                else gx.RebuildFts5Index();
+            }
+            SqliteConnection.ClearAllPools();
+        }
+        catch (Exception ex)
+        {
+            SqliteConnection.ClearAllPools();
+            onStatus?.Invoke("インポートに失敗したため、取り込み前の状態に戻しています...");
+            var notRestored = new List<string>();
+            foreach (var (target, backup) in backups)
+            {
+                try { RestoreImportBackup(backup, target); }
+                catch (Exception rex) { notRestored.Add($"{Path.GetFileName(target)} ({rex.Message}。控えは {backup})"); }
+            }
+            SqliteConnection.ClearAllPools();
+            if (notRestored.Count > 0)
+                throw new IOException($"インポートに失敗し、次の DB を取り込み前の状態に戻せませんでした: {string.Join(", ", notRestored)}。元の失敗: {ex.Message}", ex);
+            foreach (var b in backups.Values) TryDelete(b);
+            throw new InvalidOperationException($"インポートに失敗したため、取り込み前の状態に戻しました: {ex.Message}", ex);
+        }
 
+        foreach (var b in backups.Values) TryDelete(b);
         onStatus?.Invoke("インポート完了");
     }
+
+    // 控えの置き場所 (取り込み先と同じフォルダ)
+    private static string CreateImportBackup(string dbPath)
+    {
+        var bak = dbPath + ".import.bak";
+        TryDelete(bak);
+        using var conn = new SqliteConnection($"Data Source={dbPath};Pooling=False");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandTimeout = 0;
+        cmd.CommandText = "VACUUM INTO @p";
+        cmd.Parameters.AddWithValue("@p", bak);
+        cmd.ExecuteNonQuery();
+        return bak;
+    }
+
+    // 控えから戻す (SQLite のバックアップで書き戻すので、ほかで開いている接続があっても戻せる)
+    private static void RestoreImportBackup(string backupPath, string dbPath)
+    {
+        using var bak = new SqliteConnection($"Data Source={backupPath};Mode=ReadOnly;Pooling=False");
+        bak.Open();
+        using var dest = new SqliteConnection($"Data Source={dbPath};Pooling=False");
+        dest.Open();
+        bak.BackupDatabase(dest);
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
+    }
+
+    // 控えを作る空き (取り込み先の DB の大きさの合計 + 取り込みで増える分の見込み (importBytes: 取り込むバックアップの DB の大きさの合計) + 100MB) があるか
+    private static void EnsureFreeSpaceForBackups(List<string> targets, long importBytes)
+    {
+        long need = 100L * 1024 * 1024 + targets.Where(File.Exists).Sum(t => new FileInfo(t).Length) + importBytes;
+        long free;
+        string root;
+        try
+        {
+            root = Path.GetPathRoot(Path.GetFullPath(targets[0])) ?? "";
+            if (root.Length == 0) return;
+            free = new DriveInfo(root).AvailableFreeSpace;
+        }
+        catch { return; }   // 空きを調べられない (ネットワークのフォルダ等) ときは調べずに進む
+        if (free < need)
+            throw new IOException($"取り込み前の控えを作る空きが足りません ({root} の空き {free / 1024 / 1024:N0} MB、必要 {need / 1024 / 1024:N0} MB)。何も取り込んでいません");
+    }
+
+    // translations.db: translations は、b の行 (ゲーム由来の訳) で置き換え、a の個人行 (manual / csv / glossary) は残す
+    // (同じ key に b の行があれば english だけ b の値にする)。b の個人行は、a に同じ key の個人行が無ければ b のまま入る。
+    // glossary は a 優先の和集合 (同じ english は a のまま)
+    private static void ImportTranslationsDb(string aPath, string bPath, HashSet<BackupCategory> cats, Action<string>? onStatus)
+    {
+        using var conn = OpenWithSource(aPath, bPath);
+        using var tx = conn.BeginTransaction();
+        var personal = string.Join(", ", App.PersonalTranslationSources.Select(s => $"'{s}'"));
+        if (cats.Contains(BackupCategory.Translations) && SourceTableExists(conn, tx, "translations"))
+        {
+            var cols = CommonColumns(conn, tx, "translations");
+            if (!cols.Contains("key", StringComparer.OrdinalIgnoreCase))
+                throw new InvalidOperationException("バックアップの translations に key の列がありません");
+            Exec(conn, tx, $"DELETE FROM main.translations WHERE COALESCE(source, '') NOT IN ({personal})");
+            var colList = string.Join(", ", cols.Select(Q));
+            var onConflict = cols.Contains("english", StringComparer.OrdinalIgnoreCase)
+                ? "DO UPDATE SET english = excluded.english" : "DO NOTHING";
+            // INSERT ... SELECT に ON CONFLICT を付けるときは、構文のあいまいさを避けるため SELECT に WHERE が要る
+            var n = Exec(conn, tx, $"INSERT INTO main.translations ({colList}) SELECT {colList} FROM src.translations WHERE true ON CONFLICT(key) {onConflict}");
+            onStatus?.Invoke($"translations: {n} 件完了");
+        }
+        if (cats.Contains(BackupCategory.Glossary) && SourceTableExists(conn, tx, "glossary"))
+        {
+            var cols = CommonColumns(conn, tx, "glossary");
+            var colList = string.Join(", ", cols.Select(Q));
+            var n = Exec(conn, tx, $"INSERT OR IGNORE INTO main.glossary ({colList}) SELECT {colList} FROM src.glossary");
+            onStatus?.Invoke($"glossary: {n} 件追加");
+        }
+        tx.Commit();
+    }
+
+    // gamedata_cache.db: ゲーム・ネット由来の表 (IndexTables) は b で置き換え。gamedata_meta は、この PC だけの印 (LocalOnlyMetaKeys) を
+    // a の値のままにし (b からは取らない。a に無ければ無いまま)、ほかのキーは b で置き換え。knowledge は a の行を残し、b の行は同じ本文 (content) が a に無いものだけ新しい id で足す
+    private static void ImportIndexDb(string aPath, string bPath, HashSet<BackupCategory> cats, Action<string>? onStatus)
+    {
+        using var conn = OpenWithSource(aPath, bPath);
+        using var tx = conn.BeginTransaction();
+        if (cats.Contains(BackupCategory.Index))
+        {
+            foreach (var table in IndexTables)
+            {
+                if (table == "gamedata_meta" || !SourceTableExists(conn, tx, table)) continue;
+                var n = ReplaceTable(conn, tx, table);
+                onStatus?.Invoke($"{table}: {n} 件完了");
+            }
+            // name_key 列の無い版 (v1.x) のバックアップの item_index を入れたときは、GameDataExtractor.MigrateItemIndexNameKeyColumn が
+            // 列を足すときと同じく、チャットのベクトル検索の埋め込み (item_vectors) の行をすべて消す (name_key は NULL のまま。
+            // 次のインデックス構築・装備データの再抽出で埋まり、次のベクトル検索の構築で埋め込みを全件作り直す)。
+            // 今の DB には name_key 列がある (EnsureSchema で足してある) ので、取り込んだ後に移行が走らないため、ここで行う
+            if (SourceTableExists(conn, tx, "item_index") && !SourceColumnExists(conn, tx, "item_index", "name_key")
+                && Scalar(conn, tx, "SELECT COUNT(*) FROM main.sqlite_master WHERE type='table' AND name='item_vectors'") > 0)
+            {
+                var n = Exec(conn, tx, "DELETE FROM main.item_vectors");
+                onStatus?.Invoke($"item_vectors: バックアップの item_index に name_key の列が無いため {n} 件消しました (次のベクトル検索の構築で作り直します)");
+            }
+            if (SourceTableExists(conn, tx, "gamedata_meta"))
+            {
+                Exec(conn, tx, $"DELETE FROM main.gamedata_meta WHERE key NOT IN ({LocalOnlyMetaKeyList})");
+                Exec(conn, tx, $"INSERT OR REPLACE INTO main.gamedata_meta (key, value) SELECT key, value FROM src.gamedata_meta WHERE key NOT IN ({LocalOnlyMetaKeyList})");
+            }
+        }
+        if (cats.Contains(BackupCategory.Knowledge) && SourceTableExists(conn, tx, "knowledge"))
+        {
+            var cols = CommonColumns(conn, tx, "knowledge").Where(c => !c.Equals("id", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (cols.Contains("content", StringComparer.OrdinalIgnoreCase))
+            {
+                var colList = string.Join(", ", cols.Select(Q));
+                var n = Exec(conn, tx, $"INSERT INTO main.knowledge ({colList}) SELECT {colList} FROM src.knowledge s "
+                    + "WHERE NOT EXISTS (SELECT 1 FROM main.knowledge k WHERE k.content = s.content)");
+                onStatus?.Invoke($"knowledge: {n} 件追加");
+            }
+        }
+        NormalizeSequences(conn, tx);
+        tx.Commit();
+    }
+
+    // trade_cache.db: ネット由来の表は b で置き換え、個人の表は a 優先 (TradePersonalKeyedTables / TradePersonalUnkeyedTables の説明のとおり)。
+    // hangar_meta はキーで分ける (HangarMetaNetKeys は b、ほかは a 優先の和集合)
+    private static void ImportTradeDb(string aPath, string bPath, Action<string>? onStatus)
+    {
+        using var conn = OpenWithSource(aPath, bPath);
+        using var tx = conn.BeginTransaction();
+        foreach (var table in TradeTables)
+        {
+            if (!SourceTableExists(conn, tx, table)) continue;
+            if (TradeNetTables.Contains(table))
+            {
+                var n = ReplaceTable(conn, tx, table);
+                onStatus?.Invoke($"{table}: {n} 件完了");
+            }
+            else if (table == "hangar_meta")
+            {
+                var netKeys = string.Join(", ", HangarMetaNetKeys.Select(k => $"'{k}'"));
+                EnsureMainTable(conn, tx, table);
+                Exec(conn, tx, $"DELETE FROM main.hangar_meta WHERE key IN ({netKeys})");
+                Exec(conn, tx, $"INSERT OR REPLACE INTO main.hangar_meta (key, value) SELECT key, value FROM src.hangar_meta WHERE key IN ({netKeys})");
+                Exec(conn, tx, $"INSERT OR IGNORE INTO main.hangar_meta (key, value) SELECT key, value FROM src.hangar_meta WHERE key NOT IN ({netKeys})");
+            }
+            else if (TradePersonalKeyedTables.Contains(table))
+            {
+                EnsureMainTable(conn, tx, table);
+                var colList = string.Join(", ", CommonColumns(conn, tx, table).Select(Q));
+                var n = Exec(conn, tx, $"INSERT OR IGNORE INTO main.{Q(table)} ({colList}) SELECT {colList} FROM src.{Q(table)}");
+                onStatus?.Invoke($"{table}: {n} 件追加");
+            }
+            else if (TradePersonalUnkeyedTables.Contains(table))
+            {
+                EnsureMainTable(conn, tx, table);
+                if (Scalar(conn, tx, $"SELECT EXISTS (SELECT 1 FROM main.{Q(table)})") != 0) continue;
+                var colList = string.Join(", ", CommonColumns(conn, tx, table).Select(Q));
+                var n = Exec(conn, tx, $"INSERT INTO main.{Q(table)} ({colList}) SELECT {colList} FROM src.{Q(table)}");
+                onStatus?.Invoke($"{table}: {n} 件追加");
+            }
+        }
+        NormalizeSequences(conn, tx);
+        tx.Commit();
+    }
+
+    // a の DB を開き、b を "src" として読む
+    private static SqliteConnection OpenWithSource(string aPath, string bPath)
+    {
+        var conn = new SqliteConnection($"Data Source={aPath};Pooling=False");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "ATTACH DATABASE @p AS src";
+        cmd.Parameters.AddWithValue("@p", bPath);
+        cmd.ExecuteNonQuery();
+        return conn;
+    }
+
+    // a の表を b の行で置き換える (列は両方にあるものだけ。a に無い表は b の形で作る)。入れた行数を返す。
+    // b の中で、a にだけある一意の索引 (例 ux_item_shop_prices_key) にぶつかる行は、後の行を残す
+    private static int ReplaceTable(SqliteConnection conn, SqliteTransaction tx, string table)
+    {
+        EnsureMainTable(conn, tx, table);
+        var colList = string.Join(", ", CommonColumns(conn, tx, table).Select(Q));
+        Exec(conn, tx, $"DELETE FROM main.{Q(table)}");
+        return Exec(conn, tx, $"INSERT OR REPLACE INTO main.{Q(table)} ({colList}) SELECT {colList} FROM src.{Q(table)}");
+    }
+
+    // a に表が無ければ b の CREATE TABLE で作る
+    private static void EnsureMainTable(SqliteConnection conn, SqliteTransaction tx, string table)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "SELECT COUNT(*) FROM main.sqlite_master WHERE type = 'table' AND name = @t";
+        cmd.Parameters.AddWithValue("@t", table);
+        if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) > 0) return;
+        cmd.CommandText = "SELECT sql FROM src.sqlite_master WHERE type = 'table' AND name = @t";
+        var sql = cmd.ExecuteScalar() as string;
+        if (string.IsNullOrEmpty(sql)) throw new InvalidOperationException($"{table} の表の形が分かりません");
+        Exec(conn, tx, sql);
+    }
+
+    private static bool SourceTableExists(SqliteConnection conn, SqliteTransaction tx, string table)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "SELECT COUNT(*) FROM src.sqlite_master WHERE type = 'table' AND name = @t";
+        cmd.Parameters.AddWithValue("@t", table);
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) > 0;
+    }
+
+    // b の表に列があるか
+    private static bool SourceColumnExists(SqliteConnection conn, SqliteTransaction tx, string table, string column)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"PRAGMA src.table_info({Q(table)})";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            if (string.Equals(r.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    // a と b の両方にある列 (a の順)
+    private static List<string> CommonColumns(SqliteConnection conn, SqliteTransaction tx, string table)
+    {
+        List<string> Cols(string schema)
+        {
+            var list = new List<string>();
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = $"PRAGMA {schema}.table_info({Q(table)})";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) list.Add(r.GetString(1));
+            return list;
+        }
+        var src = new HashSet<string>(Cols("src"), StringComparer.OrdinalIgnoreCase);
+        var cols = Cols("main").Where(src.Contains).ToList();
+        if (cols.Count == 0) throw new InvalidOperationException($"{table} に、今の DB とバックアップの両方にある列がありません");
+        return cols;
+    }
+
+    // sqlite_sequence (AUTOINCREMENT の表の最後の番号) を、表ごとに 1 行・使った番号の最大以上にする (b の id で入れた表があるため)
+    private static void NormalizeSequences(SqliteConnection conn, SqliteTransaction tx)
+    {
+        if (Scalar(conn, tx, "SELECT COUNT(*) FROM main.sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'") == 0) return;
+        var names = new List<string>();
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "SELECT DISTINCT name FROM main.sqlite_sequence";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) names.Add(r.GetString(0));
+        }
+        foreach (var name in names)
+        {
+            long maxId = 0;
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = "SELECT COUNT(*) FROM main.sqlite_master WHERE type = 'table' AND name = @t";
+                cmd.Parameters.AddWithValue("@t", name);
+                if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) > 0)
+                    maxId = Scalar(conn, tx, $"SELECT COALESCE(MAX(rowid), 0) FROM main.{Q(name)}");
+            }
+            using var up = conn.CreateCommand();
+            up.Transaction = tx;
+            up.CommandText = "SELECT COALESCE(MAX(seq), 0) FROM main.sqlite_sequence WHERE name = @n";
+            up.Parameters.AddWithValue("@n", name);
+            var seq = Math.Max(maxId, Convert.ToInt64(up.ExecuteScalar() ?? 0L));
+            up.CommandText = "DELETE FROM main.sqlite_sequence WHERE name = @n";
+            up.ExecuteNonQuery();
+            up.CommandText = "INSERT INTO main.sqlite_sequence (name, seq) VALUES (@n, @s)";
+            up.Parameters.AddWithValue("@s", seq);
+            up.ExecuteNonQuery();
+        }
+    }
+
+    private static int Exec(SqliteConnection conn, SqliteTransaction tx, string sql)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandTimeout = 0;
+        cmd.CommandText = sql;
+        return cmd.ExecuteNonQuery();
+    }
+
+    private static long Scalar(SqliteConnection conn, SqliteTransaction tx, string sql)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = sql;
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L);
+    }
+
+    private static string Q(string name) => "\"" + name.Replace("\"", "\"\"") + "\"";
 
     private static void EnsureTradeSchema(SqliteConnection conn)
     {
@@ -328,6 +734,11 @@ public static class DatabaseBackupService
                 production_status TEXT,
                 production_note TEXT,
                 fetched_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS ship_loaners (
+                ship_name TEXT NOT NULL,
+                loaner_name TEXT NOT NULL,
+                PRIMARY KEY (ship_name, loaner_name)
             );
             CREATE TABLE IF NOT EXISTS store_skus (
                 id TEXT PRIMARY KEY,
@@ -404,71 +815,6 @@ public static class DatabaseBackupService
             alter.CommandText = "ALTER TABLE store_skus ADD COLUMN native_discounted_cents INTEGER DEFAULT 0";
             alter.ExecuteNonQuery();
         }
-    }
-
-    private static void CopyTables(SqliteConnection src, SqliteConnection dest,
-        HashSet<string> tables, ImportMode mode, Action<string>? onStatus)
-    {
-        using (var fk = dest.CreateCommand()) { fk.CommandText = "PRAGMA foreign_keys = OFF"; fk.ExecuteNonQuery(); }
-        using var tx = dest.BeginTransaction();
-        foreach (var table in tables)
-        {
-            if (!TableExists(src, table)) continue;
-
-            // 所有船・アップグレード権利 (pledge/CCU) はバックアップ側にデータがある場合のみ反映する
-            // (個人資産除外バックアップは空の my_ships / hangar_* テーブルを含むため、Drop モードでもローカルの個人資産を消さない)
-            if (PersonalTables.Contains(table) && CountRows(src, table) == 0) continue;
-
-            // gamedata_meta のこの PC だけの印は、消さず・読み込まない (受け取った側の印をそのまま残す)
-            var localMetaFilter = table == "gamedata_meta" ? $" WHERE key NOT IN ({LocalOnlyMetaKeyList})" : "";
-            if (mode == ImportMode.Drop)
-            {
-                using var delCmd = dest.CreateCommand();
-                delCmd.CommandText = $"DELETE FROM {table}{localMetaFilter}";
-                delCmd.Transaction = tx;
-                delCmd.ExecuteNonQuery();
-            }
-
-            using var readCmd = src.CreateCommand();
-            readCmd.CommandText = $"SELECT * FROM {table}{localMetaFilter}";
-            using var reader = readCmd.ExecuteReader();
-
-            var colCount = reader.FieldCount;
-            var colNames = new string[colCount];
-            for (int i = 0; i < colCount; i++)
-                colNames[i] = reader.GetName(i);
-
-            var colList = string.Join(", ", colNames);
-            var paramList = string.Join(", ", colNames.Select((_, i) => $"@p{i}"));
-
-            string insertSql;
-            if (mode == ImportMode.Add && table == "translations" && colNames.Contains("japanese"))
-            {
-                insertSql = $"INSERT INTO {table} ({colList}) VALUES ({paramList}) ON CONFLICT(key) DO UPDATE SET japanese = excluded.japanese, source = excluded.source, translator = excluded.translator, modified_at = excluded.modified_at WHERE {table}.japanese IS NULL OR {table}.japanese = ''";
-            }
-            else
-            {
-                var insertVerb = mode == ImportMode.Add ? "INSERT OR IGNORE" : "INSERT OR REPLACE";
-                insertSql = $"{insertVerb} INTO {table} ({colList}) VALUES ({paramList})";
-            }
-
-            int count = 0;
-            while (reader.Read())
-            {
-                using var insertCmd = dest.CreateCommand();
-                insertCmd.CommandText = insertSql;
-                insertCmd.Transaction = tx;
-                for (int i = 0; i < colCount; i++)
-                    insertCmd.Parameters.AddWithValue($"@p{i}", reader.GetValue(i));
-                insertCmd.ExecuteNonQuery();
-                count++;
-
-                if (count % 5000 == 0)
-                    onStatus?.Invoke($"{table}: {count} 件処理中...");
-            }
-            onStatus?.Invoke($"{table}: {count} 件完了");
-        }
-        tx.Commit();
     }
 
     public static async Task ImportAsync(string backupPath, string translationDbPath, string indexDbPath,

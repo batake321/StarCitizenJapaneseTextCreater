@@ -64,7 +64,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 ; インストール先 ({app}) にだけ置く。作業ディレクトリや %LOCALAPPDATA% にはファイルを置かない。
 ; 同梱 DB (translations.db / gamedata_cache.db / equipment_cache.db) は {app} に置き、
-; 作業ディレクトリへの反映はアプリ起動時の処理 (無ければコピー、新しければ差分マージ) に任せる。
+; 作業ディレクトリへの反映はアプリ起動時の処理 (同梱 DB が替わった・作業ディレクトリに無い・使えないときに、
+; 同梱 DB を土台に作り直し、今までの DB から利用者の入力 (手動訳・用語集・チャットの記憶など) を引き継ぐ) に任せる。
 ; trade_cache.db (と作業用の -wal / -shm / -journal) は個人データなので、publish に紛れていても入れない
 Source: "publish\*"; DestDir: "{app}"; Excludes: "trade_cache.db,trade_cache.db-wal,trade_cache.db-shm,trade_cache.db-journal"; Flags: ignoreversion recursesubdirs createallsubdirs
 
@@ -1030,6 +1031,28 @@ begin
   Result := X = Y;
 end;
 
+// 同じフォルダか、その下のフォルダか (大文字小文字と末尾の \ を無視。比べ方は IsSameDir と同じ)
+function IsSameOrUnderDir(const A, Parent: String): Boolean;
+var
+  X, Y: String;
+begin
+  X := Trim(A);
+  Y := Trim(Parent);
+  Result := False;
+  if (X = '') or (Y = '') then Exit;
+  X := AddBackslash(OrdinalUpper(X));
+  Y := AddBackslash(OrdinalUpper(Y));
+  Result := (Length(X) >= Length(Y)) and (Copy(X, 1, Length(Y)) = Y);
+end;
+
+// Program Files ({commonpf} / {commonpf32} / {commonpf64}) そのものか、その下か
+function IsUnderProgramFiles(const A: String): Boolean;
+begin
+  Result := IsSameOrUnderDir(A, ExpandConstant('{commonpf}'))
+    or IsSameOrUnderDir(A, ExpandConstant('{commonpf32}'))
+    or IsSameOrUnderDir(A, ExpandConstant('{commonpf64}'));
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
@@ -1043,11 +1066,18 @@ begin
       SuppressibleMsgBox('作業ディレクトリを指定してください。', mbError, MB_OK, IDOK);
       Result := False;
     end
-    // インストール先そのものだと、更新時に同梱 DB で利用者の DB が上書きされ、アンインストールで消えるため不可
-    else if IsSameDir(WorkDirPage.Values[0], WizardDirValue) then
+    // インストール先そのものとその下だと、更新時に同梱 DB で利用者の DB が上書きされ、アンインストールで消えるため不可
+    else if IsSameOrUnderDir(WorkDirPage.Values[0], WizardDirValue) then
     begin
-      SuppressibleMsgBox('作業ディレクトリにインストール先と同じフォルダは指定できません。' + #13#10 +
-        '(更新やアンインストールでデータが消えるおそれがあります。下のフォルダなら指定できます)', mbError, MB_OK, IDOK);
+      SuppressibleMsgBox('作業ディレクトリにインストール先のフォルダとその下のフォルダは指定できません。' + #13#10 +
+        '(更新やアンインストールでデータが消えるおそれがあります)', mbError, MB_OK, IDOK);
+      Result := False;
+    end
+    // Program Files とその下は、普通の権限のアプリからは書き込めない (起動時に DB を写せない) ため不可
+    else if IsUnderProgramFiles(WorkDirPage.Values[0]) then
+    begin
+      SuppressibleMsgBox('作業ディレクトリに Program Files とその下のフォルダは指定できません。' + #13#10 +
+        '(アプリから書き込めません。例: C:\temp)', mbError, MB_OK, IDOK);
       Result := False;
     end;
   end;

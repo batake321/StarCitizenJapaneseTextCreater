@@ -60,32 +60,12 @@
 
         <Separator Grid.Row="3" Margin="0,4,0,8"/>
 
-        <!-- インポートモード -->
-        <GroupBox Grid.Row="4" Header="インポートモード" Margin="0,0,0,12" Padding="8,6">
-            <StackPanel>
-                <RadioButton x:Name="rbAdd" IsChecked="True" Margin="0,4" FontSize="13">
-                    <StackPanel>
-                        <TextBlock Text="追加（上書きしない）" FontWeight="SemiBold"/>
-                        <TextBlock Text="既存データを保持し、新しいデータのみ追加します。"
-                                   Foreground="#666" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"/>
-                    </StackPanel>
-                </RadioButton>
-                <RadioButton x:Name="rbOverwrite" Margin="0,6" FontSize="13">
-                    <StackPanel>
-                        <TextBlock Text="上書き（既存データを更新）" FontWeight="SemiBold"/>
-                        <TextBlock Text="既存データをバックアップの内容で上書きします。バックアップにないデータは残ります。"
-                                   Foreground="#666" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"/>
-                    </StackPanel>
-                </RadioButton>
-                <RadioButton x:Name="rbDrop" Margin="0,6" FontSize="13">
-                    <StackPanel>
-                        <TextBlock Text="全置換（一度クリア）" FontWeight="SemiBold"/>
-                        <TextBlock Text="既存データを削除し、バックアップの内容で完全に置き換えます。"
-                                   Foreground="#C00" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"/>
-                    </StackPanel>
-                </RadioButton>
-            </StackPanel>
-        </GroupBox>
+        <!-- 取り込み方 (選ぶものは無い。決まりの説明だけ) -->
+        <StackPanel Grid.Row="4" Margin="0,0,0,12">
+            <TextBlock Text="取り込み方" FontWeight="SemiBold" FontSize="13"/>
+            <TextBlock Text="ゲームやネットから取得したデータは、バックアップの内容に置き換えます。自分で登録したもの (手動の訳・用語集・記憶・所持船など) は今のものを残し、バックアップにだけあるものを足します。"
+                       Foreground="#666" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"/>
+        </StackPanel>
 
         <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="インポート" Click="Import_Click" Padding="20,8" FontWeight="Bold"

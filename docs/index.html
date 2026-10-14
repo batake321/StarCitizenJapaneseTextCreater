@@ -127,8 +127,8 @@
         </tr>
         <tr>
           <td><b>翻訳データベース (zip)</b></td>
-          <td>Patch 4.10.2 対応 (2026/10/13)。アプリの <span class="btn">インポート (復元)</span> から取り込みます</td>
-          <td><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.0.0/sc_japanese_backup.zip" rel="noreferrer">sc_japanese_backup.zip</a></td>
+          <td>Patch 4.10.2 対応 (2026/10/15)。アプリの <span class="btn">インポート (復元)</span> から取り込みます</td>
+          <td><a href="https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.0.2/sc_japanese_backup.zip" rel="noreferrer">sc_japanese_backup.zip</a></td>
         </tr>
       </tbody>
     </table>
@@ -143,10 +143,10 @@
       <li>好きな場所に展開します。<b>zip 版はインストール作業なしで動きます。</b></li>
       <li>展開したフォルダの中の実行ファイルを起動します。</li>
     </ol>
-    <p><b>インストーラーでも動きます。</b>zip の中の <code>SCJPTextCreator-v2.0.1-Setup.exe</code> を実行すると、作業ディレクトリ（一時ファイルの場所）を選べて、無ければ作成されます。exe を直接使う場合は、起動後に設定タブで設定してください。</p>
+    <p><b>インストーラーでも動きます。</b>zip の中の <code>SCJPTextCreator-v2.0.2-Setup.exe</code> を実行すると、作業ディレクトリ（一時ファイルの場所）を選べて、無ければ作成されます。exe を直接使う場合は、起動後に設定タブで設定してください。</p>
 
     <div class="note warn">
-      <p><strong>アプリを新しいバージョンに入れ替えたときは、翻訳タブの <span class="btn">日本語化</span> → <span class="btn">実行</span> を一度行ってください。</strong>同梱の翻訳データベースがローカルのものより新しい場合、起動時に自動で差分マージされますが（未翻訳のレコードだけを更新し、手動で直した翻訳は保護されます）、ゲーム側のファイルに書き出すのは <span class="btn">日本語化</span> の役目です。</p>
+      <p><strong>アプリを新しいバージョンに入れ替えたときは、翻訳タブの <span class="btn">日本語化</span> → <span class="btn">実行</span> を一度行ってください。</strong>同梱の翻訳データベースが新しくなっていれば、起動時に同梱のものを元に作り直されますが（手動・CSV・用語集で入れた訳、用語集、チャットの記憶は引き継がれます）、ゲーム側のファイルに書き出すのは <span class="btn">日本語化</span> の役目です。</p>
     </div>
 
     <!-- ============================================================ -->
@@ -413,7 +413,7 @@
 
     <h3>直す</h3>
     <ul>
-      <li>一覧の <b>Japanese</b> 列を直接書き換えると、そのレコードは <code>manual</code> になり、以降の再翻訳や同梱 DB のマージで<b>上書きされません</b>。</li>
+      <li>一覧の <b>Japanese</b> 列を直接書き換えると、そのレコードは <code>manual</code> になり、以降の再翻訳で<b>上書きされません</b>。同梱 DB で作り直したときも、手で直した訳は<b>引き継がれます</b>。</li>
       <li><span class="btn">選択した翻訳を削除 (再翻訳用)</span> — 訳文を消して未翻訳に戻します。次の <span class="btn">AI翻訳</span> で訳し直されます。</li>
       <li><span class="btn">全て原文</span> — 選んだ行を英語のまま表示させます。訳すとかえって分かりにくい用語に使います。</li>
       <li><span class="btn">CSV Export</span> / <span class="btn">CSV Import</span> — 表計算ソフトでまとめて直したいときに。</li>
@@ -794,7 +794,7 @@
 
     <details>
       <summary>訳がおかしい / 訳さないでほしい語がある</summary>
-      <p><a href="#editor">翻訳エディタ</a>でその行を直接書き換えると <code>manual</code> になり、再翻訳や同梱 DB のマージでは上書きされません。毎回同じ語を直しているなら、<a href="#glossary">用語集</a>に登録して <span class="btn">一括置換 (翻訳済みテキストに適用)</span> を実行するほうが早いです。ただし<b>一括置換だけは例外で、手で直した行も置き換えます</b>。英語のままにしたい語は、翻訳エディタでその行を選んで <span class="btn">全て原文</span> を押してください。</p>
+      <p><a href="#editor">翻訳エディタ</a>でその行を直接書き換えると <code>manual</code> になり、再翻訳では上書きされず、同梱 DB で作り直したときも引き継がれます。毎回同じ語を直しているなら、<a href="#glossary">用語集</a>に登録して <span class="btn">一括置換 (翻訳済みテキストに適用)</span> を実行するほうが早いです。ただし<b>一括置換だけは例外で、手で直した行も置き換えます</b>。英語のままにしたい語は、翻訳エディタでその行を選んで <span class="btn">全て原文</span> を押してください。</p>
     </details>
 
     <details>

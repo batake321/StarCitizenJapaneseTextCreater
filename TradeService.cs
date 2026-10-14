@@ -474,7 +474,8 @@ public class TradeService
 
     // 旧スキーマ(id 列なし)の trade_terminals だけを作り直す。
     // 無条件 DROP にすると InitDb が呼ばれるたびに取得済みターミナルが消えるため、id 列が無い場合に限定する。
-    private static void MigrateTerminalsSchema(SqliteConnection db)
+    // (インポート (DatabaseBackupService) でも、取り込む前に同じ移行をするために呼ぶ)
+    internal static void MigrateTerminalsSchema(SqliteConnection db)
     {
         var hasId = false;
         using (var check = db.CreateCommand())
