@@ -316,6 +316,9 @@ public partial class App : Application
     //     .bak.new (と横のファイル) が今までの DB なので正式名に戻す (取り込み元として使えるように)。
     //     .bak.new 側に横のファイルがある接尾辞について、正式名の横のファイルがあれば DB の無い残りなので消してから戻す
     //   - .bak.new があり、正式名の DB がある (新しい DB へは入れ替わっていた): .bak.new を .bak にする
+    //     (FinishBak の途中で終わった場合もここ。FinishBak は .bak.new を最後に動かすので、呼び直せば続きができる)
+    // FinishBak も横のファイルを先、DB を最後に動かすので、FinishBak の途中で落ちても
+    // ".bak.new が無く横のファイルだけある" 状態にはならない (1 つ目の分岐は ReplaceWithRebuilt の途中だけ)
     internal static void RecoverInterruptedReplace(string dest, string workDir)
     {
         var bak = dest + ".bak";
@@ -362,14 +365,24 @@ public partial class App : Application
         }
     }
 
-    // "<名前>.bak.new" (と横のファイル) を "<名前>.bak" にする (前の .bak と横のファイルは置き換える)
+    // "<名前>.bak.new" (と横のファイル) を "<名前>.bak" にする (前の .bak と横のファイルは置き換える)。
+    // どこで落ちても RecoverInterruptedReplace から呼び直せば続きができるように、次の順で動かす:
+    //   1. 前の .bak の横のファイルを消す → 2. 前の .bak を消す (.bak が無ければ、前の .bak の横のファイルはもう無い)
+    //   3. .bak.new の横のファイルを .bak の横へ → 4. .bak.new を最後に .bak へ
+    // DB を最後に動かすので、.bak.new が無くなっていれば横のファイルも全部動いている
+    // (".bak.new が無く .bak.new の横のファイルだけある" 状態は ReplaceWithRebuilt の途中でしか起きない)。
+    // .bak が無いときの .bak の横のファイルは 3 で動かした .bak.new のものなので消さない
     private static void FinishBak(string bakNew, string bak)
     {
-        foreach (var s in SqliteSideFileSuffixes)
-            if (File.Exists(bak + s)) File.Delete(bak + s);
-        if (File.Exists(bakNew)) File.Move(bakNew, bak, overwrite: true);
+        if (File.Exists(bak))
+        {
+            foreach (var s in SqliteSideFileSuffixes)
+                if (File.Exists(bak + s)) File.Delete(bak + s);
+            File.Delete(bak);
+        }
         foreach (var s in SqliteSideFileSuffixes)
             if (File.Exists(bakNew + s)) File.Move(bakNew + s, bak + s, overwrite: true);
+        if (File.Exists(bakNew)) File.Move(bakNew, bak, overwrite: true);
     }
 
     // 作り直しを順に行う (裏のスレッドで呼ぶ)。成功したものだけ記録する

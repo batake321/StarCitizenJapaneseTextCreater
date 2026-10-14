@@ -1216,22 +1216,37 @@ public class GameDataExtractor : IDisposable
     // (成功したときは、ShopPriceFetchRequested の受け手が手動中止の印を消して取得を始める)
     public async Task BuildStructuredIndexAsync(string dataP4kPath, CancellationToken ct = default, bool requestShopPriceFetch = true)
     {
-        await PauseShopPriceFetchAsync();
-        Dictionary<string, string>? savedMarks = null;
+        // 構築中かどうか (IsIndexBuildRunning) は、取得を止める前から、再開を頼んだ後まで立てておく
+        Interlocked.Increment(ref s_indexBuildsRunning);
         try
         {
-            EnsureDb();
-            savedMarks = ReadShopPriceMarks(_db!);
-            await BuildStructuredIndexCoreAsync(dataP4kPath, ct, requestShopPriceFetch);
+            await PauseShopPriceFetchAsync();
+            Dictionary<string, string>? savedMarks = null;
+            try
+            {
+                EnsureDb();
+                savedMarks = ReadShopPriceMarks(_db!);
+                await BuildStructuredIndexCoreAsync(dataP4kPath, ct, requestShopPriceFetch);
+            }
+            catch
+            {
+                // 止めた取得 (とチャットの取り直し) は、どこで失敗しても必ず再開を頼む
+                try { if (savedMarks != null && _db != null) RestoreShopPriceMarks(_db, savedMarks); } catch { }
+                ShopPriceFetchResumeRequested?.Invoke(DbPath);
+                throw;
+            }
         }
-        catch
+        finally
         {
-            // 止めた取得 (とチャットの取り直し) は、どこで失敗しても必ず再開を頼む
-            try { if (savedMarks != null && _db != null) RestoreShopPriceMarks(_db, savedMarks); } catch { }
-            ShopPriceFetchResumeRequested?.Invoke(DbPath);
-            throw;
+            Interlocked.Decrement(ref s_indexBuildsRunning);
         }
     }
+
+    // BuildStructuredIndexAsync (設定タブの構築・チャットの自動構築) と RebuildEquipmentDataAsync (装備データの再抽出) が走っている数
+    private static int s_indexBuildsRunning;
+
+    // BuildStructuredIndexAsync・RebuildEquipmentDataAsync が走っている間 true (バックアップのインポートの終わりに、構築が止めた取得を再開しないために MainWindow が見る)
+    internal static bool IsIndexBuildRunning => Volatile.Read(ref s_indexBuildsRunning) > 0;
 
     private async Task BuildStructuredIndexCoreAsync(string dataP4kPath, CancellationToken ct, bool requestShopPriceFetch)
     {
@@ -2215,6 +2230,8 @@ public class GameDataExtractor : IDisposable
 
         Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
         if (relay != null) StatusChanged += relay;
+        // 構築と同じく、取得を止める前から再開を頼んだ後まで IsIndexBuildRunning を立てておく (下の finally で下ろす)
+        Interlocked.Increment(ref s_indexBuildsRunning);
         try
         {
             // 売り場・価格の裏の取得を止めてから再抽出する (成功すれば最後の ShopPriceFetchRequested、失敗すれば下の catch で再開)
@@ -2303,6 +2320,7 @@ public class GameDataExtractor : IDisposable
         }
         finally
         {
+            Interlocked.Decrement(ref s_indexBuildsRunning);
             if (relay != null) StatusChanged -= relay;
         }
     }

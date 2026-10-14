@@ -1482,17 +1482,42 @@ public partial class MainWindow : Window
             }
             // インデックス構築と同じく、取り込みの間は売り場・価格の裏の取得 (とチャットの価格の取り直し) を止め、
             // 終わったら (成功・失敗とも) 構築が失敗したときと同じ方法 (止めた取得が途中だったときだけ続きを再開) で戻す
-            await GameDataExtractor.PauseShopPriceFetchAsync();
+            // 取り込み中の印 (_importsRunning) は取得を止める前から立てる。取り込み中に構築・再抽出が終わったときの再開の依頼は
+            // 受け手 (OnShopPriceFetchRequested / OnShopPriceFetchResumeRequested) が預かり、下の finally で行う
+            lock (_priceRefreshTasks) _importsRunning++;
+            (string DbPath, bool AfterRebuild)? deferred = null;
+            bool lastImport = false;
             try
             {
+                await GameDataExtractor.PauseShopPriceFetchAsync();
                 await DatabaseBackupService.ImportFromZipAsync(dlg.FileName, DbPath, IndexDbPath,
                     selectDlg.SelectedCategories,
                     s => Dispatcher.Invoke(() => txtBackupStatus.Text = s), tradeDbImportPath);
             }
             finally
             {
+                lock (_priceRefreshTasks)
+                {
+                    _importsRunning--;
+                    if (_importsRunning == 0)
+                    {
+                        lastImport = true;
+                        deferred = _deferredShopPriceRequest;
+                        _deferredShopPriceRequest = null;
+                    }
+                }
                 if (reopenEquip) ReopenHangarEquip();
-                OnShopPriceFetchResumeRequested(IndexDbPath);
+                // ほかの取り込みがまだ走っていれば何もしない (最後に終わった取り込みが戻す)
+                if (!lastImport) { }
+                else if (deferred is { } d)
+                {
+                    // 取り込み中に構築・再抽出が終わっていた: 預かった依頼 (成功なら取得の開始、失敗なら続きの再開) をここで行う
+                    if (d.AfterRebuild) OnShopPriceFetchRequested(d.DbPath);
+                    else OnShopPriceFetchResumeRequested(d.DbPath);
+                }
+                // インデックス構築・装備データの再抽出が走っている間は再開しない (構築が止めた取得を構築中に動かさない。構築が終わったときの再開に任せる)
+                else if (!_indexBuildRunning && !GameDataExtractor.IsIndexBuildRunning)
+                    OnShopPriceFetchResumeRequested(IndexDbPath);
             }
 
             txtBackupStatus.Text = "インポート完了";
@@ -2019,51 +2044,64 @@ public partial class MainWindow : Window
         }
 
         btnExtractGameData.IsEnabled = false;
-        // 売り場・価格の裏での取得中なら止めてから構築する (構築が終わると ShopPriceFetchRequested で続きを再開する)
-        await StopShopPriceFetchAsync();
-        txtGameDataStatus.Text = "構築中...";
-
-        _gameDataExtractor.ProgressChanged += OnGameDataProgress;
-        _gameDataExtractor.StatusChanged += OnGameDataStatus;
-
-        // 装備タブの読み込み口 (EquipmentService) は覚えた結果 (子ポートの定義・本当の大きさ等) を持つので、
-        // 装備データの再抽出と同じく、構築の前に閉じて構築の後に作り直す (ReopenHangarEquip)
-        _hangarEquip?.Dispose();
-        _hangarEquip = null;
-
-        bool built = false;
+        _indexBuildRunning = true;
+        // 取得を止めるところ (StopShopPriceFetchAsync) で例外が出ても、構築中の印とボタンを必ず戻す
         try
         {
-            // 売り場・価格の裏の取得は、構築の後の処理 (日本語名・固有名詞キャッシュ) が終わってから始める (並んで走らないように)
-            await _gameDataExtractor.BuildIndexAsync(p4kPath, requestShopPriceFetch: false);
-            built = true;
-            OnGameDataStatus("日本語名をマッピング中...");
-            var transDbPath = Path.Combine(WorkDir, "translations.db");
-            if (File.Exists(transDbPath))
-                _gameDataExtractor.PopulateJapaneseNames(transDbPath);
-            OnGameDataStatus("固有名詞キャッシュ取得中...");
-            TranslationBackend.SetCacheDir(WorkDir);
-            await TranslationBackend.FetchAndCacheProperNounsAsync();
-            OnGameDataStatus("固有名詞キャッシュ完了");
-            var ver = _gameDataExtractor.GetCachedVersion();
-            txtGameDataStatus.Text = $"インデックス済み ({ver})";
-            UpdateSearchIndexStatus();
-        }
-        catch (Exception ex)
-        {
-            txtGameDataStatus.Text = "構築失敗";
-            MessageBox.Show($"インデックス構築エラー:\n{ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+            // 売り場・価格の裏での取得中なら止めてから構築する (構築が終わると ShopPriceFetchRequested で続きを再開する)
+            await StopShopPriceFetchAsync();
+            txtGameDataStatus.Text = "構築中...";
+
+            _gameDataExtractor.ProgressChanged += OnGameDataProgress;
+            _gameDataExtractor.StatusChanged += OnGameDataStatus;
+
+            // 装備タブの読み込み口 (EquipmentService) は覚えた結果 (子ポートの定義・本当の大きさ等) を持つので、
+            // 装備データの再抽出と同じく、構築の前に閉じて構築の後に作り直す (ReopenHangarEquip)
+            _hangarEquip?.Dispose();
+            _hangarEquip = null;
+
+            bool built = false;
+            try
+            {
+                // 売り場・価格の裏の取得は、構築の後の処理 (日本語名・固有名詞キャッシュ) が終わってから始める (並んで走らないように)
+                await _gameDataExtractor.BuildIndexAsync(p4kPath, requestShopPriceFetch: false);
+                built = true;
+                OnGameDataStatus("日本語名をマッピング中...");
+                var transDbPath = Path.Combine(WorkDir, "translations.db");
+                if (File.Exists(transDbPath))
+                    _gameDataExtractor.PopulateJapaneseNames(transDbPath);
+                OnGameDataStatus("固有名詞キャッシュ取得中...");
+                TranslationBackend.SetCacheDir(WorkDir);
+                await TranslationBackend.FetchAndCacheProperNounsAsync();
+                OnGameDataStatus("固有名詞キャッシュ完了");
+                var ver = _gameDataExtractor.GetCachedVersion();
+                txtGameDataStatus.Text = $"インデックス済み ({ver})";
+                UpdateSearchIndexStatus();
+            }
+            catch (Exception ex)
+            {
+                txtGameDataStatus.Text = "構築失敗";
+                MessageBox.Show($"インデックス構築エラー:\n{ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                _gameDataExtractor.ProgressChanged -= OnGameDataProgress;
+                _gameDataExtractor.StatusChanged -= OnGameDataStatus;
+                btnExtractGameData.IsEnabled = true;
+                ReopenHangarEquip();
+                // 構築ができていれば (後の処理が失敗しても)、ここで売り場・価格の裏の取得を始めてもらう
+                if (built) GameDataExtractor.RequestShopPriceFetch(_gameDataExtractor.DbPath);
+            }
         }
         finally
         {
-            _gameDataExtractor.ProgressChanged -= OnGameDataProgress;
-            _gameDataExtractor.StatusChanged -= OnGameDataStatus;
             btnExtractGameData.IsEnabled = true;
-            ReopenHangarEquip();
-            // 構築ができていれば (後の処理が失敗しても)、ここで売り場・価格の裏の取得を始めてもらう
-            if (built) GameDataExtractor.RequestShopPriceFetch(_gameDataExtractor.DbPath);
+            _indexBuildRunning = false;
         }
     }
+
+    // 設定タブのインデックス構築 (ExtractGameData_Click) が、取得を止める前から構築の後の処理・再開の依頼までの間 true (UI のスレッドだけで読み書きする)
+    private bool _indexBuildRunning;
 
     // 装備タブの読み込み口 (_hangarEquip) を作り直す。gamedata_cache.db の中身が替わったあと (インデックス構築・バックアップの取り込み) に呼ぶ。
     // 装備タブを一度でも読み込んでいれば、装備データの再抽出と同じく読み込み直して開き直す (LoadUpgradeData が gamedata_cache.db を開く)。
@@ -2118,8 +2156,26 @@ public partial class MainWindow : Window
     // インデックス構築 (設定タブ・チャットの自動構築)・装備データの再抽出が終わったとき (別スレッドから呼ばれることがある)
     private void OnShopPriceFetchRequested(string dbPath)
     {
-        lock (_priceRefreshTasks) _priceRefreshBlocked = false;
+        lock (_priceRefreshTasks)
+        {
+            if (DeferShopPriceRequestIfImporting(dbPath, afterRebuild: true)) return;
+            _priceRefreshBlocked = false;
+        }
         StartShopPriceFetch(dbPath, afterRebuild: true);
+    }
+
+    // バックアップの取り込み (ImportDb_Click) が走っている数と、その間に来た再開の依頼 (取り込みの finally で行う)。
+    // どちらも _priceRefreshTasks のロックの中で読み書きする
+    private int _importsRunning;
+    private (string DbPath, bool AfterRebuild)? _deferredShopPriceRequest;
+
+    // 取り込み中なら依頼を預かって true を返す (ロックの中で呼ぶ)。成功の依頼 (afterRebuild) と失敗の依頼が両方来たら成功の依頼を残す
+    private bool DeferShopPriceRequestIfImporting(string dbPath, bool afterRebuild)
+    {
+        if (_importsRunning == 0) return false;
+        var keepAfterRebuild = afterRebuild || _deferredShopPriceRequest is { AfterRebuild: true };
+        _deferredShopPriceRequest = (dbPath, keepAfterRebuild);
+        return true;
     }
 
     // 構築・再抽出の前 (別スレッドから呼ばれることがある)。裏の取得とチャットの価格の取り直しを止めて、止まるまで待つ
@@ -2134,7 +2190,11 @@ public partial class MainWindow : Window
     // 構築・再抽出が失敗したとき。止めた取得が途中だったときだけ続きを再開する (［価格の取得を中止］で止めていたときは再開しない)
     private void OnShopPriceFetchResumeRequested(string dbPath)
     {
-        lock (_priceRefreshTasks) _priceRefreshBlocked = false;
+        lock (_priceRefreshTasks)
+        {
+            if (DeferShopPriceRequestIfImporting(dbPath, afterRebuild: false)) return;
+            _priceRefreshBlocked = false;
+        }
         StartShopPriceFetch(dbPath, afterRebuild: false, onlyIfInterrupted: true);
     }
 
