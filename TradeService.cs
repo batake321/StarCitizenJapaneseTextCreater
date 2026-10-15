@@ -934,7 +934,11 @@ public class TradeService
                 });
             _myShips = list;
         }
-        catch { _myShips = new(); }
+        catch (Exception ex)
+        {
+            ChatService.LogExternal($"[所持船] 読み込みに失敗: {ex.Message}");
+            _myShips = new();
+        }
     }
 
     public void AddMyShip(string name, string manufacturer, int scu, string notes = "")

@@ -25,9 +25,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v2.0.2-win-x64.zip (最新 v2.0.2 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.0.2/StarCitizenJapaneseTextCreater-v2.0.2-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v2.0.3-win-x64.zip (最新 v2.0.3 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.0.3/StarCitizenJapaneseTextCreater-v2.0.3-win-x64.zip)**
 >
-> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.0.2-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
+> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.0.3-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
 >
 > **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/15 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.0.2/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
 
@@ -48,7 +48,14 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v2.0.2 更新内容
+### 🚀 v2.0.3 更新内容
+
+- **所持船のタブの一覧が空になる不具合を直しました**: 起動してから交易の価格の取得が終わるまで（数分かかることがあります）、所持船の一覧が空になっていました。起動したらすぐ DB から読むようにしました。My Hangar の同期の後も、一覧を読み直してから表示します。所持船のデータ自体は消えていません
+- **v2.0.2 の差し替え分**: DB の入れ替えの途中で落ちたときの後片付けと、インデックス構築・インポートが重なったときの価格の取得の再開を直しました
+
+<details>
+<summary>v2.0.2 更新内容</summary>
+
 
 - **インストール後に DB が空になる不具合を直しました** (個人武器の詳細が何も出ない、など):
   - 同梱DBが新しくなったら、同梱DBを元に作り直します。自分で入力したもの (手動・CSV・用語集で入れた訳、用語集、チャットの記憶) は今のDBから引き継ぎます。古い版のDBからも引き継げます
@@ -64,6 +71,8 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
 - **「パッチ更新あり」の判定**: ファイルの日時ではなく、ゲームの版 (build_manifest.id) で比べるように
 - UEX の価格に付けるゲームの版が、いつも "4.0" になっていたのを直しました
 - インストーラーで、作業フォルダに Program Files の中を選べないようにしました。作業フォルダに書けないときにアプリが落ちる箇所を直しました
+
+</details>
 
 <details>
 <summary>v2.0.1 更新内容</summary>

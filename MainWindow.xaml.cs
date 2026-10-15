@@ -3560,6 +3560,9 @@ public partial class MainWindow : Window
         try
         {
             _hangarService.SetCacheDir(WorkDir);
+            // 所持船を DB から読み直してから一覧 (RefreshMyShipRows) を入れ直す。同期の後に一覧が空・古いままにならないように
+            _tradeService.SetCacheDir(WorkDir);
+            _tradeService.LoadMyShips();
             var ships = _hangarService.GetShipInstances();
             _hangarShips = ships;
             _allCcus = _hangarService.LoadCcus();
@@ -5999,6 +6002,16 @@ public partial class MainWindow : Window
         {
             _tradeService.SetCacheDir(WorkDir);
             _tradeService.GamePatch = DetectGamePatch();
+
+            // 所持船の一覧は価格取得を待たずに DB から読んで埋める (取得に時間がかかる・失敗する場合も空にしない)。
+            // ここはまだ UI スレッド (await Task.Run の前)。価格取得の後の読み込みは従来どおり下で行う
+            try
+            {
+                _tradeService.LoadMyShips();
+                RefreshMyShipRows();
+            }
+            catch (Exception ex) { Log($"[Trade] 所持船の先読みに失敗: {ex.Message}"); }
+
             Log($"[Trade] パッチ: {_tradeService.GamePatch} バックグラウンド価格取得を開始...");
             await Task.Run(async () => await _tradeService.FetchAllDataAsync());
             Log($"[Trade] 取得完了: 価格 {_tradeService.PriceCount:N0} 件, 船 {_tradeService.Ships.Count} 件");
