@@ -72,6 +72,10 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        // 船の積載量 (SCU) の共通の関数 (ゲームデータ → UEX → Ship Matrix) が使う作業ディレクトリと UEX の船データ
+        ShipCargo.Configure(() => WorkDir, _tradeService);
+        ShipCargo.Resolved += OnShipCargoResolved;
+        Closed += (_, _) => ShipCargo.Resolved -= OnShipCargoResolved;
         // 表の名前のダブルクリック → ［詳細］タブ
         DetailPanel.Requested += OnDetailRequested;
         DetailPanel.SearchRequested += OnDetailSearchRequested;
@@ -79,6 +83,9 @@ public partial class MainWindow : Window
         // 装備タブの表: Ctrl+C で選んだセルの文字だけをコピーする
         DataGridCellCopy.Attach(dgMyComponents);
         DataGridCellCopy.Attach(dgLoadout);
+        // ［ゲームログ］の購入の行の「装備に入れる」ボタン
+        gameLogPanel.PurchaseClassifier = ClassifyGameLogPurchases;
+        gameLogPanel.PurchaseImporter = ImportGameLogPurchase;
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -1507,6 +1514,9 @@ public partial class MainWindow : Window
                     }
                 }
                 if (reopenEquip) ReopenHangarEquip();
+                // trade_cache.db の印 (my_component_purchases) が替わったかもしれないので、［ゲームログ］の印の一覧を読み直す
+                InvalidateImportedPurchaseKeys();
+                gameLogPanel?.RefreshPurchaseButtons();
                 // ほかの取り込みがまだ走っていれば何もしない (最後に終わった取り込みが戻す)
                 if (!lastImport) { }
                 else if (deferred is { } d)
@@ -1939,6 +1949,7 @@ public partial class MainWindow : Window
 
         InitGameDataExtractor();
         LoadMissionsAsync();
+        StartShipCargoBackfill();
 
         // 作業フォルダに書けない・DB を開けないときは、案内を足さずに続ける (落ちないように。DB の状態は設定タブの表示 (InitGameDataExtractor) に出る)
         bool hasStructuredData;
@@ -1948,6 +1959,87 @@ public partial class MainWindow : Window
             welcomeLines.Add("\n💡 ミッション・契約の検索には、設定タブの「インデックス構築」の実行が必要です（約2分半）。");
 
         _chatBubbles.Add(new ChatBubble { Text = string.Join("", welcomeLines), IsUser = false });
+    }
+
+    // 起動後に裏で一度だけ: ships に積載量 (cargo_scu) をまだ計算していない行 (NULL) があれば、積載量だけを計算する
+    // (GameDataExtractor.RebuildShipCargoAsync。試験の実測で 15 秒前後)。インデックス構築・装備データの再抽出の最中は走らせない。
+    // starbreaker が入っていない・Data.p4k が見つからないときは走らせない (starbreaker を自動でダウンロードしない)。
+    // 失敗はログに残す (cargo_scu は NULL のままなので、次の起動でまた試す)。終わったら積載量の覚えを捨てて一覧を描き直す
+    // インデックス構築・装備データの再抽出・バックアップのインポートが始まるときは、取得を止める依頼 (OnShopPriceFetchPauseRequested) の中で
+    // StopShipCargoBackfillAsync が取り消して終わるまで待つ (積載量の書き込みと構築・再抽出・インポートが重ならないように)
+    private async void StartShipCargoBackfill()
+    {
+        CancellationTokenSource? cts = null;
+        try
+        {
+            var workDir = App.Config.WorkingDirectory;
+            if (string.IsNullOrEmpty(workDir)) workDir = AppDomain.CurrentDomain.BaseDirectory;
+            Task<(int, string?)> task;
+            // 構築・再抽出・インポートの印の確認と、取り消し用の登録は _priceRefreshTasks のロックの中で行う
+            // (印は取得を止める依頼より前に立つので、依頼が登録より先に来たときは、ここで印を見て始めない)
+            lock (_priceRefreshTasks)
+            {
+                if (_indexBuildRunning || GameDataExtractor.IsIndexBuildRunning || _importsRunning > 0) return;
+                cts = new CancellationTokenSource();
+                var ct = cts.Token;
+                task = Task.Run(async () =>
+                {
+                    using var extractor = new GameDataExtractor(workDir);
+                    if (!extractor.IsReady) return (0, "starbreaker か Data.p4k が見つからない");
+                    if (!extractor.NeedsShipCargo()) return (0, (string?)null);
+                    if (GameDataExtractor.IsIndexBuildRunning) return (0, "インデックス構築・装備データの再抽出が走っている");
+                    ct.ThrowIfCancellationRequested();
+                    Log("[積載量] 船の積載量 (SCU) をまだ計算していない船があるので、裏で計算します");
+                    var n = await extractor.RebuildShipCargoAsync(new Progress<string>(m => Log($"[積載量] {m}")), ct);
+                    return (n, (string?)null);
+                });
+                _shipCargoCts = cts;
+                _shipCargoTask = task;
+            }
+            var (count, skipped) = await task;
+            if (skipped != null) Log($"[積載量] 船の積載量 (SCU) の計算をしませんでした ({skipped})");
+            if (count > 0) ShipCargo.Invalidate();   // 計算した値を使うよう、覚えた結果を捨てて一覧を描き直す
+        }
+        catch (OperationCanceledException) when (cts?.IsCancellationRequested == true)
+        {
+            Log("[積載量] インデックス構築・装備データの再抽出・インポートが始まったので、船の積載量 (SCU) の計算を取り消しました (次の起動でまた試します)");
+        }
+        catch (Exception ex)
+        {
+            Log($"[積載量] 船の積載量 (SCU) の計算に失敗しました (次の起動でまた試します): {ex.Message}");
+        }
+        finally
+        {
+            if (cts != null)
+            {
+                lock (_priceRefreshTasks)
+                {
+                    if (ReferenceEquals(_shipCargoCts, cts))
+                    {
+                        _shipCargoCts = null;
+                        _shipCargoTask = null;
+                    }
+                    cts.Dispose();
+                }
+            }
+        }
+    }
+
+    // 起動後の積載量の計算 (StartShipCargoBackfill) の取り消し用。_priceRefreshTasks のロックの中で読み書きする
+    private CancellationTokenSource? _shipCargoCts;
+    private Task? _shipCargoTask;
+
+    // 構築・再抽出・インポートの前 (別スレッドから呼ばれることがある)。起動後の積載量の計算が走っていれば取り消し、終わるまで待つ
+    private async Task StopShipCargoBackfillAsync()
+    {
+        Task? task;
+        lock (_priceRefreshTasks)
+        {
+            task = _shipCargoTask;
+            _shipCargoCts?.Cancel();
+        }
+        if (task == null) return;
+        try { await task; } catch { }
     }
 
     private void InitGameDataExtractor()
@@ -2108,6 +2200,8 @@ public partial class MainWindow : Window
     // まだ読み込んでいなければ閉じるだけ (次に装備タブを開いたときに開かれる)
     private void ReopenHangarEquip()
     {
+        // gamedata_cache.db が替わったので、船の積載量 (ships.cargo_scu) の覚えた結果を捨てる
+        ShipCargo.Invalidate();
         _hangarEquip?.Dispose();
         _hangarEquip = null;
         if (!_upgradeDataLoadedOnce) return;
@@ -2180,8 +2274,13 @@ public partial class MainWindow : Window
 
     // 構築・再抽出の前 (別スレッドから呼ばれることがある)。裏の取得とチャットの価格の取り直しを止めて、止まるまで待つ
     // (構築・再抽出・VACUUM の間は新しい取り直しも始めない。終わったら OnShopPriceFetchRequested / OnShopPriceFetchResumeRequested で戻す)
+    // 起動後の積載量の計算 (StartShipCargoBackfill) もここで取り消して終わるまで待つ (構築・再抽出・インポートと書き込みが重ならないように)
     private async Task OnShopPriceFetchPauseRequested()
     {
+        await StopShipCargoBackfillAsync();
+        // ［ゲームログ］の入れられる品の索引を裏で作っていれば (gamedata_cache.db を読んでいる)、終わるまで待つ
+        var ownable = Dispatcher.CheckAccess() ? _ownableIndexTask : await Dispatcher.InvokeAsync(() => _ownableIndexTask);
+        if (ownable != null) { try { await ownable; } catch { } }
         await StopPriceRefreshesAsync();
         if (Dispatcher.CheckAccess()) await StopShopPriceFetchAsync();
         else await Dispatcher.InvokeAsync(StopShopPriceFetchAsync).Task.Unwrap();
@@ -3522,6 +3621,7 @@ public partial class MainWindow : Window
             var win = new HangarSyncWindow(WorkDir) { Owner = this };
             win.ShowDialog();
             _hangarService.InvalidateCaches();
+            ShipCargo.Invalidate();   // 船の積載量の覚えた結果も捨てる (Ship Matrix・DB が替わったかもしれない)
             LoadUpgradeData();
 
             // 同期した保有船を所持船にも反映する (既存の所持船行は変更・削除しない)。
@@ -3635,6 +3735,8 @@ public partial class MainWindow : Window
                     Focus = s.Matrix?.Focus ?? "",
                     Type = s.Matrix?.Type ?? "",
                     Status = s.Matrix?.ProductionStatus ?? "",
+                    // 積載量 (役割・種別と同じく元の船名の船。共通の関数)
+                    CargoFactory = () => ShipCargo.Peek(s.Name, s.Matrix?.ManufacturerName),
                     IsUnresolved = s.IsUnresolved,
                     Mark = s.Mark,
                     SameTypeCount = s.SameTypeCount,
@@ -3721,6 +3823,8 @@ public partial class MainWindow : Window
                     Focus = matrix?.Focus ?? "",
                     Type = matrix?.Type ?? "",
                     Status = matrix?.ProductionStatus ?? "",
+                    // 積載量は所持船の一覧と同じ (登録した値が 0 より大きければそれ、0 なら共通の関数)
+                    CargoFactory = () => my.Cargo,
                     IsUnresolved = matrix == null,
                     OriginDisplay = inGame ? "ゲーム内購入" : "手入力 (未同期)",
                     IsInGame = inGame,
@@ -4136,12 +4240,15 @@ public partial class MainWindow : Window
         // 販売中の船 (RSI ストア)。保有列は名寄せ後の現在保有型で照合
         _storeRows = _storeSkus.Select(k => new StoreRow
         {
+            ProductId = k.ProductId,
             Category = k.Category,
             Name = k.Name,
             NativePriceDisplay = k.NativePriceDisplay,
             IsWarbond = k.IsWarbond,
             StockLevel = k.StockLevel,
             OwnedDisplay = heldNames.Contains(_hangarService.NormalizeShipName(k.Name)) ? "保有" : "",
+            // 積載量は船の商品 (Standalone Ships "72"・Upgrades "241"。［詳細］で船として開くものと同じ) だけ。共通の関数
+            CargoFactory = k.ProductId == "72" || k.ProductId == "241" ? () => ShipCargo.Peek(k.Name) : null,
         }).ToList();
 
         RefreshUpgradeShipGrid();   // CCU 行 (_upgradeCcus の状態) も保有船グリッドに差し込まれる
@@ -4708,6 +4815,69 @@ public partial class MainWindow : Window
         catch (Exception ex) { Log($"[Ship] メーカーの自動補完に失敗: {ex.Message}"); }
     }
 
+    // 船の積載量の裏の計算が済んだ (または覚えた結果を捨てた) ら、積載量を出している一覧を描き直す (別のスレッドから呼ばれる)
+    private void OnShipCargoResolved()
+    {
+        try { Dispatcher.BeginInvoke(RefreshCargoDisplays); } catch { }
+    }
+
+    // 積載量を出している一覧・候補を描き直す。選び直しの処理 (入力欄の上書き・装備の表の作り直し) が走らないよう、描き直す間は選択の変更の処理を外す
+    private void RefreshCargoDisplays()
+    {
+        foreach (var grid in new DataGrid?[] { dgMyShips, dgUpgradeShips, dgStore })
+            if (grid != null) RefreshCargoGrid(grid);
+        try
+        {
+            if (cmbAddShip?.ItemsSource != null)
+            {
+                cmbAddShip.SelectionChanged -= AddShip_Selected;
+                try { cmbAddShip.Items.Refresh(); } finally { cmbAddShip.SelectionChanged += AddShip_Selected; }
+            }
+        }
+        catch { }
+        try
+        {
+            if (cmbTradeShip?.ItemsSource != null)
+            {
+                cmbTradeShip.SelectionChanged -= TradeShip_Changed;
+                try { cmbTradeShip.Items.Refresh(); } finally { cmbTradeShip.SelectionChanged += TradeShip_Changed; }
+            }
+        }
+        catch { }
+        try
+        {
+            if (cmbLoadoutShip?.ItemsSource != null)
+            {
+                var prev = _suppressLoadoutEvents;
+                _suppressLoadoutEvents = true;
+                try { cmbLoadoutShip.Items.Refresh(); } finally { _suppressLoadoutEvents = prev; }
+            }
+        }
+        catch { }
+    }
+
+    // 積載量を出している表を描き直す。行の編集中 (Items.Refresh が例外になる) なら、行の編集が終わった後 (RowEditEnding の後) にもう一度描き直す
+    private readonly HashSet<DataGrid> _cargoRefreshDeferred = new();
+
+    private void RefreshCargoGrid(DataGrid grid)
+    {
+        if (grid.ItemsSource == null) return;
+        if (grid.Items is IEditableCollectionView ecv && (ecv.IsEditingItem || ecv.IsAddingNew))
+        {
+            if (!_cargoRefreshDeferred.Add(grid)) return;   // すでに編集の終わりを待っている
+            void OnRowEditEnding(object? s, DataGridRowEditEndingEventArgs e)
+            {
+                grid.RowEditEnding -= OnRowEditEnding;
+                _cargoRefreshDeferred.Remove(grid);
+                // 編集の確定・取り消しが済んでから描き直す (まだ編集中なら、また終わりを待つ)
+                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, new Action(() => RefreshCargoGrid(grid)));
+            }
+            grid.RowEditEnding += OnRowEditEnding;
+            return;
+        }
+        try { grid.Items.Refresh(); } catch { }
+    }
+
     // DB を読み直さず、現在の _tradeService.MyShips を表示行に写し直す (同期状態・シミュレーション状態の反映用)
     private void RefreshMyShipRows()
     {
@@ -4729,6 +4899,8 @@ public partial class MainWindow : Window
             Name = e.Name,
             Manufacturer = e.Manufacturer,
             Scu = e.Scu,
+            // 積載量の欄: 登録した値 (my_ships.scu) が 0 より大きければそれ、0 なら共通の関数 (MyShipEntry.Cargo)
+            CargoFactory = () => e.Cargo,
             Notes = e.Notes,
             AddedAt = e.AddedAt,
         };
@@ -4871,11 +5043,12 @@ public partial class MainWindow : Window
         foreach (var s in toAdd)
         {
             var uex = _tradeService.FindUexShip(s.Name);
-            var scu = uex?.Scu ?? 0;
             var mfr = s.Matrix?.ManufacturerName ?? "";
             if (string.IsNullOrEmpty(mfr)) mfr = uex?.Manufacturer ?? "";
+            // 登録する積載量は共通の関数 (ゲームデータ → UEX → Ship Matrix) の値 (my_ships.scu は整数なので小数は切り捨て。分からなければ 0)
+            var scu = CargoAsInt(ShipCargo.Resolve(s.Name, s.Matrix?.ManufacturerName));
             _tradeService.AddMyShip(s.Name, mfr, scu, s.OriginDisplay);
-            Log($"[Ship] 追加 (Hangar 反映): {s.Name} ({scu} SCU) {s.OriginDisplay}");
+            Log($"[Ship] 追加 (Hangar 反映): {s.Name}{(scu > 0 ? $" ({scu} SCU)" : "")} {s.OriginDisplay}");
         }
 
         RefreshMyShips(reloadUpgrade);
@@ -4897,6 +5070,7 @@ public partial class MainWindow : Window
                 .Select(c => new MyComponentRow(c)
                 {
                     OnUsableChanged = MyComponentUsable_Changed,
+                    OnQuantityChanged = MyComponentQuantity_Changed,
                     // 種別の欄の武器の名前 (装備の表と同じく、ダメージの種類で分ける) と性能の欄。gamedata_cache.db が無ければ空
                     WeaponKindDisplay = _hangarEquip != null && c.ItemType == "WeaponGun" ? _hangarEquip.WeaponDamageKindLabel(c.ItemRecord) : "",
                     PerfDisplay = _hangarEquip?.ComponentPerfLabel(c.ItemRecord, c.ItemType) ?? "",
@@ -4916,6 +5090,9 @@ public partial class MainWindow : Window
         {
             txtCompStatus.Text = $"読み込みエラー: {ex.Message}";
         }
+        // ［ゲームログ］の「装備に入れる」ボタンの状態も決め直す (装備 DB を開き直したときなど)。印の一覧も読み直す
+        InvalidateImportedPurchaseKeys();
+        gameLogPanel?.RefreshPurchaseButtons();
     }
 
     private void PopulateCompTypeCombo()
@@ -5044,6 +5221,139 @@ public partial class MainWindow : Window
         }
     }
 
+    // 数量の欄の書き換え (MyComponentRow.Quantity の setter から)。表の編集の確定の最中なので、読み直しは後で行う
+    private void MyComponentQuantity_Changed(MyComponentRow row, int quantity) =>
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => ApplyMyComponentQuantity(row, quantity));
+
+    // 「1つ減らす」
+    private void DecrementMyComponent_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not MyComponentRow row) return;
+        ApplyMyComponentQuantity(row, row.Quantity - 1);
+    }
+
+    // 数量を quantity にする (UpdateMyComponent)。0 になるなら行を消すか確かめ、「いいえ」なら変えない。負の数は受け付けない
+    private void ApplyMyComponentQuantity(MyComponentRow row, int quantity)
+    {
+        var c = row.Model;
+        try
+        {
+            if (quantity < 0)
+            {
+                MessageBox.Show("数量は 0 以上の整数で入力してください。", "入力エラー");
+            }
+            else if (quantity == 0)
+            {
+                if (MessageBox.Show($"数量が 0 になります。「{c.ItemName}」({c.SizeDisplay} {c.GradeDisplay}) の行を削除しますか？", "確認", MessageBoxButton.YesNo) == MessageBoxResult.Yes)
+                {
+                    _hangarService.SetCacheDir(WorkDir);
+                    _hangarService.DeleteMyComponent(c.Id);
+                    Log($"[Equip] 削除: {c.ItemName}");
+                }
+            }
+            else
+            {
+                var before = c.Quantity;
+                c.Quantity = quantity;
+                _hangarService.SetCacheDir(WorkDir);
+                _hangarService.UpdateMyComponent(c);
+                Log($"[Equip] 数量: {c.ItemName} ×{before} → ×{quantity}");
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"保存に失敗しました: {ex.Message}", "エラー");
+        }
+        RefreshMyComponents();
+        RefreshLoadoutGrid();
+    }
+
+    // ［ゲームログ］の購入の一覧 → それぞれの「装備に入れる」ボタンの状態 (HangarService.ClassifyPurchase)。
+    // 装備 DB (_hangarEquip) が開いていないとき・ボタンを付ける時刻 (GameLogPurchase.ImportCutoffUtc) 以降の成功した購入が無いときは、
+    // trade_cache.db を開かずにすべてボタン無し
+    // 印の一覧 (my_component_purchases) は覚えておき、印が変わったとき (購入を入れた・インポート・所持リストの読み直し) だけ読み直す
+    // (InvalidateImportedPurchaseKeys)。入れられる品の索引がまだ無ければ裏で作り (ゲームログの表を初めて作ったとき)、
+    // できるまではボタン無しにして、できたら表を作り直す
+    private IReadOnlyList<PurchaseImportState> ClassifyGameLogPurchases(IReadOnlyList<GameLogPurchase> purchases)
+    {
+        var states = new PurchaseImportState[purchases.Count];
+        var equip = _hangarEquip;
+        if (equip == null || !purchases.Any(p => p.Succeeded && p.TimeUtc >= GameLogPurchase.ImportCutoffUtc)) return states;
+        if (!equip.IsOwnableIndexReady)
+        {
+            PrepareOwnableIndex(equip);
+            return states;
+        }
+        if (_importedPurchaseKeys == null)
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _importedPurchaseKeys = _hangarService.LoadImportedPurchaseKeys();
+        }
+        for (int i = 0; i < purchases.Count; i++)
+            states[i] = HangarService.ClassifyPurchase(purchases[i], equip, _importedPurchaseKeys, GameLogPurchase.ImportCutoffUtc).State;
+        return states;
+    }
+
+    // ［ゲームログ］の印の一覧の覚え (ClassifyGameLogPurchases)。UI のスレッドだけで使う
+    private HashSet<string>? _importedPurchaseKeys;
+
+    private void InvalidateImportedPurchaseKeys() => _importedPurchaseKeys = null;
+
+    // 入れられる品の索引を作っている裏の作業 (構築・再抽出・インポートの前に終わるまで待つ。gamedata_cache.db を読んでいるため)
+    private Task? _ownableIndexTask;
+
+    private async void PrepareOwnableIndex(EquipmentService equip)
+    {
+        var task = equip.PrepareOwnableIndexAsync();
+        if (ReferenceEquals(_ownableIndexTask, task)) return;   // 作り終わるのを待っている
+        if (task.IsFaulted) return;   // 前に失敗した (ログは出してある。装備 DB を開き直すまで作り直さない)
+        _ownableIndexTask = task;
+        try { await task; }
+        catch (Exception ex) { Log($"[ゲームログ] 装備に入れられる品の一覧を作れませんでした: {ex.Message}"); return; }
+        finally { if (ReferenceEquals(_ownableIndexTask, task)) _ownableIndexTask = null; }
+        // 作っている間に装備 DB を開き直していなければ、ボタンの状態を決め直す
+        if (ReferenceEquals(_hangarEquip, equip)) gameLogPanel?.RefreshPurchaseButtons();
+    }
+
+    // ［ゲームログ］の「装備に入れる」: 購入を所持コンポーネントに入れる (名前・種別・サイズ・グレードは手入力の追加の候補と同じ。使用可、メモ無し)。
+    // 印が既にあれば (入れ済み) 何もしない
+    private void ImportGameLogPurchase(GameLogPurchase p)
+    {
+        var equip = _hangarEquip;
+        if (equip == null)
+        {
+            MessageBox.Show("gamedata_cache.db がありません。コンポーネントを追加できません。", "装備");
+            return;
+        }
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            var (state, item) = HangarService.ClassifyPurchase(p, equip, _hangarService.LoadImportedPurchaseKeys(), GameLogPurchase.ImportCutoffUtc);
+            if (state == PurchaseImportState.Ready && item != null)
+            {
+                var c = new MyComponent
+                {
+                    ItemRecord = item.RecordName,
+                    ItemName = item.Name,
+                    ItemType = item.ItemType,
+                    Size = item.Size,
+                    Grade = item.Grade,
+                    Quantity = p.Quantity,
+                    Usable = true,
+                    Notes = "",
+                };
+                if (_hangarService.ImportPurchasedComponent(p, c))
+                    Log($"[Equip] ゲームログの購入から追加: {c.ItemName} ({c.ItemType} {c.SizeDisplay} {c.GradeDisplay}) ×{c.Quantity}");
+            }
+            RefreshMyComponents();
+            RefreshLoadoutGrid();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"保存に失敗しました: {ex.Message}", "エラー");
+        }
+    }
+
     // === 装備サブタブ: 現在の装備 (ship_loadouts) ===
 
     // 船セレクタを GetShipInstances の結果 (+ 所持船側から開いた "my|" キーの船) で埋め直す。選択中のキーは維持する
@@ -5060,6 +5370,7 @@ public partial class MainWindow : Window
                 Name = s.Name,
                 Manufacturer = s.Matrix?.ManufacturerName,
                 Display = string.IsNullOrEmpty(s.PledgeName) ? s.Name : $"{s.Name} — {s.PledgeName}",
+                CargoFactory = () => ShipCargo.Peek(s.Name, s.Matrix?.ManufacturerName),
             })
             .ToList();
         foreach (var extra in _extraLoadoutShips)
@@ -5280,6 +5591,9 @@ public partial class MainWindow : Window
             Name = shipName,
             Manufacturer = matrix?.ManufacturerName,
             Display = $"{shipName} — 所持船",
+            // 積載量は所持船の一覧と同じ (登録した値が 0 より大きければそれ、0 なら共通の関数)。所持船が見つからなければ共通の関数
+            CargoFactory = () => _tradeService.MyShips.FirstOrDefault(m => m.Id == myShipId) is { } my
+                ? my.Cargo : ShipCargo.Peek(shipName, matrix?.ManufacturerName),
         });
         RefreshLoadoutShipCombo();
         return FindLoadoutShipChoice(key);
@@ -5292,7 +5606,15 @@ public partial class MainWindow : Window
             cmbTradeShip.SelectionChanged -= TradeShip_Changed;
             var items = new List<object>();
             foreach (var my in _tradeService.MyShips)
-                items.Add(new ShipInfo { Name = $"★ {my.Name}", Manufacturer = my.Manufacturer, Scu = my.Scu });
+            {
+                var entry = my;
+                // 積載量は所持船の一覧と同じ (登録した値が 0 より大きければそれ、0 なら共通の関数)
+                items.Add(new ShipInfo
+                {
+                    Name = $"★ {my.Name}", Manufacturer = my.Manufacturer, Scu = my.Scu,
+                    CargoPeekFactory = () => entry.Cargo, CargoResolveFactory = () => entry.ResolveCargo(),
+                });
+            }
             foreach (var s in _tradeService.Ships)
                 items.Add(s);
             cmbTradeShip.ItemsSource = items;
@@ -5346,9 +5668,14 @@ public partial class MainWindow : Window
             // UEX 側にメーカーが入っていないことがあるので、空なら船名から Ship Matrix で補う
             if (!string.IsNullOrWhiteSpace(ship.Manufacturer)) cmbAddShipMfr.Text = ship.Manufacturer;
             else AutoFillShipManufacturer();
-            txtAddShipScu.Text = ship.Scu.ToString();
+            // 積載量は共通の関数 (ゲームデータ → UEX → Ship Matrix) の値 (入力欄は整数なので小数は切り捨て)。分からなければ空欄
+            var scu = CargoAsInt(ship.ResolveCargo());
+            txtAddShipScu.Text = scu > 0 ? scu.ToString() : "";
         }
     }
+
+    // 積載量を整数の入力欄・my_ships.scu に入れる形にする (小数は切り捨て。UEX の scu を取り込むときと同じ)。分からなければ 0
+    private static int CargoAsInt(ShipCargo.Info? cargo) => cargo is { } c ? (int)c.Scu : 0;
 
     private void AddMyShip_Click(object sender, RoutedEventArgs e)
     {
@@ -5366,15 +5693,12 @@ public partial class MainWindow : Window
         int.TryParse(txtAddShipScu.Text.Trim(), out var scu);
         var notes = ApplyInGameMarker(txtAddShipNotes.Text.Trim(), chkAddShipInGame.IsChecked == true);
 
-        // UEX データから SCU を補完
+        // SCU が入っていなければ共通の関数 (ゲームデータ → UEX → Ship Matrix) の値で補う。メーカーは今までどおり UEX から補う
         if (scu == 0)
         {
             var uex = _tradeService.FindUexShip(name);
-            if (uex != null)
-            {
-                scu = uex.Scu;
-                if (string.IsNullOrEmpty(mfr)) mfr = uex.Manufacturer;
-            }
+            if (uex != null && string.IsNullOrEmpty(mfr)) mfr = uex.Manufacturer;
+            scu = CargoAsInt(ShipCargo.Resolve(name, mfr));
         }
 
         try { _tradeService.AddMyShip(name, mfr, scu, notes); }
@@ -5389,7 +5713,7 @@ public partial class MainWindow : Window
         txtAddShipScu.Text = "0";
         txtAddShipNotes.Text = "";
         chkAddShipInGame.IsChecked = false;
-        Log($"[Ship] 追加: {name} ({scu} SCU){(IsInGameNotes(notes) ? " [ゲーム内購入]" : "")}");
+        Log($"[Ship] 追加: {name}{(scu > 0 ? $" ({scu} SCU)" : "")}{(IsInGameNotes(notes) ? " [ゲーム内購入]" : "")}");
     }
 
     // 所持船メモの「ゲーム内購入 (aUEC)」接頭辞。my_ships.notes の先頭に付けて由来を記録する (スキーマは変えない)
@@ -5489,7 +5813,8 @@ public partial class MainWindow : Window
 
         SetAddShipName(ship.Name);
         cmbAddShipMfr.Text = ship.Manufacturer;
-        txtAddShipScu.Text = ship.Scu.ToString();
+        // 登録した値 (my_ships.scu) をそのまま出す (0 は空欄)。共通の関数の値は入れない ([更新] で利用者の入力として保存されないように)
+        txtAddShipScu.Text = ship.Scu > 0 ? ship.Scu.ToString() : "";
         // 「ゲーム内購入」は notes の接頭辞からチェックボックスへ復元し、メモ欄には本文だけを出す (保存時に ApplyInGameMarker で付け直す)
         chkAddShipInGame.IsChecked = IsInGameNotes(ship.Notes);
         txtAddShipNotes.Text = StripInGameMarker(ship.Notes);
@@ -5529,6 +5854,35 @@ public partial class MainWindow : Window
         else DetailPanel.RequestSearch(my.Name);
     }
 
+    // 販売中の船 (RSI ストア) の「船/商品」列 (2 列目) のダブルクリック: ［詳細］タブで開く
+    private void Store_DoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        DependencyObject? d = e.OriginalSource as DependencyObject;
+        while (d != null && d is not DataGridCell)
+            d = d is System.Windows.Media.Visual or System.Windows.Media.Media3D.Visual3D ? System.Windows.Media.VisualTreeHelper.GetParent(d) : LogicalTreeHelper.GetParent(d);
+        if (d is DataGridCell cell && dgStore.Columns.IndexOf(cell.Column) == 1 && cell.DataContext is StoreRow row)
+            OpenStoreDetail(row);
+    }
+
+    // Standalone Ships ("72")・Upgrades ("241") は所持船と同じく船名と Ship Matrix のメーカーで ResolveShipRecordName。
+    // 決まらなければ、また船でない商品 (Packages "45"・Packs "270" 等) は［詳細］の名前欄に品名を入れて検索した状態にする
+    private void OpenStoreDetail(StoreRow row)
+    {
+        string? record = null;
+        if (row.ProductId == "72" || row.ProductId == "241")
+        {
+            try
+            {
+                var mfr = _hangarService.ResolveShip(row.Name)?.ManufacturerName;
+                _hangarService.SetCacheDir(WorkDir);
+                record = _hangarService.ResolveShipRecordName(row.Name, mfr);
+            }
+            catch (Exception ex) { Log($"[Ship] 詳細の品目を決められませんでした ({row.Name}): {ex.Message}"); record = null; }
+        }
+        if (record != null) DetailPanel.Request(record, row.Name);
+        else DetailPanel.RequestSearch(row.Name);
+    }
+
     private void UpdateMyShip_Click(object sender, RoutedEventArgs e)
     {
         if (dgMyShips.SelectedItem is not MyShipRow ship) return;
@@ -5543,7 +5897,7 @@ public partial class MainWindow : Window
             return;
         }
         RefreshMyShips();
-        Log($"[Ship] 更新: {name} ({scu} SCU){(IsInGameNotes(notes) ? " [ゲーム内購入]" : "")}");
+        Log($"[Ship] 更新: {name}{(scu > 0 ? $" ({scu} SCU)" : "")}{(IsInGameNotes(notes) ? " [ゲーム内購入]" : "")}");
     }
 
     // === Commodity Trade ===
@@ -5826,6 +6180,7 @@ public partial class MainWindow : Window
             Dispatcher.Invoke(() =>
             {
                 _hangarService.InvalidateCaches();
+                ShipCargo.Invalidate();   // 船の積載量の覚えた結果も捨てる (Ship Matrix・DB が替わったかもしれない)
                 LoadUpgradeData();
             });
         }
@@ -5862,6 +6217,7 @@ public partial class MainWindow : Window
         try
         {
             _hangarService.InvalidateCaches();
+            ShipCargo.Invalidate();   // 船の積載量の覚えた結果も捨てる (Ship Matrix・DB が替わったかもしれない)
             LoadUpgradeData();
             txtUpgradeStatus.Text += $" | {result}";
         }
@@ -5911,6 +6267,7 @@ public partial class MainWindow : Window
         try
         {
             _hangarService.InvalidateCaches();
+            ShipCargo.Invalidate();   // 船の積載量の覚えた結果も捨てる (Ship Matrix・DB が替わったかもしれない)
             if (rebuilt)
             {
                 // 再抽出でポート構成 (PortKey) が変わった船に備え、存在しないポートキーの ship_loadouts 行を削除する
@@ -6027,6 +6384,7 @@ public partial class MainWindow : Window
         {
             Dispatcher.Invoke(() =>
             {
+                ShipCargo.Invalidate();   // UEX の船データが替わったので、船の積載量の覚えた結果を捨てる
                 _tradeService.LoadMyShips();
                 RefreshCommodityShipCombo();
                 RestoreSavedShipSelection();
@@ -6062,6 +6420,7 @@ public partial class MainWindow : Window
             _tradeService.GamePatch = DetectGamePatch();
             await Task.Run(async () => await _tradeService.FetchAllDataAsync(force: true));
             Log($"[Trade] 強制取得完了: 船 {_tradeService.Ships.Count}, 価格 {_tradeService.PriceCount}");
+            ShipCargo.Invalidate();   // UEX の船データが替わったので、船の積載量の覚えた結果を捨てる
             RefreshCommodityShipCombo();
             cmbAddShip.ItemsSource = _tradeService.Ships;
             cmbAddShip.DisplayMemberPath = "DisplayName";
@@ -6078,8 +6437,12 @@ public partial class MainWindow : Window
 
     private void TradeShip_Changed(object sender, SelectionChangedEventArgs e)
     {
+        // 積載量は候補の表示と同じ決め方 (ShipInfo.ResolveCargo。入力欄は整数なので小数は切り捨て)。分からなければ空欄
         if (cmbTradeShip.SelectedItem is ShipInfo ship)
-            txtTradeScu.Text = ship.Scu.ToString();
+        {
+            var scu = CargoAsInt(ship.ResolveCargo());
+            txtTradeScu.Text = scu > 0 ? scu.ToString() : "";
+        }
     }
 
     private void TradeSearch_Click(object sender, RoutedEventArgs e)
@@ -6403,6 +6766,11 @@ public class UpgradeShipRow
     public string Focus { get; set; } = "";             // Ship Matrix: focus
     public string Type { get; set; } = "";              // Ship Matrix: type
     public string Status { get; set; } = "";            // Ship Matrix: production_status
+    // 積載量 (SCU)。船行だけ CargoFactory を入れる (計算済みの値だけを返す。まだなら裏で計算し、済んだら一覧を描き直す。ヘッダ行・CCU 行は空欄)
+    public Func<ShipCargo.Info?>? CargoFactory { get; set; }
+    public ShipCargo.Info? Cargo => CargoFactory?.Invoke();
+    public string CargoDisplay => ShipCargo.Display(Cargo);   // 0・不明は空欄
+    public double CargoSortValue => Cargo?.Scu ?? 0;
     public bool IsUnresolved { get; set; }              // Ship Matrix で名寄せできなかった
     public bool IsDuplicate { get; set; }               // 名寄せ後の CurrentName が保有船の中で 2 機以上
     public HangarShipMark Mark { get; set; } = HangarShipMark.None;
@@ -6503,10 +6871,15 @@ public class MyShipRow
     public int Id { get; set; }
     public string Name { get; set; } = "";
     public string Manufacturer { get; set; } = "";
-    public int Scu { get; set; }
+    public int Scu { get; set; }                            // my_ships.scu (利用者が登録した値。0 は未登録)
     public string Notes { get; set; } = "";
     public string AddedAt { get; set; } = "";
-    public string DisplayName => Scu > 0 ? $"{Name} ({Scu} SCU)" : Name;
+    // 表示する積載量 (Scu が 0 より大きければそれ、0 なら共通の関数)。CargoFactory は計算済みの値だけを返す (まだなら裏で計算し、済んだら一覧を描き直す)
+    public Func<ShipCargo.Info?>? CargoFactory { get; set; }
+    public ShipCargo.Info? Cargo => CargoFactory?.Invoke();
+    public string ScuDisplay => ShipCargo.Display(Cargo);   // 0・不明は空欄
+    public double ScuSortValue => Cargo?.Scu ?? 0;
+    public string DisplayName => Cargo is { } c ? $"{Name} ({ShipCargo.Format(c.Scu)} SCU)" : Name;
 
     public int HangarCount { get; set; }                    // 正規化名が一致する同期済み保有船の数 (0 = 未同期)
     public bool IsInGame { get; set; }                      // Hangar 未一致で、メモが "[ゲーム内購入]" で始まる (aUEC 購入の船。未同期とは表示しない)
@@ -6542,6 +6915,10 @@ public class LoadoutShipChoice
     public string? Manufacturer { get; set; }       // Ship Matrix のメーカー名 (ResolveShipRecordName 用)
     public string Display { get; set; } = "";
     public string? Record { get; set; }             // ships.record_name (初回参照時に解決してキャッシュ)
+    // 積載量 (SCU)。CargoFactory は計算済みの値だけを返す (まだなら裏で計算し、済んだら一覧を描き直す)。船セレクタには船名と一緒に出す (分からなければ船名だけ)
+    public Func<ShipCargo.Info?>? CargoFactory { get; set; }
+    public ShipCargo.Info? Cargo => CargoFactory?.Invoke();
+    public string DisplayWithCargo => Cargo is { } c ? $"{Display} ({ShipCargo.Format(c.Scu)} SCU)" : Display;
     public override string ToString() => Display;
 }
 
@@ -6569,6 +6946,8 @@ public class MyComponentRow : INotifyPropertyChanged
 {
     public MyComponent Model { get; }
     public Action<MyComponentRow>? OnUsableChanged { get; set; }
+    // 数量の欄の書き換え (新しい数量)。Model は書き換えず、受け手が確かめてから DB へ書き戻して読み直す
+    public Action<MyComponentRow, int>? OnQuantityChanged { get; set; }
 
     public MyComponentRow(MyComponent model) => Model = model;
 
@@ -6583,7 +6962,15 @@ public class MyComponentRow : INotifyPropertyChanged
     public string GradeDisplay => Model.GradeDisplay;
     // 性能の欄 (種類ごとに 1 つの代表の値。EquipmentService.ComponentPerfLabel。record の基本値)
     public string PerfDisplay { get; set; } = "";
-    public int Quantity => Model.Quantity;
+    public int Quantity
+    {
+        get => Model.Quantity;
+        set
+        {
+            if (Model.Quantity == value) return;
+            OnQuantityChanged?.Invoke(this, value);
+        }
+    }
     public string Notes => Model.Notes;
     public string AddedAt => Model.AddedAt;
 
@@ -6677,6 +7064,7 @@ public class MeltPledgeRow : INotifyPropertyChanged
 // 販売中の船 (RSI ストア) グリッドの 1 行
 public class StoreRow
 {
+    public string ProductId { get; set; } = "";         // ストアのカテゴリ id ("72" Standalone Ships / "241" Upgrades 等)
     public string Category { get; set; } = "";
     public string Name { get; set; } = "";
     public string NativePriceDisplay { get; set; } = "";
@@ -6684,6 +7072,11 @@ public class StoreRow
     public string WarbondDisplay => IsWarbond ? "Warbond" : "";
     public string StockLevel { get; set; } = "";
     public string OwnedDisplay { get; set; } = "";      // 保有船に同名があれば "保有"
+    // 積載量 (SCU)。船の商品だけ CargoFactory を入れる (計算済みの値だけを返す。まだなら裏で計算し、済んだら一覧を描き直す。それ以外の商品は空欄)
+    public Func<ShipCargo.Info?>? CargoFactory { get; set; }
+    public ShipCargo.Info? Cargo => CargoFactory?.Invoke();
+    public string CargoDisplay => ShipCargo.Display(Cargo);   // 0・不明は空欄
+    public double CargoSortValue => Cargo?.Scu ?? 0;
 }
 
 public class TradeDetailRow

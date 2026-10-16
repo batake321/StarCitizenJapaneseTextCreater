@@ -112,7 +112,7 @@ public class TradeService
             }
             catch { errors++; }
         }
-        _ships = ships.OrderBy(s2 => s2.DisplayName).ToList();
+        _ships = ships.OrderBy(s2 => s2.UexDisplayKey).ToList();
         OnProgress?.Invoke($"UEX vehicles: {_ships.Count} 件パース完了" + (errors > 0 ? $" ({errors} 件スキップ)" : ""));
     }
 
@@ -995,11 +995,12 @@ public class TradeService
         LoadMyShips();
     }
 
+    // 船名が完全一致 (大文字小文字は区別しない) する UEX の船。無いときだけ、"{船名} ({SCU} SCU)" に name を含む最初の船
     public ShipInfo? FindUexShip(string name)
     {
-        return _ships.FirstOrDefault(s =>
-            s.Name.Equals(name, StringComparison.OrdinalIgnoreCase) ||
-            s.DisplayName.Contains(name, StringComparison.OrdinalIgnoreCase));
+        var ships = _ships;
+        return ships.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            ?? ships.FirstOrDefault(s => s.UexDisplayKey.Contains(name, StringComparison.OrdinalIgnoreCase));
     }
 
     public string ResolveVehicleName(string rawName, Dictionary<string, string>? localization = null)
@@ -1106,9 +1107,262 @@ public class ShipInfo
 {
     public string Name { get; set; } = "";
     public string Manufacturer { get; set; } = "";
-    public int Scu { get; set; }
-    public string DisplayName => $"{Name} ({Scu} SCU)";
+    public int Scu { get; set; }   // UEX の scu (所持船から作ったものは my_ships.scu)
+    // UEX の船の並べ替えと FindUexShip の部分一致に使う、UEX の値そのままの表示 (積載量の表示を変える前の DisplayName と同じ形)
+    public string UexDisplayKey => $"{Name} ({Scu} SCU)";
+
+    // 積載量の決め方。無ければ共通の関数 (UEX の値はこの船のもの)。所持船から作ったものは所持船の決め方 (ShipCargo.PeekMyShip / ResolveMyShip) を入れる
+    public Func<ShipCargo.Info?>? CargoPeekFactory { get; set; }
+    public Func<ShipCargo.Info?>? CargoResolveFactory { get; set; }
+    // 表示用: 計算済みの値だけを返す (まだなら null を返し、裏で計算する。計算が済むと ShipCargo.Resolved で知らせる)
+    public ShipCargo.Info? Cargo => CargoPeekFactory != null ? CargoPeekFactory() : ShipCargo.Peek(Name, Manufacturer, uex: this);
+    // 値を使う処理用: その場で計算する (時間がかかることがある)
+    public ShipCargo.Info? ResolveCargo() => CargoResolveFactory != null ? CargoResolveFactory() : ShipCargo.Resolve(Name, Manufacturer, uex: this);
+    // 積載量が分からない (0) ときは船名だけ
+    public string DisplayName => Cargo is { } c ? $"{Name} ({ShipCargo.Format(c.Scu)} SCU)" : Name;
     public override string ToString() => DisplayName;
+}
+
+// 船の積載量 (SCU) を引く共通の関数。ゲームデータ (gamedata_cache.db の ships.cargo_scu) → UEX (trade_ships.scu) → RSI Ship Matrix (cargocapacity) の順に、
+// 0 より大きい値を最初に見つけたものを返す。どれも 0・不明なら null (表示は空欄)。
+// 名前の突き合わせ: ゲームデータは record 名が分かっていればそれ、無ければ HangarService.ResolveShipRecordName (メーカーが無ければ Ship Matrix のメーカー)、
+// UEX は TradeService.FindUexShip (完全一致を先に)、Ship Matrix は HangarService.ResolveShip。
+// ResolveShipRecordName は 1 隻 30〜90ms ほどかかる (試験の実測) ので、結果は覚えておき、一覧の表示 (Peek) はその場で計算せずに裏で計算して、
+// 済んだら Resolved で知らせる (画面は受けて一覧を描き直す)。チャット (別のスレッド) からも呼ばれるので、画面の HangarService とは別の HangarService を持ち、
+// lock の中で使う。覚えた結果は Invalidate (インデックス構築・装備データの再抽出・インポート・UEX や Ship Matrix の取得の後) で捨てる
+public static class ShipCargo
+{
+    public readonly record struct Info(double Scu, string Source);
+
+    public const string SourceGameData = "ゲームデータ";
+    public const string SourceUex = "UEX";
+    public const string SourceShipMatrix = "RSI Ship Matrix";
+    public const string SourceMyShip = "所持船の登録";
+
+    // ComputeLock: Hangar と DB を使う計算。CacheLock: 覚えた結果と裏の計算の順番待ち (表示の Peek は CacheLock だけを取るので、計算中も待たされない)
+    private static readonly object ComputeLock = new();
+    private static readonly object CacheLock = new();
+    private static readonly HangarService Hangar = new();
+    private static TradeService? _trade;
+    private static Func<string?>? _workDirProvider;
+    private static string? _workDir;
+    private static Dictionary<string, double>? _gameCargo;
+    private static readonly Dictionary<string, Info?> Cache = new(StringComparer.Ordinal);
+    private static readonly Queue<(string Key, string Name, string? Manufacturer, string? Record, ShipInfo? Uex)> Pending = new();
+    private static readonly HashSet<string> Queued = new(StringComparer.Ordinal);
+    private static bool _workerRunning;
+    private static int _generation;
+
+    // 裏の計算が済んだ (順番待ちが空になった)、または覚えた結果を捨てた。別のスレッドから呼ばれる
+    public static event Action? Resolved;
+
+    // 作業ディレクトリ (trade_cache.db / gamedata_cache.db / translations.db の所在。設定で変わるので呼ぶたびに読む) と、UEX の船データを持つ TradeService
+    public static void Configure(Func<string?> workDirProvider, TradeService trade)
+    {
+        lock (ComputeLock)
+        {
+            _workDirProvider = workDirProvider;
+            _trade = trade;
+        }
+    }
+
+    // 覚えた結果・読み込んだ ships.cargo_scu・Ship Matrix を捨てる (次に使うときに読み直す)
+    public static void Invalidate()
+    {
+        lock (ComputeLock)
+        {
+            Hangar.InvalidateCaches();
+            _gameCargo = null;
+            lock (CacheLock)
+            {
+                Cache.Clear();
+                Pending.Clear();
+                Queued.Clear();
+                _generation++;
+            }
+        }
+        RaiseResolved();
+    }
+
+    // その場で計算する (覚えた結果があればそれ)
+    public static Info? Resolve(string? shipName, string? manufacturer = null, string? recordName = null, ShipInfo? uex = null)
+    {
+        var name = (shipName ?? "").Trim();
+        var key = Key(name, manufacturer, recordName, uex);
+        int gen;
+        lock (CacheLock)
+        {
+            if (Cache.TryGetValue(key, out var hit)) return hit;
+            gen = _generation;
+        }
+        var result = Compute(name, manufacturer, recordName, uex);
+        lock (CacheLock)
+            if (gen == _generation) Cache[key] = result;
+        return result;
+    }
+
+    // 表示用: 覚えた結果があればそれ、無ければ null を返して裏で計算する (済んだら Resolved で知らせる)
+    public static Info? Peek(string? shipName, string? manufacturer = null, string? recordName = null, ShipInfo? uex = null)
+    {
+        var name = (shipName ?? "").Trim();
+        var key = Key(name, manufacturer, recordName, uex);
+        lock (CacheLock)
+        {
+            if (Cache.TryGetValue(key, out var hit)) return hit;
+            if (Queued.Add(key)) Pending.Enqueue((key, name, manufacturer, recordName, uex));
+            if (_workerRunning) return null;
+            _workerRunning = true;
+        }
+        _ = Task.Run(Worker);
+        return null;
+    }
+
+    // 所持船の積載量: 利用者が登録した値 (my_ships.scu) が 0 より大きければそれ、0 なら共通の関数
+    public static Info? ResolveMyShip(MyShipEntry my) =>
+        my.Scu > 0 ? new Info(my.Scu, SourceMyShip) : Resolve(my.Name, my.Manufacturer);
+
+    public static Info? PeekMyShip(MyShipEntry my) =>
+        my.Scu > 0 ? new Info(my.Scu, SourceMyShip) : Peek(my.Name, my.Manufacturer);
+
+    // 表示の形 (整数なら桁区切り、端数があれば小数 2 桁まで)
+    public static string Format(double scu) => scu.ToString("#,0.##", System.Globalization.CultureInfo.InvariantCulture);
+
+    // 表示用の文字列。分からなければ空
+    public static string Display(Info? info) => info is { } i ? Format(i.Scu) : "";
+
+    private static string Key(string name, string? manufacturer, string? recordName, ShipInfo? uex) =>
+        string.Join("\u0001", name.ToLowerInvariant(), (manufacturer ?? "").Trim().ToLowerInvariant(), recordName ?? "", uex == null ? "-" : uex.Scu.ToString());
+
+    private static void RaiseResolved()
+    {
+        try { Resolved?.Invoke(); } catch { }
+    }
+
+    private static void Worker()
+    {
+        while (true)
+        {
+            (string Key, string Name, string? Manufacturer, string? Record, ShipInfo? Uex) item;
+            int gen;
+            lock (CacheLock)
+            {
+                if (Pending.Count == 0) { _workerRunning = false; break; }
+                item = Pending.Dequeue();
+                Queued.Remove(item.Key);
+                if (Cache.ContainsKey(item.Key)) continue;
+                gen = _generation;
+            }
+            Info? result;
+            try { result = Compute(item.Name, item.Manufacturer, item.Record, item.Uex); }
+            catch { result = null; }
+            lock (CacheLock)
+                if (gen == _generation) Cache[item.Key] = result;
+        }
+        RaiseResolved();
+    }
+
+    private static Info? Compute(string name, string? manufacturer, string? recordName, ShipInfo? uex)
+    {
+        lock (ComputeLock)
+        {
+            UpdateWorkDir();
+            if (_workDir == null) return uex != null && uex.Scu > 0 ? new Info(uex.Scu, SourceUex) : null;
+
+            // 1. ゲームデータ
+            var record = recordName;
+            if (string.IsNullOrEmpty(record) && name.Length > 0)
+            {
+                try
+                {
+                    var mfr = !string.IsNullOrWhiteSpace(manufacturer) ? manufacturer : Hangar.ResolveShip(name)?.ManufacturerName;
+                    record = Hangar.ResolveShipRecordName(name, mfr);
+                }
+                catch { record = null; }
+            }
+            if (!string.IsNullOrEmpty(record) && GameCargo(record) is double g && g > 0) return new Info(g, SourceGameData);
+
+            // ゲームデータの英語名は "Drake Cutlass Black" のようにメーカー名が付き、UEX・Ship Matrix は "Cutlass Black" なので、
+            // 先頭の 1 語を外した名前も試す (完全一致だけ。今までのチャットの UEX の積載量の引き方と同じ)
+            var space = name.IndexOf(' ');
+            var tail = space > 0 ? name[(space + 1)..].Trim() : "";
+
+            // 2. UEX
+            var u = uex ?? (name.Length > 0 ? _trade?.FindUexShip(name) : null);
+            if (u != null && u.Scu > 0) return new Info(u.Scu, SourceUex);
+            if (uex == null && tail.Length > 0 && _trade != null)
+            {
+                var ut = _trade.Ships.FirstOrDefault(s => s.Name.Equals(tail, StringComparison.OrdinalIgnoreCase));
+                if (ut != null && ut.Scu > 0) return new Info(ut.Scu, SourceUex);
+            }
+
+            // 3. RSI Ship Matrix
+            if (name.Length > 0)
+            {
+                try
+                {
+                    foreach (var cand in tail.Length > 0 ? new[] { name, tail } : new[] { name })
+                        if (Hangar.ResolveShip(cand)?.CargoCapacity is double mc && mc > 0) return new Info(mc, SourceShipMatrix);
+                }
+                catch { }
+            }
+            return null;
+        }
+    }
+
+    // 作業ディレクトリが変わったら、読み込んだもの・覚えた結果を捨てて新しいディレクトリにする (ComputeLock の中で呼ぶ)
+    private static void UpdateWorkDir()
+    {
+        string? dir = null;
+        try { dir = _workDirProvider?.Invoke(); } catch { dir = null; }
+        if (string.IsNullOrEmpty(dir)) { _workDir = null; return; }
+        if (string.Equals(dir, _workDir, StringComparison.OrdinalIgnoreCase)) return;
+        var first = _workDir == null;
+        _workDir = dir;
+        Hangar.SetCacheDir(dir);
+        _gameCargo = null;
+        if (!first)
+            lock (CacheLock)
+            {
+                Cache.Clear();
+                _generation++;
+            }
+    }
+
+    // ships.cargo_scu (record 名 → SCU。NULL の行は入れない)。初めて使うとき (と Invalidate の後) に gamedata_cache.db から読む (ComputeLock の中で呼ぶ)
+    private static double? GameCargo(string recordName)
+    {
+        try
+        {
+            if (_gameCargo == null)
+            {
+                var map = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+                var path = Path.Combine(_workDir!, "gamedata_cache.db");
+                if (File.Exists(path))
+                {
+                    using var db = new SqliteConnection($"Data Source={path};Mode=ReadOnly");
+                    db.Open();
+                    bool hasColumn = false;
+                    using (var info = db.CreateCommand())
+                    {
+                        info.CommandText = "PRAGMA table_info(ships)";
+                        using var r = info.ExecuteReader();
+                        while (r.Read())
+                            if (string.Equals(r.GetString(1), "cargo_scu", StringComparison.OrdinalIgnoreCase)) hasColumn = true;
+                    }
+                    if (hasColumn)
+                    {
+                        using var cmd = db.CreateCommand();
+                        cmd.CommandText = "SELECT record_name, cargo_scu FROM ships WHERE cargo_scu IS NOT NULL";
+                        using var r = cmd.ExecuteReader();
+                        while (r.Read()) map[r.GetString(0)] = r.GetDouble(1);
+                    }
+                }
+                _gameCargo = map;
+            }
+            return _gameCargo.TryGetValue(recordName, out var v) ? v : null;
+        }
+        catch { return null; }
+    }
 }
 
 public class TradeRoute
@@ -1165,7 +1419,11 @@ public class MyShipEntry
     public int Scu { get; set; }
     public string Notes { get; set; } = "";
     public string AddedAt { get; set; } = "";
-    public string DisplayName => Scu > 0 ? $"{Name} ({Scu} SCU)" : Name;
+    // 積載量は登録した値 (Scu) が 0 より大きければそれ、0 なら共通の関数。Cargo は表示用 (計算済みの値だけ。まだなら裏で計算する)、
+    // ResolveCargo はその場で計算する。分からなければ船名だけ
+    public ShipCargo.Info? Cargo => ShipCargo.PeekMyShip(this);
+    public ShipCargo.Info? ResolveCargo() => ShipCargo.ResolveMyShip(this);
+    public string DisplayName => Cargo is { } c ? $"{Name} ({ShipCargo.Format(c.Scu)} SCU)" : Name;
     public override string ToString() => DisplayName;
 }
 

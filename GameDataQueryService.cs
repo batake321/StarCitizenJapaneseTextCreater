@@ -93,6 +93,9 @@ public partial class GameDataQueryService : IDisposable
             if (!string.IsNullOrEmpty(role)) sb.Append($" | 種別: {ResolveLocKey(role)}");
             if (crew > 0) sb.Append($" | 乗員: {crew}");
             if (size > 0) sb.Append($" | サイズ: {size}");
+            // 積載量 (船の積載量の共通の関数: ゲームデータ → UEX → Ship Matrix)。0・不明なら出さない
+            if (ShipCargo.Resolve(!string.IsNullOrEmpty(nameEn) ? nameEn : nameJa, mfr, rn) is { } cargo)
+                sb.Append($" | 積載量: {ShipCargo.Format(cargo.Scu)} SCU ({cargo.Source})");
             sb.AppendLine();
             if (!string.IsNullOrWhiteSpace(desc))
                 sb.AppendLine("    説明: " + desc.Replace("\\n", " ").Trim());
@@ -1374,10 +1377,10 @@ public partial class GameDataQueryService : IDisposable
     public static string ShipWeaponAmmoUnknownText(string? text) =>
         $"弾を使うか (ammo) '{(text ?? "").Trim()}' がわかりません。使う / 使わない のどちらかを指定してください (ダメージの種類で絞る引数ではありません)。";
 
-    // shipScuLookup: 船の英語名 → 貨物積載量 (SCU)。UEX の船データ (TradeService のキャッシュ) から引く
+    // shipScuLookup: (ships.record_name, 船の英語名) → 貨物積載量 (SCU)。船の積載量の共通の関数 (ShipCargo.Resolve: ゲームデータ → UEX → Ship Matrix) で引く
     // weight: アーマーの重さ (Light / Medium / Heavy)。アーマーの種類で指定があればその重さだけを表にし、無ければ重さごとの要約を返す
     public (string Text, List<string> UsedPriceUuids) CompareItems(CompareCategory cat, int? sizeFilter,
-        IReadOnlyDictionary<string, List<(string Location, double Price)>>? uexItemPrices, Func<string, int?>? shipScuLookup, string? weight = null,
+        IReadOnlyDictionary<string, List<(string Location, double Price)>>? uexItemPrices, Func<string, string, ShipCargo.Info?>? shipScuLookup, string? weight = null,
         bool shopOnly = false, string? ammo = null)
     {
         var used = new List<string>();
@@ -2682,7 +2685,7 @@ public partial class GameDataQueryService : IDisposable
     }
 
     // 船・車両の比較。ships 表を英語名 (name_en) ごとに 1 行にまとめる (AI 用などの複製の record は同じ名前なので 1 つになる)
-    private (string, List<string>) CompareShips(CompareCategory cat, int? sizeFilter, Func<string, int?>? shipScuLookup, LocReader loc, List<string> used)
+    private (string, List<string>) CompareShips(CompareCategory cat, int? sizeFilter, Func<string, string, ShipCargo.Info?>? shipScuLookup, LocReader loc, List<string> used)
     {
         var sizeLabel = sizeFilter.HasValue ? $" サイズ{sizeFilter.Value}" : "";
         if (!ShipsHasNameEn())
@@ -2724,8 +2727,8 @@ public partial class GameDataQueryService : IDisposable
             e.Cells["職業"] = loc.Text(career);
             if (crew > 0) { e.Cells["乗員"] = crew.ToString(); e.Nums["乗員"] = crew; }
             if (e.Size > 0) e.Cells["サイズ"] = e.Size.ToString();
-            var scu = shipScuLookup?.Invoke(e.Name);
-            if (scu is int s && s > 0) { e.Cells["貨物積載量 (SCU)"] = s.ToString("N0"); e.Nums["貨物積載量"] = s; }
+            var scu = shipScuLookup?.Invoke(e.Record, e.Name);
+            if (scu is { } s && s.Scu > 0) { e.Cells["貨物積載量 (SCU)"] = ShipCargo.Format(s.Scu); e.Nums["貨物積載量"] = s.Scu; }
             FillItemPrice(e, shopRows, null);
         }
 
@@ -2733,7 +2736,7 @@ public partial class GameDataQueryService : IDisposable
         var cols = new List<string> { "種別", "職業", "乗員", "サイズ", "貨物積載量 (SCU)" };
         var sb = new StringBuilder();
         sb.AppendLine($"=== 比較: {cat.Label}{sizeLabel} — {roots.Count} 種類 ===");
-        sb.AppendLine("出典: 種別・乗員・サイズ = ゲームデータ (DB の ships 表)。貨物積載量 = UEX の船データ。店 = UEX の購入・レンタル価格 (保存データ)。");
+        sb.AppendLine("出典: 種別・乗員・サイズ = ゲームデータ (DB の ships 表)。貨物積載量 = ゲームデータから計算した値 (無ければ UEX の船データ、それも無ければ RSI Ship Matrix)。店 = UEX の購入・レンタル価格 (保存データ)。");
         sb.AppendLine("| 船・車両 | " + string.Join(" | ", cols) + " | 店 |");
         sb.AppendLine("|" + string.Concat(Enumerable.Repeat("---|", cols.Count + 2)));
         var orderedShips = roots.OrderByDescending(x => x.Buyable).ThenBy(x => x.Size).ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToList();

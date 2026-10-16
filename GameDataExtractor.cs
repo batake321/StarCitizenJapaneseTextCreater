@@ -181,6 +181,7 @@ public class GameDataExtractor : IDisposable
                 MigrateItemIndexSizeColumn();
                 MigrateItemIndexNameKeyColumn();
                 MigrateShipsNameEnColumn();
+                MigrateShipsCargoScuColumn();
                 MigrateShipPortsSizeColumns();
                 EnsureItemPortsTable();
                 return;
@@ -263,7 +264,8 @@ public class GameDataExtractor : IDisposable
                 size INTEGER,
                 raw_json TEXT NOT NULL,
                 extracted_at TEXT NOT NULL,
-                name_en TEXT
+                name_en TEXT,
+                cargo_scu REAL
             );
             CREATE INDEX IF NOT EXISTS idx_ships_name ON ships(name COLLATE NOCASE);
             """ + ShipPortsDdl + """
@@ -378,6 +380,7 @@ public class GameDataExtractor : IDisposable
         MigrateItemIndexSizeColumn();
         MigrateItemIndexNameKeyColumn();
         MigrateShipsNameEnColumn();
+        MigrateShipsCargoScuColumn();
         MigrateShipPortsSizeColumns();
         EnsureItemPortsTable();
     }
@@ -758,6 +761,461 @@ public class GameDataExtractor : IDisposable
         }
     }
 
+    // ===== 船の積載量 (SCU) =====
+    // 船の既定のロードアウト (SEntityComponentDefaultLoadoutParams) をたどり、付いているエンティティの貨物の置き場
+    // (SCItemInventoryContainerComponentParams.containerParams が指す InventoryContainer のうち、種類が InventoryOpenContainerType のもの) の
+    // 内寸 interiorDimensions (m) の x*y*z を 1 SCU (1.25m 角 = 1.953125m³) で割って足す。
+    // たどるのは、entry に手書きで入れ子にしたロードアウト (SItemPortLoadoutManualParams) と、付いたエンティティ自身の既定のロードアウトの両方
+    // (例: Constellation の扉 → 扉の既定のロードアウトの貨物の格子)。船自身に付いている置き場は数えない。
+    // XML の別ファイルを指すロードアウト (SItemPortLoadoutXMLParams。loadoutPath は Data.p4k の Data/ の下の CryXML) は、そのファイルの
+    // <Item portName itemName> (付く先 = itemName) と、Item の下の <Items> (手書きの入れ子と同じ扱い)・<Loadout loadout="別の XML"> を同じ規則でたどる。
+    // 付く先は entityClassReference (ファイルの場所) があればそのファイル名、無ければ entityClassName (record 名は大文字小文字を区別せずに引く)
+    internal const double CargoUnitVolume = 1.953125;
+    private const string CargoOpenContainerType = "InventoryOpenContainerType";
+    // 入れ子が循環していたときに止めるための、エンティティをたどる段数の上限
+    private const int CargoMaxDepth = 12;
+
+    // 既定のロードアウトの 1 entry (付く先のエンティティの record 名と、entry に手書きで入れ子にしたロードアウト)。
+    // XML のロードアウトは、付く先の無い entry (Target が空) の Children にそのファイルの entry を入れて表す (同じファイルは同じ List を共有する)
+    internal sealed class CargoEntry
+    {
+        public string Target = "";
+        public List<CargoEntry> Children = new();
+    }
+
+    // 船の積載量を計算して ships.cargo_scu に入れる (インデックス構築・装備データの再抽出の中で使う)。
+    // 失敗しても構築は続ける (cargo_scu は NULL のまま。表示は UEX・Ship Matrix の値になる)
+    private async Task UpdateShipCargoAsync(string p4kPath, CancellationToken ct)
+    {
+        try
+        {
+            await UpdateShipCargoCoreAsync(p4kPath, ct);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            StatusChanged?.Invoke($"船の積載量 (SCU) の計算に失敗しました (UEX・Ship Matrix の値で代わりにします): {ex.Message}");
+        }
+    }
+
+    // 積載量だけを計算し直す (インデックス構築・装備データの再抽出をせずに ships.cargo_scu を埋める)。計算した船の数を返す。
+    // ships の行は今あるものを使う (ships が空なら何もしない)。起動後に裏で一度だけ呼ばれる (MainWindow: ships に cargo_scu が NULL の行があるとき)。
+    // 構築・再抽出と同時に走っても作業フォルダがぶつからないよう、取り出し先は別の名前 (dcb_tmp_cargo / cargo_loadout_tmp_cargo) にする。
+    // 途中で構築・再抽出が始まったら (IsIndexBuildRunning)、ships が作り直されるので書き込まずに 0 を返す
+    public async Task<int> RebuildShipCargoAsync(IProgress<string>? progress = null, CancellationToken ct = default)
+    {
+        var p4kPath = FindDataP4k()
+            ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
+
+        await EnsureStarBreakerAsync();
+        EnsureDb();
+
+        Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
+        if (relay != null) StatusChanged += relay;
+        var prevSuffix = _tmpSuffix;
+        if (_dcbScopeDepth == 0) _tmpSuffix = "_cargo";
+        try
+        {
+            using var dcbScope = await UseExtractedDcbAsync(p4kPath, ct);
+            return await UpdateShipCargoCoreAsync(p4kPath, ct, skipWriteIfIndexBuildStarts: true);
+        }
+        finally
+        {
+            _tmpSuffix = prevSuffix;
+            if (relay != null) StatusChanged -= relay;
+        }
+    }
+
+    // 作業フォルダの取り出し先の名前に付ける接尾辞 (RebuildShipCargoAsync の間だけ "_cargo")
+    private string _tmpSuffix = "";
+
+    // ships に積載量 (cargo_scu) をまだ計算していない行 (NULL) があるか (起動後の RebuildShipCargoAsync を走らせるか決めるため)
+    public bool NeedsShipCargo()
+    {
+        EnsureDb();
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM ships WHERE cargo_scu IS NULL)";
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
+    }
+
+    private async Task<int> UpdateShipCargoCoreAsync(string p4kPath, CancellationToken ct, bool skipWriteIfIndexBuildStarts = false)
+    {
+        var sw = Stopwatch.StartNew();
+        StatusChanged?.Invoke("船の積載量 (SCU) を計算中...");
+
+        // XML のロードアウト (Data/Scripts/Loadouts/**) を作業ディレクトリへ取り出す。取り出せなければ XML のロードアウトはたどらずに続ける
+        var xmlDir = Path.Combine(Path.GetDirectoryName(DbPath) ?? ".", "cargo_loadout_tmp" + _tmpSuffix);
+        try
+        {
+            Func<string, List<CargoEntry>>? xmlLoader = null;
+            int xmlFiles = 0, xmlMissing = 0;
+            try
+            {
+                if (Directory.Exists(xmlDir)) Directory.Delete(xmlDir, true);
+                Directory.CreateDirectory(xmlDir);
+                await RunStarBreakerAsync($"p4k extract --p4k \"{p4kPath}\" -o \"{xmlDir}\" --filter \"Data/Scripts/Loadouts/**\"", ct);
+                var dataDir = Path.Combine(xmlDir, "Data");
+                if (Directory.Exists(dataDir))
+                    xmlLoader = CreateCargoXmlLoader(dataDir, () => xmlFiles++, () => xmlMissing++);
+                else
+                    StatusChanged?.Invoke("船の積載量 (SCU): XML のロードアウトを取り出せませんでした (XML のロードアウトはたどらずに計算します)");
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                StatusChanged?.Invoke($"船の積載量 (SCU): XML のロードアウトを取り出せませんでした (XML のロードアウトはたどらずに計算します): {ex.Message}");
+            }
+            var count = await UpdateShipCargoFromLoadoutsAsync(p4kPath, xmlLoader, sw, ct, skipWriteIfIndexBuildStarts);
+            if (xmlLoader != null)
+                StatusChanged?.Invoke($"船の積載量 (SCU): XML のロードアウト {xmlFiles} 件を読みました" + (xmlMissing > 0 ? $" (見つからない・読めないもの {xmlMissing} 件)" : ""));
+            return count;
+        }
+        finally
+        {
+            try { if (Directory.Exists(xmlDir)) Directory.Delete(xmlDir, true); } catch { }
+        }
+    }
+
+    // XML のロードアウトの読み込み口 (loadoutPath → entry の並び)。dataDir は取り出した Data フォルダ。同じファイルは 1 回だけ読み、
+    // 入れ子の <Loadout loadout> が循環していたら、循環した所は空にする。onRead / onMissing は読んだ数・見つからない数を数えるため
+    internal static Func<string, List<CargoEntry>> CreateCargoXmlLoader(string dataDir, Action? onRead = null, Action? onMissing = null)
+    {
+        var cache = new Dictionary<string, List<CargoEntry>>(StringComparer.OrdinalIgnoreCase);
+        var loading = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        List<CargoEntry> Load(string loadoutPath)
+        {
+            var key = (loadoutPath ?? "").Replace('\\', '/').Trim().TrimStart('/');
+            if (key.Length == 0) return new List<CargoEntry>();
+            if (cache.TryGetValue(key, out var hit)) return hit;
+            if (!loading.Add(key)) return new List<CargoEntry>();
+            var result = new List<CargoEntry>();
+            try
+            {
+                var file = Path.Combine(dataDir, key.Replace('/', Path.DirectorySeparatorChar));
+                if (File.Exists(file))
+                {
+                    var root = CryXmlParser.Parse(file).Root;
+                    if (root != null) result = ReadCargoXmlItems(root, Load);
+                    onRead?.Invoke();
+                }
+                else onMissing?.Invoke();
+            }
+            catch { onMissing?.Invoke(); }
+            finally { loading.Remove(key); }
+            cache[key] = result;
+            return result;
+        }
+        return Load;
+    }
+
+    // XML のロードアウトの要素 (Loadout / Item) の下の <Items><Item portName itemName> を entry にする。
+    // Item の下の <Items> は Children に、<Loadout loadout="別の XML"> は付く先の無い entry (Children = その XML) にする
+    internal static List<CargoEntry> ReadCargoXmlItems(XElement parent, Func<string, List<CargoEntry>> xmlLoader)
+    {
+        var result = new List<CargoEntry>();
+        foreach (var items in parent.Elements("Items"))
+            foreach (var item in items.Elements("Item"))
+            {
+                var entry = new CargoEntry { Target = ((string?)item.Attribute("itemName") ?? "").Trim() };
+                entry.Children.AddRange(ReadCargoXmlItems(item, xmlLoader));
+                foreach (var sub in item.Elements("Loadout"))
+                {
+                    var path = (string?)sub.Attribute("loadout");
+                    if (!string.IsNullOrWhiteSpace(path)) entry.Children.Add(new CargoEntry { Children = xmlLoader(path) });
+                }
+                result.Add(entry);
+            }
+        return result;
+    }
+
+    private async Task<int> UpdateShipCargoFromLoadoutsAsync(string p4kPath, Func<string, List<CargoEntry>>? xmlLoader, Stopwatch sw, CancellationToken ct,
+        bool skipWriteIfIndexBuildStarts)
+    {
+        // 船の record 名と既定のロードアウト (ships.raw_json)
+        var loadouts = new Dictionary<string, List<CargoEntry>>(StringComparer.OrdinalIgnoreCase);
+        var ships = new List<(string RecordName, string ShortName)>();
+        using (var cmd = _db!.CreateCommand())
+        {
+            cmd.CommandText = "SELECT record_name, raw_json FROM ships";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var rn = r.GetString(0);
+                var shortName = RecordShortName(rn);
+                ships.Add((rn, shortName));
+                try
+                {
+                    using var doc = JsonDocument.Parse(r.GetString(1));
+                    loadouts[shortName] = ReadCargoLoadout(doc.RootElement, xmlLoader);
+                }
+                catch { loadouts[shortName] = new List<CargoEntry>(); }
+            }
+        }
+        if (ships.Count == 0)
+        {
+            StatusChanged?.Invoke("船の積載量 (SCU): 船のデータ (ships) が無いので計算しませんでした");
+            return 0;
+        }
+
+        // 全エンティティの record 名 (大文字小文字はこの名前で filter に渡す。starbreaker の --filter は大文字小文字を区別する)
+        var namesText = await RunDcbQueryRawAsync(p4kPath, "EntityClassDefinition.Category", "*", ct);
+        var names = ParseEntityRecordNames(namesText);
+        if (names.Count == 0) throw new InvalidOperationException("エンティティの一覧を取得できませんでした");
+
+        // 貨物の置き場を持つエンティティと、その置き場 (種類と SCU)
+        ct.ThrowIfCancellationRequested();
+        var containerText = await RunDcbQueryRawAsync(p4kPath, "EntityClassDefinition.Components[SCItemInventoryContainerComponentParams].containerParams", "*", ct);
+        var containers = ParseCargoContainers(containerText);
+
+        // 船に付いているエンティティの既定のロードアウトを、付く先が無くなるまで段ごとに読み込む
+        var attempted = new HashSet<string>(loadouts.Keys, StringComparer.OrdinalIgnoreCase);
+        var pending = NewCargoTargets(loadouts.Values, names, attempted);
+        int round = 0, fetched = 0;
+        while (pending.Count > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            round++;
+            StatusChanged?.Invoke($"船の積載量 (SCU): 付いている部品を読み込み中 ({round} 段目, {pending.Count} 件)");
+            attempted.UnionWith(pending);
+            var filters = BuildRecordNameFilters(pending.Select(t => names[t]));
+            var added = new List<List<CargoEntry>>();
+            using (var prefetch = new DcbPrefetcher(filters.Count, (i, token) => RunDcbQueryRawAsync(p4kPath, "EntityClassDefinition", filters[i], token), ct))
+            {
+                for (int i = 0; i < filters.Count; i++)
+                {
+                    var text = await prefetch.GetAsync(i);
+                    foreach (var block in SplitJsonBlocks(text))
+                    {
+                        try
+                        {
+                            using var doc = JsonDocument.Parse(block);
+                            var root = doc.RootElement;
+                            var rn = root.TryGetProperty("_RecordName_", out var rnEl) ? rnEl.GetString() ?? "" : "";
+                            var shortName = RecordShortName(rn);
+                            if (!pending.Contains(shortName) || loadouts.ContainsKey(shortName)) continue;
+                            var entries = ReadCargoLoadout(root, xmlLoader);
+                            loadouts[shortName] = entries;
+                            added.Add(entries);
+                            fetched++;
+                        }
+                        catch { }
+                    }
+                }
+            }
+            pending = NewCargoTargets(added, names, attempted);
+        }
+
+        // 船ごとに計算して書き込む
+        var results = ships.Select(s => (s.RecordName, Scu: ComputeCargoScu(s.ShortName, loadouts, containers, names.ContainsKey))).ToList();
+        if (skipWriteIfIndexBuildStarts && IsIndexBuildRunning)
+        {
+            StatusChanged?.Invoke("船の積載量 (SCU): インデックス構築・装備データの再抽出が始まったので、計算した値は書き込みませんでした");
+            return 0;
+        }
+        // 起動後の裏の計算 (RebuildShipCargoAsync) は、構築・再抽出・インポートが始まるときに取り消される (MainWindow が取り消して終わるまで待つ)。
+        // 取り消されたら書き込まない
+        ct.ThrowIfCancellationRequested();
+        using (var tx = _db.BeginTransaction())
+        using (var up = _db.CreateCommand())
+        {
+            up.Transaction = tx;
+            up.CommandText = "UPDATE ships SET cargo_scu = @v WHERE record_name = @rn";
+            var pV = up.Parameters.Add("@v", SqliteType.Real);
+            var pRn = up.Parameters.Add("@rn", SqliteType.Text);
+            foreach (var (rn, scu) in results)
+            {
+                pV.Value = scu;
+                pRn.Value = rn;
+                up.ExecuteNonQuery();
+            }
+            tx.Commit();
+        }
+        var zero = results.Count(x => x.Scu <= 0);
+        StatusChanged?.Invoke($"船の積載量 (SCU): {results.Count} 隻を計算しました (貨物の置き場が見つからない船 {zero} 隻。部品 {fetched} 件を {round} 段で読み込み, {sw.Elapsed.TotalSeconds:F1}秒)");
+        return results.Count;
+    }
+
+    // "EntityClassDefinition.X" → "X" (接頭辞が無ければそのまま)
+    private static string RecordShortName(string recordName)
+    {
+        const string head = "EntityClassDefinition.";
+        return recordName.StartsWith(head, StringComparison.Ordinal) ? recordName[head.Length..] : recordName;
+    }
+
+    // "EntityClassDefinition.X\t値" の行の並び (dcb query の性質の取り出し) から、record 名 (接頭辞を除く) を集める。
+    // キーは大文字小文字を区別しない、値は元の大文字小文字の名前
+    internal static Dictionary<string, string> ParseEntityRecordNames(string text)
+    {
+        const string head = "EntityClassDefinition.";
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var raw in (text ?? "").Split('\n'))
+        {
+            var line = raw.TrimEnd('\r');
+            var tab = line.IndexOf('\t');
+            if (tab <= 0) continue;
+            var rec = line[..tab].Trim();
+            if (!rec.StartsWith(head, StringComparison.Ordinal)) continue;
+            var shortName = rec[head.Length..];
+            if (shortName.Length > 0) map.TryAdd(shortName, shortName);
+        }
+        return map;
+    }
+
+    // "EntityClassDefinition.X\t{InventoryContainer の JSON}" の行の並び (containerParams の取り出し。参照先の record が展開されて出る) から、
+    // エンティティごとの置き場 (種類 = inventoryType の __type、SCU = interiorDimensions の x*y*z / 1.953125) を集める
+    internal static Dictionary<string, List<(string Type, double Scu)>> ParseCargoContainers(string text)
+    {
+        const string head = "EntityClassDefinition.";
+        var map = new Dictionary<string, List<(string Type, double Scu)>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var raw in (text ?? "").Split('\n'))
+        {
+            var line = raw.TrimEnd('\r');
+            var tab = line.IndexOf('\t');
+            if (tab <= 0) continue;
+            var rec = line[..tab].Trim();
+            if (!rec.StartsWith(head, StringComparison.Ordinal)) continue;
+            try
+            {
+                using var doc = JsonDocument.Parse(line[(tab + 1)..]);
+                var c = doc.RootElement;
+                if (c.ValueKind != JsonValueKind.Object) continue;
+                if (!c.TryGetProperty("interiorDimensions", out var d) || d.ValueKind != JsonValueKind.Object) continue;
+                if (!c.TryGetProperty("inventoryType", out var it) || it.ValueKind != JsonValueKind.Object) continue;
+                var type = it.TryGetProperty("__type", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() ?? "" : "";
+                var x = GetNum(d, "x"); var y = GetNum(d, "y"); var z = GetNum(d, "z");
+                var shortName = rec[head.Length..];
+                if (!map.TryGetValue(shortName, out var list)) map[shortName] = list = new List<(string, double)>();
+                list.Add((type, x * y * z / CargoUnitVolume));
+            }
+            catch { }
+        }
+        return map;
+    }
+
+    // record (dcb query の 1 件の JSON) の既定のロードアウトの entry を読む。SItemPortLoadoutXMLParams は xmlLoader で読む (null ならたどらない)
+    internal static List<CargoEntry> ReadCargoLoadout(JsonElement root, Func<string, List<CargoEntry>>? xmlLoader = null)
+    {
+        var result = new List<CargoEntry>();
+        if (!root.TryGetProperty("_RecordValue_", out var rv) || rv.ValueKind != JsonValueKind.Object) return result;
+        if (!rv.TryGetProperty("Components", out var comps) || comps.ValueKind != JsonValueKind.Array) return result;
+        foreach (var c in comps.EnumerateArray())
+        {
+            if (c.ValueKind != JsonValueKind.Object) continue;
+            if (!c.TryGetProperty("_Type_", out var t) || t.ValueKind != JsonValueKind.String || t.GetString() != "SEntityComponentDefaultLoadoutParams") continue;
+            if (c.TryGetProperty("loadout", out var lo)) ReadCargoEntries(lo, result, xmlLoader);
+        }
+        return result;
+    }
+
+    private static void ReadCargoEntries(JsonElement loadout, List<CargoEntry> into, Func<string, List<CargoEntry>>? xmlLoader)
+    {
+        if (loadout.ValueKind != JsonValueKind.Object) return;
+        if (!loadout.TryGetProperty("_Type_", out var lt) || lt.ValueKind != JsonValueKind.String) return;
+        if (lt.GetString() == "SItemPortLoadoutXMLParams")
+        {
+            // XML のロードアウト: 付く先の無い entry の Children にそのファイルの entry を入れる
+            var path = loadout.TryGetProperty("loadoutPath", out var lp) && lp.ValueKind == JsonValueKind.String ? lp.GetString() ?? "" : "";
+            if (xmlLoader != null && path.Length > 0) into.Add(new CargoEntry { Children = xmlLoader(path) });
+            return;
+        }
+        if (lt.GetString() != "SItemPortLoadoutManualParams") return;
+        if (!loadout.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array) return;
+        foreach (var e in entries.EnumerateArray())
+        {
+            if (e.ValueKind != JsonValueKind.Object) continue;
+            if (!e.TryGetProperty("_Type_", out var et) || et.ValueKind != JsonValueKind.String || et.GetString() != "SItemPortLoadoutEntryParams") continue;
+            var entry = new CargoEntry { Target = CargoEntryTarget(e) };
+            if (e.TryGetProperty("loadout", out var sub)) ReadCargoEntries(sub, entry.Children, xmlLoader);
+            into.Add(entry);
+        }
+    }
+
+    // entry の付く先: entityClassReference があればそのファイル名 (拡張子 .json を除く)、無ければ entityClassName
+    private static string CargoEntryTarget(JsonElement e)
+    {
+        var reference = e.TryGetProperty("entityClassReference", out var er) && er.ValueKind == JsonValueKind.String ? er.GetString() ?? "" : "";
+        if (reference.Length > 0)
+        {
+            var slash = reference.LastIndexOf('/');
+            var basename = slash >= 0 ? reference[(slash + 1)..] : reference;
+            if (basename.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) basename = basename[..^5];
+            return basename;
+        }
+        return e.TryGetProperty("entityClassName", out var en) && en.ValueKind == JsonValueKind.String ? en.GetString() ?? "" : "";
+    }
+
+    // まだ読み込んでいない付く先 (エンティティの一覧にあるもの) を集める
+    private static HashSet<string> NewCargoTargets(IEnumerable<List<CargoEntry>> loadouts, Dictionary<string, string> names, HashSet<string> attempted)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Walk(List<CargoEntry> entries)
+        {
+            foreach (var e in entries)
+            {
+                if (e.Target.Length > 0 && !attempted.Contains(e.Target) && names.ContainsKey(e.Target)) result.Add(e.Target);
+                Walk(e.Children);
+            }
+        }
+        foreach (var l in loadouts) Walk(l);
+        return result;
+    }
+
+    // record 名 (接頭辞を除く、大文字小文字は元のまま) を、dcb query の filter "EntityClassDefinition.{名前1,名前2,…}" にまとめる
+    // (1 回の filter は TypedFilterMaxChars 文字・TypedFilterMaxRecords 件まで。名前に glob の記号を含むものは 1 件ずつ。BuildTypedExtraFilters と同じ決まり)
+    internal static List<string> BuildRecordNameFilters(IEnumerable<string> shortNames)
+    {
+        const string head = "EntityClassDefinition.";
+        var names = shortNames.Distinct(StringComparer.Ordinal).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        var result = new List<string>();
+        var batch = new List<string>();
+        int batchChars = 0;
+        void Flush()
+        {
+            if (batch.Count == 0) return;
+            result.Add(batch.Count == 1 ? head + batch[0] : head + "{" + string.Join(",", batch) + "}");
+            batch.Clear();
+            batchChars = 0;
+        }
+        foreach (var n in names)
+        {
+            if (n.IndexOfAny(['{', '}', '[', ']', '*', '?', ',', '\\']) >= 0)
+            {
+                result.Add(head + n);
+                continue;
+            }
+            if (batch.Count >= TypedFilterMaxRecords || batchChars + n.Length + 1 > TypedFilterMaxChars) Flush();
+            batch.Add(n);
+            batchChars += n.Length + 1;
+        }
+        Flush();
+        return result;
+    }
+
+    // 船 1 隻の積載量 (SCU)。exists はエンティティの一覧にある名前か (無い名前の付く先はたどらない)
+    internal static double ComputeCargoScu(string shipShortName, IReadOnlyDictionary<string, List<CargoEntry>> loadouts,
+        IReadOnlyDictionary<string, List<(string Type, double Scu)>> containers, Func<string, bool> exists)
+    {
+        double total = 0;
+        void Visit(string entity, int depth)
+        {
+            if (depth > CargoMaxDepth) return;
+            if (depth > 0 && containers.TryGetValue(entity, out var list))
+                foreach (var (type, scu) in list)
+                    if (type == CargoOpenContainerType) total += scu;
+            if (loadouts.TryGetValue(entity, out var entries)) Walk(entries, depth);
+        }
+        void Walk(List<CargoEntry> entries, int depth)
+        {
+            foreach (var e in entries)
+            {
+                if (e.Target.Length > 0 && (loadouts.ContainsKey(e.Target) || exists(e.Target))) Visit(e.Target, depth + 1);
+                Walk(e.Children, depth);
+            }
+        }
+        Visit(shipShortName, 0);
+        return total;
+    }
+
     // 構築の間だけ使う、Data.p4k から取り出した Game2.dcb (null なら dcb query は --p4k で読む)
     private string? _dcbPath;
     private int _dcbScopeDepth;
@@ -770,7 +1228,7 @@ public class GameDataExtractor : IDisposable
     private readonly Dictionary<(string Type, string Filter), string> _queryCacheFiles = new();
     private readonly object _queryCacheLock = new();
 
-    private string DcbTmpDir => Path.Combine(Path.GetDirectoryName(DbPath) ?? ".", "dcb_tmp");
+    private string DcbTmpDir => Path.Combine(Path.GetDirectoryName(DbPath) ?? ".", "dcb_tmp" + _tmpSuffix);
 
     // Data.p4k から Game2.dcb を作業ディレクトリの dcb_tmp に 1 回だけ取り出し、返したものを破棄するまで dcb query をそこから読ませる。
     // starbreaker は --p4k だと呼ぶたびに p4k から dcb を開き直す (1 回あたり約 3.6 秒。--dcb なら約 0.4 秒。出力は同じ。実測)。
@@ -1050,6 +1508,31 @@ public class GameDataExtractor : IDisposable
             if (!hasTable) return;
             using var alt = _db.CreateCommand();
             alt.CommandText = "ALTER TABLE ships ADD COLUMN name_en TEXT";
+            alt.ExecuteNonQuery();
+        }
+        catch { }
+    }
+
+    // 既存 DB の ships に cargo_scu 列 (ゲームデータから計算した船の積載量 SCU。UpdateShipCargoAsync が埋める) が無ければ追加する。
+    // 足したばかりの列は NULL (まだ計算していない)。0 は「計算したが貨物の置き場が見つからなかった」
+    private void MigrateShipsCargoScuColumn()
+    {
+        if (_db == null) return;
+        try
+        {
+            using var chk = _db.CreateCommand();
+            chk.CommandText = "PRAGMA table_info(ships)";
+            using var reader = chk.ExecuteReader();
+            bool hasTable = false;
+            while (reader.Read())
+            {
+                hasTable = true;
+                if (string.Equals(reader.GetString(1), "cargo_scu", StringComparison.OrdinalIgnoreCase)) return;
+            }
+            reader.Close();
+            if (!hasTable) return;
+            using var alt = _db.CreateCommand();
+            alt.CommandText = "ALTER TABLE ships ADD COLUMN cargo_scu REAL";
             alt.ExecuteNonQuery();
         }
         catch { }
@@ -1382,6 +1865,7 @@ public class GameDataExtractor : IDisposable
         int shipCount = await ExtractShipsAsync(dataP4kPath, now, ct);
         UpdateShipEnglishNames();
         await UpdateShipPortSizesAsync(dataP4kPath, ct);
+        await UpdateShipCargoAsync(dataP4kPath, ct);
 
         // Step 3: アイテム詳細（装備コンポーネント）
         step++;
@@ -2272,6 +2756,7 @@ public class GameDataExtractor : IDisposable
                 int shipCount = await ExtractShipsAsync(p4kPath, now, ct);
                 UpdateShipEnglishNames();
                 await UpdateShipPortSizesAsync(p4kPath, ct);
+                await UpdateShipCargoAsync(p4kPath, ct);
 
                 SetMeta("equipment_rebuilt_at", now);
                 try { await RebuildMissionReputationAsync(progress, ct); }

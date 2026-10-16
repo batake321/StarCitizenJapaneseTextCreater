@@ -20,6 +20,36 @@ public sealed class GameLogEntry
     public long Seq { get; init; }
     // ミッション名がまだ分からない契約終了の行の MissionId (内容は MissionId の先頭 8 文字)。名前を入れたら null
     public string? PendingMissionId { get; set; }
+    // 店の購入の行 (種類「購入」「購入失敗」) の依頼の中身。ほかの行は null
+    public GameLogPurchase? Purchase { get; init; }
+    // ［ゲームログ］タブが決める「装備に入れる」ボタンの状態 (UI のスレッドだけで使う)
+    public PurchaseImportState ImportState { get; set; }
+}
+
+// ［ゲームログ］の購入の行の「装備に入れる」ボタンの状態 (HangarService.ClassifyPurchase)
+public enum PurchaseImportState { None, Ready, Imported }
+
+// 店で買う依頼 (SendShopBuyRequest / SendStandardItemBuyRequest の行) の中身。Succeeded は結果 (RmShopFlowResponse) が Success だったとき true。
+// LogTime は行頭の時刻の文字 (UTC。"2026-10-15T13:41:22.633")。Key は購入を見分ける組 (時刻・playerId・shopId・kioskId・itemName・quantity)。
+// ゲームの再起動で同じ購入が今の Game.log と過去のログの両方に出ても、行が同じなら Key も同じ
+public sealed class GameLogPurchase
+{
+    public DateTime TimeUtc { get; init; }
+    public string LogTime { get; init; } = "";
+    public string PlayerId { get; init; } = "";
+    public string ShopId { get; init; } = "";
+    public string KioskId { get; init; } = "";
+    public string ItemName { get; init; } = "";
+    public int Quantity { get; init; }
+    public bool Succeeded { get; set; }
+
+    public string Key => MakeKey(LogTime, PlayerId, ShopId, KioskId, ItemName, Quantity);
+
+    public static string MakeKey(string logTime, string playerId, string shopId, string kioskId, string itemName, int quantity) =>
+        string.Join("\u001f", logTime, playerId, shopId, kioskId, itemName, quantity.ToString(CultureInfo.InvariantCulture));
+
+    // 「装備に入れる」ボタンを付ける購入の始まり: 2026-10-15 23:01 (日本時間) = 14:01 (UTC)。これより前の購入には付けない
+    public static readonly DateTime ImportCutoffUtc = new(2026, 10, 15, 14, 1, 0, DateTimeKind.Utc);
 }
 
 // MissionId → ミッション名。［ゲームログ］タブ全体 (過去のログ・今の Game.log のすべての GameLogParser) で 1 つを共有し、ファイルをまたいで引く。
@@ -167,6 +197,8 @@ public sealed class GameLogParser
     private static readonly Regex EndMissionRegex = new(@"<EndMission> .*?MissionId\[([0-9A-Fa-f-]+)\].*?CompletionType\[([^\]]*)\]", RegexOptions.Compiled);
     // 店で買う (2 種類の行): ... shopName[..] kioskId[..] client_price[42.000000] itemClassGUID[..] itemName[..] quantity[6]
     private static readonly Regex ShopBuyRegex = new(@"<CEntityComponent(?:ShopUIProvider::SendShopBuyRequest|ShoppingProvider::SendStandardItemBuyRequest)> .*? shopName\[([^\]]*)\].*? client_price\[([-0-9.]+)\].*? itemName\[([^\]]*)\] quantity\[(\d+)\]", RegexOptions.Compiled);
+    // 店で買う依頼の playerId・shopId・kioskId (2 種類の行とも playerId[..] shopId[..] shopName[..] kioskId[..] の順)
+    private static readonly Regex ShopBuyIdsRegex = new(@"playerId\[([^\]]*)\] shopId\[([^\]]*)\] shopName\[[^\]]*\] kioskId\[([^\]]*)\]", RegexOptions.Compiled);
     // 店の結果: ... result[Success] type[Buying] (ShopUIProvider) / Shop Flow Response - playerId[..] result[Success] (ShoppingProvider。type 無し)
     private static readonly Regex ShopResponseRegex = new(@"<CEntityComponent(?:ShopUIProvider|ShoppingProvider)::RmShopFlowResponse> .*? result\[([^\]]*)\](?: type\[([^\]]*)\])?", RegexOptions.Compiled);
     // 商品の買い: ... shopName[..] kioskId[..] price[2608320.000000] shopPricePerCentiSCU[..] resourceGUID[..] autoLoading[0] quantity[104000.000000 cSCU]
@@ -315,7 +347,17 @@ public sealed class GameLogParser
         if ((m = ShopBuyRegex.Match(line)).Success)
         {
             var item = m.Groups[3].Value;
-            var e = Add(time, "購入", $"{_itemName(item)} × {m.Groups[4].Value} / 店: {m.Groups[1].Value}", ParseNumber(m.Groups[2].Value));
+            var ids = ShopBuyIdsRegex.Match(line);
+            var purchase = new GameLogPurchase
+            {
+                TimeUtc = time, LogTime = sm.Groups[1].Value, ItemName = item,
+                // 数に直せない数量は 0 (HangarService.ClassifyPurchase が 0 以下の購入にはボタンを付けない)
+                Quantity = int.TryParse(m.Groups[4].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var qty) ? qty : 0,
+                PlayerId = ids.Success ? ids.Groups[1].Value : "",
+                ShopId = ids.Success ? ids.Groups[2].Value : "",
+                KioskId = ids.Success ? ids.Groups[3].Value : "",
+            };
+            var e = Add(time, "購入", $"{_itemName(item)} × {m.Groups[4].Value} / 店: {m.Groups[1].Value}", ParseNumber(m.Groups[2].Value), purchase);
             _pendingPurchases.Add(e);
             return;
         }
@@ -333,6 +375,11 @@ public sealed class GameLogParser
             {
                 e.Kind = "購入失敗";
                 e.Content += $" / 結果: {result}";
+                Changed = true;
+            }
+            else if (e.Purchase != null)
+            {
+                e.Purchase.Succeeded = true;
                 Changed = true;
             }
             return;
@@ -569,11 +616,11 @@ public sealed class GameLogParser
     }
 
     // ─── 共通 ───
-    private GameLogEntry Add(DateTime time, string kind, string content, double? amount = null)
+    private GameLogEntry Add(DateTime time, string kind, string content, double? amount = null, GameLogPurchase? purchase = null)
     {
         var e = new GameLogEntry
         {
-            TimeUtc = time, Kind = kind, Content = content, Amount = amount, Source = _source,
+            TimeUtc = time, Kind = kind, Content = content, Amount = amount, Source = _source, Purchase = purchase,
             Seq = System.Threading.Interlocked.Increment(ref _seq),
         };
         Entries.Add(e);

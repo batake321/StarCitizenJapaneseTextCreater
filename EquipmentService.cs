@@ -25,7 +25,8 @@ public class EquipmentService : IDisposable
     private static readonly TimeSpan CacheTtl = TimeSpan.FromHours(24);
 
     // 装備カテゴリ。Key は items.item_type (船舶武器 WeaponGun・タレット Turret・ジンバル/マウント WeaponMount は items に無く item_index から引く)。
-    // 表示順はこの並び。uexCategoryIds は UEX の購入場所検索用 (不明なカテゴリは空 → 既定カテゴリで検索)
+    // 表示順はこの並び。uexCategoryIds は UEX の購入場所検索用 (UEX の /2.0/categories で確かめた id。
+    // 当たるカテゴリを確かめられないものは空 → 購入場所を検索しない。既定のカテゴリでは探さない)
     private const string WeaponGunType = "WeaponGun";
     internal const string TurretType = "Turret";
     internal const string WeaponMountType = "WeaponMount";
@@ -36,13 +37,14 @@ public class EquipmentService : IDisposable
         ("QuantumDrive", "量子ドライブ", new[] { 22 }),
         ("JumpDrive", "ジャンプドライブ", Array.Empty<int>()),
         ("Cooler", "クーラー", new[] { 19 }),
-        ("Radar", "レーダー", Array.Empty<int>()),
-        ("MissileLauncher", "ミサイルラック", Array.Empty<int>()),
+        ("Radar", "レーダー", new[] { 83 }),
+        ("MissileLauncher", "ミサイルラック", new[] { 33 }),
+        ("Missile", "ミサイル", new[] { 34 }),
         ("FuelTank", "燃料タンク", Array.Empty<int>()),
         ("QuantumFuelTank", "量子燃料タンク", Array.Empty<int>()),
         ("FuelIntake", "燃料インテーク", Array.Empty<int>()),
         (WeaponGunType, "船舶武器", new[] { 32, 33, 34, 35 }),
-        (TurretType, "タレット", Array.Empty<int>()),
+        (TurretType, "タレット", new[] { 35 }),
         (WeaponMountType, "ジンバル/マウント", Array.Empty<int>()),
     };
 
@@ -61,7 +63,10 @@ public class EquipmentService : IDisposable
     private readonly bool _hasShipPortSizes;
     private readonly bool _hasItemPorts;
 
-    public EquipmentService(string gamedataCacheDbPath)
+    public EquipmentService(string gamedataCacheDbPath) : this(gamedataCacheDbPath, loadPriceCache: true) { }
+
+    // loadPriceCache: false なら equipment_cache.db (購入場所の覚え) を開かない (入れられる品の索引を裏で作るときの、読むだけの口)
+    private EquipmentService(string gamedataCacheDbPath, bool loadPriceCache)
     {
         _gamedataDbPath = gamedataCacheDbPath;
         _conn = new SqliteConnection($"Data Source={gamedataCacheDbPath};Mode=ReadOnly");
@@ -70,6 +75,7 @@ public class EquipmentService : IDisposable
         _hasShipPortSizes = HasColumn("ship_ports", "max_size") && HasColumn("ship_ports", "min_size") && HasColumn("ship_ports", "port_types");
         _hasItemPorts = HasColumn("item_ports", "max_size");
         _cacheDbPath = Path.Combine(Path.GetDirectoryName(gamedataCacheDbPath) ?? ".", "equipment_cache.db");
+        if (!loadPriceCache) return;
         InitCacheDb();
         ReloadPriceIndex();
     }
@@ -598,6 +604,67 @@ public class EquipmentService : IDisposable
 
     // record がジンバル/マウントか (IsMountRecord: 既定の装備のポートの種別、無ければ record 名の規則)
     public bool IsGimbalRecord(string? record) => !string.IsNullOrWhiteSpace(record) && IsMountRecord(record);
+
+    // 所持コンポーネントに入れられる品 (装備カテゴリ ComponentCategories のどれかの GetShipComponents の候補に入るもの) の索引。
+    // record_name (大文字小文字は区別しない) → 候補 (手入力の追加の候補と同じ名前・種別・サイズ・グレード)。
+    // PrepareOwnableIndexAsync が裏で作る (作られる前に FindOwnableComponent が呼ばれたら、その場で作る)
+    private volatile Dictionary<string, EquipmentItem>? _ownableByRecord;
+    private readonly object _ownableLock = new();
+    private Task? _ownableTask;
+    // FindOwnableComponent の結果の覚え (record → 候補 / null)。UI のスレッドだけで使う
+    private readonly Dictionary<string, EquipmentItem?> _ownableResults = new(StringComparer.OrdinalIgnoreCase);
+
+    // 入れられる品の索引ができているか
+    public bool IsOwnableIndexReady => _ownableByRecord != null;
+
+    // 入れられる品の索引を裏で一度だけ作る (この口の接続 _conn は使わず、読むだけの口を別に開いて作る)。作り終わると完了する
+    public Task PrepareOwnableIndexAsync()
+    {
+        lock (_ownableLock)
+        {
+            if (_ownableByRecord != null) return Task.CompletedTask;
+            return _ownableTask ??= Task.Run(() =>
+            {
+                using var reader = new EquipmentService(_gamedataDbPath, loadPriceCache: false);
+                var dict = reader.BuildOwnableIndex();
+                lock (_ownableLock) _ownableByRecord ??= dict;
+            });
+        }
+    }
+
+    private Dictionary<string, EquipmentItem> BuildOwnableIndex()
+    {
+        var dict = new Dictionary<string, EquipmentItem>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (catKey, _, _) in ComponentCategories)
+            foreach (var item in GetShipComponents(catKey))
+                dict.TryAdd(item.RecordName, item);
+        return dict;
+    }
+
+    // record (EntityClassDefinition. 付き) が item_index にあり、所持コンポーネントに入れられる種類なら、その候補 (手入力の候補と同じもの)。
+    // どちらかに当たらなければ null。結果は覚えておく (gamedata_cache.db が替わるときはこの口ごと作り直される)
+    public EquipmentItem? FindOwnableComponent(string record)
+    {
+        var key = (record ?? "").Trim();
+        if (key.Length == 0) return null;
+        if (_ownableResults.TryGetValue(key, out var cached)) return cached;
+        var index = _ownableByRecord;
+        if (index == null)
+        {
+            var dict = BuildOwnableIndex();
+            lock (_ownableLock) index = _ownableByRecord ??= dict;
+        }
+        EquipmentItem? result = null;
+        if (index.TryGetValue(key, out var found))
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT 1 FROM item_index WHERE record_name = @rn COLLATE NOCASE LIMIT 1";
+            cmd.Parameters.AddWithValue("@rn", key);
+            if (cmd.ExecuteScalar() != null) result = found;
+        }
+        _ownableResults[key] = result;
+        return result;
+    }
 
     // record 名 1 件を items から引く (ツールチップ / 装備インベントリ用)。
     // ship_ports.equipped_item は "POWR_AEGS_S01_Regulus_SCItem" 形式、items.record_name / item_index.record_name は
@@ -1130,8 +1197,12 @@ public class EquipmentService : IDisposable
         {
             int[] categoryIds;
             var catInfo = componentType != null ? ComponentCategories.FirstOrDefault(c => c.Key == componentType) : default;
-            if (catInfo.Key != null && catInfo.UexCategoryIds.Length > 0)
+            if (catInfo.Key != null)
+            {
+                // 装備カテゴリの種別で、UEX のカテゴリを確かめられていないもの (id が空) は検索しない (別のカテゴリで探して誤った結果を出さない)
+                if (catInfo.UexCategoryIds.Length == 0) return null;
                 categoryIds = catInfo.UexCategoryIds;
+            }
             else
                 categoryIds = new[] { 18, 17 };
 

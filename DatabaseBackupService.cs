@@ -28,7 +28,7 @@ public static class DatabaseBackupService
     private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache", "item_shop_prices", "ammo_params", "item_variants", "player_damage_params", "item_ports", "item_port_labels",
         "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
-    private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "ship_loaners", "store_skus", "my_components", "ship_loadouts"];
+    private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "ship_loaners", "store_skus", "my_components", "ship_loadouts", "my_component_purchases"];
 
     public static string[] GetTables(BackupCategory category) => category switch
     {
@@ -98,6 +98,7 @@ public static class DatabaseBackupService
                                     DELETE FROM hangar_ship_marks;
                                     DELETE FROM my_components;
                                     DELETE FROM ship_loadouts;
+                                    DELETE FROM my_component_purchases;
                                     """;
                                 cmd.ExecuteNonQuery();
                             }
@@ -201,6 +202,9 @@ public static class DatabaseBackupService
     // 個人で、行を見分けるキーが無いもの (主キーが無い、または中身と関係の無い連番の id だけのもの):
     // a にその表の行が 1 行でもあれば a だけ、a が空 (表が無い) なら b の行を使う
     private static readonly string[] TradePersonalUnkeyedTables = ["my_ships", "my_components", "hangar_items", "hangar_nameable_ships"];
+    // ［ゲームログ］の購入を所持コンポーネントに入れた印。my_components と必ず同じ側から取る:
+    // my_components を a のまま残したときは印も a だけ、a が空で b の my_components を使ったときは印も b のものにする
+    private const string ComponentPurchasesTable = "my_component_purchases";
     // hangar_meta のうちネット由来のデータ (ship_matrix / ship_loaners / store_skus) の取得時刻のキー (b を使う)。ほかのキー (同期の時刻・残高) は個人
     private static readonly string[] HangarMetaNetKeys = ["ship_matrix_fetched_at", "loaners_fetched_at", "store_fetched_at"];
 
@@ -495,8 +499,21 @@ public static class DatabaseBackupService
     {
         using var conn = OpenWithSource(aPath, bPath);
         using var tx = conn.BeginTransaction();
+        var componentsFromB = false;   // my_components を b から入れたか (ComponentPurchasesTable の扱いに使う)
         foreach (var table in TradeTables)
         {
+            if (table == ComponentPurchasesTable)
+            {
+                if (!componentsFromB) continue;
+                // 印も b のものだけにする (b に表が無ければ印は空)
+                EnsureTradeSchemaTable(conn, tx);
+                Exec(conn, tx, $"DELETE FROM main.{Q(table)}");
+                if (!SourceTableExists(conn, tx, table)) continue;
+                var cols = string.Join(", ", CommonColumns(conn, tx, table).Select(Q));
+                var n = Exec(conn, tx, $"INSERT OR IGNORE INTO main.{Q(table)} ({cols}) SELECT {cols} FROM src.{Q(table)}");
+                onStatus?.Invoke($"{table}: {n} 件追加");
+                continue;
+            }
             if (!SourceTableExists(conn, tx, table)) continue;
             if (TradeNetTables.Contains(table))
             {
@@ -522,6 +539,7 @@ public static class DatabaseBackupService
             {
                 EnsureMainTable(conn, tx, table);
                 if (Scalar(conn, tx, $"SELECT EXISTS (SELECT 1 FROM main.{Q(table)})") != 0) continue;
+                if (table == "my_components") componentsFromB = true;
                 var colList = string.Join(", ", CommonColumns(conn, tx, table).Select(Q));
                 var n = Exec(conn, tx, $"INSERT INTO main.{Q(table)} ({colList}) SELECT {colList} FROM src.{Q(table)}");
                 onStatus?.Invoke($"{table}: {n} 件追加");
@@ -530,6 +548,22 @@ public static class DatabaseBackupService
         NormalizeSequences(conn, tx);
         tx.Commit();
     }
+
+    // a に印の表 (ComponentPurchasesTable) が無ければ作る (b に表が無いときも空の表を用意するため。形は EnsureTradeSchema と同じ)
+    private static void EnsureTradeSchemaTable(SqliteConnection conn, SqliteTransaction tx) =>
+        Exec(conn, tx, """
+            CREATE TABLE IF NOT EXISTS main.my_component_purchases (
+                log_time TEXT NOT NULL,
+                player_id TEXT NOT NULL DEFAULT '',
+                shop_id TEXT NOT NULL DEFAULT '',
+                kiosk_id TEXT NOT NULL DEFAULT '',
+                item_name TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                item_record TEXT DEFAULT '',
+                added_at TEXT DEFAULT (datetime('now','localtime')),
+                PRIMARY KEY (log_time, player_id, shop_id, kiosk_id, item_name, quantity)
+            )
+            """);
 
     // a の DB を開き、b を "src" として読む
     private static SqliteConnection OpenWithSource(string aPath, string bPath)
@@ -733,7 +767,8 @@ public static class DatabaseBackupService
                 size TEXT,
                 production_status TEXT,
                 production_note TEXT,
-                fetched_at TEXT
+                fetched_at TEXT,
+                cargocapacity REAL
             );
             CREATE TABLE IF NOT EXISTS ship_loaners (
                 ship_name TEXT NOT NULL,
@@ -776,6 +811,17 @@ public static class DatabaseBackupService
                 item_record TEXT NOT NULL,
                 PRIMARY KEY (ship_key, port_name)
             );
+            CREATE TABLE IF NOT EXISTS my_component_purchases (
+                log_time TEXT NOT NULL,
+                player_id TEXT NOT NULL DEFAULT '',
+                shop_id TEXT NOT NULL DEFAULT '',
+                kiosk_id TEXT NOT NULL DEFAULT '',
+                item_name TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                item_record TEXT DEFAULT '',
+                added_at TEXT DEFAULT (datetime('now','localtime')),
+                PRIMARY KEY (log_time, player_id, shop_id, kiosk_id, item_name, quantity)
+            );
             """;
         cmd.ExecuteNonQuery();
 
@@ -815,6 +861,10 @@ public static class DatabaseBackupService
             alter.CommandText = "ALTER TABLE store_skus ADD COLUMN native_discounted_cents INTEGER DEFAULT 0";
             alter.ExecuteNonQuery();
         }
+
+        // 旧スキーマ (cargocapacity 列なし) の ship_matrix に列を追加する (HangarService.MigrateShipMatrixSchema と同じ)。
+        // バックアップ側にある Ship Matrix の積載量を取り込めるようにするため
+        HangarService.MigrateShipMatrixSchema(conn);
     }
 
     public static async Task ImportAsync(string backupPath, string translationDbPath, string indexDbPath,
@@ -1115,7 +1165,8 @@ public static class DatabaseBackupService
                 size INTEGER,
                 raw_json TEXT NOT NULL,
                 extracted_at TEXT NOT NULL,
-                name_en TEXT
+                name_en TEXT,
+                cargo_scu REAL
             );
             CREATE TABLE IF NOT EXISTS ship_ports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1200,6 +1251,13 @@ public static class DatabaseBackupService
         {
             using var alter = conn.CreateCommand();
             alter.CommandText = "ALTER TABLE ships ADD COLUMN name_en TEXT";
+            alter.ExecuteNonQuery();
+        }
+        // 同じく cargo_scu 列 (ゲームデータから計算した船の積載量) が無ければ足す (バックアップ側の積載量を取り込めるようにするため)
+        if (shipCols.Count > 0 && !shipCols.Contains("cargo_scu"))
+        {
+            using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE ships ADD COLUMN cargo_scu REAL";
             alter.ExecuteNonQuery();
         }
     }

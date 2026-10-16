@@ -202,6 +202,7 @@ public class ShipMatrixEntry
     public string Size { get; set; } = "";          // API の size は "Small"/"Large" 等の文字列
     public string ProductionStatus { get; set; } = "";
     public string ProductionNote { get; set; } = "";
+    public double? CargoCapacity { get; set; }      // API の cargocapacity (SCU)。無い・null なら null
 }
 
 public class HangarTotals
@@ -622,7 +623,8 @@ public class HangarService
                 size TEXT,
                 production_status TEXT,
                 production_note TEXT,
-                fetched_at TEXT
+                fetched_at TEXT,
+                cargocapacity REAL
             );
             CREATE TABLE IF NOT EXISTS ship_loaners (
                 ship_name TEXT NOT NULL,
@@ -665,10 +667,30 @@ public class HangarService
                 item_record TEXT NOT NULL,
                 PRIMARY KEY (ship_key, port_name)
             );
+            CREATE TABLE IF NOT EXISTS my_component_purchases (
+                log_time TEXT NOT NULL,
+                player_id TEXT NOT NULL DEFAULT '',
+                shop_id TEXT NOT NULL DEFAULT '',
+                kiosk_id TEXT NOT NULL DEFAULT '',
+                item_name TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                item_record TEXT DEFAULT '',
+                added_at TEXT DEFAULT (datetime('now','localtime')),
+                PRIMARY KEY (log_time, player_id, shop_id, kiosk_id, item_name, quantity)
+            );
             """;
         cmd.ExecuteNonQuery();
         MigratePledgesSchema(db);
         MigrateStoreSchema(db);
+        MigrateShipMatrixSchema(db);
+    }
+
+    // 旧スキーマ (cargocapacity 列なし) の ship_matrix に列を追加する。DROP はしない (足したばかりの列は NULL。次の Ship Matrix の取得で入る)
+    internal static void MigrateShipMatrixSchema(SqliteConnection db)
+    {
+        var cols = TableColumns(db, "ship_matrix");
+        if (cols.Count > 0 && !cols.Contains("cargocapacity"))
+            Exec(db, "ALTER TABLE ship_matrix ADD COLUMN cargocapacity REAL");
     }
 
     // 旧スキーマ (config_value_cents / availability 列なし) の hangar_pledges に列を追加する。DROP はしない
@@ -1174,12 +1196,14 @@ public class HangarService
 
     // === 装備インベントリ (my_components) / 現在の装備 (ship_loadouts) ===
 
+    // 読む前に、同じ品 (item_record と使用可が同じ) の行を 1 行にまとめる (MergeDuplicateMyComponents)
     public List<MyComponent> LoadMyComponents()
     {
         var list = new List<MyComponent>();
         if (_dbPath == null || !File.Exists(_dbPath)) return list;
         using var db = new SqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
+        MergeDuplicateMyComponents(db);
         using var cmd = db.CreateCommand();
         cmd.CommandText = "SELECT id, item_record, item_name, item_type, size, grade, quantity, usable, notes, added_at FROM my_components ORDER BY item_type, size DESC, grade, item_name, id";
         using var r = cmd.ExecuteReader();
@@ -1202,13 +1226,49 @@ public class HangarService
         return list;
     }
 
-    // 追加した行の id を返す
+    // 追加する。同じ品 (item_record と使用可が同じ) の行が既にあれば、新しい行を作らずその行の数量に足す
+    // (メモは JoinNotes で連結。名前・種別・サイズ・グレード・追加日は既にある行のまま)。追加した (または足した) 行の id を返す
     public int AddMyComponent(MyComponent c)
     {
         if (_dbPath == null) return 0;
         using var db = new SqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
+        using var tx = db.BeginTransaction();
+        var id = AddOrMergeMyComponent(db, tx, c);
+        tx.Commit();
+        return id;
+    }
+
+    // AddMyComponent の本体 (呼ぶ側のトランザクションの中で行う)。c.Id に行の id を入れる
+    private static int AddOrMergeMyComponent(SqliteConnection db, SqliteTransaction tx, MyComponent c)
+    {
+        int? existingId = null;
+        var existingNotes = "";
+        using (var find = db.CreateCommand())
+        {
+            find.Transaction = tx;
+            find.CommandText = "SELECT id, COALESCE(notes, '') FROM my_components WHERE item_record = @r AND (COALESCE(usable, 1) != 0) = @u ORDER BY id LIMIT 1";
+            find.Parameters.AddWithValue("@r", c.ItemRecord);
+            find.Parameters.AddWithValue("@u", c.Usable ? 1 : 0);
+            using var r = find.ExecuteReader();
+            if (r.Read())
+            {
+                existingId = r.GetInt32(0);
+                existingNotes = r.GetString(1);
+            }
+        }
         using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
+        if (existingId is int eid)
+        {
+            cmd.CommandText = "UPDATE my_components SET quantity = COALESCE(quantity, 1) + @q, notes = @o WHERE id = @id";
+            cmd.Parameters.AddWithValue("@q", c.Quantity);
+            cmd.Parameters.AddWithValue("@o", JoinNotes([existingNotes, c.Notes ?? ""]));
+            cmd.Parameters.AddWithValue("@id", eid);
+            cmd.ExecuteNonQuery();
+            c.Id = eid;
+            return eid;
+        }
         cmd.CommandText = """
             INSERT INTO my_components (item_record, item_name, item_type, size, grade, quantity, usable, notes)
             VALUES (@r, @n, @t, @s, @g, @q, @u, @o);
@@ -1225,6 +1285,106 @@ public class HangarService
         var id = (int)(long)(cmd.ExecuteScalar() ?? 0L);
         c.Id = id;
         return id;
+    }
+
+    // メモを 1 つにする: 空でないものを並びの順に、同じ文 (前後の空白を除いて) は 1 つにして " / " でつなぐ
+    internal static string JoinNotes(IEnumerable<string> notes)
+    {
+        var parts = new List<string>();
+        foreach (var n in notes)
+        {
+            var t = (n ?? "").Trim();
+            if (t.Length > 0 && !parts.Contains(t, StringComparer.Ordinal)) parts.Add(t);
+        }
+        return string.Join(" / ", parts);
+    }
+
+    // 同じ品 (item_record と使用可が同じ) の行が 2 行以上あれば、id のいちばん小さい行に数量を合計してまとめ、ほかの行を消す。
+    // メモは id の順に JoinNotes で連結する。名前・種別・サイズ・グレード・追加日は id のいちばん小さい行のまま。
+    // 使用可が違う行は別の行のまま (使用可は行ごとの状態で、まとめるとどちらかが失われるため)
+    private static void MergeDuplicateMyComponents(SqliteConnection db)
+    {
+        var groups = new Dictionary<(string Record, bool Usable), List<(int Id, int Qty, string Notes)>>();
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.CommandText = "SELECT id, item_record, COALESCE(quantity, 1), COALESCE(usable, 1), COALESCE(notes, '') FROM my_components ORDER BY id";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var key = (r.IsDBNull(1) ? "" : r.GetString(1), r.GetInt32(3) != 0);
+                if (!groups.TryGetValue(key, out var rows)) groups[key] = rows = new();
+                rows.Add((r.GetInt32(0), r.GetInt32(2), r.GetString(4)));
+            }
+        }
+        var dups = groups.Values.Where(g => g.Count > 1).ToList();
+        if (dups.Count == 0) return;
+        using var tx = db.BeginTransaction();
+        foreach (var rows in dups)
+        {
+            var keep = rows[0];
+            Exec(db, tx, "UPDATE my_components SET quantity = @q, notes = @o WHERE id = @id",
+                ("@q", rows.Sum(x => x.Qty)), ("@o", JoinNotes(rows.Select(x => x.Notes))), ("@id", keep.Id));
+            foreach (var other in rows.Skip(1))
+                Exec(db, tx, "DELETE FROM my_components WHERE id = @id", ("@id", other.Id));
+        }
+        tx.Commit();
+    }
+
+    // ［ゲームログ］の購入を所持コンポーネントに入れた印 (my_component_purchases) の一覧 (GameLogPurchase.Key)
+    public HashSet<string> LoadImportedPurchaseKeys()
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (_dbPath == null || !File.Exists(_dbPath)) return set;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT log_time, player_id, shop_id, kiosk_id, item_name, quantity FROM my_component_purchases";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            set.Add(GameLogPurchase.MakeKey(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetInt32(5)));
+        return set;
+    }
+
+    // ［ゲームログ］の購入 p を所持コンポーネント c として入れる (AddMyComponent と同じく同じ品には数量を足す)。
+    // 購入の印 (時刻・playerId・shopId・kioskId・itemName・quantity) を my_component_purchases に残し、印が既にあれば何もせず false。
+    // 印と所持コンポーネントは 1 つのトランザクションで書く (片方だけ残らないように)
+    public bool ImportPurchasedComponent(GameLogPurchase p, MyComponent c)
+    {
+        if (_dbPath == null) return false;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var tx = db.BeginTransaction();
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = """
+                INSERT OR IGNORE INTO my_component_purchases (log_time, player_id, shop_id, kiosk_id, item_name, quantity, item_record)
+                VALUES (@t, @p, @s, @k, @i, @q, @r)
+                """;
+            cmd.Parameters.AddWithValue("@t", p.LogTime);
+            cmd.Parameters.AddWithValue("@p", p.PlayerId);
+            cmd.Parameters.AddWithValue("@s", p.ShopId);
+            cmd.Parameters.AddWithValue("@k", p.KioskId);
+            cmd.Parameters.AddWithValue("@i", p.ItemName);
+            cmd.Parameters.AddWithValue("@q", p.Quantity);
+            cmd.Parameters.AddWithValue("@r", c.ItemRecord);
+            if (cmd.ExecuteNonQuery() == 0) return false;   // 入れ済み (tx は Commit せずに捨てる)
+        }
+        AddOrMergeMyComponent(db, tx, c);
+        tx.Commit();
+        return true;
+    }
+
+    // ［ゲームログ］の購入の行のボタン (装備に入れる) の状態。
+    //   None:     ボタンを出さない (成功していない・数量が読めない (0 以下)・cutoffUtc より前・品が item_index に無いか所持リストに入れられる種類でない)
+    //   Imported: 入れ済み (印がある)
+    //   Ready:    入れられる (item に入れる品)
+    public static (PurchaseImportState State, EquipmentItem? Item) ClassifyPurchase(GameLogPurchase p, EquipmentService equip, ISet<string> importedKeys, DateTime cutoffUtc)
+    {
+        if (!p.Succeeded || p.Quantity <= 0 || p.TimeUtc < cutoffUtc) return (PurchaseImportState.None, null);
+        var item = equip.FindOwnableComponent("EntityClassDefinition." + p.ItemName);
+        if (item == null) return (PurchaseImportState.None, null);
+        return (importedKeys.Contains(p.Key) ? PurchaseImportState.Imported : PurchaseImportState.Ready, item);
     }
 
     public void UpdateMyComponent(MyComponent c)
@@ -2189,6 +2349,7 @@ public class HangarService
                     Size = size,
                     ProductionStatus = GetStr(el, "production_status").Trim(),
                     ProductionNote = GetStr(el, "production_note").Trim(),
+                    CargoCapacity = el.TryGetProperty("cargocapacity", out var cc) && cc.ValueKind == JsonValueKind.Number ? cc.GetDouble() : null,
                 });
             }
         }
@@ -2206,12 +2367,12 @@ public class HangarService
             {
                 Exec(db, """
                     INSERT OR REPLACE INTO ship_matrix
-                        (id, name, manufacturer_code, manufacturer_name, focus, type, size, production_status, production_note, fetched_at)
-                    VALUES (@id, @n, @mc, @mn, @f, @t, @s, @ps, @pn, @fa)
+                        (id, name, manufacturer_code, manufacturer_name, focus, type, size, production_status, production_note, fetched_at, cargocapacity)
+                    VALUES (@id, @n, @mc, @mn, @f, @t, @s, @ps, @pn, @fa, @cc)
                     """,
                     ("@id", e.Id), ("@n", e.Name), ("@mc", e.ManufacturerCode), ("@mn", e.ManufacturerName),
                     ("@f", e.Focus), ("@t", e.Type), ("@s", e.Size),
-                    ("@ps", e.ProductionStatus), ("@pn", e.ProductionNote), ("@fa", now));
+                    ("@ps", e.ProductionStatus), ("@pn", e.ProductionNote), ("@fa", now), ("@cc", (object?)e.CargoCapacity ?? DBNull.Value));
             }
             SetMeta(db, "ship_matrix_fetched_at", now);
             tx.Commit();
@@ -2366,7 +2527,7 @@ public class HangarService
         using var db = new SqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var cmd = db.CreateCommand();
-        cmd.CommandText = "SELECT id, name, manufacturer_code, manufacturer_name, focus, type, size, production_status, production_note FROM ship_matrix ORDER BY name";
+        cmd.CommandText = "SELECT id, name, manufacturer_code, manufacturer_name, focus, type, size, production_status, production_note, cargocapacity FROM ship_matrix ORDER BY name";
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
@@ -2381,6 +2542,7 @@ public class HangarService
                 Size = r.IsDBNull(6) ? "" : r.GetString(6),
                 ProductionStatus = r.IsDBNull(7) ? "" : r.GetString(7),
                 ProductionNote = r.IsDBNull(8) ? "" : r.GetString(8),
+                CargoCapacity = r.IsDBNull(9) ? null : r.GetDouble(9),
             });
         }
         return list;
@@ -3126,6 +3288,16 @@ public class HangarService
         cmd.CommandText = sql;
         var v = cmd.ExecuteScalar();
         return v == null || v is DBNull ? 0 : Convert.ToInt64(v, CultureInfo.InvariantCulture);
+    }
+
+    private static void Exec(SqliteConnection db, SqliteTransaction tx, string sql, params (string name, object value)[] parms)
+    {
+        using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = sql;
+        foreach (var (name, value) in parms)
+            cmd.Parameters.AddWithValue(name, value);
+        cmd.ExecuteNonQuery();
     }
 
     private static void Exec(SqliteConnection db, string sql, params (string name, object value)[] parms)

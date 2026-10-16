@@ -718,7 +718,7 @@ public class ChatService
             ammo = GameDataQueryService.NormalizeShipWeaponAmmo(ammoText);
             if (ammo == null) return GameDataQueryService.ShipWeaponAmmoUnknownText(ammoText);
         }
-        var (text, used) = _queryService.CompareItems(cat, size, uex, name => FindCachedShipScu(name)?.Scu, weight, shopOnly, ammo);
+        var (text, used) = _queryService.CompareItems(cat, size, uex, (record, name) => ShipCargo.Resolve(name, null, record), weight, shopOnly, ammo);
         foreach (var u in used) NotePriceItemUsed(u);
         return text;
     }
@@ -1064,18 +1064,19 @@ public class ChatService
                         if (string.IsNullOrEmpty(vr)) continue;
                         sb.AppendLine(vr.Replace("=== ゲームデータ (DB): 船 ===", "").Trim());
                         var vName = vr.Split('\n').Skip(1).FirstOrDefault()?.TrimStart('-', ' ').Split(" | ")[0];
-                        if (!string.IsNullOrEmpty(vName) && FindCachedShipScu(vName) is { } vScu)
-                            sb.AppendLine($"    貨物積載量 (UEX の船データ「{vScu.Name}」): {vScu.Scu} SCU");
+                        // 積載量は船の積載量の共通の関数 (ゲームデータ → UEX → Ship Matrix)。0・不明なら行ごと出さない
+                        if (!string.IsNullOrEmpty(vName) && ShipCargo.Resolve(vName, null, v) is { } vScu)
+                            sb.AppendLine($"    貨物積載量 ({vScu.Source}): {ShipCargo.Format(vScu.Scu)} SCU");
                     }
                 }
             }
             catch { }
         }
 
-        // 貨物積載量: ゲームデータ (ships / ship_ports) には SCU の数値が無いため、UEX の船データ (交易タブで取得したキャッシュ) から引く
-        var cachedScu = FindCachedShipScu(item.name);
+        // 貨物積載量: 船の積載量の共通の関数 (ゲームデータ (ships.cargo_scu) → UEX の船データ → RSI Ship Matrix)。0・不明なら行ごと出さない
+        var cachedScu = ShipCargo.Resolve(item.name, item.manufacturer, string.IsNullOrEmpty(item.recordName) ? null : item.recordName);
         if (cachedScu != null)
-            sb.AppendLine($"貨物積載量 (UEX の船データ「{cachedScu.Value.Name}」): {cachedScu.Value.Scu} SCU");
+            sb.AppendLine($"貨物積載量 ({cachedScu.Value.Source}): {ShipCargo.Format(cachedScu.Value.Scu)} SCU");
 
         try
         {
@@ -1091,10 +1092,10 @@ public class ChatService
                     var mfr = v.TryGetProperty("manufacturer_name", out var m) ? m.GetString() ?? "" : "";
                     var focus = v.TryGetProperty("focus", out var f) ? f.GetString() ?? "" : "";
                     var crew = v.TryGetProperty("crew", out var c) ? c.ToString() : "";
-                    var cargo = v.TryGetProperty("scu", out var cg) ? cg.ToString() : "";
+                    var cargo = UexCargoText(v, name, mfr);
                     var price = v.TryGetProperty("price", out var p) ? p.ToString() : "";
                     var size = v.TryGetProperty("size", out var sz) ? sz.GetString() ?? "" : "";
-                    sb.AppendLine($"[UEX] {mfr} {name} | 役割: {focus} | 乗員: {crew} | カーゴ: {cargo} SCU | サイズ: {size} | 価格: {price} aUEC");
+                    sb.AppendLine($"[UEX] {mfr} {name} | 役割: {focus} | 乗員: {crew}{cargo} | サイズ: {size} | 価格: {price} aUEC");
                 }
             }
         }
@@ -1123,20 +1124,14 @@ public class ChatService
         return sb.Length > 0 ? sb.ToString() : $"'{query}' の詳細情報が見つかりませんでした。";
     }
 
-    // UEX の船データ (TradeService が取得・キャッシュしたもの) から、船名が完全一致するものの SCU を返す。
-    // item_index の船名は "Drake Ironclad" のようにメーカー名が付き、UEX は "Ironclad" なので、先頭の 1 語を外した名前も試す
-    private static (string Name, int Scu)? FindCachedShipScu(string shipName)
+    // UEX の vehicles API の 1 件 (v) の行に入れる積載量 (" | カーゴ: N SCU")。船の積載量の共通の関数 (ゲームデータ → UEX → Ship Matrix) で、
+    // UEX の値はこの 1 件の scu (TradeService と同じく整数に切り捨て)。UEX 以外の値のときは出典を添える。0・不明なら空 (項目ごと出さない)
+    private static string UexCargoText(JsonElement v, string name, string manufacturer)
     {
-        if (_tradeService == null || string.IsNullOrWhiteSpace(shipName)) return null;
-        var candidates = new List<string> { shipName.Trim() };
-        var space = shipName.Trim().IndexOf(' ');
-        if (space > 0) candidates.Add(shipName.Trim()[(space + 1)..]);
-        foreach (var name in candidates)
-        {
-            var hit = _tradeService.Ships.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-            if (hit != null && hit.Scu > 0) return (hit.Name, hit.Scu);
-        }
-        return null;
+        var scu = v.TryGetProperty("scu", out var cg) && cg.ValueKind == JsonValueKind.Number ? (int)cg.GetDouble() : 0;
+        var info = ShipCargo.Resolve(name, manufacturer, uex: new ShipInfo { Name = name, Manufacturer = manufacturer, Scu = scu });
+        if (info is not { } c) return "";
+        return $" | カーゴ: {ShipCargo.Format(c.Scu)} SCU" + (c.Source == ShipCargo.SourceUex ? "" : $" ({c.Source})");
     }
 
     private static async Task<string> LookupItemAsync(string query, (string uuid, string recordName, string name, string itemType, string subType, string manufacturer, double score) item)
@@ -1229,7 +1224,6 @@ public class ChatService
                     var manufacturer = v.TryGetProperty("manufacturer_name", out var mfr) ? mfr.GetString() ?? "" : "";
                     var focus = v.TryGetProperty("focus", out var f) ? f.GetString() ?? "" : "";
                     var crew = v.TryGetProperty("crew", out var c) ? c.ToString() : "";
-                    var cargo = v.TryGetProperty("scu", out var cg) ? cg.ToString() : "";
                     var price = v.TryGetProperty("price", out var p) ? p.ToString() : "";
                     var size = v.TryGetProperty("size", out var sz) ? sz.GetString() ?? "" : "";
 
@@ -1242,7 +1236,7 @@ public class ChatService
                                 (!string.IsNullOrEmpty(resolvedName) && name.Contains(resolvedName, StringComparison.OrdinalIgnoreCase));
 
                     if (match)
-                        results.Add($"- {manufacturer} {name} | 役割: {focus} | 乗員: {crew} | カーゴ: {cargo} SCU | サイズ: {size} | 価格: {price} aUEC");
+                        results.Add($"- {manufacturer} {name} | 役割: {focus} | 乗員: {crew}{UexCargoText(v, name, manufacturer)} | サイズ: {size} | 価格: {price} aUEC");
                 }
             }
         }
@@ -2896,8 +2890,9 @@ public class ChatService
             var queryWords = lowerQuery.Split(' ', '　', '?', '？', 'の', 'を', 'は', 'で', 'が', 'に')
                 .Where(w => w.Trim().Length >= 2).Select(w => w.Trim()).ToArray();
 
-            var matched = new List<string>();
-            var unmatched = new List<string>();
+            // 行は出すものだけ作る (積載量の共通の関数を、出さない船の分まで呼ばないため)
+            var matched = new List<Func<string>>();
+            var unmatched = new List<Func<string>>();
 
             foreach (var v in data.EnumerateArray())
             {
@@ -2905,11 +2900,11 @@ public class ChatService
                 var manufacturer = v.TryGetProperty("manufacturer_name", out var mfr) ? mfr.GetString() ?? "" : "";
                 var focus = v.TryGetProperty("focus", out var f) ? f.GetString() ?? "" : "";
                 var crew = v.TryGetProperty("crew", out var c) ? c.ToString() : "";
-                var cargo = v.TryGetProperty("scu", out var cg) ? cg.ToString() : "";
                 var price = v.TryGetProperty("price", out var p) ? p.ToString() : "";
                 var size = v.TryGetProperty("size", out var sz) ? sz.GetString() ?? "" : "";
 
-                var line = $"- {manufacturer} {name} | 役割: {focus} | 乗員: {crew} | カーゴ: {cargo} SCU | サイズ: {size} | 価格: {price} aUEC";
+                var vehicle = v;
+                Func<string> line = () => $"- {manufacturer} {name} | 役割: {focus} | 乗員: {crew}{UexCargoText(vehicle, name, manufacturer)} | サイズ: {size} | 価格: {price} aUEC";
 
                 bool isMatch = false;
                 if (!string.IsNullOrEmpty(shipName))
@@ -2935,11 +2930,11 @@ public class ChatService
 
             var sb = new StringBuilder("=== UEX 機体データ ===\n");
             foreach (var line in matched)
-                sb.AppendLine(line);
+                sb.AppendLine(line());
             if (matched.Count == 0)
             {
                 foreach (var line in unmatched.Take(20))
-                    sb.AppendLine(line);
+                    sb.AppendLine(line());
             }
             int count = matched.Count > 0 ? matched.Count : Math.Min(unmatched.Count, 20);
             return count > 0 ? sb.ToString() : null;
@@ -3311,11 +3306,12 @@ public class ChatService
                 var name = ship.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
                 var manufacturer = ship.TryGetProperty("manufacturer", out var m) ? m.GetString() ?? "" : "";
                 var focus = ship.TryGetProperty("focus", out var f) ? f.GetString() ?? "" : "";
-                var cargo = ship.TryGetProperty("cargocapacity", out var cg) ? cg.ToString() : "";
                 var crew = ship.TryGetProperty("crew", out var cr) ? cr.ToString() : "";
                 var size = ship.TryGetProperty("size", out var sz) ? sz.GetString() ?? "" : "";
                 var price = ship.TryGetProperty("price", out var pr) ? pr.ToString() : "";
-                sb.AppendLine($"- {manufacturer} {name} | 役割: {focus} | カーゴ: {cargo} SCU | 乗員: {crew} | サイズ: {size} | 価格: ${price}");
+                // 積載量は船の積載量の共通の関数 (ゲームデータ → UEX → Ship Matrix) の値と出典。0・不明なら項目ごと出さない
+                var cargo = ShipCargo.Resolve(name, manufacturer) is { } ci ? $" | カーゴ: {ShipCargo.Format(ci.Scu)} SCU ({ci.Source})" : "";
+                sb.AppendLine($"- {manufacturer} {name} | 役割: {focus}{cargo} | 乗員: {crew} | サイズ: {size} | 価格: ${price}");
                 count++;
             }
             return count > 0 ? sb.ToString() : null;

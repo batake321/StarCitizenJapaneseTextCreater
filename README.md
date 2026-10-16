@@ -25,11 +25,11 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v2.0.3-win-x64.zip (最新 v2.0.3 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.0.3/StarCitizenJapaneseTextCreater-v2.0.3-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v2.0.4-win-x64.zip (最新 v2.0.4 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.0.4/StarCitizenJapaneseTextCreater-v2.0.4-win-x64.zip)**
 >
-> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.0.3-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
+> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.0.4-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
 >
-> **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/15 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.0.2/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/16 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.0.4/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの [日本語化] → [実行] を行ってください。**
 
@@ -48,10 +48,21 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v2.0.3 更新内容
+### 🚀 v2.0.4 更新内容
+
+- **船の積載量 (SCU) をゲームデータから出すようにしました**: 貨物の置き場の大きさから計算します (例: Constellation Mk V Centaurus 240 SCU)。ゲームデータで分からない船は UEX、それも無ければ RSI の Ship Matrix の値を使い、どれでも分からないときは空欄にします (「0 SCU」とは出しません)。［詳細］タブの船・販売中の船・アップグレード管理・装備タブの船選びにも積載量を出します
+- **店で買った船の装備を所持リストに入れられるように**: ゲームログタブの購入の行に「装備に入れる」ボタンを付けました。入れた購入は「入れ済み」になり、二重に入りません。同じ装備は数量を足して 1 行にまとめ、数量の書き換えと「1つ減らす」もできます。ミサイルも所持リストに入れられます
+- **販売中の船 (RSI ストア) も品名ダブルクリックで［詳細］を開けるように**
+- **船の装備名を英語に揃えました**: AI 翻訳でカタカナになっていた装備名 (Rampart→ランパート など) を英語に戻し、以降の翻訳でもカタカナにしないようにしました
+
+<details>
+<summary>v2.0.3 更新内容</summary>
+
 
 - **所持船のタブの一覧が空になる不具合を直しました**: 起動してから交易の価格の取得が終わるまで（数分かかることがあります）、所持船の一覧が空になっていました。起動したらすぐ DB から読むようにしました。My Hangar の同期の後も、一覧を読み直してから表示します。所持船のデータ自体は消えていません
 - **v2.0.2 の差し替え分**: DB の入れ替えの途中で落ちたときの後片付けと、インデックス構築・インポートが重なったときの価格の取得の再開を直しました
+
+</details>
 
 <details>
 <summary>v2.0.2 更新内容</summary>

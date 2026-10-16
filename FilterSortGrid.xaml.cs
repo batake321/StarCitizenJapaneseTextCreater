@@ -18,6 +18,17 @@ public sealed class GridColumnSpec
     public bool Numeric { get; init; }
     // セルのツールチップ (null・空なら出さない)。指定が無い列は出さない
     public Func<object, string?>? Tooltip { get; init; }
+    // ボタンの列にするとき: 行ごとに null = ボタンを出さない、true = 押せる、false = 押せない (文字は Text)。押されたら ButtonClick (引数は行の元のオブジェクト)
+    public Func<object, bool?>? Button { get; init; }
+    public Action<object>? ButtonClick { get; init; }
+}
+
+// ボタンの列のセル 1 つ (GridColumnSpec.Button)
+public sealed class GridCellButton
+{
+    public string Text { get; init; } = "";
+    public bool IsEnabled { get; init; }
+    public Visibility Visibility { get; init; }
 }
 
 // 絞り込み・複数列の並べ替えができる表 (［船舶戦闘］［個人戦闘］で共用)。
@@ -35,6 +46,7 @@ public partial class FilterSortGrid : UserControl
         public object Source { get; init; } = new();
         public string[] Cells { get; init; } = [];
         public string?[] Tips { get; init; } = [];          // セルのツールチップ (GridColumnSpec.Tooltip。無ければ null)
+        public GridCellButton?[] Buttons { get; init; } = [];  // ボタンの列のセル (GridColumnSpec.Button。ボタンの列でなければ null)
     }
 
     private List<GridColumnSpec> _columns = new();
@@ -88,6 +100,26 @@ public partial class FilterSortGrid : UserControl
             header.Children.Add(mark);
             header.Children.Add(filter);
             _headerParts.Add((title, mark, filter));
+            if (spec.Button != null)
+            {
+                // ボタンの列: 行の Buttons[i] の文字・押せるか・出すかで作る
+                var factory = new FrameworkElementFactory(typeof(Button));
+                factory.SetBinding(ContentControl.ContentProperty, new Binding($"Buttons[{i}].Text"));
+                factory.SetBinding(UIElement.IsEnabledProperty, new Binding($"Buttons[{i}].IsEnabled"));
+                factory.SetBinding(UIElement.VisibilityProperty, new Binding($"Buttons[{i}].Visibility"));
+                factory.SetValue(Control.PaddingProperty, new Thickness(6, 0, 6, 0));
+                factory.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Left);
+                factory.AddHandler(System.Windows.Controls.Primitives.ButtonBase.ClickEvent, new RoutedEventHandler((s, _) =>
+                {
+                    if ((s as FrameworkElement)?.DataContext is GridRow row) spec.ButtonClick?.Invoke(row.Source);
+                }));
+                grid.Columns.Add(new DataGridTemplateColumn
+                {
+                    Header = header, SortMemberPath = $"Cells[{i}]",
+                    CellTemplate = new DataTemplate { VisualTree = factory },
+                });
+                continue;
+            }
             var column = new DataGridTextColumn { Header = header, Binding = new Binding($"Cells[{i}]"), SortMemberPath = $"Cells[{i}]" };
             if (spec.Numeric || spec.Tooltip != null)
             {
@@ -110,8 +142,21 @@ public partial class FilterSortGrid : UserControl
             Source = o,
             Cells = _columns.Select(c => c.Text(o) ?? "").ToArray(),
             Tips = _columns.Select(c => c.Tooltip?.Invoke(o) is { Length: > 0 } t ? t : null).ToArray(),
+            Buttons = _columns.Select(c => MakeButton(c, o)).ToArray(),
         }).ToList();
         Refresh();
+    }
+
+    private static GridCellButton? MakeButton(GridColumnSpec spec, object o)
+    {
+        if (spec.Button == null) return null;
+        var state = spec.Button(o);
+        return new GridCellButton
+        {
+            Text = spec.Text(o) ?? "",
+            IsEnabled = state == true,
+            Visibility = state == null ? Visibility.Collapsed : Visibility.Visible,
+        };
     }
 
     // 1 列の定義 (見出し・値) を差し替える。その列は値が変わるので絞り込みを解除する。並べ替えと他の列の絞り込み・検索欄はそのまま残す
@@ -126,6 +171,7 @@ public partial class FilterSortGrid : UserControl
         {
             r.Cells[index] = spec.Text(r.Source) ?? "";
             r.Tips[index] = spec.Tooltip?.Invoke(r.Source) is { Length: > 0 } t ? t : null;
+            r.Buttons[index] = MakeButton(spec, r.Source);
         }
         Refresh();
     }

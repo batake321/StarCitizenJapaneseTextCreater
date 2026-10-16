@@ -49,6 +49,12 @@ public partial class GameLogPanel : UserControl
     private int _rescanLeft;
     private bool _rescanRunning;
 
+    // 購入の行の「装備に入れる」ボタン (MainWindow が渡す)。
+    //   PurchaseClassifier: 購入の一覧 → それぞれのボタンの状態 (HangarService.ClassifyPurchase)。null なら、どの行にもボタンを出さない
+    //   PurchaseImporter:   購入 1 件を所持コンポーネントに入れる。入れたら (または入れ済みと分かったら) 表を作り直す
+    public Func<IReadOnlyList<GameLogPurchase>, IReadOnlyList<PurchaseImportState>>? PurchaseClassifier { get; set; }
+    public Action<GameLogPurchase>? PurchaseImporter { get; set; }
+
     public GameLogPanel()
     {
         InitializeComponent();
@@ -82,8 +88,8 @@ public partial class GameLogPanel : UserControl
         return workDir;
     }
 
-    // 列: 日時 (ローカル時刻)、種類、内容、金額、ログ (どのファイル由来か。今の Game.log は「現在」)
-    private static List<GridColumnSpec> Columns() =>
+    // 列: 日時 (ローカル時刻)、種類、内容、金額、ログ (どのファイル由来か。今の Game.log は「現在」)、装備 (購入の行の「装備に入れる」)
+    private List<GridColumnSpec> Columns() =>
     [
         new()
         {
@@ -100,7 +106,44 @@ public partial class GameLogPanel : UserControl
             Text = o => ((GameLogEntry)o).Amount?.ToString("#,0.##") ?? "", Key = o => ((GameLogEntry)o).Amount,
         },
         new() { Header = "ログ", Text = o => ((GameLogEntry)o).Source, Key = o => ((GameLogEntry)o).Source is { Length: > 0 } s ? s : null },
+        // 装備: 成功した購入のうち所持コンポーネントに入れられるものに「装備に入れる」(入れ済みなら押せない「入れ済み」)
+        new()
+        {
+            Header = "装備",
+            Text = o => ((GameLogEntry)o).ImportState switch { PurchaseImportState.Ready => "装備に入れる", PurchaseImportState.Imported => "入れ済み", _ => "" },
+            Key = o => ((GameLogEntry)o).ImportState switch { PurchaseImportState.Ready => "装備に入れる", PurchaseImportState.Imported => "入れ済み", _ => null },
+            Button = o => ((GameLogEntry)o).ImportState switch { PurchaseImportState.Ready => true, PurchaseImportState.Imported => false, _ => null },
+            ButtonClick = o => { if (((GameLogEntry)o).Purchase is { } p) ImportPurchase(p); },
+        },
     ];
+
+    // 「装備に入れる」が押されたとき: MainWindow に入れてもらい、ボタンの状態を作り直す
+    private void ImportPurchase(GameLogPurchase p)
+    {
+        PurchaseImporter?.Invoke(p);
+        UpdateTable();
+    }
+
+    // 購入の行のボタンの状態を決める (PurchaseClassifier)。失敗したらボタンを出さない
+    private void ClassifyPurchases(IReadOnlyList<GameLogEntry> entries)
+    {
+        var rows = entries.Where(e => e.Purchase != null).ToList();
+        foreach (var e in rows) e.ImportState = PurchaseImportState.None;
+        if (PurchaseClassifier == null || rows.Count == 0) return;
+        try
+        {
+            var states = PurchaseClassifier(rows.Select(e => e.Purchase!).ToList());
+            for (int i = 0; i < rows.Count && i < states.Count; i++) rows[i].ImportState = states[i];
+        }
+        catch { foreach (var e in rows) e.ImportState = PurchaseImportState.None; }
+    }
+
+    // 表を作り直す (ボタンの状態も決め直す)。MainWindow から、所持コンポーネントが変わったときなどに呼ぶ
+    public void RefreshPurchaseButtons()
+    {
+        if (_tail == null) return;
+        UpdateTable();
+    }
 
     // 読み込みを始める。ゲームのフォルダが無ければ案内を出して false
     private bool Start()
@@ -265,10 +308,11 @@ public partial class GameLogPanel : UserControl
     // 表に入れる (新しい順。同じ時刻は読んだ順の逆)。絞り込み・並べ替えは表の部品が残す
     private void UpdateTable()
     {
-        var rows = _backupSnapshot.Concat(_currentRows)
+        var entries = _backupSnapshot.Concat(_currentRows)
             .OrderByDescending(e => e.TimeUtc).ThenByDescending(e => e.Seq)
-            .Cast<object>().ToList();
-        table.SetItems(rows);
+            .ToList();
+        ClassifyPurchases(entries);
+        table.SetItems(entries.Cast<object>().ToList());
     }
 
     private void UpdateStatus()
