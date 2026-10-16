@@ -1299,14 +1299,6 @@
                                                     <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
                                                 </DataGridTextColumn.ElementStyle>
                                             </DataGridTextColumn>
-                                            <!-- 1つ減らす: 数量を 1 減らす (1 のときは行を消すか確かめる) -->
-                                            <DataGridTemplateColumn Header="減らす" Width="80" IsReadOnly="True">
-                                                <DataGridTemplateColumn.CellTemplate>
-                                                    <DataTemplate>
-                                                        <Button Content="1つ減らす" Click="DecrementMyComponent_Click" Padding="4,0" Margin="2,1" FontSize="11"/>
-                                                    </DataTemplate>
-                                                </DataGridTemplateColumn.CellTemplate>
-                                            </DataGridTemplateColumn>
                                             <!-- 使用可: MyComponentRow.Usable の setter が DB へ書き戻す (CellEditEnding には依存しない) -->
                                             <DataGridCheckBoxColumn Header="使用可" Width="60" IsReadOnly="False"
                                                                     Binding="{Binding Usable, UpdateSourceTrigger=PropertyChanged}"/>

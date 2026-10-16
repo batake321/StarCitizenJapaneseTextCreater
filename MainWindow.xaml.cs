@@ -5064,6 +5064,8 @@ public partial class MainWindow : Window
         if (dgMyComponents == null) return;   // XAML 読込中
         try
         {
+            // 数量の欄を編集したまま Tab で移った等で行の編集が開いていると、ItemsSource の入れ直しが失敗しうるので先に確定する
+            dgMyComponents.CommitEdit(DataGridEditingUnit.Row, true);
             _hangarService.SetCacheDir(WorkDir);
             _myComponents = _hangarService.LoadMyComponents();
             _myComponentRows = _myComponents
@@ -5224,13 +5226,6 @@ public partial class MainWindow : Window
     // 数量の欄の書き換え (MyComponentRow.Quantity の setter から)。表の編集の確定の最中なので、読み直しは後で行う
     private void MyComponentQuantity_Changed(MyComponentRow row, int quantity) =>
         Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => ApplyMyComponentQuantity(row, quantity));
-
-    // 「1つ減らす」
-    private void DecrementMyComponent_Click(object sender, RoutedEventArgs e)
-    {
-        if ((sender as FrameworkElement)?.DataContext is not MyComponentRow row) return;
-        ApplyMyComponentQuantity(row, row.Quantity - 1);
-    }
 
     // 数量を quantity にする (UpdateMyComponent)。0 になるなら行を消すか確かめ、「いいえ」なら変えない。負の数は受け付けない
     private void ApplyMyComponentQuantity(MyComponentRow row, int quantity)
