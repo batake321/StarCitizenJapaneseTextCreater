@@ -161,7 +161,7 @@ public partial class GameLogPanel : UserControl
         var workDir = WorkDir();
         _names = new GameLogNames(Path.Combine(workDir, "gamedata_cache.db"), Path.Combine(workDir, "translations.db"));
         _logPath = Path.Combine(gamePath, "Game.log");
-        _tail = new GameLogTail(_logPath, CurrentSource, _names.Ship, _names.Item, _missionNames);
+        _tail = new GameLogTail(_logPath, CurrentSource, _names.Ship, _names.Item, _missionNames, _names.Translate, _names.IsVehicleClass, _names.Resource);
 
         // 過去のログ: 初回の一覧はここで取り (再起動の後に探すときに、新しいファイルと見分けるため)、読むのは裏で行う
         _backupDir = Path.Combine(gamePath, "logbackups");
@@ -198,7 +198,8 @@ public partial class GameLogPanel : UserControl
             }
             try
             {
-                var rows = GameLogParser.ParseFile(f.FullName, Path.GetFileNameWithoutExtension(f.Name), names.Ship, names.Item, _missionNames);
+                var rows = GameLogParser.ParseFile(f.FullName, Path.GetFileNameWithoutExtension(f.Name), names.Ship, names.Item, _missionNames,
+                    names.Translate, names.IsVehicleClass, names.Resource);
                 lock (_backupLock)
                 {
                     _backupRows.AddRange(rows);
@@ -357,8 +358,12 @@ public partial class GameLogPanel : UserControl
     }
 
     // 船のクラス名・店の品目の内部名 → 表示名。引いた結果は覚えておく。裏の 2 つのスレッド (過去のログ・Game.log) から呼ばれるので lock する。
-    //   船: ships.record_name = "EntityClassDefinition." + クラス名 の ships.name (@vehicle_Name…) を翻訳 DB で日本語にする
+    //   船: ships.record_name = "EntityClassDefinition." + クラス名 の ships.name (@vehicle_Name…) を翻訳 DB で日本語にする。
+    //       ships に無ければ item_index.record_name が同じ行の name_ja (無ければ name) (ships に入らない船: GLSN_Shiv 等)
     //   品目: items.record_name = "EntityClassDefinition." + 内部名 の items.name (@item_Name…) を翻訳 DB で日本語にする
+    //   資源: resource_types.uuid = 商品売買の resourceGUID の name_key (@items_commodities_…) を翻訳 DB で日本語にする (無ければ name_en)
+    //   訳: "@キー" をそのまま翻訳 DB で引く (鉱石の名前 items_commodities_…)
+    //   船かどうか: クラス名が ships にあるか、item_index の Vehicle 系 (item_type に Vehicle を含む) にあるか
     // 翻訳 DB の引き方は GameDataQueryService の LocReader.Text / ResolveItemNameJa と同じ
     // (key か key + ",P" の行。"!" で始まる訳・空の訳は英語。プレースホルダは使わない)。引けなければ内部名のまま。
     // DB は名前を引くたびに開いて閉じる (Pooling=False。開いたままだと設定の［DB クリア］で DB を消せない)
@@ -369,6 +374,9 @@ public partial class GameLogPanel : UserControl
         private readonly string _translationsDbPath;
         private readonly Dictionary<string, string> _ships = new(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _items = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, string?> _resources = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string?> _translations = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, bool> _vehicleClasses = new(StringComparer.Ordinal);
 
         public GameLogNames(string gamedataCacheDbPath, string translationsDbPath)
         {
@@ -393,41 +401,30 @@ public partial class GameLogPanel : UserControl
             }
         }
 
-        // 覚えた名前を捨てる (訳・品目名が替わったとき。次に引くときに DB から引き直す)
+        // 覚えた名前を捨てる (訳・品目名が替わったとき、資源の種類 (resource_types) を取り出したとき。次に引くときに DB から引き直す)
         public void Clear()
         {
             lock (_lock)
             {
                 _ships.Clear();
                 _items.Clear();
+                _resources.Clear();
+                _translations.Clear();
+                _vehicleClasses.Clear();
             }
         }
 
-        public string Ship(string className) => Resolve(className, "ships", _ships);
-        public string Item(string itemName) => Resolve(itemName, "items", _items);
+        public string Ship(string className) => Resolve(className, _ships, ResolveShip);
+        public string Item(string itemName) => Resolve(itemName, _items, name => ResolveName("items", name));
 
-        private string Resolve(string name, string table, Dictionary<string, string> cache)
+        private string Resolve(string name, Dictionary<string, string> cache, Func<string, string?> lookup)
         {
             if (string.IsNullOrEmpty(name)) return name ?? "";
             lock (_lock)
             {
                 if (cache.TryGetValue(name, out var v)) return v;
-                string? result = null;
-                try
-                {
-                    string? key = null;
-                    using (var game = Open(_gamedataCacheDbPath))
-                    {
-                        if (game != null)
-                        {
-                            using var cmd = game.CreateCommand();
-                            cmd.CommandText = $"SELECT name FROM {table} WHERE record_name = @r LIMIT 1";
-                            cmd.Parameters.AddWithValue("@r", "EntityClassDefinition." + name);
-                            key = cmd.ExecuteScalar() as string;
-                        }
-                    }
-                    if (key != null) result = Japanese(key);
-                }
+                string? result;
+                try { result = lookup(name); }
                 catch
                 {
                     // DB を読めなかったときは覚えず、次の時にもう一度引く
@@ -439,29 +436,177 @@ public partial class GameLogPanel : UserControl
             }
         }
 
-        // ResolveItemNameJa と同じ: "@キー" を翻訳 DB の日本語 (無ければ英語) にする。キーでない・訳が無い・プレースホルダなら null
-        private string? Japanese(string value)
+        // ships / items の record_name = "EntityClassDefinition." + 名前 の name ("@キー") を翻訳 DB で日本語にする (_lock の中で呼ぶ)
+        private string? ResolveName(string table, string name)
+        {
+            string? key = null;
+            using (var game = Open(_gamedataCacheDbPath))
+            {
+                if (game != null)
+                {
+                    using var cmd = game.CreateCommand();
+                    cmd.CommandText = $"SELECT name FROM {table} WHERE record_name = @r LIMIT 1";
+                    cmd.Parameters.AddWithValue("@r", "EntityClassDefinition." + name);
+                    key = cmd.ExecuteScalar() as string;
+                }
+            }
+            return key != null ? Japanese(key) : null;
+        }
+
+        // 船: ships の name を翻訳 DB で日本語にする。ships に無ければ item_index の name_ja (無ければ name) (_lock の中で呼ぶ)
+        private string? ResolveShip(string className)
+        {
+            string? key = null, indexName = null;
+            using (var game = Open(_gamedataCacheDbPath))
+            {
+                if (game != null)
+                {
+                    using (var cmd = game.CreateCommand())
+                    {
+                        cmd.CommandText = "SELECT name FROM ships WHERE record_name = @r LIMIT 1";
+                        cmd.Parameters.AddWithValue("@r", "EntityClassDefinition." + className);
+                        key = cmd.ExecuteScalar() as string;
+                    }
+                    if (key == null)
+                    {
+                        using var cmd = game.CreateCommand();
+                        cmd.CommandText = "SELECT COALESCE(NULLIF(name_ja, ''), name) FROM item_index WHERE record_name = @r LIMIT 1";
+                        cmd.Parameters.AddWithValue("@r", "EntityClassDefinition." + className);
+                        indexName = cmd.ExecuteScalar() as string;
+                    }
+                }
+            }
+            if (key != null) return Japanese(key);
+            return indexName != null ? Usable(indexName) : null;
+        }
+
+        // "@キー" → 翻訳 DB の日本語 (無ければ英語)。訳が無ければ null (鉱石の名前 items_commodities_… に使う)。
+        // 鉱石のキーは GameLogParser.MineralKey が小文字で組み立てるが、翻訳 DB のキーは大文字が混じるもの (items_commodities_Astatine 等) が
+        // あるので、キーの大文字小文字を区別せずに引く
+        public string? Translate(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return null;
+            lock (_lock)
+            {
+                if (_translations.TryGetValue(key, out var v)) return v;
+                string? result;
+                try { result = Japanese(key, ignoreCase: true); }
+                catch { return null; }   // DB を読めなかったときは覚えず、次の時にもう一度引く
+                _translations[key] = result;
+                return result;
+            }
+        }
+
+        // 資源の GUID (商品売買の resourceGUID = ResourceType の record の ID) → 名前。resource_types の name_key を翻訳 DB で日本語にし、
+        // 訳が無ければ name_en。表に無ければ null。表そのものが無い (古い DB) ・読めないときは覚えず null (起動後に裏で取り出したら引けるようになる)
+        public string? Resource(string guid)
+        {
+            if (string.IsNullOrEmpty(guid)) return null;
+            lock (_lock)
+            {
+                if (_resources.TryGetValue(guid, out var v)) return v;
+                string? result = null;
+                try
+                {
+                    string? key = null, en = null;
+                    bool found = false;
+                    using (var game = Open(_gamedataCacheDbPath))
+                    {
+                        if (game == null) return null;
+                        using var cmd = game.CreateCommand();
+                        cmd.CommandText = "SELECT name_key, name_en FROM resource_types WHERE uuid = @u LIMIT 1";
+                        cmd.Parameters.AddWithValue("@u", guid);
+                        using var r = cmd.ExecuteReader();
+                        if (r.Read())
+                        {
+                            found = true;
+                            key = r.IsDBNull(0) ? null : r.GetString(0);
+                            en = r.IsDBNull(1) ? null : r.GetString(1);
+                        }
+                    }
+                    if (found)
+                    {
+                        if (key != null) result = Japanese(key);
+                        if (result == null && en != null) result = Usable(en);
+                    }
+                }
+                catch { return null; }
+                _resources[guid] = result;
+                return result;
+            }
+        }
+
+        // クラス名が船か: ships にあるか、item_index の Vehicle 系 (item_type に Vehicle を含む) にあるか。DB を読めなければ false (覚えない)
+        public bool IsVehicleClass(string className)
+        {
+            if (string.IsNullOrEmpty(className)) return false;
+            lock (_lock)
+            {
+                if (_vehicleClasses.TryGetValue(className, out var v)) return v;
+                bool result;
+                try
+                {
+                    using var game = Open(_gamedataCacheDbPath);
+                    if (game == null) return false;
+                    using var cmd = game.CreateCommand();
+                    cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM ships WHERE record_name = @r) OR EXISTS (SELECT 1 FROM item_index WHERE record_name = @r AND item_type LIKE '%Vehicle%')";
+                    cmd.Parameters.AddWithValue("@r", "EntityClassDefinition." + className);
+                    result = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
+                }
+                catch { return false; }
+                _vehicleClasses[className] = result;
+                return result;
+            }
+        }
+
+        // ResolveItemNameJa と同じ: "@キー" を翻訳 DB の日本語 (無ければ英語) にする。キーでない・訳が無い・プレースホルダなら null。
+        // ignoreCase: そのままのキーで見つからなければ、大文字小文字を区別せずに引き直す (key COLLATE NOCASE。translations の主キーの索引は
+        // BINARY なので使われず全行を読む (写しの 91,062 行で 15ms ほど)。引いた結果は呼び出し元が覚えるので、キーごとに一度だけ)
+        private string? Japanese(string value, bool ignoreCase = false)
         {
             if (!value.StartsWith('@')) return null;
             string? en = null, ja = null;
             using (var loc = Open(_translationsDbPath))
             {
                 if (loc == null) return null;
-                using var cmd = loc.CreateCommand();
-                cmd.CommandText = "SELECT english, japanese FROM translations WHERE key = @k OR key = @kp ORDER BY (key = @k) DESC LIMIT 1";
-                cmd.Parameters.AddWithValue("@k", value[1..]);
-                cmd.Parameters.AddWithValue("@kp", value[1..] + ",P");
-                using var r = cmd.ExecuteReader();
-                if (r.Read())
+                bool found = false;
+                using (var cmd = loc.CreateCommand())
                 {
-                    en = r.IsDBNull(0) ? null : r.GetString(0);
-                    ja = r.IsDBNull(1) ? null : r.GetString(1);
+                    cmd.CommandText = "SELECT english, japanese FROM translations WHERE key = @k OR key = @kp ORDER BY (key = @k) DESC LIMIT 1";
+                    cmd.Parameters.AddWithValue("@k", value[1..]);
+                    cmd.Parameters.AddWithValue("@kp", value[1..] + ",P");
+                    using var r = cmd.ExecuteReader();
+                    if (r.Read())
+                    {
+                        found = true;
+                        en = r.IsDBNull(0) ? null : r.GetString(0);
+                        ja = r.IsDBNull(1) ? null : r.GetString(1);
+                    }
+                }
+                if (!found && ignoreCase)
+                {
+                    using var cmd = loc.CreateCommand();
+                    cmd.CommandText = "SELECT english, japanese FROM translations WHERE key COLLATE NOCASE = @k OR key COLLATE NOCASE = @kp ORDER BY (key COLLATE NOCASE = @k) DESC LIMIT 1";
+                    cmd.Parameters.AddWithValue("@k", value[1..]);
+                    cmd.Parameters.AddWithValue("@kp", value[1..] + ",P");
+                    using var r = cmd.ExecuteReader();
+                    if (r.Read())
+                    {
+                        en = r.IsDBNull(0) ? null : r.GetString(0);
+                        ja = r.IsDBNull(1) ? null : r.GetString(1);
+                    }
                 }
             }
             string text;
             if (!string.IsNullOrWhiteSpace(ja) && !ja.StartsWith('!')) text = ja;
             else if (!string.IsNullOrWhiteSpace(en)) text = en;
             else return null;
+            return Usable(text);
+        }
+
+        // 表示に使える文字か。空白を整え、キーのまま・プレースホルダなら null
+        private static string? Usable(string text)
+        {
             text = text.Replace('\u00A0', ' ').Trim();
             if (text.Length == 0 || text.StartsWith('@') || text.StartsWith("<=", StringComparison.Ordinal)
                 || text.Contains("PLACEHOLDER", StringComparison.OrdinalIgnoreCase) || text.Contains("プレースホルダ")) return null;

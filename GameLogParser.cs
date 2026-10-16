@@ -104,7 +104,7 @@ public sealed class GameLogMissionNames
 //   ・行頭の時刻は <2026-10-12T07:11:21.642Z> (UTC)
 //   ・通知の文言などに改行があると、次の行が「同じ時刻 (または 1 ミリ秒だけ遅い時刻) + 空白 + 続き」([Notice] もタグも無い) になる。
 //     続きの先頭 1 バイトが欠けていて先頭に置換文字 (U+FFFD) が出るので取り除き、1 行につなげる (欠けた字は戻せない)
-//   ・つなぐのは通知 (Added notification) と船の呼び出し (SetVehicleSpawningInformations) の行で、行末の [Team_…] が無いもの
+//   ・つなぐのは通知 (Added notification) と船の呼び出し (SetVehicleSpawningInformations / SetVehicleSpawnedInformations) の行で、行末の [Team_…] が無いもの
 public sealed class GameLogParser
 {
     private static long _seq;
@@ -112,6 +112,12 @@ public sealed class GameLogParser
     private readonly string _source;
     private readonly Func<string, string> _shipName;
     private readonly Func<string, string> _itemName;
+    // "@キー" → 翻訳 DB の訳 (無ければ null)。鉱石の名前 (items_commodities_…) に使う
+    private readonly Func<string, string?> _translate;
+    // クラス名が船 (ships か item_index の Vehicle 系) か。ナビゲーション・境界違反などの行から船の ID を覚えるときに、船でないもの (AImodule_ATC 等) を除くため
+    private readonly Func<string, bool> _isVehicleClass;
+    // 資源の GUID (商品売買の resourceGUID) → 名前 (無ければ null)
+    private readonly Func<string, string?> _resourceName;
 
     // 拾った行 (読んだ順)
     public List<GameLogEntry> Entries { get; } = new();
@@ -132,8 +138,26 @@ public sealed class GameLogParser
 
     // 船の ID → クラス名 (末尾の _ID を除いたもの)
     private readonly Dictionary<string, string> _vehicleClasses = new(StringComparer.Ordinal);
-    // 船名がまだ分からない呼び出し・格納の行 (ID → (行, 内容の組み立て))
+    // 自分の船の ID (自分が操縦した・乗っていて死んだ・衝突した・量子ジャンプした・呼び出した船と、自分の船だけが出る行 (OwnVehicleLearnTags) の船)。
+    // 格納の行はこの ID のものだけ出す (周りの他人の船の格納も同じ行で出るため)
+    private readonly HashSet<string> _ownVehicles = new(StringComparer.Ordinal);
+    // 船名がまだ分からない呼び出しの行 (ID → (行, 内容の組み立て))。「船 ID …」で出しておき、分かったら書き換える
     private readonly Dictionary<string, List<(GameLogEntry Entry, Func<string, string> Build)>> _vehicleWaiting = new(StringComparer.Ordinal);
+    // まだ出していない格納の行 (ID → (時刻, 種類, 内容の組み立て))。格納は周りの着陸場で他人の船が格納されたときにも出るので、
+    // 自分の船 (_ownVehicles) でクラス名も分かる (_vehicleClasses) まで表には出さず、分かったときに行にする
+    private readonly Dictionary<string, List<(DateTime Time, string Kind, Func<string, string> Build)>> _vehicleHidden = new(StringComparer.Ordinal);
+
+    // 採掘 (手掘り): 拾った鉱石の候補 (個体 ID → (時刻, クラス名))。同じ個体 ID の Store で確定して行にする
+    private readonly Dictionary<string, (DateTime Time, string Class)> _mineCandidates = new(StringComparer.Ordinal);
+    // 所持品から取り出した鉱石のクラス名 → その時刻 (EquipItem / AttachItem の行から)。次の同じクラスの AttachmentReceived は拾得ではなく取り出し
+    // (いちばん新しいものに結び付けて消す)。ただし EquipItem / AttachItem から PendingEquipWindow を過ぎた候補は取り出しとみなさず捨てる
+    // (昨夜のログの実測では EquipItem から 2 秒ほどで AttachmentReceived が出る)
+    private readonly Dictionary<string, DateTime> _pendingEquip = new(StringComparer.Ordinal);
+    private static readonly TimeSpan PendingEquipWindow = TimeSpan.FromSeconds(10);
+    // 取り出しとみなした個体 ID (同じ個体の AttachmentReceived が続けて 2 回出ることがある)
+    private readonly HashSet<string> _takenOut = new(StringComparer.Ordinal);
+    // 直前に確定した採掘の行 (直後の Update Container Items で所持数を添える)
+    private (GameLogEntry Entry, string Class)? _lastMined;
 
     // 結果を待っている店の購入 (古い順。結果はいちばん新しいものに結び付ける。行そのものは Entries にある)
     private readonly List<GameLogEntry> _pendingPurchases = new();
@@ -148,13 +172,51 @@ public sealed class GameLogParser
     private readonly List<string> _lastCollisionTargets = new();
 
     public GameLogParser(string source, Func<string, string>? shipName = null, Func<string, string>? itemName = null,
-        GameLogMissionNames? sharedMissionNames = null)
+        GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
+        Func<string, string?>? resourceName = null)
     {
         _source = source;
         _shipName = shipName ?? (s => s);
         _itemName = itemName ?? (s => s);
         _sharedMissionNames = sharedMissionNames;
+        _translate = translate ?? (_ => null);
+        _isVehicleClass = isVehicleClass ?? (_ => true);
+        _resourceName = resourceName ?? (_ => null);
     }
+
+    // 船の ID → クラス名を覚えるだけの行 (クラス_ID[ID] / 'クラス_ID' [ID] の形で船が出る)。船でないもの (AImodule_ATC_… や飲み物の瓶など) も
+    // 同じ形で出るので、クラス名が船 (_isVehicleClass) のものだけ覚える。
+    // 自分の船だけが出る行 (自分の操縦する船の経路計算・燃料計算。全ログ 330 本の実測で、ここに出た ID はすべて自分が操縦した船 (control token) の ID だった)。
+    // 覚えた ID は「自分の船」として、格納の行を出す判断にも使う
+    private static readonly string[] OwnVehicleLearnTags =
+    [
+        "<Calculate Route>",
+        "<Failed to get starmap route data!>",
+        "<Player Requested Fuel to Quantum Target",   // "- Local>" / "- Server Routing>" が続く
+        "<Found Obstruction while Routing",           // ">" / " - Routing Around>" が続く
+    ];
+    // 周りの他人の船も出る行 (同じ実測で 9 割前後が自分の操縦した船でない ID)。名前 (ID → クラス名) は覚えるが「自分の船」とはみなさない
+    private static readonly string[] OtherVehicleLearnTags =
+    [
+        "<Local Route Guard - Server Rerouted>",
+        "<Host Vehicle Id SV Update>",
+        "<Command Module Ship Spawned Paired>",
+        "<Bad Spawn Position>",
+        "<Boundary Violation>",
+    ];
+    private static readonly string[] VehicleLearnTags = [.. OwnVehicleLearnTags, .. OtherVehicleLearnTags];
+
+    // 所持品・手に持つ物の行 (手掘りの鉱石を拾ったことを知るのに使う)。<InventoryManagement> / <InventoryManagementRequest> は
+    // 2026-04 ごろのビルドのタグ名 (中身は今の <Add Inventory Management Move> / Queued Request と同じ形)
+    private static readonly string[] InventoryTags =
+    [
+        "<AttachmentReceived>",
+        "<Add Inventory Management Move>",
+        "<Update Container Items Add New Item>",
+        "<EquipItem>",
+        "<InventoryManagement>",
+        "<InventoryManagementRequest>",
+    ];
 
     // 拾う行のタグ。これを含まない行は解析しない (過去ログは合計 600MB ほどあるので、先に string.Contains で絞る)
     private static readonly string[] Tags =
@@ -172,13 +234,24 @@ public sealed class GameLogParser
         "<Player Selected Quantum Target - Local>",
         "<Quantum Drive Arrived - Arrived at Final Destination>",
         "<CEntityComponentShipListProvider::SetVehicleSpawningInformations>",
+        "<CEntityComponentShipListProvider::SetVehicleSpawnedInformations>",   // 呼び出しの完了 (船が着陸場に出た)
         "<LandingArea_UnregisterFromExternalSystems_StowingVehicle>",
+        "<CLandingArea::UnregisterFromExternalSystems>",   // 2026-07-08 までのビルドの格納のタグ名 (文面は同じ)
         "<Vehicle Control Flow>",   // 船の ID → クラス名を覚えるだけ (releasing control token for 'クラス_ID' [ID])
+        .. VehicleLearnTags,
+        .. InventoryTags,
     ];
 
     public static bool HasTag(string line)
     {
         foreach (var t in Tags)
+            if (line.Contains(t, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    private static bool HasAnyTag(string line, string[] tags)
+    {
+        foreach (var t in tags)
             if (line.Contains(t, StringComparison.Ordinal)) return true;
         return false;
     }
@@ -211,15 +284,36 @@ public sealed class GameLogParser
     private static readonly Regex QuantumTargetRegex = new(@"<Player Selected Quantum Target - Local> .*?Player has selected point (.+?) as their destination", RegexOptions.Compiled);
     // 行の中の船: クラス_ID[ID] (量子ジャンプの行の | DRAK_Ironclad_819458464586[819458464586]|)
     private static readonly Regex VehicleRefRegex = new(@"([A-Za-z][A-Za-z0-9_]*?)_(\d{6,})\[\2\]", RegexOptions.Compiled);
+    // 行の中の船 (引用符の形): Entity 'クラス_ID' [ID] (<Boundary Violation>)
+    private static readonly Regex QuotedVehicleRefRegex = new(@"'([A-Za-z][A-Za-z0-9_]*?)_(\d{6,})' \[\2\]", RegexOptions.Compiled);
     // 船の呼び出し: VehicleEntityId: [id], LandingArea: 着陸場所 [Team_…]
     // (続きの行が来なかったときは行末まで)
     private static readonly Regex SpawnRegex = new(@"SetVehicleSpawningInformations - VehicleEntityId: \[(\d+)\], LandingArea: (.*?)\s*(?:\[Team_.*)?$", RegexOptions.Compiled);
-    // 船の格納: [STOWING ON UNREGISTER] 着陸場所 [id] - Attempting to stow current vehicle [id]
-    private static readonly Regex StowRegex = new(@"<LandingArea_UnregisterFromExternalSystems_StowingVehicle> \[STOWING ON UNREGISTER\] (.*?) \[\d+\] - Attempting to stow current vehicle \[(\d+)\]", RegexOptions.Compiled);
+    // 船の呼び出しの完了: SetVehicleSpawnedInformations - VehicleEntityId: [id], LandingATCId: [id], LandingArea: 着陸場所 [着陸場所の id] [Team_…]
+    // (着陸場所の後ろの [id] は呼び出しの行には無いので、呼び出しと同じ見た目になるよう除く)
+    private static readonly Regex SpawnedRegex = new(@"SetVehicleSpawnedInformations - VehicleEntityId: \[(\d+)\], LandingATCId: \[\d+\], LandingArea: (.*?)(?: \[\d+\])?\s*(?:\[Team_.*)?$", RegexOptions.Compiled);
+    // 船の格納: [STOWING ON UNREGISTER] 着陸場所 [id] - Attempting to stow current vehicle [id] (新旧 2 つのタグ名)
+    private static readonly Regex StowRegex = new(@"<(?:LandingArea_UnregisterFromExternalSystems_StowingVehicle|CLandingArea::UnregisterFromExternalSystems)> \[STOWING ON UNREGISTER\] (.*?) \[\d+\] - Attempting to stow current vehicle \[(\d+)\]", RegexOptions.Compiled);
     // 船の ID → クラス名: releasing control token for 'クラス_ID' [ID]
     private static readonly Regex ControlTokenRegex = new(@"releasing control token for '([A-Za-z0-9_]+?)_(\d+)' \[\2\]", RegexOptions.Compiled);
     // 末尾の _数字 (船のクラス名_ID)
     private static readonly Regex TrailingIdRegex = new(@"^(.+?)_(\d+)$", RegexOptions.Compiled);
+
+    // ─── 採掘 (手掘り) の行 ───
+    // 手に持った: Player[名前] Attachment[Harvestable_Mineral_1H_鉱石_ID, Harvestable_Mineral_1H_鉱石, ID] Status[persistent] Port[weapon_attach_hand_right]
+    // (所持品の中の鉱石の Attachment[Harvestable_Mineral_1H_鉱石, Default, 14043] Status[local] はこの形でないので拾わない。
+    //  取り出しの途中で出る Port[inventory_pocket] 等の行も、手に持った Port[weapon_attach_hand_right] でないので拾わない)
+    private static readonly Regex MineralAttachedRegex = new(@"<AttachmentReceived> .*?Attachment\[(Harvestable_Mineral_1H_[A-Za-z0-9_]+?)_(\d{6,}), \1, \2\] .*?Port\[weapon_attach_hand_right\]", RegexOptions.Compiled);
+    // 所持品から取り出して手に持つ: <EquipItem> Request[n] equip from Inventory[…] Class[Harvestable_Mineral_1H_鉱石] Rank[…] … PostAction[Carry]
+    private static readonly Regex MineralEquipRegex = new(@"<EquipItem> .*?Class\[(Harvestable_Mineral_1H_[^\]]+)\]", RegexOptions.Compiled);
+    // 同上 (所持品の操作の行): Type[Interaction] … ItemClass[Harvestable_Mineral_1H_鉱石] … Caller[CSCLocalPlayerPersonalThoughtComponent::AttachItem]
+    private static readonly Regex MineralAttachItemRegex = new(@"Type\[Interaction\] .*?ItemClass\[(Harvestable_Mineral_1H_[^\]]+)\] .*?Caller\[[^\]]*::AttachItem\]", RegexOptions.Compiled);
+    // 所持品にしまう: Type[Store] … StoredEntity[Harvestable_Mineral_1H_鉱石_ID] (<Add Inventory Management Move> / 旧 <InventoryManagement>)、
+    // Type[Store] … Item[Harvestable_Mineral_1H_鉱石_ID] (旧 <InventoryManagementRequest> Queued Request)
+    private static readonly Regex MineralStoreRegex = new(@"Type\[Store\] .*?(?:StoredEntity|Item)\[(Harvestable_Mineral_1H_[A-Za-z0-9_]+?)_(\d{6,})\]", RegexOptions.Compiled);
+    // しまった後の個数: Player '名前' [id] adding 1 stack(s) to N stack(s) of Entity Class[Harvestable_Mineral_1H_鉱石] Rank[…]
+    private static readonly Regex ContainerAddRegex = new(@"<Update Container Items Add New Item> .*?adding \d+ stack\(s\) to (\d+) stack\(s\) of Entity Class\[([^\]]+)\]", RegexOptions.Compiled);
+    private const string MineralClassPrefix = "Harvestable_Mineral_1H_";
 
     // 1 行を渡す (行末の \r は付いていてもよい)
     public void FeedLine(string line)
@@ -302,7 +396,8 @@ public sealed class GameLogParser
 
     private static bool NeedsContinuation(string line) =>
         (line.Contains("<SHUDEvent_OnNotification> Added notification", StringComparison.Ordinal)
-         || line.Contains("<CEntityComponentShipListProvider::SetVehicleSpawningInformations>", StringComparison.Ordinal))
+         || line.Contains("<CEntityComponentShipListProvider::SetVehicleSpawningInformations>", StringComparison.Ordinal)
+         || line.Contains("<CEntityComponentShipListProvider::SetVehicleSpawnedInformations>", StringComparison.Ordinal))
         && !line.Contains("[Team_", StringComparison.Ordinal);
 
     private void Process(string line)
@@ -315,6 +410,16 @@ public sealed class GameLogParser
         if (line.Contains("<Vehicle Control Flow>", StringComparison.Ordinal))
         {
             if ((m = ControlTokenRegex.Match(line)).Success) LearnVehicle(m.Groups[2].Value, m.Groups[1].Value);
+            return;
+        }
+        if (HasAnyTag(line, VehicleLearnTags))
+        {
+            LearnVehiclesInLine(line, own: HasAnyTag(line, OwnVehicleLearnTags));
+            return;
+        }
+        if (HasAnyTag(line, InventoryTags))
+        {
+            OnInventory(time, line);
             return;
         }
         if ((m = DeadRegex.Match(line)).Success)
@@ -386,15 +491,16 @@ public sealed class GameLogParser
         }
         if ((m = CommodityBuyRegex.Match(line)).Success)
         {
+            // quantity は cSCU (1/100 SCU) なので SCU に直す
             var scu = ParseNumber(m.Groups[4].Value) is double c ? (c / 100).ToString("#,0.##", CultureInfo.InvariantCulture) : m.Groups[4].Value;
-            var e = Add(time, "商品購入", $"品目 {ShortGuid(m.Groups[3].Value)} × {scu} SCU / 店: {m.Groups[1].Value}", ParseNumber(m.Groups[2].Value));
+            var e = Add(time, "商品購入", $"{ResourceDisplay(m.Groups[3].Value)} {scu} SCU / 店: {m.Groups[1].Value}", ParseNumber(m.Groups[2].Value));
             _pendingCommodity["Buying"] = e;
             return;
         }
         if ((m = CommoditySellRegex.Match(line)).Success)
         {
-            // quantity の単位は未確認なので数値のまま出す
-            var e = Add(time, "商品売却", $"品目 {ShortGuid(m.Groups[3].Value)} × {m.Groups[4].Value} / 店: {m.Groups[1].Value}", ParseNumber(m.Groups[2].Value));
+            // 売りの quantity には単位が付かない (実ログの全行で quantity[数] のみ) ので数値のまま出す
+            var e = Add(time, "商品売却", $"{ResourceDisplay(m.Groups[3].Value)} × {m.Groups[4].Value} / 店: {m.Groups[1].Value}", ParseNumber(m.Groups[2].Value));
             _pendingCommodity["Selling"] = e;
             return;
         }
@@ -433,13 +539,90 @@ public sealed class GameLogParser
             AddWithVehicle(time, "呼び出し", m.Groups[1].Value, ship => $"{ship} / 着陸場所: {area}");
             return;
         }
+        if ((m = SpawnedRegex.Match(line)).Success)
+        {
+            // 呼び出しの完了 (同じ呼び出しで SetVehicleSpawningInformations の数秒後に出る)。呼び出しと同じく自分の船なので船名待ちで出す
+            var area = m.Groups[2].Value.Trim();
+            AddWithVehicle(time, "呼び出し完了", m.Groups[1].Value, ship => $"{ship} / 着陸場所: {area}");
+            return;
+        }
         if ((m = StowRegex.Match(line)).Success)
         {
             var area = m.Groups[1].Value;
-            AddWithVehicle(time, "格納", m.Groups[2].Value, ship => $"{ship} / {area}");
+            AddWithVehicleIfKnown(time, "格納", m.Groups[2].Value, ship => $"{ship} / {area}");
             return;
         }
     }
+
+    // ─── 採掘 (手掘り) ───
+    // 拾った鉱石: 手に持った (AttachmentReceived) 候補を個体 ID で覚え、同じ個体 ID をしまった (Type[Store]) ときに確定して 1 行にする。
+    // 所持品から取り出して手に持ったときも同じ AttachmentReceived が出るので、直前 (PendingEquipWindow 以内) に同じクラスの EquipItem / AttachItem が
+    // あれば取り出しとみなして出さない。しまった直後の Update Container Items (adding 1 stack(s) to N stack(s)) が来たら所持数 (N + 1) を添える
+    private void OnInventory(DateTime time, string line)
+    {
+        var last = _lastMined;
+        _lastMined = null;
+        Match m;
+        if ((m = MineralAttachedRegex.Match(line)).Success)
+        {
+            var cls = m.Groups[1].Value;
+            var id = m.Groups[2].Value;
+            if (_pendingEquip.Remove(cls, out var equipTime))
+            {
+                // 窓を過ぎた候補は捨てる (取り出しとみなさず、拾得の候補として扱う)
+                if (time - equipTime <= PendingEquipWindow)
+                {
+                    _takenOut.Add(id);
+                    return;
+                }
+            }
+            if (_takenOut.Contains(id)) return;
+            _mineCandidates[id] = (time, cls);
+            return;
+        }
+        if ((m = MineralEquipRegex.Match(line)).Success || (m = MineralAttachItemRegex.Match(line)).Success)
+        {
+            _pendingEquip[m.Groups[1].Value] = time;
+            return;
+        }
+        if ((m = MineralStoreRegex.Match(line)).Success)
+        {
+            if (!_mineCandidates.Remove(m.Groups[2].Value, out var c)) return;
+            var e = Add(c.Time, "採掘", $"{MineralName(c.Class)} ×1");
+            _lastMined = (e, c.Class);
+            return;
+        }
+        if ((m = ContainerAddRegex.Match(line)).Success && last is { } lm && lm.Class == m.Groups[2].Value
+            && int.TryParse(m.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var to))
+        {
+            lm.Entry.Content += $"（所持 {to + 1}）";
+            Changed = true;
+        }
+    }
+
+    // 鉱石のクラス名 Harvestable_Mineral_1H_<X> → 名前。翻訳 DB の items_commodities_<x> (無ければ <X> のまま)
+    private string MineralName(string cls)
+    {
+        var x = cls.StartsWith(MineralClassPrefix, StringComparison.Ordinal) ? cls[MineralClassPrefix.Length..] : cls;
+        return _translate("@items_commodities_" + MineralKey(x)) ?? x;
+    }
+
+    // <X> → 翻訳キーの末尾。大文字で語を区切り、小文字 + "_" でつなぐ (CarinitePure → carinite_pure、Aphorite → aphorite)。
+    // 元から "_" があればそのまま、大文字が続くところ (RMC など) は区切らない
+    internal static string MineralKey(string x)
+    {
+        var sb = new StringBuilder(x.Length + 4);
+        for (int i = 0; i < x.Length; i++)
+        {
+            var c = x[i];
+            if (char.IsUpper(c) && i > 0 && (char.IsLower(x[i - 1]) || char.IsDigit(x[i - 1]))) sb.Append('_');
+            sb.Append(char.ToLowerInvariant(c));
+        }
+        return sb.ToString();
+    }
+
+    // 商品売買の資源の GUID → 名前。引けなければ今までどおり「品目 先頭 8 文字」
+    private string ResourceDisplay(string guid) => _resourceName(guid) ?? $"品目 {ShortGuid(guid)}";
 
     // ─── 衝突 ───
     // 同じ時刻・同じ船の行が部位ごとに複数出るので 1 件にまとめる (相手が違えば並べる)
@@ -591,28 +774,78 @@ public sealed class GameLogParser
         if (m.Success) LearnVehicle(m.Groups[2].Value, m.Groups[1].Value);
     }
 
-    // 船の ID → クラス名を覚える。船名待ちの呼び出し・格納の行があれば書き換える
-    private void LearnVehicle(string id, string className)
+    // ナビゲーション・ドッキング・境界違反などの行から、行の中のすべての クラス_ID[ID] / 'クラス_ID' [ID] を拾い、クラス名が船のものだけ覚える。
+    // own = 自分の船だけが出る行 (OwnVehicleLearnTags) なら、自分の船としても覚える
+    private void LearnVehiclesInLine(string line, bool own)
+    {
+        foreach (Match m in VehicleRefRegex.Matches(line)) LearnVehicleIfShip(m.Groups[2].Value, m.Groups[1].Value, own);
+        foreach (Match m in QuotedVehicleRefRegex.Matches(line)) LearnVehicleIfShip(m.Groups[2].Value, m.Groups[1].Value, own);
+    }
+
+    private void LearnVehicleIfShip(string id, string className, bool own)
+    {
+        if (id.Length == 0 || className.Length == 0) return;
+        if (_isVehicleClass(className)) LearnVehicle(id, className, own);
+    }
+
+    // 船の ID → クラス名を覚える (own なら自分の船としても)。船名待ちの呼び出しの行があれば書き換え、
+    // 自分の船と分かるまで出していなかった格納の行があれば行にする
+    private void LearnVehicle(string id, string className, bool own = true)
     {
         if (id.Length == 0 || className.Length == 0) return;
         _vehicleClasses[id] = className;
-        if (!_vehicleWaiting.Remove(id, out var list)) return;
-        var ship = _shipName(className);
-        foreach (var (e, build) in list) e.Content = build(ship);
-        Changed = true;
+        if (own) _ownVehicles.Add(id);
+        if (_vehicleWaiting.Remove(id, out var list))
+        {
+            var ship = _shipName(className);
+            foreach (var (e, build) in list) e.Content = build(ship);
+            Changed = true;
+        }
+        FlushHiddenVehicleRows(id);
     }
 
-    // 船の ID の付いた行。クラス名が分かっていれば船名、まだなら「船 ID …」で出し、後で分かったら書き換える
+    // 自分の船の ID を覚える (呼び出しの行。クラス名はまだ分からない)。出していなかった格納の行があり、クラス名も分かっていれば行にする
+    private void MarkOwnVehicle(string id)
+    {
+        if (id.Length == 0) return;
+        _ownVehicles.Add(id);
+        FlushHiddenVehicleRows(id);
+    }
+
+    // 出していなかった格納の行を、自分の船でクラス名も分かったときに行にする
+    private void FlushHiddenVehicleRows(string id)
+    {
+        if (!_ownVehicles.Contains(id) || !_vehicleClasses.TryGetValue(id, out var cls)) return;
+        if (!_vehicleHidden.Remove(id, out var hidden)) return;
+        var ship = _shipName(cls);
+        foreach (var (time, kind, build) in hidden) Add(time, kind, build(ship));
+    }
+
+    // 自分の船の ID の付いた行 (呼び出し)。クラス名が分かっていれば船名、まだなら「船 ID …」で出し、後で分かったら書き換える
     private void AddWithVehicle(DateTime time, string kind, string id, Func<string, string> build)
     {
         if (_vehicleClasses.TryGetValue(id, out var cls))
         {
             Add(time, kind, build(_shipName(cls)));
+            MarkOwnVehicle(id);
             return;
         }
         var e = Add(time, kind, build($"船 ID {id}"));
         if (!_vehicleWaiting.TryGetValue(id, out var list)) _vehicleWaiting[id] = list = new();
         list.Add((e, build));
+        MarkOwnVehicle(id);
+    }
+
+    // 船の ID の付いた行のうち、自分の船でクラス名も分かるものだけ出すもの (格納)。まだ分からなければ覚えておき、分かったときに行にする
+    private void AddWithVehicleIfKnown(DateTime time, string kind, string id, Func<string, string> build)
+    {
+        if (_ownVehicles.Contains(id) && _vehicleClasses.TryGetValue(id, out var cls))
+        {
+            Add(time, kind, build(_shipName(cls)));
+            return;
+        }
+        if (!_vehicleHidden.TryGetValue(id, out var list)) _vehicleHidden[id] = list = new();
+        list.Add((time, kind, build));
     }
 
     // ─── 共通 ───
@@ -640,9 +873,10 @@ public sealed class GameLogParser
 
     // 過去のログ 1 ファイルを全部読む。ゲームが書き込み中でも開けるように共有で開く
     public static List<GameLogEntry> ParseFile(string path, string source, Func<string, string>? shipName = null, Func<string, string>? itemName = null,
-        GameLogMissionNames? sharedMissionNames = null)
+        GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
+        Func<string, string?>? resourceName = null)
     {
-        var parser = new GameLogParser(source, shipName, itemName, sharedMissionNames);
+        var parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName);
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var reader = new StreamReader(fs, LogEncoding, detectEncodingFromByteOrderMarks: false);
         string? line;
@@ -667,6 +901,9 @@ public sealed class GameLogTail
     private readonly Func<string, string>? _shipName;
     private readonly Func<string, string>? _itemName;
     private readonly GameLogMissionNames? _sharedMissionNames;
+    private readonly Func<string, string?>? _translate;
+    private readonly Func<string, bool>? _isVehicleClass;
+    private readonly Func<string, string?>? _resourceName;
     private long _position;
     private long _lastLength;
     private byte[]? _head;                   // 覚えている先頭の 1 行 (改行まで)。まだ分からなければ null
@@ -676,14 +913,18 @@ public sealed class GameLogTail
     public GameLogParser Parser { get; private set; }
 
     public GameLogTail(string path, string source, Func<string, string>? shipName = null, Func<string, string>? itemName = null,
-        GameLogMissionNames? sharedMissionNames = null)
+        GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
+        Func<string, string?>? resourceName = null)
     {
         _path = path;
         _source = source;
         _shipName = shipName;
         _itemName = itemName;
         _sharedMissionNames = sharedMissionNames;
-        Parser = new GameLogParser(source, shipName, itemName, sharedMissionNames);
+        _translate = translate;
+        _isVehicleClass = isVehicleClass;
+        _resourceName = resourceName;
+        Parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName);
     }
 
     // 増えた分を読む。戻り値: ファイルがあったか。reset = 最初から読み直した (それまでの行は捨てた)
@@ -700,7 +941,7 @@ public sealed class GameLogTail
         {
             _position = 0;
             _lastLength = 0;
-            Parser = new GameLogParser(_source, _shipName, _itemName, _sharedMissionNames);
+            Parser = new GameLogParser(_source, _shipName, _itemName, _sharedMissionNames, _translate, _isVehicleClass, _resourceName);
             reset = true;
         }
         if (head != null) _head = head;

@@ -1258,7 +1258,8 @@ public partial class GameDataQueryService : IDisposable
         new("アーマー (胴)", CompareKind.Armor, ["torso", "core", "chest", "胴", "胴体", "ボディアーマー", "胴アーマー", "コア"], ["Char_Armor_Torso"], GroupVariants: true, UexCategoryIds: [5]),
         new("アーマー (腕)", CompareKind.Armor, ["arms", "腕", "アーム", "腕アーマー"], ["Char_Armor_Arms"], GroupVariants: true, UexCategoryIds: [1]),
         new("アーマー (脚)", CompareKind.Armor, ["legs", "脚", "レッグ", "脚アーマー"], ["Char_Armor_Legs"], GroupVariants: true, UexCategoryIds: [4]),
-        new("アンダースーツ", CompareKind.Armor, ["undersuit", "アンダースーツ"], ["Char_Armor_Undersuit"], GroupVariants: true, UexCategoryIds: [24]),
+        // フライトスーツ・レーシングフライトスーツもゲームデータの種類はアンダースーツ (Char_Armor_Undersuit。説明文の Item Type: Flight Suit / Racing Flight Suit)
+        new("アンダースーツ", CompareKind.Armor, ["undersuit", "flight suit", "racing flight suit", "アンダースーツ", "フライトスーツ", "レーシングフライトスーツ"], ["Char_Armor_Undersuit"], GroupVariants: true, UexCategoryIds: [24]),
         new("バックパック", CompareKind.Armor, ["backpack", "バックパック"], ["Char_Armor_Backpack", "Char_Clothing_Backpack"], GroupVariants: true, UexCategoryIds: [2]),
         new("アーマー (全部位)", CompareKind.Armor, ["armor", "armour", "アーマー", "防具"], ArmorPieceFilters, GroupVariants: true, UexCategoryIds: [1, 2, 3, 4, 5, 7, 24], PartSummary: true),
         new("服 (全部位)", CompareKind.Armor, ["clothing", "clothes", "服", "衣服", "衣装"], ["Char_Clothing_*"], GroupVariants: true, UexCategoryIds: ClothingUexCategoryIds, PartSummary: true),
@@ -2440,9 +2441,10 @@ public partial class GameDataQueryService : IDisposable
         var healing = IsHealingDevice(e);
         var sb = new StringBuilder();
         sb.AppendLine(isWeapon ? "【武器の性能 (ゲームデータ)】" : "【性能 (ゲームデータ)】");
+        // アーマー・服は、比べる表の列に加えて口のデータの行 (バックパックの口・胴アーマーの口) も出す (lookup だけ。表には「対応 (バックパック/コア)」で出る)
         var keys = isWeapon
             ? new[] { "サイズ", "連射速度 (発/分)", "1回の弾数", "装弾数", "有効射程 (説明文)", "弾速", "1発のダメージ", "ビームのダメージ (毎秒)", "バースト DPS", "平均 DPS (推定)", "薬剤の注入量 (mSCU/秒)" }
-            : ItemColumns(kind, new List<CompareEntry> { e }).Prepend("サイズ").Distinct().ToArray();
+            : ItemColumns(kind, new List<CompareEntry> { e }).Prepend("サイズ").Concat(kind == CompareKind.Armor ? ArmorPortLineKeys : []).Distinct().ToArray();
         int lines = 0;
         foreach (var key in keys)
         {
@@ -3101,8 +3103,14 @@ public partial class GameDataQueryService : IDisposable
                     var cm = System.Text.RegularExpressions.Regex.Match(D("Carrying Capacity"), @"([\d.]+)\s*([kK])?");
                     if (cm.Success && double.TryParse(cm.Groups[1].Value, System.Globalization.NumberStyles.Float, inv, out var cap))
                         e.Nums["所持容量"] = cm.Groups[2].Success ? cap * 1000 : cap;
-                    var compat = D("Backpacks").Length > 0 ? D("Backpacks") : D("Core Compatibility");
-                    if (compat.Length > 0) e.Cells["対応 (バックパック/コア)"] = compat;
+                    // 耐 G (アンダースーツ。SCItemClothingParams.Flight.gForceResistance。説明文の「G-Force Tolerance: +97.5%」= この値 × 100 %)。0 でも出す
+                    if (e.ItemType == "Char_Armor_Undersuit" && Comp("SCItemClothingParams") is { } fcp && fcp.TryGetProperty("Flight", out var fl)
+                        && fl.ValueKind == JsonValueKind.Object && TryNum(fl, "gForceResistance", out var gf))
+                    {
+                        e.Cells[GForceColumn] = FormatGForce(gf);
+                        e.Nums[GForceNumKey] = gf * 100;
+                    }
+                    FillCharacterPortCells(e, D);
                     break;
                 }
                 default:
@@ -3114,6 +3122,99 @@ public partial class GameDataQueryService : IDisposable
             }
         }
         finally { raw?.Dispose(); }
+    }
+
+    // ===== 着る物の口のデータ (item_ports。GameDataExtractor.CharacterPortRecordTypes の種類) =====
+    // 耐 G の列 (アンダースーツ)。値は gForceResistance × 100 を「+97.5%」の形 (説明文の G-Force Tolerance と同じ書き方。0 は "0%")
+    private const string GForceColumn = "耐 G";
+    private const string GForceNumKey = "耐G";
+    private static string FormatGForce(double gForceResistance) =>
+        (gForceResistance * 100).ToString("+0.##;-0.##;0", System.Globalization.CultureInfo.InvariantCulture) + "%";
+
+    // lookup のアーマー・服の詳細に出す口のデータの行 (比べる表の列ではない)
+    private static readonly string[] ArmorPortLineKeys = ["バックパックの口", "胴アーマーの口"];
+    private const string PortsNotFetchedText = "口のデータが未取得 (ゲームデータからまだ取り出していません)";
+
+    // 着る物の口のデータが item_ports に取り出し済みか。取り出し済みなら覚えておく (取り出し前は毎回確かめる。起動後の裏の取り出しで変わるため)
+    private bool _characterPortsReady;
+    private bool HasCharacterPorts()
+    {
+        if (_characterPortsReady) return true;
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = GameDataExtractor.CharacterPortsExistSql;
+            _characterPortsReady = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
+        }
+        catch { }   // 表の無い古い DB
+        return _characterPortsReady;
+    }
+
+    // 品目 1 件の口 (item_ports)。表が無い・無い品目は空
+    private List<ItemPortDef> CharacterPorts(string record)
+    {
+        var list = new List<ItemPortDef>();
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT port_name, min_size, max_size, port_types FROM item_ports WHERE record_name = @rn ORDER BY rowid";
+            cmd.Parameters.AddWithValue("@rn", record);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                list.Add(new ItemPortDef
+                {
+                    Name = r.GetString(0),
+                    MinSize = r.IsDBNull(1) ? 0 : r.GetInt32(1),
+                    MaxSize = r.IsDBNull(2) ? 0 : r.GetInt32(2),
+                    Types = r.IsDBNull(3) ? "" : r.GetString(3),
+                });
+        }
+        catch { }
+        return list;
+    }
+
+    // 口の大きさの範囲 "S1〜S3" (同じなら "S1")
+    private static string PortSizeRange(List<ItemPortDef> ports)
+    {
+        var min = ports.Min(p => p.MinSize);
+        var max = ports.Max(p => p.MaxSize);
+        return min == max ? $"S{min}" : $"S{min}〜S{max}";
+    }
+
+    // 口のデータ (item_ports) から「バックパックの口」「胴アーマーの口」(lookup の行) と「対応 (バックパック/コア)」(表の列) を作る。
+    //   バックパックの口 = Char_Armor_Backpack を受け付ける口 (アンダースーツ・胴アーマー・上着に出す)、胴アーマーの口 = Char_Armor_Torso を受け付ける口 (アンダースーツに出す)。
+    //   対応 (バックパック/コア) = 「バックパック S1〜S3 / コア あり」の形 (口が無ければ「なし」)。
+    // 口のデータがまだ無い (起動後の取り出し前) ときは未取得と出し、「対応」だけ説明文の欄 (Backpacks: / Core Compatibility:) で代わりにする (推測で埋めない)。
+    // 口のデータを保存しない種類 (服のシャツ・帽子など) は今までどおり説明文の欄
+    private void FillCharacterPortCells(CompareEntry e, Func<string, string> desc)
+    {
+        var isUndersuit = e.ItemType == "Char_Armor_Undersuit";
+        var wantsBackpack = e.ItemType is "Char_Armor_Undersuit" or "Char_Armor_Torso" or "Char_Clothing_Torso_1";
+        var portType = GameDataExtractor.CharacterPortRecordTypes.Contains(e.ItemType, StringComparer.Ordinal);
+        string compat;
+        if (portType && HasCharacterPorts())
+        {
+            var ports = CharacterPorts(e.Record);
+            var backpack = ports.Where(p => p.TypeNames.Contains("Char_Armor_Backpack", StringComparer.OrdinalIgnoreCase)).ToList();
+            var core = ports.Where(p => p.TypeNames.Contains("Char_Armor_Torso", StringComparer.OrdinalIgnoreCase)).ToList();
+            var backpackText = backpack.Count > 0 ? PortSizeRange(backpack) : null;
+            if (wantsBackpack) e.Cells["バックパックの口"] = backpackText != null ? $"あり ({backpackText})" : "なし";
+            if (isUndersuit) e.Cells["胴アーマーの口"] = core.Count > 0 ? "あり" : "なし";
+            var parts = new List<string>();
+            if (wantsBackpack || backpackText != null) parts.Add("バックパック " + (backpackText ?? "なし"));
+            if (isUndersuit || core.Count > 0) parts.Add("コア " + (core.Count > 0 ? "あり" : "なし"));
+            compat = string.Join(" / ", parts);
+        }
+        else
+        {
+            if (portType)
+            {
+                if (wantsBackpack) e.Cells["バックパックの口"] = PortsNotFetchedText;
+                if (isUndersuit) e.Cells["胴アーマーの口"] = PortsNotFetchedText;
+            }
+            compat = desc("Backpacks").Length > 0 ? desc("Backpacks") : desc("Core Compatibility");
+        }
+        if (compat.Length > 0) e.Cells["対応 (バックパック/コア)"] = compat;
     }
 
     // ミサイル・魚雷・ロケット 1 件の値 (raw_json の SCItemMissileParams)。無ければ null。
@@ -3691,7 +3792,7 @@ public partial class GameDataQueryService : IDisposable
             CompareKind.Cooler => ["サイズ", "グレード", "クラス", "冷却 (クーラント/秒)"],
             CompareKind.QuantumDrive => ["サイズ", "グレード", "クラス", "速度 (km/秒)", "スプール時間 (秒)", "クールダウン (秒)", "燃料消費"],
             CompareKind.Radar => ["サイズ", "グレード", "クラス"],
-            CompareKind.Armor => ["ダメージ軽減 (説明文)", "耐えられる温度", "放射線防護", "所持容量 (説明文)", "対応 (バックパック/コア)"],
+            CompareKind.Armor => ["ダメージ軽減 (説明文)", "耐えられる温度", "放射線防護", "所持容量 (説明文)", GForceColumn, "対応 (バックパック/コア)"],
             // それ以外の種類。ミサイル・魚雷は FillMissileCells の値 (ダメージの種類・1発のダメージ・弾速・追尾)、
             // ロケットポッドは船の武器の値 (DPS も) を出す (値のある品目があるときだけ)
             _ => ["サイズ", "ダメージの種類", "1発のダメージ", "DPS (バースト / 平均)", "弾速", "追尾", "性能 (説明文)"],

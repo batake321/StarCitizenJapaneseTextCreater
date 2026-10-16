@@ -96,8 +96,8 @@ public partial class GearTablePanel : UserControl
         PriceColumn(),
     ];
 
-    // 個人装備の列: 名前、種類、部位、重さ、メーカー、ダメージ軽減 (%)、耐えられる温度、放射線防護、所持容量、対応 (バックパック/コア)、
-    // 性能 (説明文。アーマー・服以外)、店の最安値
+    // 個人装備の列: 名前、種類、部位、重さ、メーカー、ダメージ軽減 (%)、耐えられる温度、放射線防護、所持容量、耐 G (%。アンダースーツ)、
+    // 対応 (バックパック/コア)、性能 (説明文。アーマー・服以外)、店の最安値
     private static List<GridColumnSpec> PersonalColumns() =>
     [
         NameColumn(),
@@ -110,6 +110,8 @@ public partial class GearTablePanel : UserControl
         new() { Header = "耐えられる温度", Filterable = false, Text = o => ((GearTableRow)o).T("耐えられる温度"), Key = o => ((GearTableRow)o).N("耐えられる温度の幅") },
         Number("放射線防護", "放射線防護", "#,0.##"),
         Number("所持容量", "所持容量", "#,0.##"),
+        // 耐 G: アンダースーツの gForceResistance × 100 (GameDataQueryService.FillItemStats)。0 でも "0" と出す (値の無い部位は空)
+        Number("耐 G (%)", "耐G", "+0.##;-0.##;0"),
         Text("対応 (バックパック/コア)", r => r.T("対応 (バックパック/コア)")),
         Text("性能 (説明文)", r => r.T("性能 (説明文)"), filterable: false),
         PriceColumn(),

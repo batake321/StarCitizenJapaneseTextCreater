@@ -419,14 +419,29 @@ public class GameDataExtractor : IDisposable
         try
         {
             using var cmd = _db.CreateCommand();
-            cmd.CommandText = ItemPortsDdl + ItemPortLabelsDdl;
+            cmd.CommandText = ItemPortsDdl + ItemPortLabelsDdl + ResourceTypesDdl;
             cmd.ExecuteNonQuery();
         }
         catch { }
     }
 
-    // 品目 (タレット・ジンバル・船の武器) 自身の子ポートの定義 (record の SItemPortContainerComponentParams.Ports)。
-    // port_types は受け付ける種類 "Type:SubType,SubType|Type:..." (例 "WeaponGun:Gun")。インデックス構築で作る
+    // 資源の種類 (ResourceTypeDatabase の record の中の ResourceType)。uuid は record の _RecordId_ (商品売買のログの resourceGUID と同じ)、
+    // name_key は displayName ("@items_commodities_…")、name_en は英語ローカライズで引いた英語名 (無ければ NULL)。
+    // ［ゲームログ］の商品売買の行で資源名を出すのに使う。インデックス構築で作る (無い・空なら起動後に裏で一度だけ取り出す: RebuildResourceTypesAsync)
+    internal const string ResourceTypesDdl = """
+
+        CREATE TABLE IF NOT EXISTS resource_types (
+            uuid TEXT PRIMARY KEY,
+            record_name TEXT NOT NULL,
+            name_key TEXT,
+            name_en TEXT,
+            extracted_at TEXT NOT NULL
+        );
+        """;
+
+    // 品目 (タレット・ジンバル・船の武器と、着る物 CharacterPortRecordTypes) 自身の子ポートの定義 (record の SItemPortContainerComponentParams.Ports)。
+    // port_types は受け付ける種類 "Type:SubType,SubType|Type:..." (例 "WeaponGun:Gun", "Char_Armor_Backpack")。インデックス構築で作る。
+    // 着る物の分が無い DB (前の版で構築したもの) は、起動後に裏で一度だけ足す (RebuildCharacterPortsAsync)
     internal const string ItemPortsDdl = """
 
         CREATE TABLE IF NOT EXISTS item_ports (
@@ -505,9 +520,23 @@ public class GameDataExtractor : IDisposable
         return count;
     }
 
-    // 子ポートの定義を保存する品目の種類 (AttachDef.Type)
-    internal static readonly HashSet<string> ItemPortRecordTypes = new(StringComparer.Ordinal)
-        { "Turret", "TurretBase", "UtilityTurret", "WeaponMount", "WeaponGun" };
+    // 着る物のうち子ポートの定義 (item_ports) を保存する種類 (AttachDef.Type)。チャットが装備の互換性 (バックパックの口・胴アーマーの口) を
+    // 口のデータで答えるのに使う。前の版で構築した DB には無いので、起動後に裏で一度だけ Data.p4k から取り出す (RebuildCharacterPortsAsync)。
+    // ItemPortRecordTypes より前に置く (静的な初期化の順)
+    internal static readonly string[] CharacterPortRecordTypes =
+        ["Char_Armor_Undersuit", "Char_Armor_Torso", "Char_Clothing_Torso_1", "Char_Armor_Arms", "Char_Armor_Legs", "Char_Armor_Helmet", "Char_Armor_Backpack"];
+
+    // SQL の IN (...) に並べた CharacterPortRecordTypes
+    internal static readonly string CharacterPortTypeList = string.Join(", ", CharacterPortRecordTypes.Select(t => $"'{t}'"));
+
+    // 着る物 (CharacterPortRecordTypes) の子ポートの定義が item_ports に 1 行でもあるか (0 / 1)。
+    // GameDataQueryService (口のデータが取り出し済みか) と NeedsCharacterPorts で使う
+    internal static readonly string CharacterPortsExistSql =
+        $"SELECT EXISTS (SELECT 1 FROM item_ports p WHERE EXISTS (SELECT 1 FROM item_index x WHERE x.record_name = p.record_name AND x.item_type IN ({CharacterPortTypeList})))";
+
+    // 子ポートの定義を保存する品目の種類 (AttachDef.Type): 船の武器類と着る物 (CharacterPortRecordTypes)
+    internal static readonly HashSet<string> ItemPortRecordTypes = new(
+        new[] { "Turret", "TurretBase", "UtilityTurret", "WeaponMount", "WeaponGun" }.Concat(CharacterPortRecordTypes), StringComparer.Ordinal);
 
     // SItemPortContainerComponentParams の Ports を (名前, 最小, 最大, 受け付ける種類, flags) にする
     internal static List<(string Name, int Min, int Max, string Types, string Flags)> ReadItemPortDefs(JsonElement portContainer)
@@ -543,17 +572,16 @@ public class GameDataExtractor : IDisposable
     // dcb query (EntityClassDefinition) の出力から、ItemPortRecordTypes の品目の子ポートの定義を item_ports に入れる (INSERT OR REPLACE)。
     // 入れた行数を返す。インデックス構築とハーネスの両方から使う
     internal static int InsertItemPortsFromJson(SqliteConnection db, SqliteTransaction? tx, string rawJson, HashSet<string>? onlyRecords = null)
+        => InsertItemPortRows(db, tx, ReadItemPortRows(rawJson, onlyRecords));
+
+    // item_ports の 1 行 (record 名, 口の名前, 最小, 最大, 受け付ける種類, flags)
+    internal readonly record struct ItemPortRow(string Record, string Name, int Min, int Max, string Types, string Flags);
+
+    // dcb query (EntityClassDefinition) の出力から、ItemPortRecordTypes の品目の子ポートの定義を item_ports の行にする (読むだけで書かない)。
+    // onlyRecords を渡すと、その record だけ。読めない record は飛ばす
+    internal static List<ItemPortRow> ReadItemPortRows(string rawJson, HashSet<string>? onlyRecords = null)
     {
-        using var cmd = db.CreateCommand();
-        cmd.Transaction = tx;
-        cmd.CommandText = "INSERT OR REPLACE INTO item_ports(record_name, port_name, min_size, max_size, port_types, flags) VALUES(@rn, @pn, @mn, @mx, @pt, @fl)";
-        var pRn = cmd.Parameters.Add("@rn", SqliteType.Text);
-        var pPn = cmd.Parameters.Add("@pn", SqliteType.Text);
-        var pMn = cmd.Parameters.Add("@mn", SqliteType.Integer);
-        var pMx = cmd.Parameters.Add("@mx", SqliteType.Integer);
-        var pPt = cmd.Parameters.Add("@pt", SqliteType.Text);
-        var pFl = cmd.Parameters.Add("@fl", SqliteType.Text);
-        int count = 0;
+        var rows = new List<ItemPortRow>();
         foreach (var block in SplitJsonBlocks(rawJson))
         {
             try
@@ -578,13 +606,31 @@ public class GameDataExtractor : IDisposable
                 }
                 if (container == null || !ItemPortRecordTypes.Contains(itemType)) continue;
                 foreach (var (name, min, max, types, flags) in ReadItemPortDefs(container.Value))
-                {
-                    pRn.Value = recordName; pPn.Value = name; pMn.Value = min; pMx.Value = max; pPt.Value = types; pFl.Value = flags;
-                    cmd.ExecuteNonQuery();
-                    count++;
-                }
+                    rows.Add(new ItemPortRow(recordName, name, min, max, types, flags));
             }
             catch { }
+        }
+        return rows;
+    }
+
+    // item_ports に行を入れる (INSERT OR REPLACE)。入れた行数を返す
+    internal static int InsertItemPortRows(SqliteConnection db, SqliteTransaction? tx, IEnumerable<ItemPortRow> rows)
+    {
+        using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "INSERT OR REPLACE INTO item_ports(record_name, port_name, min_size, max_size, port_types, flags) VALUES(@rn, @pn, @mn, @mx, @pt, @fl)";
+        var pRn = cmd.Parameters.Add("@rn", SqliteType.Text);
+        var pPn = cmd.Parameters.Add("@pn", SqliteType.Text);
+        var pMn = cmd.Parameters.Add("@mn", SqliteType.Integer);
+        var pMx = cmd.Parameters.Add("@mx", SqliteType.Integer);
+        var pPt = cmd.Parameters.Add("@pt", SqliteType.Text);
+        var pFl = cmd.Parameters.Add("@fl", SqliteType.Text);
+        int count = 0;
+        foreach (var r in rows)
+        {
+            pRn.Value = r.Record; pPn.Value = r.Name; pMn.Value = r.Min; pMx.Value = r.Max; pPt.Value = r.Types; pFl.Value = r.Flags;
+            cmd.ExecuteNonQuery();
+            count++;
         }
         return count;
     }
@@ -836,6 +882,222 @@ public class GameDataExtractor : IDisposable
         using var cmd = _db!.CreateCommand();
         cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM ships WHERE cargo_scu IS NULL)";
         return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
+    }
+
+    // 着る物 (CharacterPortRecordTypes) の子ポートの定義が item_ports にまだ 1 行も無いか (起動後の RebuildCharacterPortsAsync を走らせるか決めるため)。
+    // item_index にその種類の品目が無ければ (構築前の DB) false。表は EnsureDb (EnsureItemPortsTable) が作る
+    public bool NeedsCharacterPorts()
+    {
+        EnsureDb();
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = $"SELECT EXISTS (SELECT 1 FROM item_index WHERE item_type IN ({CharacterPortTypeList})) AND NOT ({CharacterPortsExistSql})";
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
+    }
+
+    // 着る物 (CharacterPortRecordTypes) の子ポートの定義だけを Data.p4k から取り出して item_ports に入れる (インデックス構築・装備データの再抽出をしない)。
+    // 入れた行数を返す。対象の record は item_index の今ある行から決める (その種類の品目が無ければ何もしない)。
+    // 起動後に裏で一度だけ呼ばれる (MainWindow: NeedsCharacterPorts のとき。前の版で構築した DB・同梱 DB には無いため)。
+    // 構築・再抽出と同時に走っても作業フォルダがぶつからないよう、取り出し先は別の名前 (dcb_tmp_charports) にする。
+    // 途中で構築・再抽出が始まったら (IsIndexBuildRunning)、item_ports が作り直されるので書き込まずに 0 を返す
+    public async Task<int> RebuildCharacterPortsAsync(IProgress<string>? progress = null, CancellationToken ct = default)
+    {
+        var p4kPath = FindDataP4k()
+            ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
+
+        await EnsureStarBreakerAsync();
+        EnsureDb();
+
+        Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
+        if (relay != null) StatusChanged += relay;
+        var prevSuffix = _tmpSuffix;
+        if (_dcbScopeDepth == 0) _tmpSuffix = "_charports";
+        try
+        {
+            using var dcbScope = await UseExtractedDcbAsync(p4kPath, ct);
+            return await RebuildCharacterPortsCoreAsync(p4kPath, ct);
+        }
+        finally
+        {
+            _tmpSuffix = prevSuffix;
+            if (relay != null) StatusChanged -= relay;
+        }
+    }
+
+    private async Task<int> RebuildCharacterPortsCoreAsync(string p4kPath, CancellationToken ct)
+    {
+        var sw = Stopwatch.StartNew();
+        // 対象の record 名 → 種類 (item_index)。インデックス構築と同じく、record 名を並べた filter にまとめて問い合わせる (BuildTypedExtraFilters)
+        var typeMap = new Dictionary<string, string>(StringComparer.Ordinal);
+        using (var cmd = _db!.CreateCommand())
+        {
+            cmd.CommandText = $"SELECT DISTINCT record_name, item_type FROM item_index WHERE item_type IN ({CharacterPortTypeList})";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var rn = r.GetString(0);
+                if (rn.StartsWith("EntityClassDefinition.", StringComparison.Ordinal)) typeMap[rn] = r.IsDBNull(1) ? "" : r.GetString(1);
+            }
+        }
+        if (typeMap.Count == 0)
+        {
+            StatusChanged?.Invoke("装備の口の定義: 対象の品目 (アーマー・アンダースーツ・上着) が item_index に無いので何もしませんでした");
+            return 0;
+        }
+        var filters = BuildTypedExtraFilters(typeMap, Array.Empty<string>());
+        StatusChanged?.Invoke($"装備の口の定義 (アーマー・アンダースーツ・上着) を取得中... ({typeMap.Count} 件を {filters.Count} 回に分けて読み込み)");
+
+        // 書き込みは最後にまとめて行う (途中まで入った状態だと NeedsCharacterPorts が false になり、残りが取り出されないため)
+        var rows = new List<ItemPortRow>();
+        for (int i = 0; i < filters.Count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var (filter, only) = filters[i];
+            var rawJson = await RunDcbQueryAsync(p4kPath, "EntityClassDefinition", filter, ct);
+            if (!string.IsNullOrEmpty(rawJson)) rows.AddRange(ReadItemPortRows(rawJson, only));
+            StatusChanged?.Invoke($"装備の口の定義: {i + 1}/{filters.Count} 回目を読みました ({rows.Count} 行, {sw.Elapsed.TotalSeconds:F0}秒)");
+        }
+
+        if (IsIndexBuildRunning)
+        {
+            StatusChanged?.Invoke("装備の口の定義: インデックス構築・装備データの再抽出が始まったので、取り出した定義は書き込みませんでした");
+            return 0;
+        }
+        // 起動後の裏の取り出しは、構築・再抽出・インポートが始まるときに取り消される (MainWindow が取り消して終わるまで待つ)。取り消されたら書き込まない
+        ct.ThrowIfCancellationRequested();
+        int count;
+        using (var tx = _db.BeginTransaction())
+        {
+            count = InsertItemPortRows(_db, tx, rows);
+            tx.Commit();
+        }
+        var records = rows.Select(x => x.Record).Distinct(StringComparer.Ordinal).Count();
+        StatusChanged?.Invoke($"装備の口の定義: {records} 件の品目の口 {count} 行を入れました (対象 {typeMap.Count} 件。口の無い品目は行なし, {sw.Elapsed.TotalSeconds:F1}秒)");
+        return count;
+    }
+
+    // 資源の種類 (resource_types) が空か (起動後の RebuildResourceTypesAsync を走らせるか決めるため。表は EnsureDb が作る)
+    public bool NeedsResourceTypes()
+    {
+        EnsureDb();
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM resource_types)";
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0;
+    }
+
+    // 資源の種類だけを取り出し直す (インデックス構築をせずに resource_types を埋める)。入れた行数を返す。
+    // 起動後に裏で一度だけ呼ばれる (MainWindow: resource_types が無い・空のとき)。dcb query 1 回なので Game2.dcb は取り出さず Data.p4k から直接読む。
+    // 途中で構築が始まったら (IsIndexBuildRunning)、構築が作り直すので書き込まずに 0 を返す
+    public async Task<int> RebuildResourceTypesAsync(IProgress<string>? progress = null, CancellationToken ct = default)
+    {
+        var p4kPath = FindDataP4k()
+            ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
+
+        await EnsureStarBreakerAsync();
+        EnsureDb();
+
+        Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
+        if (relay != null) StatusChanged += relay;
+        try
+        {
+            return await ExtractResourceTypesAsync(p4kPath, DateTime.UtcNow.ToString("o"), ct, skipWriteIfIndexBuildStarts: true);
+        }
+        finally
+        {
+            if (relay != null) StatusChanged -= relay;
+        }
+    }
+
+    // 資源の種類を resource_types に入れる。ResourceTypeDatabase の record (1 件) の groups[] (入れ子) の resources[] が ResourceType。
+    // 取得できなければ前の行を残して 0 を返す。入れた行数を返す
+    private async Task<int> ExtractResourceTypesAsync(string p4kPath, string now, CancellationToken ct, bool skipWriteIfIndexBuildStarts = false)
+    {
+        StatusChanged?.Invoke("資源の種類 (ResourceType) を取り出し中...");
+        var output = await RunDcbQueryRawAsync(p4kPath, "ResourceTypeDatabase", "*", ct);
+        var rows = ParseResourceTypeDatabase(output);
+        if (rows.Count == 0)
+        {
+            StatusChanged?.Invoke("資源の種類 (ResourceType) を取得できませんでした (前のデータを残します)");
+            return 0;
+        }
+        if (skipWriteIfIndexBuildStarts && IsIndexBuildRunning)
+        {
+            StatusChanged?.Invoke("資源の種類 (ResourceType): インデックス構築・装備データの再抽出が始まったので、取り出した値は書き込みませんでした");
+            return 0;
+        }
+        ct.ThrowIfCancellationRequested();
+        // 英語名: 英語ローカライズ (LoadShipNameLocalization と同じ探し方)。無ければ NULL のまま
+        var loc = LoadShipNameLocalization();
+        using var tx = _db!.BeginTransaction();
+        using (var del = _db.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM resource_types";
+            del.ExecuteNonQuery();
+        }
+        using (var ins = _db.CreateCommand())
+        {
+            ins.Transaction = tx;
+            ins.CommandText = "INSERT OR REPLACE INTO resource_types(uuid,record_name,name_key,name_en,extracted_at) VALUES(@u,@rn,@k,@en,@t)";
+            var pU = ins.Parameters.Add("@u", SqliteType.Text);
+            var pRn = ins.Parameters.Add("@rn", SqliteType.Text);
+            var pK = ins.Parameters.Add("@k", SqliteType.Text);
+            var pEn = ins.Parameters.Add("@en", SqliteType.Text);
+            var pT = ins.Parameters.Add("@t", SqliteType.Text);
+            foreach (var (uuid, recordName, nameKey) in rows)
+            {
+                string? en = null;
+                if (loc != null && nameKey is { Length: > 1 } && nameKey[0] == '@' && loc.TryGetValue(nameKey[1..], out var text) && !string.IsNullOrWhiteSpace(text))
+                    en = text.Trim();
+                pU.Value = uuid;
+                pRn.Value = recordName;
+                pK.Value = (object?)nameKey ?? DBNull.Value;
+                pEn.Value = (object?)en ?? DBNull.Value;
+                pT.Value = now;
+                ins.ExecuteNonQuery();
+            }
+        }
+        tx.Commit();
+        StatusChanged?.Invoke($"資源の種類 (ResourceType): {rows.Count} 件" + (loc == null ? " (英語ローカライズが見つからないので英語名は入れていません)" : ""));
+        return rows.Count;
+    }
+
+    // dcb query "ResourceTypeDatabase" の出力から ResourceType を集める: (uuid = _RecordId_, record_name = _RecordName_, name_key = displayName)。
+    // _RecordValue_.groups[] の中の resources[] と、入れ子の groups[] をたどる。_Type_ が ResourceType のものだけ
+    internal static List<(string Uuid, string RecordName, string? NameKey)> ParseResourceTypeDatabase(string output)
+    {
+        var rows = new List<(string, string, string?)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var block in SplitJsonBlocks(output))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                if (!doc.RootElement.TryGetProperty("_RecordValue_", out var value)) continue;
+                WalkResourceGroups(value, rows, seen);
+            }
+            catch { }
+        }
+        return rows;
+    }
+
+    private static void WalkResourceGroups(JsonElement group, List<(string, string, string?)> rows, HashSet<string> seen)
+    {
+        if (group.ValueKind != JsonValueKind.Object) return;
+        if (group.TryGetProperty("resources", out var resources) && resources.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var r in resources.EnumerateArray())
+            {
+                if (r.ValueKind != JsonValueKind.Object) continue;
+                if (r.TryGetProperty("_Type_", out var t) && t.ValueKind == JsonValueKind.String && t.GetString() != "ResourceType") continue;
+                var id = r.TryGetProperty("_RecordId_", out var idEl) && idEl.ValueKind == JsonValueKind.String ? idEl.GetString() : null;
+                var name = r.TryGetProperty("_RecordName_", out var nmEl) && nmEl.ValueKind == JsonValueKind.String ? nmEl.GetString() : null;
+                if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(name) || !seen.Add(id)) continue;
+                var key = r.TryGetProperty("displayName", out var dnEl) && dnEl.ValueKind == JsonValueKind.String ? dnEl.GetString() : null;
+                rows.Add((id, name, string.IsNullOrWhiteSpace(key) ? null : key));
+            }
+        }
+        if (group.TryGetProperty("groups", out var groups) && groups.ValueKind == JsonValueKind.Array)
+            foreach (var g in groups.EnumerateArray()) WalkResourceGroups(g, rows, seen);
     }
 
     private async Task<int> UpdateShipCargoCoreAsync(string p4kPath, CancellationToken ct, bool skipWriteIfIndexBuildStarts = false)
@@ -1908,6 +2170,11 @@ public class GameDataExtractor : IDisposable
         step++;
         ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] コモディティを抽出中...");
         int commodityCount = await ExtractCommoditiesAsync(dataP4kPath, now, ct);
+        // 資源の種類 (ResourceType。［ゲームログ］の商品売買の資源名に使う)。失敗しても構築は続ける (resource_types は前のまま。無い・空なら起動後に裏で取り出す)
+        int resourceCount = 0;
+        try { resourceCount = await ExtractResourceTypesAsync(dataP4kPath, now, ct); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { StatusChanged?.Invoke($"資源の種類 (ResourceType) の取り出しに失敗しました: {ex.Message}"); }
 
         // Step 6: メタ情報
         step++;
@@ -1937,7 +2204,7 @@ public class GameDataExtractor : IDisposable
 
         sw.Stop();
         ProgressChanged?.Invoke(100, $"完了！ ({sw.Elapsed.TotalSeconds:F1}秒)");
-        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}, 装備: {itemCount}, 弾: {ammoCount}, 契約: {missionCount}, 商品: {commodityCount}");
+        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}, 装備: {itemCount}, 弾: {ammoCount}, 契約: {missionCount}, 商品: {commodityCount}, 資源: {resourceCount}");
 
         // 新しい品目の売り場・価格は、構築とは別に裏で取得する (MainWindow が受けて FetchNewShopPricesAsync を走らせる)
         if (requestShopPriceFetch) ShopPriceFetchRequested?.Invoke(DbPath);

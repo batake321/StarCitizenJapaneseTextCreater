@@ -1968,7 +1968,7 @@ public partial class MainWindow : Window
 
         InitGameDataExtractor();
         LoadMissionsAsync();
-        StartShipCargoBackfill();
+        StartStartupBackfill();
 
         // 作業フォルダに書けない・DB を開けないときは、案内を足さずに続ける (落ちないように。DB の状態は設定タブの表示 (InitGameDataExtractor) に出る)
         bool hasStructuredData;
@@ -1980,20 +1980,25 @@ public partial class MainWindow : Window
         _chatBubbles.Add(new ChatBubble { Text = string.Join("", welcomeLines), IsUser = false });
     }
 
-    // 起動後に裏で一度だけ: ships に積載量 (cargo_scu) をまだ計算していない行 (NULL) があれば、積載量だけを計算する
-    // (GameDataExtractor.RebuildShipCargoAsync。試験の実測で 15 秒前後)。インデックス構築・装備データの再抽出の最中は走らせない。
-    // starbreaker が入っていない・Data.p4k が見つからないときは走らせない (starbreaker を自動でダウンロードしない)。
-    // 失敗はログに残す (cargo_scu は NULL のままなので、次の起動でまた試す)。終わったら積載量の覚えを捨てて一覧を描き直す
+    // 起動後に裏で一度だけ、1 本の処理として順に:
+    //  1. ships に積載量 (cargo_scu) をまだ計算していない行 (NULL) があれば、積載量だけを計算する (GameDataExtractor.RebuildShipCargoAsync。試験の実測で 15 秒前後)
+    //  2. 資源の種類 (resource_types。［ゲームログ］の商品売買の資源名) が無い・空なら、それだけを取り出す (GameDataExtractor.RebuildResourceTypesAsync)
+    //  3. 着る物 (アーマー・アンダースーツ・上着) の口の定義が item_ports に無ければ、Data.p4k から取り出して足す
+    //     (GameDataExtractor.RebuildCharacterPortsAsync。チャットが装備の互換性を口のデータで答えるのに使う)
+    // 同時には走らせない (同じ Data.p4k を 2 本同時に読まないように。前が終わってから次を始める)。1 つが失敗しても次は行う。
+    // インデックス構築・装備データの再抽出の最中は走らせない。starbreaker が入っていない・Data.p4k が見つからないときは走らせない (starbreaker を自動でダウンロードしない)。
+    // 失敗はログに残す (cargo_scu は NULL・resource_types / item_ports は空のままなので、次の起動でまた試す)。終わったら積載量の覚えを捨てて一覧を描き直し、
+    // 資源の種類を取り出したら［ゲームログ］の名前の覚えを捨てる (これから読む行は資源名で出る。もう読んだ行は読んだときのまま)
     // インデックス構築・装備データの再抽出・バックアップのインポートが始まるときは、取得を止める依頼 (OnShopPriceFetchPauseRequested) の中で
-    // StopShipCargoBackfillAsync が取り消して終わるまで待つ (積載量の書き込みと構築・再抽出・インポートが重ならないように)
-    private async void StartShipCargoBackfill()
+    // StopStartupBackfillAsync が取り消して終わるまで待つ (書き込みと構築・再抽出・インポートが重ならないように)
+    private async void StartStartupBackfill()
     {
         CancellationTokenSource? cts = null;
         try
         {
             var workDir = App.Config.WorkingDirectory;
             if (string.IsNullOrEmpty(workDir)) workDir = AppDomain.CurrentDomain.BaseDirectory;
-            Task<(int, string?)> task;
+            Task<(int Cargo, int Resources, string? Skipped)> task;
             // 構築・再抽出・インポートの印の確認と、取り消し用の登録は _priceRefreshTasks のロックの中で行う
             // (印は取得を止める依頼より前に立つので、依頼が登録より先に来たときは、ここで印を見て始めない)
             lock (_priceRefreshTasks)
@@ -2004,28 +2009,68 @@ public partial class MainWindow : Window
                 task = Task.Run(async () =>
                 {
                     using var extractor = new GameDataExtractor(workDir);
-                    if (!extractor.IsReady) return (0, "starbreaker か Data.p4k が見つからない");
-                    if (!extractor.NeedsShipCargo()) return (0, (string?)null);
-                    if (GameDataExtractor.IsIndexBuildRunning) return (0, "インデックス構築・装備データの再抽出が走っている");
+                    if (!extractor.IsReady) return (0, 0, "starbreaker か Data.p4k が見つからない");
+                    var needsCargo = extractor.NeedsShipCargo();
+                    var needsResources = extractor.NeedsResourceTypes();
+                    var needsPorts = extractor.NeedsCharacterPorts();
+                    if (!needsCargo && !needsResources && !needsPorts) return (0, 0, (string?)null);
+                    if (GameDataExtractor.IsIndexBuildRunning) return (0, 0, "インデックス構築・装備データの再抽出が走っている");
                     ct.ThrowIfCancellationRequested();
-                    Log("[積載量] 船の積載量 (SCU) をまだ計算していない船があるので、裏で計算します");
-                    var n = await extractor.RebuildShipCargoAsync(new Progress<string>(m => Log($"[積載量] {m}")), ct);
-                    return (n, (string?)null);
+                    int cargo = 0, resources = 0;
+                    // 積載量・資源の種類 (失敗はここでログに残し、口の定義へ進む。取り消しはそのまま上げる)
+                    try
+                    {
+                        if (needsCargo)
+                        {
+                            Log("[積載量] 船の積載量 (SCU) をまだ計算していない船があるので、裏で計算します");
+                            cargo = await extractor.RebuildShipCargoAsync(new Progress<string>(m => Log($"[積載量] {m}")), ct);
+                        }
+                        if (needsResources)
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            Log("[資源名] 資源の種類 (resource_types) が無い・空なので、裏で取り出します");
+                            resources = await extractor.RebuildResourceTypesAsync(new Progress<string>(m => Log($"[資源名] {m}")), ct);
+                        }
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        Log($"[積載量] 船の積載量 (SCU) の計算・資源の種類の取り出しに失敗しました (次の起動でまた試します): {ex.Message}");
+                    }
+                    // 装備の口の定義 (前が終わってから)
+                    if (needsPorts)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        try
+                        {
+                            Log("[装備の口] アーマー・アンダースーツ・上着の口の定義がまだ無いので、裏で取り出します");
+                            await extractor.RebuildCharacterPortsAsync(new Progress<string>(m => Log($"[装備の口] {m}")), ct);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            Log($"[装備の口] 口の定義の取り出しに失敗しました (次の起動でまた試します): {ex.Message}");
+                        }
+                    }
+                    return (cargo, resources, (string?)null);
                 });
-                _shipCargoCts = cts;
-                _shipCargoTask = task;
+                _startupBackfillCts = cts;
+                _startupBackfillTask = task;
             }
-            var (count, skipped) = await task;
-            if (skipped != null) Log($"[積載量] 船の積載量 (SCU) の計算をしませんでした ({skipped})");
+            var (count, resourceCount, skipped) = await task;
+            if (skipped != null)
+            {
+                Log($"[積載量] 船の積載量 (SCU) の計算・資源の種類の取り出しをしませんでした ({skipped})");
+                Log($"[装備の口] 口の定義の取り出しをしませんでした ({skipped})");
+            }
             if (count > 0) ShipCargo.Invalidate();   // 計算した値を使うよう、覚えた結果を捨てて一覧を描き直す
+            if (resourceCount > 0) gameLogPanel?.ClearNameCache();   // 取り出した資源名を使うよう、［ゲームログ］の名前の覚えを捨てる
         }
         catch (OperationCanceledException) when (cts?.IsCancellationRequested == true)
         {
-            Log("[積載量] インデックス構築・装備データの再抽出・インポートが始まったので、船の積載量 (SCU) の計算を取り消しました (次の起動でまた試します)");
+            Log("[積載量] インデックス構築・装備データの再抽出・インポートが始まったので、船の積載量 (SCU) の計算・資源の種類の取り出し・口の定義の取り出しを取り消しました (次の起動でまた試します)");
         }
         catch (Exception ex)
         {
-            Log($"[積載量] 船の積載量 (SCU) の計算に失敗しました (次の起動でまた試します): {ex.Message}");
+            Log($"[積載量] 船の積載量 (SCU) の計算・資源の種類の取り出し・口の定義の取り出しに失敗しました (次の起動でまた試します): {ex.Message}");
         }
         finally
         {
@@ -2033,10 +2078,10 @@ public partial class MainWindow : Window
             {
                 lock (_priceRefreshTasks)
                 {
-                    if (ReferenceEquals(_shipCargoCts, cts))
+                    if (ReferenceEquals(_startupBackfillCts, cts))
                     {
-                        _shipCargoCts = null;
-                        _shipCargoTask = null;
+                        _startupBackfillCts = null;
+                        _startupBackfillTask = null;
                     }
                     cts.Dispose();
                 }
@@ -2044,18 +2089,18 @@ public partial class MainWindow : Window
         }
     }
 
-    // 起動後の積載量の計算 (StartShipCargoBackfill) の取り消し用。_priceRefreshTasks のロックの中で読み書きする
-    private CancellationTokenSource? _shipCargoCts;
-    private Task? _shipCargoTask;
+    // 起動後の裏の処理 (StartStartupBackfill: 積載量の計算・資源の種類・口の定義の取り出し) の取り消し用。_priceRefreshTasks のロックの中で読み書きする
+    private CancellationTokenSource? _startupBackfillCts;
+    private Task? _startupBackfillTask;
 
-    // 構築・再抽出・インポートの前 (別スレッドから呼ばれることがある)。起動後の積載量の計算が走っていれば取り消し、終わるまで待つ
-    private async Task StopShipCargoBackfillAsync()
+    // 構築・再抽出・インポートの前 (別スレッドから呼ばれることがある)。起動後の裏の処理が走っていれば取り消し、終わるまで待つ
+    private async Task StopStartupBackfillAsync()
     {
         Task? task;
         lock (_priceRefreshTasks)
         {
-            task = _shipCargoTask;
-            _shipCargoCts?.Cancel();
+            task = _startupBackfillTask;
+            _startupBackfillCts?.Cancel();
         }
         if (task == null) return;
         try { await task; } catch { }
@@ -2346,6 +2391,9 @@ public partial class MainWindow : Window
     // インデックス構築 (設定タブ・チャットの自動構築)・装備データの再抽出が終わったとき (別スレッドから呼ばれることがある)
     private void OnShopPriceFetchRequested(string dbPath)
     {
+        // 構築で resource_types・item_ports 等が作り直されたので、［ゲームログ］の名前の覚えを捨てる (設定タブの構築・再抽出・インポートは
+        // RunDeferredItemNameRefresh でも捨てるが、チャットの自動構築 (ChatService → BuildStructuredIndexAsync) はここにしか来ない)
+        gameLogPanel?.ClearNameCache();
         lock (_priceRefreshTasks)
         {
             if (DeferShopPriceRequestIfImporting(dbPath, afterRebuild: true)) return;
@@ -2370,10 +2418,11 @@ public partial class MainWindow : Window
 
     // 構築・再抽出の前 (別スレッドから呼ばれることがある)。裏の取得とチャットの価格の取り直しを止めて、止まるまで待つ
     // (構築・再抽出・VACUUM の間は新しい取り直しも始めない。終わったら OnShopPriceFetchRequested / OnShopPriceFetchResumeRequested で戻す)
-    // 起動後の積載量の計算 (StartShipCargoBackfill) もここで取り消して終わるまで待つ (構築・再抽出・インポートと書き込みが重ならないように)
+    // 起動後の裏の処理 (StartStartupBackfill: 積載量の計算・資源の種類・口の定義の取り出し) もここで取り消して終わるまで待つ
+    // (構築・再抽出・インポートと書き込みが重ならないように)
     private async Task OnShopPriceFetchPauseRequested()
     {
-        await StopShipCargoBackfillAsync();
+        await StopStartupBackfillAsync();
         // ［ゲームログ］の入れられる品の索引を裏で作っていれば (gamedata_cache.db を読んでいる)、終わるまで待つ
         var ownable = Dispatcher.CheckAccess() ? _ownableIndexTask : await Dispatcher.InvokeAsync(() => _ownableIndexTask);
         if (ownable != null) { try { await ownable; } catch { } }

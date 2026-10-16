@@ -25,8 +25,9 @@ public static class DatabaseBackupService
     // item_port_labels: 品目の中の枠の名前と表示名 (日本語化で itemPort_ キーを足すのに使う。インデックス構築で作る)
     // item_index: 品目の索引 (全文検索の表 item_index_fts は取り込まず、取り込んだ後に item_index から作り直す)。item_vectors: チャットのベクトル検索の埋め込み。
     // mission_reputation / faction_reputation / reputation_reward_amount: ミッションの派閥・貢献度 (日本語化で使う)
+    // resource_types: 資源の種類 (商品売買のログの resourceGUID → 名前。インデックス構築で作る)
     private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache", "item_shop_prices", "ammo_params", "item_variants", "player_damage_params", "item_ports", "item_port_labels",
-        "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount"];
+        "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount", "resource_types"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
     private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "ship_loaners", "store_skus", "my_components", "ship_loadouts", "my_component_purchases"];
 
@@ -1248,7 +1249,7 @@ public static class DatabaseBackupService
                 created_at TEXT NOT NULL
             );
         """ + ShopPriceStore.TableDdl + GameDataExtractor.AmmoParamsDdl + GameDataQueryService.ItemVariantsDdl + GameDataQueryService.PlayerDamageParamsDdl
-          + GameDataExtractor.ItemPortsDdl + GameDataExtractor.ItemPortLabelsDdl;
+          + GameDataExtractor.ItemPortsDdl + GameDataExtractor.ItemPortLabelsDdl + GameDataExtractor.ResourceTypesDdl;
         cmd.ExecuteNonQuery();
 
         // 既存の ship_ports に min_size / max_size / port_types 列が無ければ足す (バックアップ側にあると INSERT が列不足で失敗するため)
