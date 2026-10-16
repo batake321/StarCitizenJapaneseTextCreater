@@ -1368,6 +1368,9 @@ public static class ShipCargo
 public class TradeRoute
 {
     public string CommodityName { get; set; } = "";
+    // 表示用の商品名 (コモディティタブで「日本語 (英語)」を入れる)。入れていなければ CommodityName
+    private string? _commodityDisplayName;
+    public string CommodityDisplayName { get => _commodityDisplayName ?? CommodityName; set => _commodityDisplayName = value; }
     public string CommodityKind { get; set; } = "";
     public int ContainerScu { get; set; }
     public string BuyLocation { get; set; } = "";

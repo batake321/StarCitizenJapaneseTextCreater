@@ -96,29 +96,7 @@ public class CommodityDictionary
     {
         try
         {
-            using var db = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={dbPath}");
-            db.Open();
-
-            // UEX英語名の集合を作成してIN句で検索
-            var uexNames = _entries.Select(e => e.EnglishName).ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-            using var cmd = db.CreateCommand();
-            cmd.CommandText = @"
-                SELECT english, japanese FROM translations
-                WHERE japanese IS NOT NULL AND japanese != ''
-                AND english IS NOT NULL AND english != ''
-                AND LENGTH(english) >= 3 AND LENGTH(english) <= 50";
-            using var reader = cmd.ExecuteReader();
-
-            var enToJa = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            while (reader.Read())
-            {
-                var en = reader.GetString(0).Trim();
-                var ja = reader.GetString(1).Trim();
-                if (!string.IsNullOrEmpty(en) && !string.IsNullOrEmpty(ja)
-                    && uexNames.Contains(en) && !enToJa.ContainsKey(en))
-                    enToJa[en] = ja;
-            }
+            var enToJa = LoadTranslatedNames(dbPath, _entries.Select(e => e.EnglishName));
 
             // Match UEX English names with translations
             foreach (var entry in _entries)
@@ -135,6 +113,125 @@ public class CommodityDictionary
             }
         }
         catch { }
+    }
+
+    private const string CommodityKeyPrefix = "items_commodities_";
+
+    // 英語名の一致で訳を拾うとき、使わない行のキーの頭 (人名・依頼の品・依頼の文・船の名前・ボタンなど。
+    // 例: Beryl → Human_First_Names_F_0296 の 'Beryl'、Quartz → Mission_Item_0176 の '石英'、Scrap → ShipSelector_Incinerate,P の '廃棄')
+    private static readonly string[] ExcludedKeyPrefixes =
+    {
+        "Human_First_Names_", "Human_Surnames_", "Mission_Item_", "mg_", "Event_ShipName_", "ShipSelector_", "vehicle_Name",
+    };
+
+    // UEX の商品名 → items_commodities_ の後ろの形。小文字にし、末尾の " (Ore)" → "_ore"・" (Raw)" → "_raw"、英数字と _ 以外を除く
+    // (例: "Laranite" → laranite、"Borase (Ore)" → borase_ore、"Audio-Visual Equipment" → audiovisualequipment、"E'tam" → etam)
+    private static string ToCommodityKeySuffix(string englishName)
+    {
+        var s = englishName.Trim().ToLowerInvariant();
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"\s*\(ore\)$", "_ore");
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"\s*\(raw\)$", "_raw");
+        return System.Text.RegularExpressions.Regex.Replace(s, @"[^a-z0-9_]", "");
+    }
+
+    // translations.db のキーの後ろの形。大文字小文字を区別せず、末尾の ",P" を除いて比べる (例: items_commodities_iron,P → iron)
+    private static string NormalizeCommodityKeySuffix(string key)
+    {
+        var s = key.Substring(CommodityKeyPrefix.Length);
+        if (s.EndsWith(",P", StringComparison.Ordinal)) s = s[..^2];
+        return s.ToLowerInvariant();
+    }
+
+    // 商品の英語名ごとの訳 (translations.db)。引き方:
+    //   1. items_commodities_<名前> のキー (ToCommodityKeySuffix の形)
+    //   2. 英語名の一致。items_commodities_ の行を優先し、ExcludedKeyPrefixes の行は使わない
+    // どちらにも無い英語名は返さない (KnownAliases は呼ぶ側で使う)
+    private static Dictionary<string, string> LoadTranslatedNames(string dbPath, IEnumerable<string> englishNames)
+    {
+        var names = englishNames.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        using var db = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={dbPath}");
+        db.Open();
+
+        // 1. items_commodities_<名前> のキー
+        var byKey = new Dictionary<string, string>(StringComparer.Ordinal);
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.CommandText = @"
+                SELECT key, japanese FROM translations
+                WHERE key LIKE 'items_commodities_%'
+                AND japanese IS NOT NULL AND japanese != ''";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var key = reader.GetString(0);
+                if (!key.StartsWith(CommodityKeyPrefix, StringComparison.OrdinalIgnoreCase)) continue;
+                var ja = reader.GetString(1).Trim();
+                if (string.IsNullOrEmpty(ja)) continue;
+                byKey.TryAdd(NormalizeCommodityKeySuffix(key), ja);
+            }
+        }
+        foreach (var name in names)
+        {
+            if (byKey.TryGetValue(ToCommodityKeySuffix(name), out var ja))
+                result[name] = ja;
+        }
+
+        // 2. 英語名の一致 (キーで引けなかったものだけ)
+        var rest = names.Where(n => !result.ContainsKey(n)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (rest.Count == 0) return result;
+
+        var commodityRows = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var otherRows = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.CommandText = @"
+                SELECT key, english, japanese FROM translations
+                WHERE japanese IS NOT NULL AND japanese != ''
+                AND english IS NOT NULL AND english != ''
+                AND LENGTH(english) >= 3 AND LENGTH(english) <= 50";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var key = reader.GetString(0);
+                var en = reader.GetString(1).Trim();
+                var ja = reader.GetString(2).Trim();
+                if (string.IsNullOrEmpty(en) || string.IsNullOrEmpty(ja) || !rest.Contains(en)) continue;
+                if (key.StartsWith(CommodityKeyPrefix, StringComparison.OrdinalIgnoreCase))
+                    commodityRows.TryAdd(en, ja);
+                else if (!ExcludedKeyPrefixes.Any(p => key.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+                    otherRows.TryAdd(en, ja);
+            }
+        }
+        foreach (var name in rest)
+        {
+            if (commodityRows.TryGetValue(name, out var ja) || otherRows.TryGetValue(name, out ja))
+                result[name] = ja;
+        }
+        return result;
+    }
+
+    // 商品の英語名ごとの日本語名。LoadTranslatedNames で引き、無ければ KnownAliases の最初の名前。どちらにも無い英語名は返さない
+    // (価格キャプチャの DictionaryEntry.JapaneseName と同じ決め方)
+    public static Dictionary<string, string> GetJapaneseNames(string? translationDbPath, IEnumerable<string> englishNames)
+    {
+        var names = englishNames.ToList();
+        Dictionary<string, string> result;
+        try
+        {
+            result = !string.IsNullOrEmpty(translationDbPath) && File.Exists(translationDbPath)
+                ? LoadTranslatedNames(translationDbPath, names)
+                : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+        catch { result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); }
+
+        foreach (var name in names)
+        {
+            if (!result.ContainsKey(name) && KnownAliases.TryGetValue(name, out var aliases))
+                result[name] = aliases[0];
+        }
+        return result;
     }
 
     public (int commodityId, string displayName, double confidence)? FindBestMatch(string ocrText)

@@ -2735,6 +2735,8 @@ public class GameDataExtractor : IDisposable
                     $"DROP TABLE IF EXISTS {t}_bak; CREATE TABLE {t}_bak AS SELECT * FROM {t};"));
                 cmd.ExecuteNonQuery();
             }
+            // item_index.name をどこから作ったかの記録も、失敗して戻すときに一緒に戻す (ExtractItemIndexAsync が書き換える)
+            var prevNameSource = ReadMetaValue(_db, ItemNameSourceMetaKey);
 
             try
             {
@@ -2774,6 +2776,8 @@ public class GameDataExtractor : IDisposable
                         $"DELETE FROM {t}; INSERT INTO {t} SELECT * FROM {t}_bak;"));
                     cmd.ExecuteNonQuery();
                 }
+                if (prevNameSource == null) DeleteMeta(_db, ItemNameSourceMetaKey);
+                else SetMeta(_db, ItemNameSourceMetaKey, prevNameSource);
                 RebuildFts5Index();
                 throw;
             }
@@ -3162,12 +3166,8 @@ public class GameDataExtractor : IDisposable
         var gamePath = App.Config.GamePath;
         var enDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var jaDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var enIniPath = Path.Combine(gamePath, "data", "Localization", "english", "global.ini");
-        if (!File.Exists(enIniPath))
-            enIniPath = Path.Combine(Path.GetDirectoryName(gamePath) ?? "", "data", "Localization", "english", "global.ini");
-        var jaIniPath = Path.Combine(gamePath, "data", "Localization", "japanese_(japan)", "global.ini");
-        if (!File.Exists(jaIniPath))
-            jaIniPath = Path.Combine(Path.GetDirectoryName(gamePath) ?? "", "data", "Localization", "japanese_(japan)", "global.ini");
+        var enIniPath = GameLocalizationIniPath(gamePath, "english");
+        var jaIniPath = GameLocalizationIniPath(gamePath, "japanese_(japan)");
         if (File.Exists(enIniPath))
         {
             StatusChanged?.Invoke("[1/4] ローカライズデータ（英語）を読み込み中...");
@@ -3178,6 +3178,18 @@ public class GameDataExtractor : IDisposable
             StatusChanged?.Invoke("[1/4] ローカライズデータ（日本語）を読み込み中...");
             jaDict = GlobalIniParser.Parse(jaIniPath);
         }
+        // english の ini が無い (ふつうの環境) ときは、名前を今の訳から作る: ［日本語化］の［実行］がゲーム用 ini に書き出す値
+        // (IniMerger.MergeForItemNames。RefreshItemNamesFromTranslations と同じ)。作れない (抽出済みの ini が無い等) ときは今までどおり japanese の ini
+        Dictionary<string, string>? merged = null;
+        if (enDict.Count == 0)
+        {
+            StatusChanged?.Invoke("[1/4] 今の訳から品目名を作成中...");
+            var workDir = Path.GetDirectoryName(DbPath) ?? "";
+            try { merged = await Task.Run(() => IniMerger.MergeForItemNames(workDir), ct); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { StatusChanged?.Invoke($"[1/4] 今の訳から品目名を作れませんでした (japanese の ini の値を使います): {ex.Message}"); }
+        }
+        var nameSource = enDict.Count > 0 ? ItemNameSourceEnglish : merged != null ? ItemNameSourceTranslations : ItemNameSourceJapaneseIni;
         int resolved = 0;
 
         int count = 0;
@@ -3276,6 +3288,11 @@ public class GameDataExtractor : IDisposable
                             name = enName;
                             resolved++;
                         }
+                        else if (merged != null && IniMerger.TryGetIniValue(merged, locKey, out var mergedName))
+                        {
+                            name = mergedName;
+                            resolved++;
+                        }
                         else if (jaDict.TryGetValue(locKey, out var jaName) && !jaName.StartsWith("!"))
                         {
                             name = jaName;
@@ -3296,6 +3313,7 @@ public class GameDataExtractor : IDisposable
             }
         }
         tx.Commit();
+        SetMeta(_db, ItemNameSourceMetaKey, nameSource);
         StatusChanged?.Invoke($"[1/4] インデックス構築完了: {count} 件 (名前解決: {resolved} 件、子ポートの定義: {portRows} 行、枠の表示名: {labelRows} 行)");
         return count;
     }
@@ -4968,8 +4986,13 @@ public class GameDataExtractor : IDisposable
     public void RebuildFts5Index()
     {
         EnsureDb();
-        using var tx = _db!.BeginTransaction();
-        using var cmd = _db.CreateCommand();
+        RebuildFts5Index(_db!);
+    }
+
+    private static void RebuildFts5Index(SqliteConnection db)
+    {
+        using var tx = db.BeginTransaction();
+        using var cmd = db.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = "DROP TABLE IF EXISTS item_index_fts";
         cmd.ExecuteNonQuery();
@@ -4982,6 +5005,148 @@ public class GameDataExtractor : IDisposable
         tx.Commit();
     }
 
+    // ゲームのフォルダの data/Localization/<言語>/global.ini の場所 (ExtractItemIndexAsync が読む ini)。
+    // ゲームのフォルダの下に無ければ、その 1 つ上のフォルダの下 (今までの ExtractItemIndexAsync と同じ順)
+    internal static string GameLocalizationIniPath(string gamePath, string language)
+    {
+        var path = Path.Combine(gamePath, "data", "Localization", language, "global.ini");
+        if (!File.Exists(path))
+            path = Path.Combine(Path.GetDirectoryName(gamePath) ?? "", "data", "Localization", language, "global.ini");
+        return path;
+    }
+
+    // item_index.name をどこから作ったか (gamedata_meta。ExtractItemIndexAsync と RefreshItemNamesFromTranslations が書く)。
+    //   english: ゲームのフォルダの english の ini (ある環境では name は英語のまま。訳を直しても作り直さない)
+    //   translations: 今の訳から作ったゲーム用 ini の値 (IniMerger.MergeForItemNames)
+    //   japanese_ini: ゲームのフォルダの japanese の ini (前回このアプリが書き出したもの。訳から作れなかったとき)
+    // 記録の無い DB (この記録を書く前に構築したもの) は、今ゲームのフォルダに english の ini があるかで見分ける (構築と同じ場所を見る)
+    internal const string ItemNameSourceMetaKey = "item_index_name_source";
+    internal const string ItemNameSourceEnglish = "english";
+    internal const string ItemNameSourceTranslations = "translations";
+    internal const string ItemNameSourceJapaneseIni = "japanese_ini";
+
+    private static string? ReadMetaValue(SqliteConnection db, string key)
+    {
+        try
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT value FROM gamedata_meta WHERE key = @k";
+            cmd.Parameters.AddWithValue("@k", key);
+            return cmd.ExecuteScalar() as string;
+        }
+        catch (SqliteException) { return null; }   // gamedata_meta が無い DB
+    }
+
+    // item_index の名前を今の訳に合わせる。
+    //   name: 名前のローカライズキー (name_key) を持つ品目の name を、［日本語化］の［実行］がゲーム用 ini に書き出す値
+    //     (訳 → 用語集の置き換え → 廃墟と橙の置き換え → 分類の印。IniMerger.Merge) にする (ExtractItemIndexAsync が english の ini の無い環境で作る名前と同じ)。
+    //     merged は Merge の結果 (null なら作業フォルダの材料で作る)。ゲーム用 ini の値が引けない品目の name は変えない。
+    //     english の ini から作った name (ItemNameSourceMetaKey) と、材料 (抽出済みの ini) が無いときは変えない。
+    //   name_ja: 作業フォルダの translations.db で PopulateJapaneseNames と同じ付け直しをする (name を変えなかったときも行う)
+    // どちらかが 1 件でも変わったら item_index_fts を作り直す。
+    // 返り値: 変わった件数 (name と name_ja の合計)。どちらも行えなかった (表が無い・translations.db も材料も無い) ときは -1
+    public static int RefreshItemNamesFromTranslations(string gamedataDbPath, string workDir,
+        Dictionary<string, string>? merged = null, Action<string>? log = null)
+    {
+        if (!File.Exists(gamedataDbPath)) return -1;
+        using var db = new SqliteConnection($"Data Source={gamedataDbPath};Pooling=False");
+        db.Open();
+
+        int nameChanged = RefreshItemIndexNames(db, workDir, merged, log);
+
+        int jaChanged = -1;
+        var translationDbPath = Path.Combine(workDir, "translations.db");
+        if (File.Exists(translationDbPath))
+        {
+            try
+            {
+                var (updated, changed, _, _, _) = PopulateJapaneseNamesCore(db, translationDbPath);
+                jaChanged = changed;
+                log?.Invoke($"日本語名 (name_ja) を今の訳で付け直しました (当たった {updated} 件、変わった {changed} 件)");
+            }
+            catch (SqliteException ex) { log?.Invoke($"日本語名 (name_ja) を付け直せませんでした ({ex.Message})"); }
+        }
+
+        if (nameChanged < 0 && jaChanged < 0) return -1;
+        var total = Math.Max(nameChanged, 0) + Math.Max(jaChanged, 0);
+        if (total > 0)
+        {
+            RebuildFts5Index(db);
+            log?.Invoke("全文検索の表を作り直しました");
+        }
+        return total;
+    }
+
+    // RefreshItemNamesFromTranslations の name の部分。返り値: 変えた件数。行わなかったときは -1
+    private static int RefreshItemIndexNames(SqliteConnection db, string workDir, Dictionary<string, string>? merged, Action<string>? log)
+    {
+        var source = ReadMetaValue(db, ItemNameSourceMetaKey);
+        if (source == ItemNameSourceEnglish
+            || (source == null && File.Exists(GameLocalizationIniPath(App.Config.GamePath, "english"))))
+        {
+            log?.Invoke("品目名は english の ini から作ったものなので、作り直しません");
+            return -1;
+        }
+
+        merged ??= IniMerger.MergeForItemNames(workDir);
+        if (merged == null)
+        {
+            log?.Invoke("作業フォルダに抽出済みの global.ini が無いので、品目名を作り直せません");
+            return -1;
+        }
+
+        var updates = new List<(string Uuid, string Name)>();
+        try
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT uuid, name_key, name FROM item_index WHERE name_key IS NOT NULL AND name_key != ''";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var uuid = r.GetString(0);
+                var key = r.GetString(1);
+                var name = r.IsDBNull(2) ? "" : r.GetString(2);
+                if (IniMerger.TryGetIniValue(merged, key, out var newName) && newName != name)
+                    updates.Add((uuid, newName));
+            }
+        }
+        catch (SqliteException ex)
+        {
+            // item_index (か name_key の列) が無い DB
+            log?.Invoke($"item_index を読めないので、品目名を作り直せません ({ex.Message})");
+            return -1;
+        }
+
+        using (var tx = db.BeginTransaction())
+        {
+            using var cmd = db.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = "UPDATE item_index SET name = @n WHERE uuid = @u";
+            var pN = cmd.Parameters.Add("@n", SqliteType.Text);
+            var pU = cmd.Parameters.Add("@u", SqliteType.Text);
+            foreach (var (uuid, name) in updates)
+            {
+                pN.Value = name;
+                pU.Value = uuid;
+                cmd.ExecuteNonQuery();
+            }
+            using var meta = db.CreateCommand();
+            meta.Transaction = tx;
+            meta.CommandText = "CREATE TABLE IF NOT EXISTS gamedata_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT OR REPLACE INTO gamedata_meta(key, value) VALUES(@k, @v)";
+            meta.Parameters.AddWithValue("@k", ItemNameSourceMetaKey);
+            meta.Parameters.AddWithValue("@v", ItemNameSourceTranslations);
+            meta.ExecuteNonQuery();
+            tx.Commit();
+        }
+        log?.Invoke(updates.Count > 0 ? $"品目名を今の訳に合わせて {updates.Count} 件直しました" : "品目名は今の訳と同じでした");
+        return updates.Count;
+    }
+
+    // 品目名 (item_index.name / name_ja) を作り直したことの知らせ。品目名を覚えている画面 (［詳細］・武器と装備の表など) が受け、
+    // 次に表示するときに引き直す。MainWindow が UI のスレッドで出す
+    public static event Action? ItemNamesChanged;
+    public static void NotifyItemNamesChanged() => ItemNamesChanged?.Invoke();
+
     // item_index.name_ja を translations.db の item_Name 行の訳で埋める。
     //   1. 名前のローカライズキー (item_index.name_key) と translations.key の一致。キーそのもの、無ければ "キー,P" (GameDataQueryService.LookupLoc と同じ順)。
     //      それぞれ大文字小文字まで同じものを先に、無ければ大文字小文字を区別せずに引く (ExtractItemIndexAsync の ini の辞書が区別しないのに合わせる)
@@ -4992,7 +5157,14 @@ public class GameDataExtractor : IDisposable
     {
         EnsureDb();
         if (!File.Exists(translationDbPath)) return;
+        var (updated, _, byKeyCount, byEnglishCount, notFound) = PopulateJapaneseNamesCore(_db!, translationDbPath);
+        RebuildFts5Index();
+        StatusChanged?.Invoke($"日本語名を {updated} 件更新し (キーで {byKeyCount} 件、英語名で {byEnglishCount} 件。見つからない {notFound} 件は変更なし)、FTS5 インデックスを再構築しました");
+    }
 
+    // PopulateJapaneseNames の中身 (全文検索の表は作り直さない)。返り値: 当たった件数、そのうち値が変わった件数、キーで・英語名で当たった件数、見つからない件数
+    private static (int Updated, int Changed, int ByKey, int ByEnglish, int NotFound) PopulateJapaneseNamesCore(SqliteConnection db, string translationDbPath)
+    {
         var byKey = new Dictionary<string, string>(StringComparer.Ordinal);
         var byKeyIgnoreCase = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var byEnglish = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -5020,27 +5192,30 @@ public class GameDataExtractor : IDisposable
             => byKey.TryGetValue(k, out var v) ? v : byKeyIgnoreCase.TryGetValue(k, out var vi) ? vi : null;
 
         var updates = new List<(string Uuid, string Ja)>();
-        int byKeyCount = 0, byEnglishCount = 0, notFound = 0;
-        using (var cmd = _db!.CreateCommand())
+        int byKeyCount = 0, byEnglishCount = 0, notFound = 0, changed = 0;
+        using (var cmd = db.CreateCommand())
         {
-            cmd.CommandText = "SELECT uuid, name_key, name FROM item_index";
+            cmd.CommandText = "SELECT uuid, name_key, name, name_ja FROM item_index";
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
                 var uuid = reader.GetString(0);
                 var nameKey = reader.IsDBNull(1) ? "" : reader.GetString(1);
                 var name = reader.IsDBNull(2) ? "" : reader.GetString(2);
+                var currentJa = reader.IsDBNull(3) ? null : reader.GetString(3);
                 string? ja = null;
                 if (nameKey.Length > 0)
                     ja = LookupKey(nameKey) ?? LookupKey(nameKey + ",P");
-                if (ja != null) { byKeyCount++; updates.Add((uuid, ja)); continue; }
-                if (name.Length > 0 && byEnglish.TryGetValue(name, out var jaEn)) { byEnglishCount++; updates.Add((uuid, jaEn)); continue; }
-                notFound++;
+                if (ja == null && name.Length > 0 && byEnglish.TryGetValue(name, out var jaEn)) { byEnglishCount++; ja = jaEn; }
+                else if (ja != null) byKeyCount++;
+                else { notFound++; continue; }
+                updates.Add((uuid, ja));
+                if (ja != currentJa) changed++;
             }
         }
 
-        using (var tx = _db.BeginTransaction())
-        using (var updateCmd = _db.CreateCommand())
+        using (var tx = db.BeginTransaction())
+        using (var updateCmd = db.CreateCommand())
         {
             updateCmd.Transaction = tx;
             updateCmd.CommandText = "UPDATE item_index SET name_ja = @ja WHERE uuid = @u";
@@ -5054,9 +5229,7 @@ public class GameDataExtractor : IDisposable
             }
             tx.Commit();
         }
-
-        RebuildFts5Index();
-        StatusChanged?.Invoke($"日本語名を {updates.Count} 件更新し (キーで {byKeyCount} 件、英語名で {byEnglishCount} 件。見つからない {notFound} 件は変更なし)、FTS5 インデックスを再構築しました");
+        return (updates.Count, changed, byKeyCount, byEnglishCount, notFound);
     }
 
     public int GetItemIndexCount()

@@ -393,6 +393,8 @@ public partial class App : Application
         // translations の個人訳を取り込んだら、gamedata の item_index.name_ja を付け直す (同梱の name_ja は作者の訳から作ったものなので)。
         // gamedata を作り直すときは、作業フォルダの translations (今回作り直したものを含む) に個人訳があれば毎回付け直す
         bool personalTranslationsImported = false;
+        // translations か gamedata を作り直したら、最後に gamedata の品目名 (item_index.name) を今の訳に合わせる
+        bool namesMayDiffer = false;
         var translationsPath = Path.Combine(workDir, "translations.db");
         foreach (var job in jobs.OrderBy(j => Array.IndexOf(BundledDbNames, j.DbName)))
         {
@@ -403,6 +405,7 @@ public partial class App : Application
                 var populate = job.DbName == "gamedata_cache.db" && TranslationsHavePersonalRows(translationsPath);
                 var counts = RebuildBundledDb(job, workDir, populate, report, jobWarnings);
                 if (job.DbName == "translations.db" && counts.Translations > 0) personalTranslationsImported = true;
+                if (job.DbName is "translations.db" or "gamedata_cache.db") namesMayDiffer = true;
                 AppendStartupLog(workDir, $"[同梱DB] {job.DbName} を作り直しました (今までの DB から取り込んだ個人データ: {counts}"
                     + (populate ? "。日本語名を付け直しました" : "") + ")");
                 foreach (var w in jobWarnings) AppendStartupLog(workDir, $"[同梱DB] {w}");
@@ -448,6 +451,26 @@ public partial class App : Application
             {
                 AppendStartupLog(workDir, $"[同梱DB] gamedata_cache.db の日本語名の付け直しに失敗: {ex}");
                 result.Failures.Add($"gamedata_cache.db の日本語名の付け直し: {ex.Message}");
+            }
+            finally
+            {
+                SqliteConnection.ClearAllPools();
+            }
+        }
+
+        // 品目名 (item_index.name) を今の訳に合わせる (作業フォルダに抽出済みの ini が無ければ合わせない。名前が変われば全文検索の表も作り直す)
+        if (namesMayDiffer && File.Exists(gamedataPath))
+        {
+            try
+            {
+                report?.Invoke(null, "gamedata_cache.db の品目名を今の訳に合わせています...");
+                GameDataExtractor.RefreshItemNamesFromTranslations(gamedataPath, workDir,
+                    log: s => AppendStartupLog(workDir, $"[同梱DB] {s}"));
+            }
+            catch (Exception ex)
+            {
+                AppendStartupLog(workDir, $"[同梱DB] gamedata_cache.db の品目名を今の訳に合わせられませんでした: {ex}");
+                result.Failures.Add($"gamedata_cache.db の品目名を今の訳に合わせる: {ex.Message}");
             }
             finally
             {

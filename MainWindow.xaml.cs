@@ -448,6 +448,8 @@ public partial class MainWindow : Window
         else
             await TranslationBackend.FetchAndCacheProperNounsAsync();
 
+        // ［実行］で書き出したゲーム用 ini の値 (品目名を今の訳に合わせるときに使い回す。書き出さなかったときは null)
+        Dictionary<string, string>? appliedMerged = null;
         try
         {
             await Task.Run(async () =>
@@ -574,6 +576,7 @@ public partial class MainWindow : Window
                         Path.Combine(WorkDir, "gamedata_cache.db"), App.Config.MissionReputationMarks,
                         App.Config.EquipmentClassMarks, App.Config.BlueprintMissionMarks);
                     GlobalIniParser.Write(OutputPath, merged);
+                    appliedMerged = merged;
                     Log($"出力: {OutputPath} ({new FileInfo(OutputPath).Length:N0} bytes)");
 
                     SetProgress(80, "ゲームディレクトリに配置中...");
@@ -604,6 +607,9 @@ public partial class MainWindow : Window
             btnApply.IsEnabled = true;
             btnCancel.Visibility = Visibility.Collapsed;
             btnCancel.IsEnabled = false;
+            // 抽出・翻訳・反映のどれも translations.db の訳を変えうる (ImportFromIni・AI 翻訳の取り込み) ので、品目名を今の訳に合わせる。
+            // ［実行］で ini を書き出したときは、その値をそのまま使う
+            RequestItemNameRefresh(appliedMerged);
         }
     }
 
@@ -823,6 +829,7 @@ public partial class MainWindow : Window
             var keys = selected.Select(r => r.Key).ToList();
             using var db = new TranslationDatabase(DbPath);
             db.ClearTranslations(keys);
+            RequestItemNameRefresh();
 
             foreach (var row in selected)
             {
@@ -862,6 +869,7 @@ public partial class MainWindow : Window
             var keys = selected.Select(r => r.Key).ToList();
             using var db = new TranslationDatabase(DbPath);
             db.SetToOriginalEnglish(keys);
+            RequestItemNameRefresh();
 
             foreach (var row in selected)
             {
@@ -895,6 +903,7 @@ public partial class MainWindow : Window
             {
                 using var db = new TranslationDatabase(DbPath);
                 db.UpdateTranslation(row.Key, row.Japanese, "manual");
+                RequestItemNameRefresh();
                 row.Source = "manual";
                 row.Translator = "manual";
                 row.ModifiedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
@@ -947,6 +956,7 @@ public partial class MainWindow : Window
         {
             using var db = new TranslationDatabase(DbPath);
             var count = db.ImportCsv(dlg.FileName);
+            RequestItemNameRefresh();
             MessageBox.Show($"CSVインポート完了: {count}件", "完了");
             RefreshEditor();
         }
@@ -988,6 +998,8 @@ public partial class MainWindow : Window
         {
             using var db = new TranslationDatabase(DbPath);
             db.UpsertGlossary(en, ja);
+            // ゲーム用 ini の値は用語集の置き換えで変わるので、品目名も今の値に合わせる
+            RequestItemNameRefresh();
             txtGlossEn.Clear();
             txtGlossJa.Clear();
             LoadGlossary();
@@ -1023,6 +1035,7 @@ public partial class MainWindow : Window
         {
             using var db = new TranslationDatabase(DbPath);
             db.DeleteGlossaryBulk(selected.Select(r => r.English).ToList());
+            RequestItemNameRefresh();
             chkGlossarySelectAll.IsChecked = false;
             LoadGlossary();
             MessageBox.Show($"{selected.Count} 件の用語を削除しました。", "完了");
@@ -1050,6 +1063,7 @@ public partial class MainWindow : Window
         {
             using var db = new TranslationDatabase(DbPath);
             var count = db.BulkReplaceWithGlossary();
+            RequestItemNameRefresh();
             MessageBox.Show($"一括置換完了: {count:N0}件のエントリを更新しました。", "完了");
 
             RefreshEditor();
@@ -1116,6 +1130,7 @@ public partial class MainWindow : Window
                     count++;
                 }
             }
+            RequestItemNameRefresh();
             MessageBox.Show($"用語集CSVインポート完了: {count}件", "完了");
             LoadGlossary();
         }
@@ -1480,8 +1495,10 @@ public partial class MainWindow : Window
             var tradeDbImportPath = Path.Combine(WorkDir, "trade_cache.db");
             // インデックス (gamedata_cache.db) を取り込むときは、装備タブの読み込み口の覚えた結果が古くなるので、閉じてから取り込み、後で作り直す
             // (翻訳データを取り込むときも、gamedata_cache.db の日本語名を付け直すので同じ)
+            // 用語集だけを取り込むときも、品目名 (ゲーム用 ini の値) が用語集の置き換えで変わるので同じ
             var reopenEquip = selectDlg.SelectedCategories.Contains(BackupCategory.Index)
-                              || selectDlg.SelectedCategories.Contains(BackupCategory.Translations);
+                              || selectDlg.SelectedCategories.Contains(BackupCategory.Translations)
+                              || selectDlg.SelectedCategories.Contains(BackupCategory.Glossary);
             if (reopenEquip)
             {
                 _hangarEquip?.Dispose();
@@ -1514,6 +1531,8 @@ public partial class MainWindow : Window
                     }
                 }
                 if (reopenEquip) ReopenHangarEquip();
+                // 取り込みの中で品目名を今の訳に合わせている (DatabaseBackupService)。取り込みの間に頼まれた分はここで行う
+                if (lastImport) RunDeferredItemNameRefresh();
                 // trade_cache.db の印 (my_component_purchases) が替わったかもしれないので、［ゲームログ］の印の一覧を読み直す
                 InvalidateImportedPurchaseKeys();
                 gameLogPanel?.RefreshPurchaseButtons();
@@ -2189,6 +2208,7 @@ public partial class MainWindow : Window
         {
             btnExtractGameData.IsEnabled = true;
             _indexBuildRunning = false;
+            RunDeferredItemNameRefresh();
         }
     }
 
@@ -2214,6 +2234,82 @@ public partial class MainWindow : Window
         {
             Log($"[Hangar] 装備DBの開き直しに失敗: {ex.Message}");
         }
+    }
+
+    // ===== 品目名 (item_index.name) を今の訳に合わせる =====
+    // 訳・用語集が変わったとき (［日本語化］の抽出・翻訳・［実行］、翻訳の画面の保存・削除・原文・一括置換、CSV 取り込み、
+    // 用語集の追加・削除・CSV 取り込み) に呼ぶ。name と name_ja の両方を合わせる。
+    // GameDataExtractor.RefreshItemNamesFromTranslations を裏で行い (UI は止めない)、終わったら覚えた名前を捨てる
+    // (装備タブの読み込み口は名前が変わったときに作り直す: ReopenHangarEquip。［ゲームログ］の名前の覚えはいつも捨てる)。
+    // merged は［実行］で書き出したゲーム用 ini の値 (null なら作業フォルダの材料で作り直す)。UI のスレッドだけで呼ぶ。
+    // 走っている間に呼ばれたら、終わってからもう 1 回だけ行う。インデックス構築・装備データの再抽出・バックアップの取り込みの間は行わず、
+    // それらが終わったときに行う (構築・再抽出は品目名を訳から作り、取り込みも取り込みの中で合わせるが、その途中で直した訳を拾うため)
+    private bool _itemNameRefreshRunning, _itemNameRefreshPending, _itemNameRefreshDeferred;
+    private Dictionary<string, string>? _itemNameRefreshPendingMerged;
+
+    private async void RequestItemNameRefresh(Dictionary<string, string>? merged = null)
+    {
+        if (_itemNameRefreshRunning)
+        {
+            _itemNameRefreshPending = true;
+            _itemNameRefreshPendingMerged = merged;
+            return;
+        }
+        _itemNameRefreshRunning = true;
+        try
+        {
+            while (true)
+            {
+                bool importing;
+                lock (_priceRefreshTasks) importing = _importsRunning > 0;
+                if (_indexBuildRunning || GameDataExtractor.IsIndexBuildRunning || importing)
+                {
+                    _itemNameRefreshDeferred = true;
+                    break;
+                }
+                _itemNameRefreshDeferred = false;
+                var gamedataPath = IndexDbPath;
+                var workDir = WorkDir;
+                var m = merged;
+                int changed;
+                try
+                {
+                    changed = await Task.Run(() => GameDataExtractor.RefreshItemNamesFromTranslations(gamedataPath, workDir, m, s => Log($"[品目名] {s}")));
+                }
+                catch (Exception ex)
+                {
+                    Log($"[品目名] 今の訳に合わせられませんでした: {ex.Message}");
+                    changed = -1;
+                }
+                // ［ゲームログ］は translations.db の訳で名前を引いて覚えているので、訳が変わったら捨てる
+                gameLogPanel?.ClearNameCache();
+                if (changed > 0)
+                {
+                    ReopenHangarEquip();
+                    // ［詳細］・武器と装備の表などが覚えた品目名を捨てさせる (次に表示するときに引き直す)
+                    GameDataExtractor.NotifyItemNamesChanged();
+                }
+                if (!_itemNameRefreshPending) break;
+                _itemNameRefreshPending = false;
+                merged = _itemNameRefreshPendingMerged;
+                _itemNameRefreshPendingMerged = null;
+            }
+        }
+        finally
+        {
+            _itemNameRefreshRunning = false;
+        }
+    }
+
+    // インデックス構築・装備データの再抽出・バックアップの取り込みが終わったときに呼ぶ。その間に頼まれて行わなかった分を行い、
+    // ［ゲームログ］の名前の覚えを捨てる (品目名・訳が替わったため)
+    private void RunDeferredItemNameRefresh()
+    {
+        gameLogPanel?.ClearNameCache();
+        GameDataExtractor.NotifyItemNamesChanged();
+        if (!_itemNameRefreshDeferred) return;
+        _itemNameRefreshDeferred = false;
+        RequestItemNameRefresh();
     }
 
     private void OnGameDataProgress(int pct, string detail)
@@ -5071,6 +5167,8 @@ public partial class MainWindow : Window
             _myComponentRows = _myComponents
                 .Select(c => new MyComponentRow(c)
                 {
+                    // 名称の欄は保存した item_name ではなく、item_record から引いた今の名前 (今の訳に合わせた item_index.name)
+                    CurrentName = HangarService.MyComponentDisplayName(c, _hangarEquip),
                     OnUsableChanged = MyComponentUsable_Changed,
                     OnQuantityChanged = MyComponentQuantity_Changed,
                     // 種別の欄の武器の名前 (装備の表と同じく、ダメージの種類で分ける) と性能の欄。gamedata_cache.db が無ければ空
@@ -5193,12 +5291,12 @@ public partial class MainWindow : Window
     {
         if (dgMyComponents.SelectedItem is not MyComponentRow row) return;
         var c = row.Model;
-        if (MessageBox.Show($"「{c.ItemName}」({c.SizeDisplay} {c.GradeDisplay} ×{c.Quantity}) を削除しますか？", "確認", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
+        if (MessageBox.Show($"「{row.ItemName}」({c.SizeDisplay} {c.GradeDisplay} ×{c.Quantity}) を削除しますか？", "確認", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
         try
         {
             _hangarService.SetCacheDir(WorkDir);
             _hangarService.DeleteMyComponent(c.Id);
-            Log($"[Equip] 削除: {c.ItemName}");
+            Log($"[Equip] 削除: {row.ItemName}");
             RefreshMyComponents();
             RefreshLoadoutGrid();
         }
@@ -5239,11 +5337,11 @@ public partial class MainWindow : Window
             }
             else if (quantity == 0)
             {
-                if (MessageBox.Show($"数量が 0 になります。「{c.ItemName}」({c.SizeDisplay} {c.GradeDisplay}) の行を削除しますか？", "確認", MessageBoxButton.YesNo) == MessageBoxResult.Yes)
+                if (MessageBox.Show($"数量が 0 になります。「{row.ItemName}」({c.SizeDisplay} {c.GradeDisplay}) の行を削除しますか？", "確認", MessageBoxButton.YesNo) == MessageBoxResult.Yes)
                 {
                     _hangarService.SetCacheDir(WorkDir);
                     _hangarService.DeleteMyComponent(c.Id);
-                    Log($"[Equip] 削除: {c.ItemName}");
+                    Log($"[Equip] 削除: {row.ItemName}");
                 }
             }
             else
@@ -5252,7 +5350,7 @@ public partial class MainWindow : Window
                 c.Quantity = quantity;
                 _hangarService.SetCacheDir(WorkDir);
                 _hangarService.UpdateMyComponent(c);
-                Log($"[Equip] 数量: {c.ItemName} ×{before} → ×{quantity}");
+                Log($"[Equip] 数量: {row.ItemName} ×{before} → ×{quantity}");
             }
         }
         catch (Exception ex)
@@ -5463,12 +5561,14 @@ public partial class MainWindow : Window
         foreach (var c in _myComponents)
         {
             if (_hangarEquip == null || !HangarService.IsLoadoutCandidate(p, c, _hangarEquip, shipRecordName)) continue;
+            // 名前は所持リストの名称の欄と同じ (item_record から引いた今の名前。引けなければ保存した item_name)
+            var name = HangarService.MyComponentDisplayName(c, _hangarEquip);
             var parts = new List<string>();
             if (c.SizeDisplay.Length > 0) parts.Add(c.SizeDisplay);
             if (c.GradeDisplay.Length > 0) parts.Add(c.GradeDisplay);
-            parts.Add(c.ItemName);
+            parts.Add(name);
             parts.Add($"×{c.Quantity}");
-            row.Candidates.Add(new LoadoutChoice { ItemRecord = c.ItemRecord, ItemName = c.ItemName, Display = string.Join(" ", parts) });
+            row.Candidates.Add(new LoadoutChoice { ItemRecord = c.ItemRecord, ItemName = name, Display = string.Join(" ", parts) });
         }
 
         if (p.IsCustom)
@@ -5897,6 +5997,33 @@ public partial class MainWindow : Window
 
     // === Commodity Trade ===
 
+    // コモディティタブの商品名の表示: 「日本語 (英語)」。日本語は価格キャプチャと同じ引き方 (CommodityDictionary.GetJapaneseNames)。
+    // 訳が無い・訳が英語名と同じときは英語だけ。並べ替え・絞り込み・価格の照合などは今までどおり英語名 (CommodityName) を使う
+    private Dictionary<string, string>? _commodityJaNames;
+    private (string path, DateTime dbWrite, DateTime priceUpdate, int count) _commodityJaNamesStamp;
+
+    private string CommodityLabel(string englishName)
+    {
+        var dbPath = Path.Combine(WorkDir, "translations.db");
+        DateTime dbWrite;
+        try { dbWrite = File.Exists(dbPath) ? File.GetLastWriteTimeUtc(dbPath) : DateTime.MinValue; }
+        catch { dbWrite = DateTime.MinValue; }
+        var stamp = (dbPath, dbWrite, _tradeService.LastPriceUpdate, _tradeService.PriceCount);
+        if (_commodityJaNames == null || _commodityJaNamesStamp != stamp)
+        {
+            var names = _tradeService.GetCommodityNames()
+                .Concat(_tradeService.GetCommodityNameToIdMap().Keys)
+                .Distinct(StringComparer.OrdinalIgnoreCase);
+            _commodityJaNames = CommodityDictionary.GetJapaneseNames(dbPath, names);
+            _commodityJaNamesStamp = stamp;
+        }
+        if (!_commodityJaNames.TryGetValue(englishName, out var ja))
+            _commodityJaNames.TryGetValue(englishName.Trim(), out ja);
+        return string.IsNullOrEmpty(ja) || ja.Equals(englishName, StringComparison.OrdinalIgnoreCase)
+            ? englishName
+            : $"{ja} ({englishName})";
+    }
+
     private void CommodityFilter_Click(object sender, RoutedEventArgs e)
     {
         if (!_tradeService.HasPriceData)
@@ -5928,7 +6055,7 @@ public partial class MainWindow : Window
         var checkBoxes = new List<CheckBox>();
         foreach (var name in allNames)
         {
-            var cb = new CheckBox { Content = name, IsChecked = _selectedCommodities == null || _selectedCommodities.Contains(name), Margin = new Thickness(2) };
+            var cb = new CheckBox { Content = CommodityLabel(name), Tag = name, IsChecked = _selectedCommodities == null || _selectedCommodities.Contains(name), Margin = new Thickness(2) };
             checkBoxes.Add(cb);
             listBox.Items.Add(cb);
         }
@@ -5938,7 +6065,7 @@ public partial class MainWindow : Window
         btnNone.Click += (_, _) => checkBoxes.ForEach(cb => cb.IsChecked = false);
         btnOk.Click += (_, _) =>
         {
-            var selected = checkBoxes.Where(cb => cb.IsChecked == true).Select(cb => cb.Content.ToString()!).ToHashSet();
+            var selected = checkBoxes.Where(cb => cb.IsChecked == true).Select(cb => (string)cb.Tag).ToHashSet();
             if (selected.Count == allNames.Count)
             {
                 _selectedCommodities = null;
@@ -5992,9 +6119,10 @@ public partial class MainWindow : Window
             Terminal = p.Terminal,
         }).ToList();
 
-        grpDetailLeft.Header = $"購入場所 (安い順) — {commodityName}";
-        grpDetailRight.Header = $"売却場所 (高い順) — {commodityName}";
-        txtDetailHeader.Text = $"{commodityName} — 購入 {buyLocs.Count} 箇所 / 売却 {sellLocs.Count} 箇所  [購入場所/売却場所クリックでその場所の全商品]";
+        var label = CommodityLabel(commodityName);
+        grpDetailLeft.Header = $"購入場所 (安い順) — {label}";
+        grpDetailRight.Header = $"売却場所 (高い順) — {label}";
+        txtDetailHeader.Text = $"{label} — 購入 {buyLocs.Count} 箇所 / 売却 {sellLocs.Count} 箇所  [購入場所/売却場所クリックでその場所の全商品]";
         grpTradeDetail.Visibility = Visibility.Visible;
     }
 
@@ -6016,7 +6144,8 @@ public partial class MainWindow : Window
 
         dgDetailBuy.ItemsSource = buyable.Select(r => new TradeDetailRow
         {
-            Location = r.CommodityName,
+            Location = CommodityLabel(r.CommodityName),
+            CommodityName = r.CommodityName,
             Price = $"{r.Price:N1}",
             Stock = r.Stock > 0 ? $"{r.Stock:N0}" : "-",
             Terminal = r.Terminal,
@@ -6028,7 +6157,8 @@ public partial class MainWindow : Window
 
         dgDetailSell.ItemsSource = sellable.Select(r => new TradeDetailRow
         {
-            Location = r.CommodityName,
+            Location = CommodityLabel(r.CommodityName),
+            CommodityName = r.CommodityName,
             Price = $"{r.Price:N1}",
             Stock = r.Stock > 0 ? $"{r.Stock:N0}" : "-",
             Terminal = r.Terminal,
@@ -6053,7 +6183,7 @@ public partial class MainWindow : Window
     {
         if (dgDetailBuy.SelectedItem is TradeDetailRow row && !string.IsNullOrEmpty(row.Location))
         {
-            var name = row.Location;
+            var name = row.NameKey;
             if (_tradeService.GetCommodityNames().Contains(name, StringComparer.OrdinalIgnoreCase))
                 ShowCommodityDetail(name);
         }
@@ -6063,7 +6193,7 @@ public partial class MainWindow : Window
     {
         if (dgDetailSell.SelectedItem is TradeDetailRow row && !string.IsNullOrEmpty(row.Location))
         {
-            var name = row.Location;
+            var name = row.NameKey;
             if (_tradeService.GetCommodityNames().Contains(name, StringComparer.OrdinalIgnoreCase))
                 ShowCommodityDetail(name);
         }
@@ -6289,6 +6419,7 @@ public partial class MainWindow : Window
         {
             btnRebuildEquipment.IsEnabled = true;
             SetUpgradeActionButtonsEnabled(true);
+            RunDeferredItemNameRefresh();
         }
     }
 
@@ -6478,11 +6609,13 @@ public partial class MainWindow : Window
         var routes = _tradeService.CalculateBestRoutes(budget, scu, buySystem, sellSystem,
             excludeOutposts, loadingDockOnly, excludeLowStock, _selectedCommodities, topN: 20);
 
+        foreach (var r in routes)
+            r.CommodityDisplayName = CommodityLabel(r.CommodityName);
         dgTradeRoutes.ItemsSource = routes;
         if (routes.Count > 0)
         {
             var best = routes[0];
-            txtTradeInfo.Text = $"上位 {routes.Count} ルート | 最高: {best.CommodityName} ({best.TotalProfitDisplay} aUEC, ROI {best.RoiDisplay})";
+            txtTradeInfo.Text = $"上位 {routes.Count} ルート | 最高: {best.CommodityDisplayName} ({best.TotalProfitDisplay} aUEC, ROI {best.RoiDisplay})";
         }
         else
         {
@@ -6948,7 +7081,9 @@ public class MyComponentRow : INotifyPropertyChanged
 
     public int Id => Model.Id;
     public string ItemRecord => Model.ItemRecord;
-    public string ItemName => Model.ItemName;
+    // 表示名: item_record から引いた今の名前 (HangarService.MyComponentDisplayName)。空なら保存した item_name
+    public string CurrentName { get; set; } = "";
+    public string ItemName => CurrentName.Length > 0 ? CurrentName : Model.ItemName;
     public string ItemType => Model.ItemType;
     // 種別の欄: 武器はダメージの種類で分けた名前 (装備の表と同じ。例 実弾武器)、分からなければ / 武器以外は Model.TypeDisplay
     public string WeaponKindDisplay { get; set; } = "";
@@ -7077,6 +7212,10 @@ public class StoreRow
 public class TradeDetailRow
 {
     public string Location { get; set; } = "";
+    // 拠点の商品一覧の行だけ、商品の英語名 (Location は表示用の「日本語 (英語)」)。場所の行は空
+    public string CommodityName { get; set; } = "";
+    // 並べ替えと商品の選び直しに使う名前: 商品の行は英語名、場所の行は Location (今までの Location と同じ値)
+    public string NameKey => string.IsNullOrEmpty(CommodityName) ? Location : CommodityName;
     public string Price { get; set; } = "";
     public string Stock { get; set; } = "";
     public string Terminal { get; set; } = "";

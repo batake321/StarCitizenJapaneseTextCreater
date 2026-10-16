@@ -15,6 +15,8 @@ public partial class GearTablePanel : UserControl
     public bool IsShip { get; set; }
 
     private bool _initialized;
+    // 品目名が作り直された (GameDataExtractor.ItemNamesChanged) ので、次に表示されたときに読み直す
+    private bool _namesStale;
     private int _loadVersion;
 
     public GearTablePanel()
@@ -22,9 +24,18 @@ public partial class GearTablePanel : UserControl
         InitializeComponent();
         // 名前のダブルクリック → ［詳細］タブにその品目を出す
         table.NameDoubleClicked += o => { if (o is GearTableRow r) DetailPanel.Request(r.Record, r.Name); };
+        // 品目名が作り直されたら、次に表示されたとき (Loaded) に読み直す
+        GameDataExtractor.ItemNamesChanged += () => _namesStale = true;
         Loaded += async (_, _) =>
         {
-            if (_initialized) return;
+            if (_initialized)
+            {
+                if (!_namesStale) return;
+                _namesStale = false;
+                try { await LoadAsync(); }
+                catch (Exception ex) { ShowMessage($"読み込めませんでした: {ex.Message}"); }
+                return;
+            }
             _initialized = true;
             // 表の部品の例外でもアプリを落とさず、1 行の知らせにする
             try

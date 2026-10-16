@@ -374,9 +374,9 @@
                             </Style>
                         </DataGrid.RowStyle>
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="コモディティ" Binding="{Binding CommodityName}" Width="120">
+                            <DataGridTextColumn Header="コモディティ" Binding="{Binding CommodityDisplayName}" SortMemberPath="CommodityName" Width="120">
                                 <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/><Setter Property="Padding" Value="4,0"/><Setter Property="ToolTip" Value="{Binding CommodityName}"/></Style>
+                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/><Setter Property="Padding" Value="4,0"/><Setter Property="ToolTip" Value="{Binding CommodityDisplayName}"/></Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="CS" Binding="{Binding ContainerScuDisplay}" Width="40">
@@ -480,7 +480,7 @@
                                           FontSize="12" RowHeight="24" HeadersVisibility="Column"
                                           SelectionChanged="DetailBuy_Selected">
                                     <DataGrid.Columns>
-                                        <DataGridTextColumn Header="場所/コモディティ" Binding="{Binding Location}" Width="*">
+                                        <DataGridTextColumn Header="場所/コモディティ" Binding="{Binding Location}" SortMemberPath="NameKey" Width="*">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock">
                                                     <Setter Property="VerticalAlignment" Value="Center"/>
@@ -534,7 +534,7 @@
                                           FontSize="12" RowHeight="24" HeadersVisibility="Column"
                                           SelectionChanged="DetailSell_Selected">
                                     <DataGrid.Columns>
-                                        <DataGridTextColumn Header="場所/コモディティ" Binding="{Binding Location}" Width="*">
+                                        <DataGridTextColumn Header="場所/コモディティ" Binding="{Binding Location}" SortMemberPath="NameKey" Width="*">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock">
                                                     <Setter Property="VerticalAlignment" Value="Center"/>

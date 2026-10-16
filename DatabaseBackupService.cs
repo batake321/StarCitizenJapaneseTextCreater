@@ -343,9 +343,24 @@ public static class DatabaseBackupService
             if (repopulate && File.Exists(indexDbPath))
             {
                 onStatus?.Invoke("日本語名を付け直し、全文検索の表を作り直しています...");
-                using var gx = new GameDataExtractor(Path.GetDirectoryName(indexDbPath) ?? ".", indexDbPath);
-                if (File.Exists(translationDbPath)) gx.PopulateJapaneseNames(translationDbPath);
-                else gx.RebuildFts5Index();
+                using (var gx = new GameDataExtractor(Path.GetDirectoryName(indexDbPath) ?? ".", indexDbPath))
+                {
+                    if (File.Exists(translationDbPath)) gx.PopulateJapaneseNames(translationDbPath);
+                    else gx.RebuildFts5Index();
+                }
+            }
+            // 翻訳・ゲームデータ・用語集 (用語集だけでも。ゲーム用 ini の値が用語集の置き換えで変わるため) を取り込んだら、
+            // 品目名 (item_index.name / name_ja) も今の訳に合わせる (作業フォルダの抽出済みの ini と translations.db から。変われば全文検索の表も作り直す)。
+            // 合わせられなくても取り込みは失敗にしない
+            if ((repopulate || (doTrans && cats.Contains(BackupCategory.Glossary))) && File.Exists(indexDbPath))
+            {
+                onStatus?.Invoke("品目名を今の訳に合わせています...");
+                try
+                {
+                    GameDataExtractor.RefreshItemNamesFromTranslations(indexDbPath, Path.GetDirectoryName(translationDbPath) ?? ".",
+                        log: s => onStatus?.Invoke(s));
+                }
+                catch (Exception ex) { onStatus?.Invoke($"品目名を今の訳に合わせられませんでした: {ex.Message}"); }
             }
             SqliteConnection.ClearAllPools();
         }

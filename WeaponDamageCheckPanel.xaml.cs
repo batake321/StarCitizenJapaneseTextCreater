@@ -30,6 +30,8 @@ public partial class WeaponDamageCheckPanel : UserControl
     private sealed record MagazinePick(string? Record, WeaponStatMultipliers Multipliers);
 
     private bool _initialized, _updating;
+    // 品目名が作り直された (GameDataExtractor.ItemNamesChanged) ので、次に表示されたときに読み直す
+    private bool _namesStale;
     private int _loadVersion, _setupVersion, _calcVersion;
     private int _readySetupVersion = -1;      // オプションの欄を作り終えた銃の _setupVersion (違えば枠を読んでいる途中なので計算しない)
     private WeaponStatMultipliers _defaultMagazineMultipliers = WeaponStatMultipliers.None;   // 既定のマガジンの補正 (既定の構成に掛ける)
@@ -50,9 +52,18 @@ public partial class WeaponDamageCheckPanel : UserControl
         cmbWeapon.DropDownClosed += (_, _) => { if (!_updating && _setupFailed) OnWeaponChanged(); };
         foreach (var c in new[] { cmbScope, cmbMuzzle, cmbUnderbarrel, cmbMagazine })
             c.SelectionChanged += (_, _) => { if (!_updating) Recompute(); };
+        // 品目名が作り直されたら、次に表示されたとき (Loaded) に読み直す (選んでいた銃・アタッチメントは選び直しになる)
+        GameDataExtractor.ItemNamesChanged += () => _namesStale = true;
         Loaded += async (_, _) =>
         {
-            if (_initialized) return;
+            if (_initialized)
+            {
+                if (!_namesStale) return;
+                _namesStale = false;
+                try { await LoadAsync(); }
+                catch (Exception ex) { ShowMessage($"読み込めませんでした: {ex.Message}"); }
+                return;
+            }
             _initialized = true;
             try
             {

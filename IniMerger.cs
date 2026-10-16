@@ -262,6 +262,50 @@ public static class IniMerger
         return merged;
     }
 
+    // ［日本語化］の［実行］(MainWindow.RunPipeline の "apply") と同じ材料・同じ設定で Merge し、ゲーム用 ini に書き出す値を作る
+    // (品目名 item_index.name を今の訳に合わせるため。GameDataExtractor.RefreshItemNamesFromTranslations / ExtractItemIndexAsync が使う)。
+    //   材料: 作業フォルダの english / japanese_(japan) の global.ini (Data.p4k から抽出したもの)、translated.jsonl、translations.db と、その用語集
+    //   設定: App.Config の英語のままにするキーの形 (ForceEnglishPatterns) と印の有無 (［日本語化］で最後に選んで保存したもの)
+    //   gamedataDbPath は渡さない。Merge がそれを使うのはミッション名の印 (AnnotateMissionReputation) と
+    //   itemPort_ のキーの追加 (AddItemPortNames) だけで、品目名 (item_Name…) の値は変わらないため
+    // 抽出済みの ini が無ければ null
+    public static Dictionary<string, string>? MergeForItemNames(string workDir)
+    {
+        var enPath = Path.Combine(workDir, "english", "global.ini");
+        var jaPath = Path.Combine(workDir, "japanese_(japan)", "global.ini");
+        var dbPath = Path.Combine(workDir, "translations.db");
+        if (!File.Exists(enPath) || !File.Exists(jaPath)) return null;
+
+        // 用語集は RunPipeline と同じく translations.db があればそこから読む (読めなければ用語集なし)
+        List<(string, string)>? glossary = null;
+        if (File.Exists(dbPath))
+        {
+            try
+            {
+                using var gdb = new TranslationDatabase(dbPath);
+                glossary = gdb.GetAllGlossary();
+            }
+            catch { }
+        }
+
+        var english = GlobalIniParser.Parse(enPath);
+        var japanese = GlobalIniParser.Parse(jaPath);
+        return Merge(english, japanese, Path.Combine(workDir, "translated.jsonl"),
+            App.Config.ForceEnglishPatterns, dbPath, glossary,
+            null, App.Config.MissionReputationMarks,
+            App.Config.EquipmentClassMarks, App.Config.BlueprintMissionMarks);
+    }
+
+    // Merge の結果から、ゲーム用 ini を書き出して読み直したときのキー locKey の値を引く (GlobalIniParser.Write の改行の書き方を通す)。
+    // ExtractItemIndexAsync が ini の値を名前にするときと同じく、"!" で始まる値 (訳が無い印) は使わない。引けなければ false
+    internal static bool TryGetIniValue(Dictionary<string, string> merged, string locKey, out string value)
+    {
+        value = "";
+        if (!merged.TryGetValue(locKey, out var v) || v.StartsWith("!")) return false;
+        value = GlobalIniParser.EscapeLineBreaks(v);
+        return true;
+    }
+
     // 品目の中の枠 (item_port_labels) の名前ごとに、"itemPort_<枠の名前>" が merged に無ければ (大文字小文字を区別せず)、
     // 枠の表示名 (DisplayName の "@キー") の値を引いて足す。値は merged (訳・公式訳・英語のうち merged に入ったもの) → english の順に、
     // キーそのものと "キー,P" を引く。引けない・空のもの (例 "@LOC_EMPTY") は足さない。

@@ -138,6 +138,10 @@ public partial class GameLogPanel : UserControl
         catch { foreach (var e in rows) e.ImportState = PurchaseImportState.None; }
     }
 
+    // 船名・品名の覚えた結果を捨てる。MainWindow から、訳・品目名 (item_index.name) が替わったときに呼ぶ。
+    // これから読む行の名前は今の訳で引き直す (もう読んだ行の名前は読んだときのまま)
+    public void ClearNameCache() => _names?.Clear();
+
     // 表を作り直す (ボタンの状態も決め直す)。MainWindow から、所持コンポーネントが変わったときなどに呼ぶ
     public void RefreshPurchaseButtons()
     {
@@ -386,6 +390,16 @@ public partial class GameLogPanel : UserControl
             {
                 c.Dispose();
                 throw;
+            }
+        }
+
+        // 覚えた名前を捨てる (訳・品目名が替わったとき。次に引くときに DB から引き直す)
+        public void Clear()
+        {
+            lock (_lock)
+            {
+                _ships.Clear();
+                _items.Clear();
             }
         }
 

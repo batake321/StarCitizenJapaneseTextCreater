@@ -692,6 +692,38 @@ public class EquipmentService : IDisposable
         return result;
     }
 
+    // 所持リスト (my_components) の表示名: record の今の item_index.name (追加の候補 GetShipComponents と同じく、
+    // その record の空でない名前のうち最小のもの)。record の照合は GetItemByRecord と同じ候補 (そのまま → "EntityClassDefinition." 前置 →
+    // "_SCItem" の有無を反転したもの) の順で、大文字小文字は区別しない。引けない・プレースホルダなら null。結果は覚えておく
+    // (item_index が替わったときはこの口ごと作り直される: MainWindow.ReopenHangarEquip)
+    private readonly Dictionary<string, string?> _currentItemNameCache = new(StringComparer.Ordinal);
+
+    public string? GetCurrentItemName(string? record)
+    {
+        var key = (record ?? "").Trim();
+        if (key.Length == 0) return null;
+        if (_currentItemNameCache.TryGetValue(key, out var cached)) return cached;
+
+        string? result = null;
+        try
+        {
+            foreach (var cand in RecordCandidates(key))
+            {
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "SELECT MIN(name) FROM item_index WHERE record_name = @rn COLLATE NOCASE AND name IS NOT NULL AND name != ''";
+                cmd.Parameters.AddWithValue("@rn", cand);
+                if (cmd.ExecuteScalar() is string name && name.Length > 0)
+                {
+                    result = IsPlaceholderName(name) ? null : name;
+                    break;
+                }
+            }
+        }
+        catch (SqliteException) { return null; }   // item_index を読めない (覚えず、次にもう一度引く)
+        _currentItemNameCache[key] = result;
+        return result;
+    }
+
     private static IEnumerable<string> RecordCandidates(string record)
     {
         const string prefix = "EntityClassDefinition.";

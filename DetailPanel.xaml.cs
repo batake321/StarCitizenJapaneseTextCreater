@@ -71,6 +71,30 @@ public partial class DetailPanel : UserControl
             catch (Exception ex) { txtStatus.Text = $"検索できませんでした: {ex.Message}"; }
         };
         Loaded += async (_, _) => await (_webInit ??= InitWebViewAsync());
+        // 品目名が作り直されたら、分類ごとの品目の覚えを次に表示されたとき (Loaded) に捨てて読み直す
+        GameDataExtractor.ItemNamesChanged += () => _namesStale = true;
+        Loaded += async (_, _) =>
+        {
+            if (!_namesStale) return;
+            _namesStale = false;
+            await ReloadAfterNamesChangedAsync();
+        };
+    }
+
+    // 品目名が作り直された (GameDataExtractor.ItemNamesChanged) ので、次に表示されたときに分類の品目を読み直す
+    private bool _namesStale;
+
+    // 分類ごとの品目の覚えを捨て、今の分類を読み直して、選んでいる種類・サイズ・検索語のままリストを作り直す
+    private async Task ReloadAfterNamesChangedAsync()
+    {
+        _categoryRows.Clear();
+        var category = cmbCategory.SelectedItem as string ?? CategoryAll;
+        if (category != CategoryAll)
+        {
+            try { await LoadCategoryAsync(category); }
+            catch (Exception ex) { ShowStatus($"読み込めませんでした: {ex.Message}"); return; }
+        }
+        await RefreshListSafeAsync();
     }
 
     private static string WorkDir()

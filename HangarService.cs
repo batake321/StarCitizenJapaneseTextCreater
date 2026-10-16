@@ -1196,6 +1196,12 @@ public class HangarService
 
     // === 装備インベントリ (my_components) / 現在の装備 (ship_loadouts) ===
 
+    // 所持リストの表示名 (一覧・スロットの選択肢・詳細の検索欄)。保存した item_name は追加したときの名前のまま更新されないので、
+    // item_record から今の名前 (EquipmentService.GetCurrentItemName = item_index.name) を引いて出す。引けないときだけ保存した item_name。
+    // DB の item_name は書き換えない
+    public static string MyComponentDisplayName(MyComponent c, EquipmentService? equip)
+        => equip?.GetCurrentItemName(c.ItemRecord) ?? c.ItemName;
+
     // 読む前に、同じ品 (item_record と使用可が同じ) の行を 1 行にまとめる (MergeDuplicateMyComponents)
     public List<MyComponent> LoadMyComponents()
     {
