@@ -1500,8 +1500,28 @@ public class HangarService
         return true;
     }
 
+    // ［ゲームログ］の船 (購入した船・呼び出した船) を所持船 (my_ships。TradeService と同じ trade_cache.db の表) に入れる。印の入れた先は my_ships、
+    // my_ships.source_key に印の鍵を入れる (取り消しで消す行を見分ける)。印が既にあれば何もせず false。印と所持船は 1 つのトランザクションで書く。
+    // origin は入手の種類 (MyShipEntry.Origin*)、expiresAt は期限 (null = なし)
+    public const string MarkTargetMyShips = "my_ships";
+
+    public bool ImportShip(string kind, string logKey, string itemRecord, string name, string manufacturer, int scu, string notes, string origin, string? expiresAt)
+    {
+        if (_dbPath == null) return false;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        TradeService.EnsureMyShipsSchema(db);
+        using var tx = db.BeginTransaction();
+        if (!InsertMark(db, tx, kind, logKey, MarkTargetMyShips, itemRecord, 1)) return false;
+        Exec(db, tx, "INSERT INTO my_ships (name, manufacturer, scu, notes, origin, expires_at, source_key) VALUES (@n, @m, @s, @no, @o, @e, @k)",
+            ("@n", name), ("@m", manufacturer ?? ""), ("@s", scu), ("@no", notes ?? ""), ("@o", origin ?? ""), ("@e", (object?)expiresAt ?? DBNull.Value), ("@k", logKey));
+        tx.Commit();
+        return true;
+    }
+
     // 「取り消す」: 印 (入れた先が my_components / my_gear のもの) を消し、入れた品の数量を所持から引く。同じ item_record の行から
     // 使用可の行・id の小さい行の順に引き、0 より下には下げない (0 で止める)。戻り値は (印があったか, 引ききれなかった数)。
+    // 入れた先が my_ships (船) の印は、source_key が鍵の所持船の行を消して印を消す (行が無ければ (消す船が無かった) Shortage = 1 で知らせる。印は消す)。
     // 入れた先が ore_stock の印はここでは扱わない (OreService.CancelStockImport)
     public (bool Found, int Shortage) CancelImport(string kind, string logKey)
     {
@@ -1511,6 +1531,20 @@ public class HangarService
         using var tx = db.BeginTransaction();
         var mark = ReadMark(db, tx, kind, logKey);
         if (mark == null) return (false, 0);
+        if (mark.Target == MarkTargetMyShips)
+        {
+            int deleted;
+            using (var cmd = db.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = "DELETE FROM my_ships WHERE source_key = @l";
+                cmd.Parameters.AddWithValue("@l", logKey);
+                deleted = cmd.ExecuteNonQuery();
+            }
+            DeleteMark(db, tx, kind, logKey);
+            tx.Commit();
+            return (true, deleted > 0 ? 0 : 1);
+        }
         var table = mark.Target switch { "my_components" => "my_components", "my_gear" => "my_gear", _ => null };
         if (table == null) return (false, 0);
         var remaining = (int)Math.Round(mark.Quantity);

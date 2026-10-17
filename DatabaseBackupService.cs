@@ -327,6 +327,9 @@ public static class DatabaseBackupService
                     // id 列の無い古い trade_terminals は、TradeService が開いたときに作り直される (取り込んだ端末が消える) ので、
                     // 取り込む前に同じ移行をしておく
                     TradeService.MigrateTerminalsSchema(conn);
+                    // 所持船の入手の種類・期限・印の鍵の列 (origin / expires_at / source_key) の無い古い my_ships にも、取り込む前に列を足す
+                    // (列の無いバックアップの行は CommonColumns (共通の列) で入る)
+                    TradeService.MigrateMyShipsSchema(conn);
                 }
             }
             SqliteConnection.ClearAllPools();
@@ -747,7 +750,8 @@ public static class DatabaseBackupService
             CREATE TABLE IF NOT EXISTS my_ships (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL, manufacturer TEXT DEFAULT '', scu INTEGER DEFAULT 0,
-                notes TEXT DEFAULT '', added_at TEXT DEFAULT (datetime('now','localtime'))
+                notes TEXT DEFAULT '', added_at TEXT DEFAULT (datetime('now','localtime')),
+                origin TEXT DEFAULT '', expires_at TEXT, source_key TEXT DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS hangar_pledges (
                 id TEXT PRIMARY KEY,

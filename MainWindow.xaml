@@ -613,6 +613,16 @@
                               AlternatingRowBackground="#FAFAFA" FontSize="13" RowHeight="30"
                               HorizontalScrollBarVisibility="Auto"
                               MouseDoubleClick="MyShip_DoubleClick">
+                        <DataGrid.RowStyle>
+                            <!-- 期限切れの船 (my_ships.expires_at を過ぎた) は薄字 (自動では消さない) -->
+                            <Style TargetType="DataGridRow">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsExpired}" Value="True">
+                                        <Setter Property="Foreground" Value="#AAA"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </DataGrid.RowStyle>
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="船名" Binding="{Binding Name}" Width="200">
                                 <DataGridTextColumn.ElementStyle>
@@ -722,6 +732,7 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto"/>
@@ -765,6 +776,11 @@
                             <TextBox x:Name="txtAddShipNotes" Grid.Row="1" Grid.Column="9" Margin="0,4,8,0" VerticalAlignment="Center"/>
                             <Button Content="追加" Grid.Row="1" Grid.Column="10" Click="AddMyShip_Click" Padding="16,4" Margin="0,4,0,0"
                                     FontWeight="Bold" Background="#4CAF50" Foreground="White"/>
+
+                            <!-- Row 2: 期限 (ミッションの報酬など期限のある船。空なら期限なし) -->
+                            <TextBlock Text="期限:" Grid.Row="2" Grid.Column="8" VerticalAlignment="Center" Margin="0,4,4,0"/>
+                            <TextBox x:Name="txtAddShipExpires" Grid.Row="2" Grid.Column="9" Margin="0,4,8,0" VerticalAlignment="Center"
+                                     ToolTip="船が無くなる日時 (ミッションの報酬やレンタルの船)。「2026/10/18 22:24」や「10/18 22:24」の形。空なら期限なし。期限を過ぎた船は一覧で薄字になります (自動では消しません)"/>
                         </Grid>
                     </GroupBox>
 

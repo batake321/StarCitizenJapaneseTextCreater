@@ -91,8 +91,10 @@ public partial class MainWindow : Window
         gameLogPanel.RecordsImporter = ImportGameLogRecords;
         gameLogPanel.TradeResultUpdater = UpdateGameLogTradeResult;
         gameLogPanel.DeliveryImporter = ApplyGameLogDeliveries;
+        gameLogPanel.ShipImporter = ApplyGameLogShips;
         gameLogPanel.SellProfit = key => orePanel.TryGetSellProfit(key);
         gameLogPanel.DetailOpener = OpenGameLogItemDetail;
+        gameLogPanel.ShipDetailOpener = OpenGameLogShipDetail;
         // ［鉱石］の作業ディレクトリ (trade_cache.db / gamedata_cache.db / translations.db の所在)
         orePanel.WorkDirProvider = () => WorkDir;
     }
@@ -4073,7 +4075,10 @@ public partial class MainWindow : Window
             // 装備サブタブ (船セレクタ・所持コンポーネント・現在の装備グリッド) も同期状態に合わせる
             RefreshMyComponents();
             RefreshLoadoutShipCombo();
+            var first = !_upgradeDataLoadedOnce;
             _upgradeDataLoadedOnce = true;
+            // 初めて所持船・同期済み保有船が揃ったら、［ゲームログ］の船の行のボタンと自動の登録 (持っている船かの判断に要る) をやり直す
+            if (first) gameLogPanel?.RefreshPurchaseButtons();
             return true;
         }
         catch (Exception ex)
@@ -5073,18 +5078,27 @@ public partial class MainWindow : Window
             CargoFactory = () => e.Cargo,
             Notes = e.Notes,
             AddedAt = e.AddedAt,
+            Origin = e.Origin,
+            ExpiresAt = e.ExpiresAt,
+            IsExpired = e.IsExpired,
         };
 
         var matched = MatchHangarRowsForMyShip(e.Name);
 
         row.HangarCount = matched.Count;
         row.HangarOriginDisplay = string.Join(" / ", matched.Select(s => s.OriginDisplay).Where(o => !string.IsNullOrEmpty(o)));
-        // Hangar に一致しない船で、メモが "[ゲーム内購入]" で始まるものは aUEC 購入 (未同期ではない)
-        if (matched.Count == 0 && IsInGameNotes(e.Notes))
+        // 入手の種類 (my_ships.origin) があればそれを由来に出す (pledge で Hangar に一致する船は、一致した保有船の由来 (パック名など) のまま)。
+        // Hangar に一致しない船で、メモが "[ゲーム内購入]" で始まるものも aUEC 購入 (未同期ではない)
+        if (e.Origin.Length > 0 && (e.Origin != MyShipEntry.OriginPledge || row.HangarOriginDisplay.Length == 0))
+            row.HangarOriginDisplay = e.OriginDisplay;
+        if (e.Origin == MyShipEntry.OriginInGame || (matched.Count == 0 && IsInGameNotes(e.Notes)))
         {
             row.IsInGame = true;
-            row.HangarOriginDisplay = "ゲーム内購入";
+            if (e.Origin.Length == 0) row.HangarOriginDisplay = "ゲーム内購入";
         }
+        // 期限 (期限切れでも消さない。薄字にするだけ)
+        if (e.ExpiresAtTime is { } expires)
+            row.HangarOriginDisplay += $"{(row.HangarOriginDisplay.Length > 0 ? " / " : "")}期限: {expires:MM/dd HH:mm}";
         row.HangarCanUpgrade = matched.Any(s => s.CanUpgrade);
         row.HangarUpgradableDisplay = row.HangarCanUpgrade ? "○" : "";
         row.HangarSaleDisplay = _hangarService.FindStoreShipWarbond(e.Name) != null ? "Warbond 販売中"
@@ -5687,16 +5701,18 @@ public partial class MainWindow : Window
         return _importMarks;
     }
 
-    // 行の品の入れ先。None = 入れられない (item_index に無い・入れられる種類でない・資源を引けない)
-    private enum ImportTarget { None, Component, Gear, Stock }
+    // 行の品の入れ先。None = 入れられない (item_index に無い・入れられる種類でない・資源を引けない)。Ship = 所持船 (my_ships)
+    private enum ImportTarget { None, Component, Gear, Stock, Ship }
 
     // 品の入れ先を決める。
+    //   船 (購入した船・車両 (IsVehicle) / 呼び出した船 (ship_spawn。クラス名が分かっているもの)): 所持船
     //   purchase / dropped: 船のコンポーネント (FindOwnableComponent) → 個人装備 (FindOwnableGear)。降ろした品の鉱石は入れない (採掘で既に在庫に足しているため)
     //   mined:              手掘りの鉱石 (Harvestable_Mineral_1H_<X> → resource_types)
     //   delivered:          通知の品名 (日本語) を resource_types の日本語名・英語名で引く (在庫から引く)
     // 装備 DB (_hangarEquip) が無ければコンポーネント・個人装備には入れられない
     private (ImportTarget Target, EquipmentItem? Item, (string Uuid, string Record)? Resource) ResolveImportTarget(GameLogImportItem item)
     {
+        if (item.IsShip) return item.ItemClass.Length > 0 ? (ImportTarget.Ship, null, null) : (ImportTarget.None, null, null);
         switch (item.Kind)
         {
             case GameLogImportItem.KindMined:
@@ -5763,14 +5779,16 @@ public partial class MainWindow : Window
     }
 
     // ［ゲームログ］の行 (ImportItems あり) の一覧 → それぞれのボタンの状態。
-    //   None:     ボタン無し (GameLogPurchase.ImportCutoffUtc より前の行、成功していない購入、数量が 0 以下、入れられる品が 1 つも無い)
+    //   None:     ボタン無し (GameLogPurchase.ImportCutoffUtc より前の行 (船の行は除く)、成功していない購入、数量が 0 以下、入れられる品が 1 つも無い、
+    //             印の無い船の行で、その船を既に持っている (所持船か同期済み保有船にある))
     //   Imported: 入れられる品の全部に印がある (「取り消す」)
     //   Ready:    印の無い入れられる品がある (「入れる」)
+    // 船の行 (購入した船・呼び出した船) は cutoff に関係なくボタンを出す (cutoff 前の船も「入れる」で所持船に入れられる)。
     // 入れられる品の索引 (FindOwnableComponent) がまだ無ければ裏で作り (ゲームログの表を初めて作ったとき)、できるまではボタン無しにして、できたら表を作り直す
     private IReadOnlyList<PurchaseImportState> ClassifyGameLogImports(IReadOnlyList<GameLogEntry> entries)
     {
         var states = new PurchaseImportState[entries.Count];
-        if (!entries.Any(e => e.TimeUtc >= GameLogPurchase.ImportCutoffUtc)) return states;
+        if (!entries.Any(e => e.TimeUtc >= GameLogPurchase.ImportCutoffUtc || IsShipRow(e))) return states;
         // 装備 DB の読み込み口がまだ無ければ開く (船のコンポーネント・個人装備の判定に要る。gamedata_cache.db が無ければ null のまま)
         EnsureHangarEquip();
         var equip = _hangarEquip;
@@ -5783,20 +5801,172 @@ public partial class MainWindow : Window
         for (int i = 0; i < entries.Count; i++)
         {
             var e = entries[i];
-            if (e.TimeUtc < GameLogPurchase.ImportCutoffUtc || e.ImportItems is not { Count: > 0 } items) continue;
+            if (e.ImportItems is not { Count: > 0 } items) continue;
+            if (e.TimeUtc < GameLogPurchase.ImportCutoffUtc && !IsShipRow(e)) continue;
+            // 船の行は、所持船・同期済み保有船が読めてから (持っている船かの判断に要る)
+            if (IsShipRow(e) && !_upgradeDataLoadedOnce) continue;
             if (e.Purchase is { } p && !p.Succeeded) continue;
             int resolvable = 0, marked = 0;
             foreach (var item in items)
             {
                 if (item.Quantity <= 0) continue;
-                if (ResolveImportTarget(item).Target == ImportTarget.None) continue;
+                var target = ResolveImportTarget(item).Target;
+                if (target == ImportTarget.None) continue;
+                if (marks.ContainsKey((item.Kind, item.LogKey))) { resolvable++; marked++; continue; }
+                // 印の無い船: 既に持っている船 (所持船・同期済み保有船) なら入れられない
+                if (target == ImportTarget.Ship && IsShipOwned(ResolveLogShip(item.ItemClass).Name)) continue;
                 resolvable++;
-                if (marks.ContainsKey((item.Kind, item.LogKey))) marked++;
             }
             if (resolvable == 0) continue;
             states[i] = marked == resolvable ? PurchaseImportState.Imported : PurchaseImportState.Ready;
         }
         return states;
+    }
+
+    // 船の行 (品が船 (IsShip) の行) か
+    private static bool IsShipRow(GameLogEntry e) => e.ImportItems is { Count: > 0 } items && items[0].IsShip;
+
+    // ゲームログの船 (クラス名) → 所持船に登録する名前・メーカー・SCU・record。
+    // ships.name_en (ships に無い車両 (ATLS 等) は item_index の name_ja / name) → Ship Matrix (ResolveShip。名前そのものか、先頭のメーカー名を除いた名前) →
+    // UEX (FindUexShip。同じく 2 通り) の順に名前とメーカーを決め、決まらなければ name_en のまま。SCU は共通の関数 (ShipCargo.Resolve)。引いた結果は覚える
+    // (UEX の船データ (_tradeService.Ships) や同期済み保有船が後から読み込まれたら、名前の決め方が変わりうるので覚えた結果を捨てる)
+    private readonly Dictionary<string, (string Name, string Manufacturer, int Scu, string Record)> _logShips = new(StringComparer.Ordinal);
+    private (int Uex, int Hangar) _logShipsStamp = (-1, -1);
+
+    private (string Name, string Manufacturer, int Scu, string Record) ResolveLogShip(string className)
+    {
+        var stamp = (_tradeService.Ships.Count, _hangarShips.Count);
+        if (stamp != _logShipsStamp)
+        {
+            _logShips.Clear();
+            _logShipsStamp = stamp;
+        }
+        if (_logShips.TryGetValue(className, out var hit)) return hit;
+        var record = "EntityClassDefinition." + className;
+        var nameEn = LookupShipNameEn(record) ?? className;
+        var space = nameEn.IndexOf(' ');
+        var tail = space > 0 ? nameEn[(space + 1)..].Trim() : "";
+        string name = nameEn, mfr = "";
+        var matrix = _hangarService.ResolveShip(nameEn) ?? (tail.Length > 0 ? _hangarService.ResolveShip(tail) : null);
+        if (matrix != null)
+        {
+            name = matrix.Name;
+            mfr = matrix.ManufacturerName ?? "";
+        }
+        else
+        {
+            var uex = _tradeService.FindUexShip(nameEn) ?? (tail.Length > 0 ? _tradeService.FindUexShip(tail) : null);
+            if (uex != null)
+            {
+                name = uex.Name;
+                mfr = uex.Manufacturer ?? "";
+            }
+        }
+        if (string.IsNullOrEmpty(mfr)) mfr = _hangarService.ResolveShip(name)?.ManufacturerName ?? "";
+        var scu = CargoAsInt(ShipCargo.Resolve(name, mfr, record));
+        var result = (name, mfr, scu, record);
+        _logShips[className] = result;
+        return result;
+    }
+
+    // gamedata_cache.db の ships.name_en (無ければ item_index の name_ja / name)。無ければ null。DB を読めなければ null (覚えない)
+    private string? LookupShipNameEn(string record)
+    {
+        var path = Path.Combine(WorkDir, "gamedata_cache.db");
+        if (!File.Exists(path)) return null;
+        try
+        {
+            using var db = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT name_en FROM ships WHERE record_name = @r AND name_en IS NOT NULL AND name_en <> '' LIMIT 1";
+            cmd.Parameters.AddWithValue("@r", record);
+            if (cmd.ExecuteScalar() is string en && en.Trim().Length > 0) return en.Trim();
+            cmd.CommandText = "SELECT COALESCE(NULLIF(name_ja, ''), name) FROM item_index WHERE record_name = @r COLLATE NOCASE LIMIT 1";
+            return cmd.ExecuteScalar() is string n && n.Trim().Length > 0 ? n.Trim() : null;
+        }
+        catch (Exception ex)
+        {
+            Log($"[ゲームログ] 船の名前を引けませんでした ({record}): {ex.Message}");
+            return null;
+        }
+    }
+
+    // ゲームログの船の record が ships にあるか (［詳細］に品目で出せるか)
+    private bool ShipRecordExists(string record)
+    {
+        var path = Path.Combine(WorkDir, "gamedata_cache.db");
+        if (!File.Exists(path)) return false;
+        try
+        {
+            using var db = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM ships WHERE record_name = @r)";
+            cmd.Parameters.AddWithValue("@r", record);
+            return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
+        }
+        catch { return false; }
+    }
+
+    // その船 (正規化名) を既に持っているか: 所持船 (my_ships) か同期済み保有船 (_hangarShips) に正規化名が一致する船がある
+    private bool IsShipOwned(string name)
+    {
+        var norm = _hangarService.NormalizeShipName(name);
+        return _tradeService.MyShips.Any(m => _hangarService.NormalizeShipName(m.Name).Equals(norm, StringComparison.OrdinalIgnoreCase))
+            || _hangarShips.Any(s => _hangarService.NormalizeShipName(s.Name).Equals(norm, StringComparison.OrdinalIgnoreCase));
+    }
+
+    // ゲームログの船 1 つを所持船に入れる (印 kind/logKey → my_ships)。購入は origin ingame (メモは今までどおり "[ゲーム内購入]" の接頭辞も付ける)、
+    // 呼び出し (ship_spawn) は origin mission (期限はログに無いので無し。所持船の一覧で入れる)。印が既にあれば false
+    private bool ImportShipFromLog(GameLogImportItem item)
+    {
+        var ship = ResolveLogShip(item.ItemClass);
+        var mission = item.Kind == GameLogImportItem.KindShipSpawn;
+        var origin = mission ? MyShipEntry.OriginMission : MyShipEntry.OriginInGame;
+        var notes = mission ? "" : InGameNotesMarker;
+        if (!_hangarService.ImportShip(item.Kind, item.LogKey, ship.Record, ship.Name, ship.Manufacturer, ship.Scu, notes, origin, null)) return false;
+        Log($"[Ship] ゲームログから追加 ({MyShipEntry.OriginLabel(origin)}): {ship.Name}{(ship.Scu > 0 ? $" ({ship.Scu} SCU)" : "")}");
+        return true;
+    }
+
+    // 船の行の自動の登録 (GameLogPanel.ShipImporter。まだ渡していない行だけ来る): GameLogPurchase.ImportCutoffUtc 以降の購入した船・呼び出した船のうち、
+    // まだ持っていない船 (所持船・同期済み保有船に無い) を一度だけ (印) 所持船に入れる。cutoff 前の行は入れない (ボタンで入れる)。
+    // 途中で失敗したら、入れた分の一覧は作り直したうえで例外を投げ直す (GameLogPanel が「渡した」にせずログに残し、次の作り直しでもう一度渡す)
+    private bool ApplyGameLogShips(IReadOnlyList<GameLogEntry> entries)
+    {
+        // 所持船・同期済み保有船がまだ読めていない (LoadUpgradeData 前) うちは「持っている船」が分からないので、まだ扱わない (渡し直してもらう)
+        if (!_upgradeDataLoadedOnce) return false;
+        var changed = false;
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? error = null;
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _tradeService.SetCacheDir(WorkDir);
+            var marks = ImportMarks();
+            foreach (var e in entries)
+            {
+                if (e.TimeUtc < GameLogPurchase.ImportCutoffUtc || e.ImportItems is not { Count: > 0 } items) continue;
+                if (e.Purchase is { } p && !p.Succeeded) continue;
+                foreach (var item in items)
+                {
+                    if (!item.IsShip || item.ItemClass.Length == 0 || item.Quantity <= 0) continue;
+                    if (marks.ContainsKey((item.Kind, item.LogKey))) continue;
+                    if (IsShipOwned(ResolveLogShip(item.ItemClass).Name)) continue;
+                    if (!ImportShipFromLog(item)) continue;
+                    changed = true;
+                    _tradeService.LoadMyShips();   // 同じ船の 2 回目の呼び出しを「持っている」と判断できるように
+                }
+            }
+        }
+        catch (Exception ex) { error = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+        if (changed)
+        {
+            InvalidateImportMarks();
+            RefreshMyShips();
+        }
+        error?.Throw();
+        return true;
     }
 
     // 入れられる品の索引を作っている裏の作業 (構築・再抽出・インポートの前に終わるまで待つ。gamedata_cache.db を読んでいるため)
@@ -5823,17 +5993,22 @@ public partial class MainWindow : Window
         var stockChanged = false;
         var componentsChanged = false;
         var gearChanged = false;
+        var shipsChanged = false;
         var shortages = new List<string>();
         try
         {
             _hangarService.SetCacheDir(WorkDir);
             _oreService.SetCacheDir(WorkDir);
+            _tradeService.SetCacheDir(WorkDir);
             foreach (var item in items)
             {
                 if (item.Quantity <= 0) continue;
                 var (target, found, resource) = ResolveImportTarget(item);
                 switch (target)
                 {
+                    case ImportTarget.Ship:
+                        if (ImportShipFromLog(item)) shipsChanged = true;
+                        break;
                     case ImportTarget.Component when found != null:
                     {
                         var c = new MyComponent
@@ -5894,6 +6069,7 @@ public partial class MainWindow : Window
         }
         if (gearChanged) RefreshMyGear();
         if (stockChanged) orePanel?.Reload();
+        if (shipsChanged) RefreshMyShips();
         if (shortages.Count > 0)
         {
             var text = "在庫が足りなかったので 0 で止めました (引けなかった数): " + string.Join(", ", shortages);
@@ -5910,6 +6086,8 @@ public partial class MainWindow : Window
         var stockChanged = false;
         var componentsChanged = false;
         var gearChanged = false;
+        var shipsChanged = false;
+        var missingShips = new List<string>();
         try
         {
             _hangarService.SetCacheDir(WorkDir);
@@ -5918,6 +6096,18 @@ public partial class MainWindow : Window
             foreach (var item in items)
             {
                 if (!marks.TryGetValue((item.Kind, item.LogKey), out var mark)) continue;
+                if (mark.Target == HangarService.MarkTargetMyShips)
+                {
+                    // 船: 印の鍵が source_key の所持船の行を消す (行が無ければ (先に手で消してある) 印だけ消して知らせる)
+                    var (found, missing) = _hangarService.CancelImport(item.Kind, item.LogKey);
+                    if (!found) continue;
+                    shipsChanged = true;
+                    if (missing > 0) missingShips.Add(item.DisplayName);
+                    Log(missing > 0
+                        ? $"[Ship] ゲームログの取り消し: {item.DisplayName} の所持船の行は既にありませんでした (印だけ消しました)"
+                        : $"[Ship] ゲームログの取り消し: {item.DisplayName} を所持船から消しました");
+                    continue;
+                }
                 if (mark.Target == OreService.MarkTargetStock)
                 {
                     var (found, shortage) = _oreService.CancelStockImport(item.Kind, item.LogKey);
@@ -5950,12 +6140,15 @@ public partial class MainWindow : Window
         }
         if (gearChanged) RefreshMyGear();
         if (stockChanged) orePanel?.Reload();
+        if (shipsChanged) RefreshMyShips();
         if (shortages.Count > 0)
         {
             var text = "所持・在庫が足りなかったので 0 で止めました (引けなかった数): " + string.Join(", ", shortages);
             Log($"[ゲームログ] {text}");
             MessageBox.Show(text, "ゲームログ");
         }
+        if (missingShips.Count > 0)
+            MessageBox.Show("所持船の行は既にありませんでした (印だけ消しました): " + string.Join(", ", missingShips), "ゲームログ");
     }
 
     // ［ゲームログ］の売買・採掘の記録 → ［鉱石］(OrePanel.ImportLogRecords)。GameLogParser の型を OrePanel の型に写す
@@ -5978,9 +6171,38 @@ public partial class MainWindow : Window
         InvalidateImportMarks();
     }
 
-    // ［ゲームログ］の内容の欄の品名のダブルクリック → ［詳細］。record が item_index (items) にあれば品目で、無いもの (鉱石) は名前で検索した状態で開く
+    // ［ゲームログ］の内容の欄の船のダブルクリック → ［詳細］。クラス名が分かっていて ships にあればその品目 (ships.record_name)、
+    // クラス名が無い行 (乗船・到着など表示名だけ) は所持船と同じく船名と Ship Matrix のメーカーで ResolveShipRecordName。決まらなければ名前で検索した状態で開く
+    private void OpenGameLogShipDetail(string? shipClass, string shipName)
+    {
+        string? record = null;
+        try
+        {
+            if (shipClass != null)
+            {
+                var r = "EntityClassDefinition." + shipClass;
+                if (ShipRecordExists(r)) record = r;
+            }
+            if (record == null && shipName.Length > 0)
+            {
+                _hangarService.SetCacheDir(WorkDir);
+                record = _hangarService.ResolveShipRecordName(shipName, _hangarService.ResolveShip(shipName)?.ManufacturerName);
+            }
+        }
+        catch (Exception ex) { Log($"[ゲームログ] 詳細の船を決められませんでした ({shipName}): {ex.Message}"); record = null; }
+        if (record != null) DetailPanel.Request(record, shipName.Length > 0 ? shipName : shipClass ?? "");
+        else DetailPanel.RequestSearch(shipName.Length > 0 ? shipName : shipClass ?? "");
+    }
+
+    // ［ゲームログ］の内容の欄の品名のダブルクリック → ［詳細］。record が item_index (items) にあれば品目で、無いもの (鉱石) は名前で検索した状態で開く。
+    // 船 (購入した船・呼び出した船) は OpenGameLogShipDetail
     private void OpenGameLogItemDetail(GameLogImportItem item)
     {
+        if (item.IsShip)
+        {
+            OpenGameLogShipDetail(item.ItemClass.Length > 0 ? item.ItemClass : null, item.DisplayName);
+            return;
+        }
         var record = "EntityClassDefinition." + item.ItemClass;
         EquipmentItem? found = null;
         try { found = _hangarEquip?.GetItemByRecord(record); }
@@ -6335,7 +6557,9 @@ public partial class MainWindow : Window
 
         var mfr = cmbAddShipMfr.Text.Trim();
         int.TryParse(txtAddShipScu.Text.Trim(), out var scu);
-        var notes = ApplyInGameMarker(txtAddShipNotes.Text.Trim(), chkAddShipInGame.IsChecked == true);
+        var inGame = chkAddShipInGame.IsChecked == true;
+        var notes = ApplyInGameMarker(txtAddShipNotes.Text.Trim(), inGame);
+        if (!TryReadExpires(out var expires)) return;
 
         // SCU が入っていなければ共通の関数 (ゲームデータ → UEX → Ship Matrix) の値で補う。メーカーは今までどおり UEX から補う
         if (scu == 0)
@@ -6345,7 +6569,8 @@ public partial class MainWindow : Window
             scu = CargoAsInt(ShipCargo.Resolve(name, mfr));
         }
 
-        try { _tradeService.AddMyShip(name, mfr, scu, notes); }
+        // 入手の種類: 「ゲーム内購入」のチェックで ingame、それ以外は手入力 ('')
+        try { _tradeService.AddMyShip(name, mfr, scu, notes, inGame ? MyShipEntry.OriginInGame : "", expires); }
         catch (Exception ex)
         {
             MessageBox.Show($"エラー: {ex.Message}", "エラー");
@@ -6356,9 +6581,35 @@ public partial class MainWindow : Window
         cmbAddShipMfr.Text = "";
         txtAddShipScu.Text = "0";
         txtAddShipNotes.Text = "";
+        txtAddShipExpires.Text = "";
         chkAddShipInGame.IsChecked = false;
-        Log($"[Ship] 追加: {name}{(scu > 0 ? $" ({scu} SCU)" : "")}{(IsInGameNotes(notes) ? " [ゲーム内購入]" : "")}");
+        Log($"[Ship] 追加: {name}{(scu > 0 ? $" ({scu} SCU)" : "")}{(IsInGameNotes(notes) ? " [ゲーム内購入]" : "")}{(expires != null ? $" 期限 {expires}" : "")}");
     }
+
+    // 期限の入力欄 (txtAddShipExpires) を読む。空なら期限なし (null)。読める形は ExpiresInputFormats (年を省けば今年)。読めなければ知らせて false
+    private static readonly string[] ExpiresInputFormats =
+    [
+        "yyyy/MM/dd HH:mm", "yyyy/MM/dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd'T'HH:mm:ss",
+        "yyyy/MM/dd", "yyyy-MM-dd", "MM/dd HH:mm", "M/d HH:mm", "M/d H:mm", "MM/dd", "M/d",
+    ];
+
+    private bool TryReadExpires(out string? expires)
+    {
+        expires = null;
+        var text = txtAddShipExpires.Text.Trim();
+        if (text.Length == 0) return true;
+        if (DateTime.TryParseExact(text, ExpiresInputFormats, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeLocal, out var t))
+        {
+            expires = t.ToString(MyShipEntry.ExpiresFormat, System.Globalization.CultureInfo.InvariantCulture);
+            return true;
+        }
+        MessageBox.Show("期限の日時が読めません。「2026/10/18 22:24」や「10/18 22:24」の形で入力してください (空なら期限なし)。", "入力エラー");
+        return false;
+    }
+
+    // 期限 (my_ships.expires_at) を入力欄の形 ("yyyy/MM/dd HH:mm") にする。無ければ空
+    private static string ExpiresInputText(string? expiresAt) =>
+        MyShipEntry.ParseExpires(expiresAt) is { } t ? t.ToString("yyyy/MM/dd HH:mm", System.Globalization.CultureInfo.InvariantCulture) : "";
 
     // 所持船メモの「ゲーム内購入 (aUEC)」接頭辞。my_ships.notes の先頭に付けて由来を記録する (スキーマは変えない)
     private const string InGameNotesMarker = "[ゲーム内購入]";
@@ -6394,7 +6645,7 @@ public partial class MainWindow : Window
     }
 
     // ワイプ (サーバーリセット) で無くなる船を選んでまとめて削除する。
-    // 既定のチェックはゲーム内購入 (aUEC) の船だけ。pledge で持っている船はワイプで消えないので既定では外す
+    // 既定では入手の種類がゲーム内購入 (ingame) ・ミッション (mission) の船だけを一覧に出し、全部チェック済み (ダイアログの「すべての船を表示」で pledge・手入力も出せる)
     private void ShipWipe_Click(object sender, RoutedEventArgs e)
     {
         var rows = (dgMyShips.ItemsSource as IEnumerable<MyShipRow>)?.ToList() ?? new List<MyShipRow>();
@@ -6407,9 +6658,10 @@ public partial class MainWindow : Window
         var dlg = new ShipWipeDialog(rows.Select(r => new WipeShipRow
         {
             Id = r.Id,
-            Selected = r.IsInGame,
+            Selected = r.IsFromGameLog,
             Name = r.Name,
             Manufacturer = r.Manufacturer,
+            Origin = r.Origin,
             OriginDisplay = r.HangarOriginDisplay,
             HangarCountDisplay = r.HangarCountDisplay,
             IsPledge = r.HangarCount > 0,
@@ -6460,8 +6712,9 @@ public partial class MainWindow : Window
         // 登録した値 (my_ships.scu) をそのまま出す (0 は空欄)。共通の関数の値は入れない ([更新] で利用者の入力として保存されないように)
         txtAddShipScu.Text = ship.Scu > 0 ? ship.Scu.ToString() : "";
         // 「ゲーム内購入」は notes の接頭辞からチェックボックスへ復元し、メモ欄には本文だけを出す (保存時に ApplyInGameMarker で付け直す)
-        chkAddShipInGame.IsChecked = IsInGameNotes(ship.Notes);
+        chkAddShipInGame.IsChecked = ship.Origin == MyShipEntry.OriginInGame || IsInGameNotes(ship.Notes);
         txtAddShipNotes.Text = StripInGameMarker(ship.Notes);
+        txtAddShipExpires.Text = ExpiresInputText(ship.ExpiresAt);
         txtMyShipStatus.Text = $"編集中: {ship.Name} — 入力欄を変更して [追加] で新規 or 下の更新ボタンで上書き";
 
         // 装備サブタブの「現在の装備」もこの船に切り替える (タブは所持船のまま。装備タブを開けばこの船が出ている)
@@ -6533,15 +6786,19 @@ public partial class MainWindow : Window
         var name = cmbAddShipName.Text.Trim();
         if (string.IsNullOrEmpty(name)) return;
         int.TryParse(txtAddShipScu.Text.Trim(), out var scu);
-        var notes = ApplyInGameMarker(txtAddShipNotes.Text.Trim(), chkAddShipInGame.IsChecked == true);
-        try { _tradeService.UpdateMyShip(ship.Id, name, cmbAddShipMfr.Text.Trim(), scu, notes); }
+        var inGame = chkAddShipInGame.IsChecked == true;
+        var notes = ApplyInGameMarker(txtAddShipNotes.Text.Trim(), inGame);
+        if (!TryReadExpires(out var expires)) return;
+        // 入手の種類: チェックを付ければ ingame。外したときは、ingame だった行は手入力 ('') に戻し、ほか (pledge / mission) はそのまま
+        var origin = inGame ? MyShipEntry.OriginInGame : ship.Origin == MyShipEntry.OriginInGame ? "" : ship.Origin;
+        try { _tradeService.UpdateMyShip(ship.Id, name, cmbAddShipMfr.Text.Trim(), scu, notes, origin, expires); }
         catch (Exception ex)
         {
             MessageBox.Show($"エラー: {ex.Message}", "エラー");
             return;
         }
         RefreshMyShips();
-        Log($"[Ship] 更新: {name}{(scu > 0 ? $" ({scu} SCU)" : "")}{(IsInGameNotes(notes) ? " [ゲーム内購入]" : "")}");
+        Log($"[Ship] 更新: {name}{(scu > 0 ? $" ({scu} SCU)" : "")}{(IsInGameNotes(notes) ? " [ゲーム内購入]" : "")}{(expires != null ? $" 期限 {expires}" : "")}");
     }
 
     // === Commodity Trade ===
@@ -7558,9 +7815,15 @@ public class MyShipRow
     public double ScuSortValue => Cargo?.Scu ?? 0;
     public string DisplayName => Cargo is { } c ? $"{Name} ({ShipCargo.Format(c.Scu)} SCU)" : Name;
 
+    // 入手の種類 (my_ships.origin。MyShipEntry.Origin*。'' = 手入力・不明)、期限 (my_ships.expires_at)、期限切れか (薄字にする)
+    public string Origin { get; set; } = "";
+    public string? ExpiresAt { get; set; }
+    public bool IsExpired { get; set; }
+    public bool IsFromGameLog => Origin is MyShipEntry.OriginInGame or MyShipEntry.OriginMission;
+
     public int HangarCount { get; set; }                    // 正規化名が一致する同期済み保有船の数 (0 = 未同期)
-    public bool IsInGame { get; set; }                      // Hangar 未一致で、メモが "[ゲーム内購入]" で始まる (aUEC 購入の船。未同期とは表示しない)
-    public string HangarCountDisplay => HangarCount > 0 ? $"×{HangarCount}" : IsInGame ? "" : "未同期";
+    public bool IsInGame { get; set; }                      // origin が ingame か、Hangar 未一致でメモが "[ゲーム内購入]" で始まる (aUEC 購入の船。未同期とは表示しない)
+    public string HangarCountDisplay => HangarCount > 0 ? $"×{HangarCount}" : IsInGame || Origin == MyShipEntry.OriginMission ? "" : "未同期";
     public string HangarOriginDisplay { get; set; } = "";   // 一致した保有船の由来を " / " 連結 (Hangar 未一致のゲーム内購入は "ゲーム内購入")
     public bool HangarCanUpgrade { get; set; }              // 一致した保有船のいずれかに使える権利がある
     public string HangarUpgradableDisplay { get; set; } = "";

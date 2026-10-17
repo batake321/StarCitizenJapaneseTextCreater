@@ -31,6 +31,9 @@ public partial class GameLogPanel : UserControl
     // 着陸場所の ID → 場所の名前 (ミッション名と同じくタブ全体で 1 つを共有し、名前待ちの行の書き換えは UI のスレッドで行う)
     private readonly GameLogPlaceNames _placeNames = new();
     private int _placeVersionApplied = -1;
+    // 船の ID → クラス名・推定の系統 (同じく共有し、船名待ちの呼び出しの行の書き換えは UI のスレッドで行う)
+    private readonly GameLogVehicleClasses _vehicleClasses = new();
+    private int _vehicleVersionApplied = -1;
     private string _logPath = "";
     private bool _logMissing;
     private string? _pollError;
@@ -65,9 +68,15 @@ public partial class GameLogPanel : UserControl
     // 納品の行 (kind delivered の品) の自動の減算 (MainWindow)。まだ渡していない行だけを渡す
     public Action<IReadOnlyList<GameLogEntry>>? DeliveryImporter { get; set; }
     private readonly HashSet<string> _handedDeliveries = new(StringComparer.Ordinal);
+    // 船の行 (船の購入・呼び出し。ImportItems の品が船 (IsShip) でクラス名の分かるもの) の自動の所持船への登録 (MainWindow)。まだ渡していない行だけを渡す。
+    // false を返したら (所持船の情報がまだ読めていない) 「渡した」にせず、次の表の作り直しでもう一度渡す
+    public Func<IReadOnlyList<GameLogEntry>, bool>? ShipImporter { get; set; }
+    private readonly HashSet<string> _handedShips = new(StringComparer.Ordinal);
     public Func<string, (double Profit, double? Rate)?>? SellProfit { get; set; }
     // 内容の欄の品名のダブルクリック → ［詳細］(MainWindow が DetailPanel.Request / RequestSearch に回す)
     public Action<GameLogImportItem>? DetailOpener { get; set; }
+    // 内容の欄の船のダブルクリック (品名の無い行の船。クラス名 (分かっていれば) と表示名) → ［詳細］
+    public Action<string?, string>? ShipDetailOpener { get; set; }
 
     // 渡した売買の記録 (鍵 → そのときの結果) と採掘の記録 (鍵)。UI のスレッドだけで使う
     private readonly Dictionary<string, string> _handedTrades = new(StringComparer.Ordinal);
@@ -168,22 +177,32 @@ public partial class GameLogPanel : UserControl
         UpdateTable();
     }
 
-    // 内容の欄のダブルクリック: 押した位置にある品名の品 (品が 1 つの行はどこを押しても) を［詳細］に出す
+    // 内容の欄のダブルクリック: 押した位置にある品名の品 (品が 1 つの行はどこを押しても) を［詳細］に出す。
+    // 品名の無い行 (品が船だけの行も含む) は、行の船 (ShipClass / ShipName) を［詳細］に出す (船名がまだ分からない行は何もしない)
     private void OnCellDoubleClicked(int column, object source, int charIndex)
     {
-        if (column != ContentColumn || source is not GameLogEntry e || e.ImportItems is not { Count: > 0 } items || DetailOpener == null) return;
-        GameLogImportItem? hit = null;
-        if (charIndex >= 0)
+        if (column != ContentColumn || source is not GameLogEntry e) return;
+        var items = e.ImportItems is { Count: > 0 } list ? list.Where(i => !i.IsShip).ToList() : [];
+        if (items.Count > 0 && DetailOpener != null)
         {
-            foreach (var item in items)
+            GameLogImportItem? hit = null;
+            if (charIndex >= 0)
             {
-                if (item.DisplayName.Length == 0) continue;
-                var at = e.Content.IndexOf(item.DisplayName, StringComparison.Ordinal);
-                if (at >= 0 && charIndex >= at && charIndex <= at + item.DisplayName.Length) { hit = item; break; }
+                foreach (var item in items)
+                {
+                    if (item.DisplayName.Length == 0) continue;
+                    var at = e.Content.IndexOf(item.DisplayName, StringComparison.Ordinal);
+                    if (at >= 0 && charIndex >= at && charIndex <= at + item.DisplayName.Length) { hit = item; break; }
+                }
             }
+            hit ??= items.Count == 1 ? items[0] : null;
+            if (hit != null) DetailOpener(hit);
+            return;
         }
-        hit ??= items.Count == 1 ? items[0] : null;
-        if (hit != null) DetailOpener(hit);
+        if (ShipDetailOpener == null) return;
+        var name = e.ShipName ?? (e.ShipClass != null ? _names?.Ship(e.ShipClass) : null);
+        if (e.ShipClass == null && string.IsNullOrEmpty(name)) return;
+        ShipDetailOpener(e.ShipClass, name ?? e.ShipClass!);
     }
 
     // 所持・在庫に入れられる行のボタンの状態を決める (ImportClassifier)。失敗したらボタンを出さない
@@ -261,6 +280,32 @@ public partial class GameLogPanel : UserControl
         {
             ChatService.LogExternal($"[ゲームログ] 納品の在庫への反映に失敗しました (次の表の作り直しでもう一度行います): {ex.Message}");
         }
+        HandOverShips(entries);
+    }
+
+    // 船の行 (購入した船・呼び出した船。品が船 (IsShip) でクラス名が分かっていて、購入なら成功したもの) をまだ渡していないものだけ ShipImporter へ (古い順)。
+    // 渡す条件を満たすまで (船名が分かるまで・購入の結果が来るまで) は「渡した」にしない。失敗したら「渡した」にせず、次の作り直しでもう一度渡す
+    private void HandOverShips(IReadOnlyList<GameLogEntry> entries)
+    {
+        if (ShipImporter == null) return;
+        var list = new List<GameLogEntry>();
+        for (int i = entries.Count - 1; i >= 0; i--)
+        {
+            var e = entries[i];
+            if (e.ImportItems is not { Count: > 0 } items || !items[0].IsShip || items[0].ItemClass.Length == 0) continue;
+            if (e.Purchase is { } p && !p.Succeeded) continue;
+            if (!_handedShips.Contains(items[0].LogKey)) list.Add(e);
+        }
+        if (list.Count == 0) return;
+        try
+        {
+            if (!ShipImporter(list)) return;
+            foreach (var e in list) _handedShips.Add(e.ImportItems![0].LogKey);
+        }
+        catch (Exception ex)
+        {
+            ChatService.LogExternal($"[ゲームログ] 船の所持船への登録に失敗しました (次の表の作り直しでもう一度行います): {ex.Message}");
+        }
     }
 
     // 船名・品名の覚えた結果を捨てる。MainWindow から、訳・品目名 (item_index.name) が替わったときに呼ぶ。
@@ -287,7 +332,7 @@ public partial class GameLogPanel : UserControl
         _names = new GameLogNames(Path.Combine(workDir, "gamedata_cache.db"), Path.Combine(workDir, "translations.db"));
         _logPath = Path.Combine(gamePath, "Game.log");
         _tail = new GameLogTail(_logPath, CurrentSource, _names.Ship, _names.Item, _missionNames, _names.Translate, _names.IsVehicleClass, _names.Resource,
-            _names.Place, _placeNames, _names.ItemLabel);
+            _names.Place, _placeNames, _names.ItemLabel, _vehicleClasses, _names.ShipClassByName);
 
         // 過去のログ: 初回の一覧はここで取り (再起動の後に探すときに、新しいファイルと見分けるため)、読むのは裏で行う
         _backupDir = Path.Combine(gamePath, "logbackups");
@@ -325,7 +370,7 @@ public partial class GameLogPanel : UserControl
             try
             {
                 var rows = GameLogParser.ParseFile(f.FullName, Path.GetFileNameWithoutExtension(f.Name), names.Ship, names.Item, _missionNames,
-                    names.Translate, names.IsVehicleClass, names.Resource, names.Place, _placeNames, names.ItemLabel);
+                    names.Translate, names.IsVehicleClass, names.Resource, names.Place, _placeNames, names.ItemLabel, _vehicleClasses, names.ShipClassByName);
                 lock (_backupLock)
                 {
                     _backupRows.AddRange(rows);
@@ -434,6 +479,13 @@ public partial class GameLogPanel : UserControl
             {
                 _placeVersionApplied = placeVersion;
                 if (_placeNames.Apply(_backupSnapshot.Concat(_currentRows))) changed = true;
+            }
+            // 船の名前: 同じく、船名待ちの呼び出しの行 (「船 ID n」「X 系（推定）」) を書き換える
+            var vehicleVersion = _vehicleClasses.Version;
+            if ((changed || vehicleVersion != _vehicleVersionApplied) && _names is { } names)
+            {
+                _vehicleVersionApplied = vehicleVersion;
+                if (_vehicleClasses.Apply(_backupSnapshot.Concat(_currentRows), names.Ship)) changed = true;
             }
             if (changed) UpdateTable();
         }
@@ -544,6 +596,7 @@ public partial class GameLogPanel : UserControl
                 _ships.Clear();
                 _items.Clear();
                 _itemLabels.Clear();
+                _shipClassesByName.Clear();
                 _resources.Clear();
                 _translations.Clear();
                 _vehicleClasses.Clear();
@@ -553,6 +606,31 @@ public partial class GameLogPanel : UserControl
 
         public string Ship(string className) => Resolve(className, _ships, ResolveShip);
         public string Item(string itemName) => Resolve(itemName, _items, name => ResolveName("items", name));
+        // 船の表示名 (乗船の通知の「MISC Starfarer Gemini」= ships.name_en) → クラス名。同じ name_en の record (AI 用の派生など) のうち、
+        // _Display 版を除いていちばん短い record_name のもの。無ければ null (引けなかったことも覚える)
+        public string? ShipClassByName(string displayName)
+        {
+            if (string.IsNullOrEmpty(displayName)) return null;
+            lock (_lock)
+            {
+                if (_shipClassesByName.TryGetValue(displayName, out var v)) return v;
+                string? result = null;
+                try
+                {
+                    using var game = Open(_gamedataCacheDbPath);
+                    if (game == null) return null;
+                    using var cmd = game.CreateCommand();
+                    cmd.CommandText = "SELECT record_name FROM ships WHERE name_en = @n COLLATE NOCASE AND record_name NOT LIKE '%\\_Display%' ESCAPE '\\' ORDER BY length(record_name), record_name LIMIT 1";
+                    cmd.Parameters.AddWithValue("@n", displayName.Trim());
+                    if (cmd.ExecuteScalar() is string record && record.StartsWith("EntityClassDefinition.", StringComparison.Ordinal))
+                        result = record["EntityClassDefinition.".Length..];
+                }
+                catch { return null; }   // DB を読めなかった (name_en 列の無い古い DB も) ときは覚えず、次の時にもう一度引く
+                _shipClassesByName[displayName] = result;
+                return result;
+            }
+        }
+        private readonly Dictionary<string, string?> _shipClassesByName = new(StringComparer.Ordinal);
         // 品目の内部名 → 「日本語 (英語)」(貨物エレベーターで降ろした品)。items.name のキーを翻訳 DB で引いて Label にする。
         // items に無ければ item_index の name_ja (無ければ name)。引けなければ内部名のまま
         public string ItemLabel(string itemName) => Resolve(itemName, _itemLabels, ResolveItemLabel);

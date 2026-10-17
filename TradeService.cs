@@ -459,17 +459,85 @@ public class TradeService
             CREATE TABLE IF NOT EXISTS trade_ships (name TEXT, manufacturer TEXT, scu INTEGER, fetched_at TEXT);
             CREATE TABLE IF NOT EXISTS trade_terminals (id INTEGER DEFAULT 0, name TEXT PRIMARY KEY, has_loading_dock INTEGER, has_docking_port INTEGER, is_cargo_center INTEGER);
             CREATE TABLE IF NOT EXISTS trade_meta (key TEXT PRIMARY KEY, value TEXT);
-            CREATE TABLE IF NOT EXISTS my_ships (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                manufacturer TEXT DEFAULT '',
-                scu INTEGER DEFAULT 0,
-                notes TEXT DEFAULT '',
-                added_at TEXT DEFAULT (datetime('now','localtime'))
-            );
-            """;
+            """ + MyShipsDdl;
         cmd.ExecuteNonQuery();
         MigrateTerminalsSchema(db);
+        MigrateMyShipsSchema(db);
+    }
+
+    // 所持船 (my_ships) の DDL (HangarService.ImportShip・DatabaseBackupService からも同じ形を使う)
+    internal const string MyShipsDdl = """
+
+        CREATE TABLE IF NOT EXISTS my_ships (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            manufacturer TEXT DEFAULT '',
+            scu INTEGER DEFAULT 0,
+            notes TEXT DEFAULT '',
+            added_at TEXT DEFAULT (datetime('now','localtime')),
+            origin TEXT DEFAULT '',
+            expires_at TEXT,
+            source_key TEXT DEFAULT ''
+        );
+        """;
+
+    // my_ships を作り (無ければ)、旧スキーマなら列を足す (トランザクションの外で呼ぶ)
+    internal static void EnsureMyShipsSchema(SqliteConnection db)
+    {
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.CommandText = MyShipsDdl;
+            cmd.ExecuteNonQuery();
+        }
+        MigrateMyShipsSchema(db);
+    }
+
+    // 所持船 (my_ships) の入手の種類 (origin: '' = 手入力・不明 / 'pledge' / 'ingame' (ゲーム内購入) / 'mission' (ミッションの報酬など))、
+    // 期限 (expires_at: ローカル時刻の "yyyy-MM-dd HH:mm:ss"。NULL = 期限なし)、ゲームログからの登録の印の鍵 (source_key: game_log_imports.log_key) の列。
+    // 旧スキーマ (列なし) には列を足し、一度だけ (trade_meta の MyShipsOriginMigratedKey) 既存の行の origin をメモから移す:
+    //   メモが "[ゲーム内購入]" で始まる → ingame、Hangar の反映 (ImportHangarShipsIntoMyShips) が書いたメモ ("パック: " / "単品: " / "CCU 適用済" / "VIP 特典" で始まる) → pledge。
+    // (インポート (DatabaseBackupService) でも、取り込む前に同じ移行をするために呼ぶ)
+    private const string MyShipsOriginMigratedKey = "my_ships_origin_migrated";
+
+    internal static void MigrateMyShipsSchema(SqliteConnection db)
+    {
+        var cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var check = db.CreateCommand())
+        {
+            check.CommandText = "PRAGMA table_info(my_ships)";
+            using var r = check.ExecuteReader();
+            while (r.Read()) cols.Add(r.GetString(1));
+        }
+        if (cols.Count == 0) return;   // 表が無い
+        using var cmd = db.CreateCommand();
+        if (!cols.Contains("origin"))
+        {
+            cmd.CommandText = "ALTER TABLE my_ships ADD COLUMN origin TEXT DEFAULT ''";
+            cmd.ExecuteNonQuery();
+        }
+        if (!cols.Contains("expires_at"))
+        {
+            cmd.CommandText = "ALTER TABLE my_ships ADD COLUMN expires_at TEXT";
+            cmd.ExecuteNonQuery();
+        }
+        if (!cols.Contains("source_key"))
+        {
+            cmd.CommandText = "ALTER TABLE my_ships ADD COLUMN source_key TEXT DEFAULT ''";
+            cmd.ExecuteNonQuery();
+        }
+        cmd.CommandText = "CREATE TABLE IF NOT EXISTS trade_meta (key TEXT PRIMARY KEY, value TEXT)";
+        cmd.ExecuteNonQuery();
+        cmd.CommandText = "SELECT value FROM trade_meta WHERE key = @k";
+        cmd.Parameters.AddWithValue("@k", MyShipsOriginMigratedKey);
+        if (cmd.ExecuteScalar() is string) return;
+        cmd.Parameters.Clear();
+        cmd.CommandText = $"""
+            UPDATE my_ships SET origin = '{MyShipEntry.OriginInGame}' WHERE COALESCE(origin, '') = '' AND notes LIKE '[ゲーム内購入]%';
+            UPDATE my_ships SET origin = '{MyShipEntry.OriginPledge}' WHERE COALESCE(origin, '') = ''
+                AND (notes LIKE 'パック: %' OR notes LIKE '単品: %' OR notes LIKE 'CCU 適用済%' OR notes LIKE 'VIP 特典%');
+            INSERT OR REPLACE INTO trade_meta (key, value) VALUES ('{MyShipsOriginMigratedKey}', '1');
+            """;
+        cmd.ExecuteNonQuery();
     }
 
     // 旧スキーマ(id 列なし)の trade_terminals だけを作り直す。
@@ -920,7 +988,7 @@ public class TradeService
             InitDb(db);
             var list = new List<MyShipEntry>();
             using var cmd = db.CreateCommand();
-            cmd.CommandText = "SELECT id, name, manufacturer, scu, notes, added_at FROM my_ships ORDER BY name";
+            cmd.CommandText = "SELECT id, name, manufacturer, scu, notes, added_at, origin, expires_at, source_key FROM my_ships ORDER BY name";
             using var r = cmd.ExecuteReader();
             while (r.Read())
                 list.Add(new MyShipEntry
@@ -931,6 +999,9 @@ public class TradeService
                     Scu = r.IsDBNull(3) ? 0 : r.GetInt32(3),
                     Notes = r.IsDBNull(4) ? "" : r.GetString(4),
                     AddedAt = r.IsDBNull(5) ? "" : r.GetString(5),
+                    Origin = r.IsDBNull(6) ? "" : r.GetString(6),
+                    ExpiresAt = r.IsDBNull(7) ? null : r.GetString(7),
+                    SourceKey = r.IsDBNull(8) ? "" : r.GetString(8),
                 });
             _myShips = list;
         }
@@ -941,23 +1012,26 @@ public class TradeService
         }
     }
 
-    public void AddMyShip(string name, string manufacturer, int scu, string notes = "")
+    // origin は入手の種類 (MyShipEntry.Origin*。'' = 手入力)、expiresAt は期限 (ローカル時刻の "yyyy-MM-dd HH:mm:ss"。null = なし)、
+    // sourceKey はゲームログからの登録の印の鍵 (手入力は '')
+    public void AddMyShip(string name, string manufacturer, int scu, string notes = "", string origin = "", string? expiresAt = null, string sourceKey = "")
     {
         if (_dbPath == null) return;
         using var db = new SqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
-        Exec(db, "INSERT INTO my_ships (name, manufacturer, scu, notes) VALUES (@n, @m, @s, @no)",
-            ("@n", name), ("@m", manufacturer), ("@s", scu), ("@no", notes));
+        Exec(db, "INSERT INTO my_ships (name, manufacturer, scu, notes, origin, expires_at, source_key) VALUES (@n, @m, @s, @no, @o, @e, @k)",
+            ("@n", name), ("@m", manufacturer), ("@s", scu), ("@no", notes), ("@o", origin ?? ""), ("@e", (object?)expiresAt ?? DBNull.Value), ("@k", sourceKey ?? ""));
         LoadMyShips();
     }
 
-    public void UpdateMyShip(int id, string name, string manufacturer, int scu, string notes)
+    // 船名・メーカー・SCU・メモ・入手の種類・期限を書き換える (source_key は変えない)
+    public void UpdateMyShip(int id, string name, string manufacturer, int scu, string notes, string origin, string? expiresAt)
     {
         if (_dbPath == null) return;
         using var db = new SqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
-        Exec(db, "UPDATE my_ships SET name=@n, manufacturer=@m, scu=@s, notes=@no WHERE id=@id",
-            ("@n", name), ("@m", manufacturer), ("@s", scu), ("@no", notes), ("@id", id));
+        Exec(db, "UPDATE my_ships SET name=@n, manufacturer=@m, scu=@s, notes=@no, origin=@o, expires_at=@e WHERE id=@id",
+            ("@n", name), ("@m", manufacturer), ("@s", scu), ("@no", notes), ("@o", origin ?? ""), ("@e", (object?)expiresAt ?? DBNull.Value), ("@id", id));
         LoadMyShips();
     }
 
@@ -1422,6 +1496,41 @@ public class MyShipEntry
     public int Scu { get; set; }
     public string Notes { get; set; } = "";
     public string AddedAt { get; set; } = "";
+    // 入手の種類 (my_ships.origin): '' = 手入力・不明、pledge、ingame (ゲーム内購入)、mission (ミッションの報酬など)
+    public string Origin { get; set; } = "";
+    // 期限 (my_ships.expires_at。ローカル時刻の "yyyy-MM-dd HH:mm:ss")。null = 期限なし
+    public string? ExpiresAt { get; set; }
+    // ゲームログからの登録の印の鍵 (game_log_imports.log_key)。手入力は ''
+    public string SourceKey { get; set; } = "";
+
+    public const string OriginPledge = "pledge";
+    public const string OriginInGame = "ingame";
+    public const string OriginMission = "mission";
+    // 期限の保存の形 (ローカル時刻)
+    public const string ExpiresFormat = "yyyy-MM-dd HH:mm:ss";
+
+    // 入手の種類の表示 ('' は空)
+    public static string OriginLabel(string? origin) => origin switch
+    {
+        OriginPledge => "pledge",
+        OriginInGame => "ゲーム内購入",
+        OriginMission => "ミッション (Wikelo など)",
+        _ => "",
+    };
+    public string OriginDisplay => OriginLabel(Origin);
+    public bool IsFromGameLog => Origin is OriginInGame or OriginMission;
+
+    // 期限を日時にする (読めなければ null)
+    public DateTime? ExpiresAtTime => ParseExpires(ExpiresAt);
+    public bool IsExpired => ExpiresAtTime is { } t && t <= DateTime.Now;
+
+    public static DateTime? ParseExpires(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        return DateTime.TryParseExact(text.Trim(), ExpiresFormat, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeLocal, out var t)
+            ? t
+            : DateTime.TryParse(text.Trim(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeLocal, out t) ? t : null;
+    }
     // 積載量は登録した値 (Scu) が 0 より大きければそれ、0 なら共通の関数。Cargo は表示用 (計算済みの値だけ。まだなら裏で計算する)、
     // ResolveCargo はその場で計算する。分からなければ船名だけ
     public ShipCargo.Info? Cargo => ShipCargo.PeekMyShip(this);

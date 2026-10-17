@@ -33,6 +33,14 @@ public sealed class GameLogEntry
     public GameLogTrade? Trade { get; init; }
     // 採掘の行の中身 (［鉱石］の mining_log に入れる)。ほかの行は null
     public GameLogMining? Mining { get; init; }
+    // 行の船。ShipClass はクラス名 (呼び出し・呼び出し完了・格納・操縦・降りた・衝突・死亡・量子ジャンプなど、クラス名の分かる行)。
+    // ShipName は内容の欄に出した船の表示名 (乗船・同乗・下船・到着・出発・ハンガー要求はこれだけ)。どちらも無ければ null。
+    // 内容の欄のダブルクリックで［詳細］に出すのに使う
+    public string? ShipClass { get; set; }
+    public string? ShipName { get; set; }
+    // 船名がまだ分からない呼び出し・呼び出し完了の行の船の ID (内容には VehicleToken (「船 ID n」か「X 系（推定）」) で出してある)。分かったら null
+    public string? PendingVehicleId { get; set; }
+    public string VehicleToken { get; set; } = "";
 }
 
 // ［ゲームログ］の行のボタンの状態。Ready = 「入れる」を押せる、Imported = 入れ済み (「取り消す」を押せる)、None = ボタン無し
@@ -44,19 +52,26 @@ public enum PurchaseImportState { None, Ready, Imported }
 //           mined は 時刻・クラス名・個体 ID、dropped は 降ろした時刻・クラス名)
 //   ItemClass: ログの中の品の内部名 (店の itemName / ItemClass / Harvestable_Mineral_1H_<X>)。item_index の record は "EntityClassDefinition." + これ
 //   Quantity: 数。DisplayName: 内容の欄に出した品名 (ダブルクリックで品を見分けるのに使う)
+//   IsVehicle: 店で買った品が船・車両 (item_index の Vehicle 系か ships にある) なら true (所持船に入れる)。
+//   船の呼び出し (ship_spawn) の ItemClass・DisplayName は、船名が後から分かったときに書き換える (ApplyVehicleClass)
 public sealed class GameLogImportItem
 {
     public string Kind { get; init; } = "";
     public string LogKey { get; init; } = "";
-    public string ItemClass { get; init; } = "";
+    public string ItemClass { get; set; } = "";
     public int Quantity { get; init; }
-    public string DisplayName { get; init; } = "";
+    public string DisplayName { get; set; } = "";
+    public bool IsVehicle { get; init; }
 
     public const string KindPurchase = "purchase";
     public const string KindMined = "mined";
     public const string KindDropped = "dropped";
     // 納品 (在庫から引く。鍵は 納品の時刻・MissionId・ObjectiveId、ItemClass は無し (品名は通知の日本語))
     public const string KindDelivered = "delivered";
+    // 船の呼び出し (所持船に無い船なら所持船に入れる。鍵は 呼び出しの時刻・船の ID。ItemClass はクラス名 (まだ分からなければ空))
+    public const string KindShipSpawn = "ship_spawn";
+    // 船 (購入の IsVehicle か ship_spawn) か
+    public bool IsShip => Kind == KindShipSpawn || (Kind == KindPurchase && IsVehicle);
     public const char KeySeparator = '\u001f';
 
     public static string MakeKey(params string[] parts) => string.Join(KeySeparator, parts);
@@ -211,6 +226,78 @@ public sealed class GameLogPlaceNames
     }
 }
 
+// 船の ID → クラス名 (確定) と、ATC の行から推定した系統名 (「Apollo 系（推定）」)。GameLogMissionNames と同じ流儀で、［ゲームログ］タブ全体で
+// 1 つを共有し、ファイルをまたいで引く (同じ船の ID は再起動をまたいでも変わらないので、別のファイルで分かったクラス名を呼び出しの行に使える)。
+// 確定のクラス名があれば推定は使わない (推定は確定が来るまでのつなぎ)
+public sealed class GameLogVehicleClasses
+{
+    private readonly object _lock = new();
+    private readonly Dictionary<string, string> _classes = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _families = new(StringComparer.Ordinal);
+    private int _version;
+
+    public int Version => System.Threading.Volatile.Read(ref _version);
+
+    public void SetClass(string id, string className)
+    {
+        lock (_lock)
+        {
+            if (_classes.TryGetValue(id, out var old) && old == className) return;
+            _classes[id] = className;
+            System.Threading.Interlocked.Increment(ref _version);
+        }
+    }
+
+    // 推定の系統名。確定のクラス名が分かっている ID には入れない
+    public void SetFamily(string id, string family)
+    {
+        lock (_lock)
+        {
+            if (_classes.ContainsKey(id)) return;
+            if (_families.TryGetValue(id, out var old) && old == family) return;
+            _families[id] = family;
+            System.Threading.Interlocked.Increment(ref _version);
+        }
+    }
+
+    public bool TryGetClass(string id, out string className)
+    {
+        lock (_lock)
+        {
+            if (_classes.TryGetValue(id, out var v)) { className = v; return true; }
+        }
+        className = "";
+        return false;
+    }
+
+    public bool TryGetFamily(string id, out string family)
+    {
+        lock (_lock)
+        {
+            if (_families.TryGetValue(id, out var v)) { family = v; return true; }
+        }
+        family = "";
+        return false;
+    }
+
+    // 船名待ちの行 (PendingVehicleId あり) に、分かっているクラス名 (表示名は shipName で引く) か推定の系統名を入れる。書き換えた行があれば true
+    public bool Apply(IEnumerable<GameLogEntry> entries, Func<string, string> shipName)
+    {
+        var any = false;
+        foreach (var e in entries)
+        {
+            if (e.PendingVehicleId is not { } id) continue;
+            if (TryGetClass(id, out var cls))
+            {
+                GameLogParser.ApplyVehicleClass(e, cls, shipName(cls));
+                any = true;
+            }
+            else if (TryGetFamily(id, out var family) && GameLogParser.ApplyVehicleEstimate(e, family)) any = true;
+        }
+        return any;
+    }
+}
+
 // Game.log の行を読んで、表に出す出来事 (GameLogEntry) にする。WPF には依存しない (コンソールからも試せる)。
 // 1 ファイルにつき 1 つ作り、行を順に FeedLine に渡し、最後に Flush を呼ぶ。
 // 名前の引き方 (船のクラス名 → 表示名、店の品目の内部名 → 表示名) は呼ぶ側が渡す。渡さなければ内部名のまま。
@@ -255,13 +342,26 @@ public sealed class GameLogParser
     // 名前がまだ分からない契約終了の行 (MissionId → 行)。共有の対応が無いときだけ使う (このファイルの中で書き換える)
     private readonly Dictionary<string, List<GameLogEntry>> _missionWaiting = new(StringComparer.OrdinalIgnoreCase);
 
-    // 船の ID → クラス名 (末尾の _ID を除いたもの)
+    // 船の ID → クラス名 (末尾の _ID を除いたもの) (このファイルの中で分かったもの)
     private readonly Dictionary<string, string> _vehicleClasses = new(StringComparer.Ordinal);
+    // ファイルをまたいで共有する 船の ID → クラス名・推定の系統名 (渡されたときだけ)。渡されたら、船名待ちの行の書き換えは呼ぶ側が行う
+    private readonly GameLogVehicleClasses? _sharedVehicleClasses;
+    // 船の表示名 (乗船の通知の「MISC Starfarer Gemini」= ships.name_en) → クラス名 (無ければ null)。呼び出し完了の後の乗船で船を確定するのに使う
+    private readonly Func<string, string?> _shipClassByName;
     // 自分の船の ID (自分が操縦した・乗っていて死んだ・衝突した・量子ジャンプした・呼び出した船と、自分の船だけが出る行 (OwnVehicleLearnTags) の船)。
     // 格納の行はこの ID のものだけ出す (周りの他人の船の格納も同じ行で出るため)
     private readonly HashSet<string> _ownVehicles = new(StringComparer.Ordinal);
-    // 船名がまだ分からない呼び出しの行 (ID → (行, 内容の組み立て))。「船 ID …」で出しておき、分かったら書き換える
-    private readonly Dictionary<string, List<(GameLogEntry Entry, Func<string, string> Build)>> _vehicleWaiting = new(StringComparer.Ordinal);
+    // 船名がまだ分からない呼び出し・呼び出し完了の行 (ID → 行)。「船 ID …」で出しておき、分かったら書き換える。共有の対応が無いときだけ使う
+    private readonly Dictionary<string, List<GameLogEntry>> _vehicleWaiting = new(StringComparer.Ordinal);
+    // このファイルでクラス名がまだ分からない呼び出しの船 (ID → 呼び出しの時刻)。ATC の行からの推定に使う (分かったら外す)
+    private readonly Dictionary<string, DateTime> _spawnUnknown = new(StringComparer.Ordinal);
+    // 最近の ATC のリセットの行 (時刻, 系統名, ATC の ID)。呼び出しの前後の行から船の系統を推定するのに使う (AtcEstimateBefore より古いものは捨てる)
+    private readonly List<(DateTime Time, string Family, long AtcId)> _atcResets = new();
+    // 呼び出し完了 (SetVehicleSpawnedInformations) した船のクラス名がまだ分からないとき、その ID と場所。ハンガーには 1 隻しか呼べないので、
+    // 次に自分が乗った船 (所有者が自分の乗船の通知の表示名 → ships.name_en) か、次の「操縦」の航法行のクラス名で確定する。
+    // 次の呼び出し・その船の格納・場所の移動 (別の着陸場所への到着・出発) で諦める
+    private string? _confirmId;
+    private string _confirmPlace = "0";
     // まだ出していない格納の行 (ID → (時刻, 種類, そのときの着陸場所の ID, 内容の組み立て))。格納は周りの着陸場で他人の船が格納されたときにも出るので、
     // 自分の船 (_ownVehicles) でクラス名も分かる (_vehicleClasses) まで表には出さず、分かったときに行にする
     private readonly Dictionary<string, List<(DateTime Time, string Kind, string PlaceId, Func<string, string> Build)>> _vehicleHidden = new(StringComparer.Ordinal);
@@ -296,8 +396,9 @@ public sealed class GameLogParser
     private readonly List<(DateTime Time, string Ship, string Owner, bool Join)> _channelWaiting = new();
     // 今操縦している船の ID (ClearDriver で null)。null のときに最初に出た自分の船の航法行で「操縦」を出す
     private string? _drivingId;
-    // 直前に操縦していた船の表示名 (到着・出発・ハンガー要求に添える)。分かるまで null
+    // 直前に操縦していた船の表示名 (到着・出発・ハンガー要求に添える) とそのクラス名。分かるまで null
     private string? _lastShipName;
+    private string? _lastShipClass;
     // 今いる着陸場所の ID ("0" = 着陸場所の外)
     private string _landingId = "0";
     // いちばん最近いた着陸場所の ID (出ても覚えておく。呼び出し・格納の文の場所に使う。まだ無ければ "0")
@@ -321,11 +422,16 @@ public sealed class GameLogParser
     private static readonly TimeSpan ReentryWindow = TimeSpan.FromSeconds(300);
     // ハンガー要求の直前とみなす ATC の行の時間 (昨夜のログでは 0.1 秒・5.8 秒前)
     private static readonly TimeSpan AtcWindow = TimeSpan.FromSeconds(60);
+    // 呼び出しの船の系統を推定する ATC のリセットの行 (<ATC_Reset_VehiclesBeingStoredCleared> ATC '系統_ShipATCDataManager_<ATC の ID>') の窓:
+    // 呼び出しの 5 秒前から 30 秒後まで。ATC の ID − 船の ID が 0〜1000 のものを同じ船とみなす (全ログ 74 件の呼び出しの実測)
+    private static readonly TimeSpan AtcEstimateBefore = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan AtcEstimateAfter = TimeSpan.FromSeconds(30);
+    private const long AtcEstimateIdRange = 1000;
 
     public GameLogParser(string source, Func<string, string>? shipName = null, Func<string, string>? itemName = null,
         GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
         Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null,
-        Func<string, string>? itemLabel = null)
+        Func<string, string>? itemLabel = null, GameLogVehicleClasses? sharedVehicleClasses = null, Func<string, string?>? shipClassByName = null)
     {
         _source = source;
         _shipName = shipName ?? (s => s);
@@ -337,6 +443,8 @@ public sealed class GameLogParser
         _placeName = placeName ?? (s => s);
         _sharedPlaceNames = sharedPlaceNames;
         _itemLabel = itemLabel ?? _itemName;
+        _sharedVehicleClasses = sharedVehicleClasses;
+        _shipClassByName = shipClassByName ?? (_ => null);
     }
 
     // ─── 貨物エレベーター ───
@@ -428,6 +536,7 @@ public sealed class GameLogParser
         "<Connection Flow>",               // ATC との通信 (ハンガー要求の場所)
         "<Channel Created>",               // nickname="自分の名前"
         "<CEntity::OnOwnerRemoved - entity attachment>",   // 自分の船の ID → クラス名を覚えるだけ (parent … name = クラス_ID)
+        "<ATC_Reset_VehiclesBeingStoredCleared>",          // 呼び出した船の系統の推定 (ATC '系統_ShipATCDataManager_<ID>')
         .. VehicleLearnTags,
         .. InventoryTags,
         .. FreightTags,
@@ -520,6 +629,9 @@ public sealed class GameLogParser
     private static readonly Regex AtcPlaceRegex = new(@"^ATC_DataManager(?:_Port)?(?:_(?:Semi|Un)?Lawful)?(?:[-_](.+))?$", RegexOptions.Compiled);
     // 自分の名前: <Channel Created> … nickname="名前"
     private static readonly Regex NicknameRegex = new(@"<Channel Created> .*?nickname=""([^""]*)""", RegexOptions.Compiled);
+    // ATC のリセット: ATC 'RSI_Apollo_ShipATCDataManager_884752803966' [884752803966] / ATC 'RSI_Skylark_ATCDataManager_883559689766' [883559689766]
+    // (系統名はベース名で、派生型 (Apollo Triage / Medivac) は区別できない)
+    private static readonly Regex AtcResetRegex = new(@"<ATC_Reset_VehiclesBeingStoredCleared> ATC '([A-Za-z][A-Za-z0-9_]*?)_(?:Ship)?ATCDataManager_(\d+)' \[\2\]", RegexOptions.Compiled);
     // 自分の船の ID → クラス名: … to unblock removal of parent id = ID name = クラス_ID (UnattendedVehicleMarker を外す行。自分の船だけ)
     private static readonly Regex OwnerRemovedRegex = new(@"<CEntity::OnOwnerRemoved - entity attachment> .*?parent id = (\d+) name = ([A-Za-z][A-Za-z0-9_]*?)_\1(?:\s|$)", RegexOptions.Compiled);
     // 船のチャンネル (乗り降り) の通知: チャンネル「船の表示名 : 所有者」 に参加しました。/ を退出しました。
@@ -680,6 +792,12 @@ public sealed class GameLogParser
             }
             return;
         }
+        if (line.Contains("<ATC_Reset_VehiclesBeingStoredCleared>", StringComparison.Ordinal))
+        {
+            if ((m = AtcResetRegex.Match(line)).Success && long.TryParse(m.Groups[2].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var atcId))
+                OnAtcReset(time, m.Groups[1].Value, atcId);
+            return;
+        }
         if (line.Contains("<Channel Created>", StringComparison.Ordinal))
         {
             if ((m = NicknameRegex.Match(line)).Success) LearnPlayerName(m.Groups[1].Value);
@@ -706,7 +824,7 @@ public sealed class GameLogParser
         {
             var from = m.Groups[1].Value;
             LearnVehicleFromName(from);
-            Add(time, "死亡", $"{ShipDisplay(from)} / 場所: {m.Groups[2].Value}");
+            Add(time, "死亡", $"{ShipDisplay(from)} / 場所: {m.Groups[2].Value}", shipClass: ShipClassOf(from), shipName: ShipDisplay(from));
             return;
         }
         if ((m = CollisionRegex.Match(line)).Success)
@@ -742,9 +860,12 @@ public sealed class GameLogParser
                 ShopId = ids.Success ? ids.Groups[2].Value : "",
                 KioskId = ids.Success ? ids.Groups[3].Value : "",
             };
-            var itemName = _itemName(item);
+            // 船・車両の購入 (itemName が ships か item_index の Vehicle 系) は所持船に入れる (IsVehicle)。船名は船の名前の引き方 (_shipName) で出す
+            var isVehicle = _isVehicleClass(item);
+            var itemName = isVehicle ? _shipName(item) : _itemName(item);
             var e = Add(time, "購入", $"{itemName} × {m.Groups[4].Value} / 店: {m.Groups[1].Value}", ParseNumber(m.Groups[2].Value), purchase,
-                importItems: [new GameLogImportItem { Kind = GameLogImportItem.KindPurchase, LogKey = purchase.Key, ItemClass = item, Quantity = purchase.Quantity, DisplayName = itemName }]);
+                importItems: [new GameLogImportItem { Kind = GameLogImportItem.KindPurchase, LogKey = purchase.Key, ItemClass = item, Quantity = purchase.Quantity, DisplayName = itemName, IsVehicle = isVehicle }],
+                shipClass: isVehicle ? item : null, shipName: isVehicle ? itemName : null);
             _pendingPurchases.Add(e);
             return;
         }
@@ -811,14 +932,16 @@ public sealed class GameLogParser
         if (line.Contains("<Quantum Drive Arrived - Arrived at Final Destination>", StringComparison.Ordinal))
         {
             var ship = "";
+            string? cls = null;
             if ((m = VehicleRefRegex.Match(line)).Success)
             {
-                LearnVehicle(m.Groups[2].Value, m.Groups[1].Value);
-                ship = _shipName(m.Groups[1].Value);
+                cls = m.Groups[1].Value;
+                LearnVehicle(m.Groups[2].Value, cls);
+                ship = _shipName(cls);
             }
             // 行き先は最後に選んだもの。そのファイルでまだ選んでいなければ船名だけ
             var content = _quantumTarget == null ? ship : ship.Length > 0 ? $"{ship} → {_quantumTarget}" : _quantumTarget;
-            Add(time, "量子ジャンプ", content);
+            Add(time, "量子ジャンプ", content, shipClass: cls, shipName: cls != null ? ship : null);
             return;
         }
         // 呼び出し・呼び出し完了・格納は文の形。場所 (いちばん最近いた着陸場所) が分かれば「場所 の/で …」、分からなければ着陸場所 (LandingArea) を添える。
@@ -827,9 +950,14 @@ public sealed class GameLogParser
         {
             var area = m.Groups[2].Value.Trim();
             var place = _placeId;
-            AddWithVehicle(time, "呼び出し", m.Groups[1].Value, place, ship => place == "0"
+            var id = m.Groups[1].Value;
+            // 次の呼び出し: 前の呼び出し完了の船の確定 (乗船・操縦で) は諦める
+            if (_confirmId != null && _confirmId != id) _confirmId = null;
+            // 所持船に入れられる行 (所持船に無い船の呼び出し。鍵は 時刻・船の ID。クラス名はまだ分からなければ空で、分かったときに入れる)
+            var item = new GameLogImportItem { Kind = GameLogImportItem.KindShipSpawn, LogKey = GameLogImportItem.MakeKey(LogTimeText(time), id), Quantity = 1 };
+            AddWithVehicle(time, "呼び出し", id, place, ship => place == "0"
                 ? $"ハンガーエレベーターで {ship} を呼び出しました (着陸場所: {area})"
-                : $"{PlaceDisplay(place)} のハンガーエレベーターで {ship} を呼び出しました");
+                : $"{PlaceDisplay(place)} のハンガーエレベーターで {ship} を呼び出しました", item);
             return;
         }
         if ((m = SpawnedRegex.Match(line)).Success)
@@ -837,16 +965,25 @@ public sealed class GameLogParser
             // 呼び出しの完了 (同じ呼び出しで SetVehicleSpawningInformations の数秒後に出る)。呼び出しと同じく自分の船なので船名待ちで出す
             var area = m.Groups[2].Value.Trim();
             var place = _placeId;
-            AddWithVehicle(time, "呼び出し完了", m.Groups[1].Value, place, ship => place == "0"
+            var id = m.Groups[1].Value;
+            AddWithVehicle(time, "呼び出し完了", id, place, ship => place == "0"
                 ? $"ハンガーエレベーターで {ship} の呼び出しが完了しました (着陸場所: {area})"
                 : $"{PlaceDisplay(place)} のハンガーエレベーターで {ship} の呼び出しが完了しました");
+            // クラス名がまだ分からなければ、次に自分が乗る船 (乗船の通知・操縦の航法行) で確定する
+            if (!TryGetVehicleClass(id, out _))
+            {
+                _confirmId = id;
+                _confirmPlace = _placeId;
+            }
             return;
         }
         if ((m = StowRegex.Match(line)).Success)
         {
             var area = m.Groups[1].Value;
             var place = _placeId;
-            AddWithVehicleIfKnown(time, "格納", m.Groups[2].Value, place, ship => place == "0"
+            var id = m.Groups[2].Value;
+            if (_confirmId == id) _confirmId = null;   // 呼び出した船を格納した: 確定は諦める
+            AddWithVehicleIfKnown(time, "格納", id, place, ship => place == "0"
                 ? $"{ship} を格納しました (着陸場所: {area})"
                 : $"{PlaceDisplay(place)} で {ship} を格納しました");
             return;
@@ -859,24 +996,37 @@ public sealed class GameLogParser
     {
         LearnVehicle(id, className);
         var ship = _shipName(className);
-        Add(time, "降りた", ship);
+        Add(time, "降りた", ship, shipClass: className, shipName: ship);
         _drivingId = null;
         _lastShipName = ship;
+        _lastShipClass = className;
     }
 
     // ClearDriver の後 (またはファイルの最初) で最初に出た自分の船の航法行: 行の中の最初の船を「操縦」として出す。
-    // 次の ClearDriver まで出さない (同じ船の航法行が続いても 1 回だけ)
+    // 次の ClearDriver まで出さない (同じ船の航法行が続いても 1 回だけ)。
+    // 呼び出し完了した船のクラス名がまだ分からなければ (乗船の通知が無かった)、この船のクラス名で確定する
     private void OnPilot(DateTime time, string line)
     {
         foreach (Match m in VehicleRefRegex.Matches(line))
         {
-            if (!_isVehicleClass(m.Groups[1].Value)) continue;
-            var ship = _shipName(m.Groups[1].Value);
-            Add(time, "操縦", ship);
+            var cls = m.Groups[1].Value;
+            if (!_isVehicleClass(cls)) continue;
+            var ship = _shipName(cls);
+            Add(time, "操縦", ship, shipClass: cls, shipName: ship);
             _drivingId = m.Groups[2].Value;
             _lastShipName = ship;
+            _lastShipClass = cls;
+            ConfirmSpawnedVehicle(cls);
             return;
         }
+    }
+
+    // 呼び出し完了した船 (クラス名が分からないまま) を、次に自分が乗った船のクラス名で確定する (自分の船として覚える)。確定したら待ちをやめる
+    private void ConfirmSpawnedVehicle(string className)
+    {
+        if (_confirmId is not { } id) return;
+        _confirmId = null;
+        if (!TryGetVehicleClass(id, out _)) LearnVehicle(id, className, own: true);
     }
 
     // 着陸場所の出入り (Update Inventory Location の Landing の今の ID)。0 以外へ = 到着、0 へ = 出発。
@@ -894,6 +1044,7 @@ public sealed class GameLogParser
     {
         _landingId = id;
         _placeId = id;
+        if (_confirmId != null && id != _confirmPlace) _confirmId = null;   // 別の着陸場所へ移った: 呼び出した船の確定は諦める
         // 同じ場所を出てから ReentryWindow 以内に戻った: 出入りの繰り返しなので、直前の出発の行を取り消し、到着の行も出さない
         if (_lastDeparture is { } d && _lastDeparturePlace == id && time - _lastDepartureTime <= ReentryWindow)
         {
@@ -904,14 +1055,15 @@ public sealed class GameLogParser
             return;
         }
         _lastDeparture = null;
-        AttachPlace(Add(time, "到着", PlaceDisplay(id) + ShipSuffix()), id);
+        AttachPlace(Add(time, "到着", PlaceDisplay(id) + ShipSuffix(), shipClass: _lastShipClass, shipName: _lastShipName), id);
     }
 
     private void OnDepart(DateTime time)
     {
         var place = _landingId;
         _landingId = "0";
-        var e = Add(time, "出発", PlaceDisplay(place) + ShipSuffix());
+        _confirmId = null;   // 着陸場所を出た: 呼び出した船の確定は諦める
+        var e = Add(time, "出発", PlaceDisplay(place) + ShipSuffix(), shipClass: _lastShipClass, shipName: _lastShipName);
         AttachPlace(e, place);
         _lastDeparture = e;
         _lastDepartureTime = time;
@@ -1007,12 +1159,22 @@ public sealed class GameLogParser
         AddChannel(time, ship, owner, join);
     }
 
-    // 所有者が自分なら「乗船」「下船」(内容は船の表示名)、他人なら「同乗」「下船」(内容は「表示名 (所有者: X)」)
+    // 所有者が自分なら「乗船」「下船」(内容は船の表示名)、他人なら「同乗」「下船」(内容は「表示名 (所有者: X)」)。
+    // 自分の船への乗船で、呼び出し完了した船のクラス名がまだ分からなければ、表示名 (= ships.name_en) から引いたクラス名で確定する (他人の船は使わない)
     private void AddChannel(DateTime time, string ship, string owner, bool join)
     {
         var own = owner == _playerName;
         var kind = join ? (own ? "乗船" : "同乗") : "下船";
-        Add(time, kind, own ? ship : $"{ship} (所有者: {owner})");
+        string? cls = null;
+        if (own && join && _confirmId != null) cls = ShipClassByName(ship);
+        if (cls != null) ConfirmSpawnedVehicle(cls);
+        Add(time, kind, own ? ship : $"{ship} (所有者: {owner})", shipClass: cls, shipName: ship);
+    }
+
+    private string? ShipClassByName(string displayName)
+    {
+        try { return _shipClassByName(displayName); }
+        catch { return null; }
     }
 
     // ─── 採掘 (手掘り) ───
@@ -1253,7 +1415,7 @@ public sealed class GameLogParser
         _lastCollisionKey = key;
         _lastCollisionTargets.Clear();
         _lastCollisionTargets.Add(target);
-        _lastCollision = Add(time, "衝突", CollisionText(vehicle, zone, _lastCollisionTargets));
+        _lastCollision = Add(time, "衝突", CollisionText(vehicle, zone, _lastCollisionTargets), shipClass: ShipClassOf(vehicle), shipName: ShipDisplay(vehicle));
     }
 
     private string CollisionText(string vehicle, string zone, List<string> targets) =>
@@ -1291,7 +1453,7 @@ public sealed class GameLogParser
             var parts = new List<string>(2);
             if (_lastAtc != null && time - _lastAtcTime <= AtcWindow) parts.Add(AtcPlace(_lastAtc));
             if (_lastShipName != null) parts.Add($"船: {_lastShipName}");
-            Add(time, "ハンガー要求", string.Join(" / ", parts));
+            Add(time, "ハンガー要求", string.Join(" / ", parts), shipClass: _lastShipClass, shipName: _lastShipName);
             return;
         }
 
@@ -1428,10 +1590,110 @@ public sealed class GameLogParser
 
     // ─── 船 ───
     // 船のクラス名_ID → 表示名 (末尾の _数字 を除いて名前を引く)
-    private string ShipDisplay(string classWithId)
+    private string ShipDisplay(string classWithId) => _shipName(ShipClassOf(classWithId));
+
+    // 船のクラス名_ID → クラス名 (末尾の _数字 を除く。無ければそのまま)
+    private static string ShipClassOf(string classWithId)
     {
         var m = TrailingIdRegex.Match(classWithId);
-        return _shipName(m.Success ? m.Groups[1].Value : classWithId);
+        return m.Success ? m.Groups[1].Value : classWithId;
+    }
+
+    // 船の ID → クラス名 (このファイルで分かったもの、無ければ共有の対応)
+    private bool TryGetVehicleClass(string id, out string className)
+    {
+        if (_vehicleClasses.TryGetValue(id, out var v))
+        {
+            className = v;
+            return true;
+        }
+        if (_sharedVehicleClasses != null && _sharedVehicleClasses.TryGetClass(id, out className)) return true;
+        className = "";
+        return false;
+    }
+
+    // ATC のリセットの行 (呼び出しの前後に出る 'クラス系統_ShipATCDataManager_<ATC の ID>')。クラス名がまだ分からない呼び出しの船のうち、
+    // ATC の ID − 船の ID が 0〜AtcEstimateIdRange で、呼び出しから AtcEstimateAfter 以内のものを、その系統と推定する。
+    // 呼び出しより前 (AtcEstimateBefore 以内) に出たものにも備えて覚えておく
+    private void OnAtcReset(DateTime time, string family, long atcId)
+    {
+        _atcResets.RemoveAll(a => time - a.Time > AtcEstimateBefore);
+        _atcResets.Add((time, family, atcId));
+        foreach (var (id, spawnTime) in _spawnUnknown.ToArray())
+        {
+            if (!IsAtcMatch(id, spawnTime, atcId, time)) continue;
+            EstimateVehicle(id, family);
+        }
+    }
+
+    private static bool IsAtcMatch(string shipId, DateTime spawnTime, long atcId, DateTime atcTime)
+    {
+        if (!long.TryParse(shipId, NumberStyles.None, CultureInfo.InvariantCulture, out var sid)) return false;
+        var diff = atcId - sid;
+        if (diff < 0 || diff > AtcEstimateIdRange) return false;
+        var dt = atcTime - spawnTime;
+        return dt >= -AtcEstimateBefore && dt <= AtcEstimateAfter;
+    }
+
+    // 呼び出しの直前 (AtcEstimateBefore 以内) に出た ATC のリセットから系統を推定する (無ければ null)
+    private string? EstimateFromRecentAtc(string id, DateTime spawnTime)
+    {
+        foreach (var (atcTime, family, atcId) in _atcResets)
+            if (IsAtcMatch(id, spawnTime, atcId, atcTime)) return family;
+        return null;
+    }
+
+    // 系統の推定を入れる (共有の対応があれば共有へ (書き換えは呼ぶ側)、無ければこのファイルの船名待ちの行を書き換える)。確定のクラス名があれば何もしない
+    private void EstimateVehicle(string id, string family)
+    {
+        if (TryGetVehicleClass(id, out _)) return;
+        if (_sharedVehicleClasses != null)
+        {
+            _sharedVehicleClasses.SetFamily(id, family);
+            return;
+        }
+        if (!_vehicleWaiting.TryGetValue(id, out var list)) return;
+        foreach (var e in list)
+            if (ApplyVehicleEstimate(e, family)) Changed = true;
+    }
+
+    // ATC の系統名 (RSI_Apollo / MISC_Starfarer / RSI_Constellation_Mk5_Centaurus) → 「Apollo 系（推定）」(先頭のメーカーの符号を除き、_ は空白にする)
+    public static string FamilyToken(string family)
+    {
+        var us = family.IndexOf('_');
+        var name = us > 0 && us < family.Length - 1 ? family[(us + 1)..] : family;
+        return $"{name.Replace('_', ' ')} 系（推定）";
+    }
+
+    // 船名待ちの行にクラス名 (確定) を入れる: 内容の欄の今の文字 (VehicleToken) を船名に置き換え、船と所持船に入れる品 (ship_spawn) にクラス名を入れる
+    public static void ApplyVehicleClass(GameLogEntry e, string className, string ship)
+    {
+        if (e.VehicleToken.Length > 0) e.Content = e.Content.Replace(e.VehicleToken, ship, StringComparison.Ordinal);
+        e.VehicleToken = ship;
+        e.ShipClass = className;
+        e.ShipName = ship;
+        e.PendingVehicleId = null;
+        if (e.ImportItems is not { Count: > 0 } items) return;
+        foreach (var item in items)
+        {
+            if (item.Kind != GameLogImportItem.KindShipSpawn) continue;
+            item.ItemClass = className;
+            item.DisplayName = ship;
+        }
+    }
+
+    // 船名待ちの行に推定の系統 (「X 系（推定）」) を入れる (確定が来たら ApplyVehicleClass で置き換わる)。同じ文字なら何もせず false
+    public static bool ApplyVehicleEstimate(GameLogEntry e, string family)
+    {
+        var token = FamilyToken(family);
+        if (e.PendingVehicleId == null || e.VehicleToken == token) return false;
+        if (e.VehicleToken.Length > 0) e.Content = e.Content.Replace(e.VehicleToken, token, StringComparison.Ordinal);
+        e.VehicleToken = token;
+        e.ShipName = null;
+        if (e.ImportItems is { Count: > 0 } items)
+            foreach (var item in items)
+                if (item.Kind == GameLogImportItem.KindShipSpawn) item.DisplayName = token;
+        return true;
     }
 
     private void LearnVehicleFromName(string classWithId)
@@ -1460,11 +1722,13 @@ public sealed class GameLogParser
     {
         if (id.Length == 0 || className.Length == 0) return;
         _vehicleClasses[id] = className;
+        _spawnUnknown.Remove(id);
         if (own) _ownVehicles.Add(id);
-        if (_vehicleWaiting.Remove(id, out var list))
+        if (_sharedVehicleClasses != null) _sharedVehicleClasses.SetClass(id, className);   // 船名待ちの行の書き換えは呼ぶ側 (GameLogVehicleClasses.Apply)
+        else if (_vehicleWaiting.Remove(id, out var list))
         {
             var ship = _shipName(className);
-            foreach (var (e, build) in list) e.Content = build(ship);
+            foreach (var e in list) ApplyVehicleClass(e, className, ship);
             Changed = true;
         }
         FlushHiddenVehicleRows(id);
@@ -1481,35 +1745,54 @@ public sealed class GameLogParser
     // 出していなかった格納の行を、自分の船でクラス名も分かったときに行にする
     private void FlushHiddenVehicleRows(string id)
     {
-        if (!_ownVehicles.Contains(id) || !_vehicleClasses.TryGetValue(id, out var cls)) return;
+        if (!_ownVehicles.Contains(id) || !TryGetVehicleClass(id, out var cls)) return;
         if (!_vehicleHidden.Remove(id, out var hidden)) return;
         var ship = _shipName(cls);
-        foreach (var (time, kind, placeId, build) in hidden) AttachPlace(Add(time, kind, build(ship)), placeId);
+        foreach (var (time, kind, placeId, build) in hidden) AttachPlace(Add(time, kind, build(ship), shipClass: cls, shipName: ship), placeId);
     }
 
-    // 自分の船の ID の付いた行 (呼び出し)。クラス名が分かっていれば船名、まだなら「船 ID …」で出し、後で分かったら書き換える。
-    // placeId はそのときの着陸場所の ID (名前がまだなら名前待ちにする。"0" なら無し)
-    private void AddWithVehicle(DateTime time, string kind, string id, string placeId, Func<string, string> build)
+    // 自分の船の ID の付いた行 (呼び出し・呼び出し完了)。クラス名が分かっていれば (このファイルか共有の対応) 船名、まだなら推定の系統 (「X 系（推定）」。
+    // 共有の対応か直前の ATC の行から) か「船 ID …」で出し、後で分かったら書き換える。
+    // placeId はそのときの着陸場所の ID (名前がまだなら名前待ちにする。"0" なら無し)。item は所持船に入れる品 (呼び出しの行だけ)
+    private void AddWithVehicle(DateTime time, string kind, string id, string placeId, Func<string, string> build, GameLogImportItem? item = null)
     {
-        if (_vehicleClasses.TryGetValue(id, out var cls))
+        if (TryGetVehicleClass(id, out var cls))
         {
-            AttachPlace(Add(time, kind, build(_shipName(cls))), placeId);
+            var ship = _shipName(cls);
+            if (item != null)
+            {
+                item.ItemClass = cls;
+                item.DisplayName = ship;
+            }
+            AttachPlace(Add(time, kind, build(ship), importItems: item != null ? [item] : null, shipClass: cls, shipName: ship), placeId);
             MarkOwnVehicle(id);
             return;
         }
-        var e = Add(time, kind, build($"船 ID {id}"));
+        string? family = null;
+        if (_sharedVehicleClasses == null || !_sharedVehicleClasses.TryGetFamily(id, out family)) family = EstimateFromRecentAtc(id, time);
+        var token = family != null ? FamilyToken(family) : $"船 ID {id}";
+        if (item != null) item.DisplayName = token;
+        var e = Add(time, kind, build(token), importItems: item != null ? [item] : null);
+        e.PendingVehicleId = id;
+        e.VehicleToken = token;
         AttachPlace(e, placeId);
-        if (!_vehicleWaiting.TryGetValue(id, out var list)) _vehicleWaiting[id] = list = new();
-        list.Add((e, build));
+        _spawnUnknown[id] = time;
+        if (family != null && _sharedVehicleClasses != null) _sharedVehicleClasses.SetFamily(id, family);
+        if (_sharedVehicleClasses == null)
+        {
+            if (!_vehicleWaiting.TryGetValue(id, out var list)) _vehicleWaiting[id] = list = new();
+            list.Add(e);
+        }
         MarkOwnVehicle(id);
     }
 
     // 船の ID の付いた行のうち、自分の船でクラス名も分かるものだけ出すもの (格納)。まだ分からなければ覚えておき、分かったときに行にする
     private void AddWithVehicleIfKnown(DateTime time, string kind, string id, string placeId, Func<string, string> build)
     {
-        if (_ownVehicles.Contains(id) && _vehicleClasses.TryGetValue(id, out var cls))
+        if (_ownVehicles.Contains(id) && TryGetVehicleClass(id, out var cls))
         {
-            AttachPlace(Add(time, kind, build(_shipName(cls))), placeId);
+            var ship = _shipName(cls);
+            AttachPlace(Add(time, kind, build(ship), shipClass: cls, shipName: ship), placeId);
             return;
         }
         if (!_vehicleHidden.TryGetValue(id, out var list)) _vehicleHidden[id] = list = new();
@@ -1518,12 +1801,13 @@ public sealed class GameLogParser
 
     // ─── 共通 ───
     private GameLogEntry Add(DateTime time, string kind, string content, double? amount = null, GameLogPurchase? purchase = null,
-        List<GameLogImportItem>? importItems = null, GameLogTrade? trade = null, GameLogMining? mining = null)
+        List<GameLogImportItem>? importItems = null, GameLogTrade? trade = null, GameLogMining? mining = null,
+        string? shipClass = null, string? shipName = null)
     {
         var e = new GameLogEntry
         {
             TimeUtc = time, Kind = kind, Content = content, Amount = amount, Source = _source, Purchase = purchase,
-            ImportItems = importItems, Trade = trade, Mining = mining,
+            ImportItems = importItems, Trade = trade, Mining = mining, ShipClass = shipClass, ShipName = shipName,
             Seq = System.Threading.Interlocked.Increment(ref _seq),
         };
         Entries.Add(e);
@@ -1545,9 +1829,9 @@ public sealed class GameLogParser
     public static List<GameLogEntry> ParseFile(string path, string source, Func<string, string>? shipName = null, Func<string, string>? itemName = null,
         GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
         Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null,
-        Func<string, string>? itemLabel = null)
+        Func<string, string>? itemLabel = null, GameLogVehicleClasses? sharedVehicleClasses = null, Func<string, string?>? shipClassByName = null)
     {
-        var parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames, itemLabel);
+        var parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames, itemLabel, sharedVehicleClasses, shipClassByName);
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var reader = new StreamReader(fs, LogEncoding, detectEncodingFromByteOrderMarks: false);
         string? line;
@@ -1578,6 +1862,8 @@ public sealed class GameLogTail
     private readonly Func<string, string>? _placeName;
     private readonly GameLogPlaceNames? _sharedPlaceNames;
     private readonly Func<string, string>? _itemLabel;
+    private readonly GameLogVehicleClasses? _sharedVehicleClasses;
+    private readonly Func<string, string?>? _shipClassByName;
     private long _position;
     private long _lastLength;
     private byte[]? _head;                   // 覚えている先頭の 1 行 (改行まで)。まだ分からなければ null
@@ -1589,7 +1875,7 @@ public sealed class GameLogTail
     public GameLogTail(string path, string source, Func<string, string>? shipName = null, Func<string, string>? itemName = null,
         GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
         Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null,
-        Func<string, string>? itemLabel = null)
+        Func<string, string>? itemLabel = null, GameLogVehicleClasses? sharedVehicleClasses = null, Func<string, string?>? shipClassByName = null)
     {
         _path = path;
         _source = source;
@@ -1602,7 +1888,9 @@ public sealed class GameLogTail
         _placeName = placeName;
         _sharedPlaceNames = sharedPlaceNames;
         _itemLabel = itemLabel;
-        Parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames, itemLabel);
+        _sharedVehicleClasses = sharedVehicleClasses;
+        _shipClassByName = shipClassByName;
+        Parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames, itemLabel, sharedVehicleClasses, shipClassByName);
     }
 
     // 増えた分を読む。戻り値: ファイルがあったか。reset = 最初から読み直した (それまでの行は捨てた)
@@ -1619,7 +1907,7 @@ public sealed class GameLogTail
         {
             _position = 0;
             _lastLength = 0;
-            Parser = new GameLogParser(_source, _shipName, _itemName, _sharedMissionNames, _translate, _isVehicleClass, _resourceName, _placeName, _sharedPlaceNames, _itemLabel);
+            Parser = new GameLogParser(_source, _shipName, _itemName, _sharedMissionNames, _translate, _isVehicleClass, _resourceName, _placeName, _sharedPlaceNames, _itemLabel, _sharedVehicleClasses, _shipClassByName);
             reset = true;
         }
         if (head != null) _head = head;
