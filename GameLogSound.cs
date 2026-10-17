@@ -4,14 +4,15 @@ using System.IO;
 
 namespace StarCitizenJapaneseTextCreater;
 
-// ［ゲームログ］の音の種類。Armistice = 休戦ゾーンに進入、Arrival = 到着
-public enum GameLogSoundKind { Armistice, Arrival }
+// ［ゲームログ］の音の種類。Armistice = 休戦ゾーンに進入 (船を操縦中)、ArmisticeOnFoot = 休戦ゾーンに進入 (徒歩)、Arrival = 到着
+public enum GameLogSoundKind { Armistice, ArmisticeOnFoot, Arrival }
 
 // ［ゲームログ］の追い読みで新しく足された行から、鳴らす音を決める。WPF にも音の再生にも依存しない (コンソールから試せる)。
 // 鳴らすのは、ライブの追い読みで新しく足された行 (起動時の最初の Poll と、ゲームの再起動 (reset) の読み直しの分は除く) のうち、
 // 行の TimeUtc が今から LiveWindow 以内のものだけ:
 //   (a) 種類「区域」で内容が休戦ゾーンへの進入 (GameLogParser.ArmisticeEnterHeadings) → 休戦の音
-//   (b) 種類「到着」→ 到着の音 (ただし直前 RepeatWindow 以内に休戦の音を鳴らしていれば鳴らさない)
+//       (行の Piloting (船を操縦中) なら Armistice、徒歩なら ArmisticeOnFoot。入切と RepeatWindow の抑止は 2 つで共通)
+//   (b) 種類「到着」→ 到着の音 (ただし直前 RepeatWindow 以内に休戦の音 (どちらか) を鳴らしていれば鳴らさない)
 // どちらも、直前の同じ音から RepeatWindow 以内は鳴らさない。鳴らさない設定 (enabled = false) の音は鳴らしたことにもしない
 // (休戦の音を切っていれば、直後の到着の音は鳴る)
 public sealed class GameLogSoundJudge
@@ -60,7 +61,7 @@ public sealed class GameLogSoundJudge
         {
             if (!armisticeEnabled || Within(_lastArmistice, nowUtc)) return null;
             _lastArmistice = nowUtc;
-            return GameLogSoundKind.Armistice;
+            return e.Piloting ? GameLogSoundKind.Armistice : GameLogSoundKind.ArmisticeOnFoot;
         }
         if (e.Kind == "到着")
         {
@@ -88,6 +89,7 @@ public sealed class GameLogSoundJudge
 public static class GameLogSoundPlayer
 {
     public const string DefaultArmisticeFile = "armistice_zone.wav";
+    public const string DefaultArmisticeOnFootFile = "armistice_zone_short.wav";
     public const string DefaultArrivalFile = "arrival.wav";
 
     private static readonly object Lock = new();

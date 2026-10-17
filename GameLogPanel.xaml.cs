@@ -682,9 +682,12 @@ public partial class GameLogPanel : UserControl
             var sounds = _soundJudge.OnPoll(found, reset, rows, DateTime.UtcNow, config.ArmisticeSoundEnabled, config.ArrivalSoundEnabled);
             foreach (var kind in sounds)
             {
-                var path = kind == GameLogSoundKind.Armistice
-                    ? GameLogSoundPlayer.ResolvePath(config.ArmisticeSoundPath, GameLogSoundPlayer.DefaultArmisticeFile)
-                    : GameLogSoundPlayer.ResolvePath(config.ArrivalSoundPath, GameLogSoundPlayer.DefaultArrivalFile);
+                var path = kind switch
+                {
+                    GameLogSoundKind.Armistice => GameLogSoundPlayer.ResolvePath(config.ArmisticeSoundPath, GameLogSoundPlayer.DefaultArmisticeFile),
+                    GameLogSoundKind.ArmisticeOnFoot => GameLogSoundPlayer.ResolvePath(config.ArmisticeOnFootSoundPath, GameLogSoundPlayer.DefaultArmisticeOnFootFile),
+                    _ => GameLogSoundPlayer.ResolvePath(config.ArrivalSoundPath, GameLogSoundPlayer.DefaultArrivalFile),
+                };
                 if (!GameLogSoundPlayer.Play(path, out var error)) ChatService.LogExternal($"[ゲームログ] {error}");
             }
         }

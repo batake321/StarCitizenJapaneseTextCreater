@@ -43,6 +43,9 @@ public sealed class GameLogEntry
     // 船名がまだ分からない呼び出し・呼び出し完了の行の船の ID (内容には VehicleToken (「船 ID n」か「X 系（推定）」) で出してある)。分かったら null
     public string? PendingVehicleId { get; set; }
     public string VehicleToken { get; set; } = "";
+    // 区域の行: その時点で船を操縦中 (操縦席に座ってから降りるまで) なら true。ほかの行は false。
+    // 休戦ゾーンに進入の音を操縦中と徒歩で分けるのに使う (GameLogSoundJudge)
+    public bool Piloting { get; init; }
 }
 
 // ［ゲームログ］の行のボタンの状態。Ready = 「入れる」を押せる、Imported = 入れ済み (「取り消す」を押せる)、None = ボタン無し
@@ -1593,7 +1596,7 @@ public sealed class GameLogParser
         var title = (colon >= 0 ? text[..colon] : text).Trim().TrimEnd(':').Trim();
         if (title.EndsWith("管轄区域に進入", StringComparison.Ordinal) || Array.IndexOf(AreaHeadings, title) >= 0
             || StartsWithAny(title, AreaPrefixHeadings, out _))
-            Add(time, "区域", title);
+            Add(time, "区域", title, piloting: _drivingId != null);
     }
 
     // 通知の文に入る書式のタグ (<EM4>…</EM4> 等)。納品の行のミッション名からは外す
@@ -1912,13 +1915,13 @@ public sealed class GameLogParser
     // ─── 共通 ───
     private GameLogEntry Add(DateTime time, string kind, string content, double? amount = null, GameLogPurchase? purchase = null,
         List<GameLogImportItem>? importItems = null, GameLogTrade? trade = null, GameLogMining? mining = null,
-        string? shipClass = null, string? shipName = null)
+        string? shipClass = null, string? shipName = null, bool piloting = false)
     {
         var e = new GameLogEntry
         {
             TimeUtc = time, Kind = kind, Content = content, Amount = amount, Source = _source, Purchase = purchase,
             ImportItems = importItems, Trade = trade, Mining = mining, ShipClass = shipClass, ShipName = shipName,
-            Seq = System.Threading.Interlocked.Increment(ref _seq),
+            Seq = System.Threading.Interlocked.Increment(ref _seq), Piloting = piloting,
         };
         Entries.Add(e);
         Changed = true;

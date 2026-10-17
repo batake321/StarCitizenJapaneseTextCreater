@@ -131,6 +131,7 @@ public partial class MainWindow : Window
         chkWebAutoStart.IsChecked = config.WebServerAutoStart;
         chkArmisticeSound.IsChecked = config.ArmisticeSoundEnabled;
         txtArmisticeSoundPath.Text = config.ArmisticeSoundPath;
+        txtArmisticeOnFootSoundPath.Text = config.ArmisticeOnFootSoundPath;
         chkArrivalSound.IsChecked = config.ArrivalSoundEnabled;
         txtArrivalSoundPath.Text = config.ArrivalSoundPath;
         var mfs = config.MissionDetailFontSize;
@@ -1676,6 +1677,7 @@ public partial class MainWindow : Window
         App.Config.WebServerAutoStart = chkWebAutoStart.IsChecked == true;
         App.Config.ArmisticeSoundEnabled = chkArmisticeSound.IsChecked == true;
         App.Config.ArmisticeSoundPath = txtArmisticeSoundPath.Text.Trim();
+        App.Config.ArmisticeOnFootSoundPath = txtArmisticeOnFootSoundPath.Text.Trim();
         App.Config.ArrivalSoundEnabled = chkArrivalSound.IsChecked == true;
         App.Config.ArrivalSoundPath = txtArrivalSoundPath.Text.Trim();
         App.Config.SyncFolder = txtSyncFolder.Text.Trim();
@@ -1733,6 +1735,7 @@ public partial class MainWindow : Window
                 App.Config.MissionReputationMarks,
                 App.Config.ArmisticeSoundEnabled,
                 App.Config.ArmisticeSoundPath,
+                App.Config.ArmisticeOnFootSoundPath,
                 App.Config.ArrivalSoundEnabled,
                 App.Config.ArrivalSoundPath,
                 App.Config.TabOrder,
@@ -1755,9 +1758,12 @@ public partial class MainWindow : Window
 
     // ［ゲームログ］の音: 「参照…」で wav を選ぶ、「試聴」で欄のパス (空なら同梱の音) を鳴らす (保存前の欄の値で鳴らす)
     private void ArmisticeSoundBrowse_Click(object sender, RoutedEventArgs e) => BrowseSoundFile(txtArmisticeSoundPath);
+    private void ArmisticeOnFootSoundBrowse_Click(object sender, RoutedEventArgs e) => BrowseSoundFile(txtArmisticeOnFootSoundPath);
     private void ArrivalSoundBrowse_Click(object sender, RoutedEventArgs e) => BrowseSoundFile(txtArrivalSoundPath);
     private void ArmisticeSoundTest_Click(object sender, RoutedEventArgs e) =>
         TestSound(GameLogSoundPlayer.ResolvePath(txtArmisticeSoundPath.Text, GameLogSoundPlayer.DefaultArmisticeFile));
+    private void ArmisticeOnFootSoundTest_Click(object sender, RoutedEventArgs e) =>
+        TestSound(GameLogSoundPlayer.ResolvePath(txtArmisticeOnFootSoundPath.Text, GameLogSoundPlayer.DefaultArmisticeOnFootFile));
     private void ArrivalSoundTest_Click(object sender, RoutedEventArgs e) =>
         TestSound(GameLogSoundPlayer.ResolvePath(txtArrivalSoundPath.Text, GameLogSoundPlayer.DefaultArrivalFile));
 

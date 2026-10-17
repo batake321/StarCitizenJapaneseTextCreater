@@ -43,9 +43,12 @@ public class AppConfig
     public string UexApiKey { get; set; } = "";
     public string PreferredOcrEngine { get; set; } = "Windows OCR";
 
-    // ［ゲームログ］の音: 休戦ゾーンに進入・到着で鳴らすか、鳴らす wav のパス (空なら同梱の sounds\armistice_zone.wav / sounds\arrival.wav)
+    // ［ゲームログ］の音: 休戦ゾーンに進入・到着で鳴らすか、鳴らす wav のパス (空なら同梱の sounds\armistice_zone.wav / sounds\arrival.wav)。
+    // 休戦ゾーンに進入は、船を操縦中なら ArmisticeSoundPath、徒歩 (操縦中でない) なら ArmisticeOnFootSoundPath (空なら同梱の sounds\armistice_zone_short.wav)。
+    // 鳴らすかどうかはどちらも ArmisticeSoundEnabled
     public bool ArmisticeSoundEnabled { get; set; } = true;
     public string ArmisticeSoundPath { get; set; } = "";
+    public string ArmisticeOnFootSoundPath { get; set; } = "";
     public bool ArrivalSoundEnabled { get; set; } = true;
     public string ArrivalSoundPath { get; set; } = "";
 
