@@ -100,6 +100,8 @@ public partial class MainWindow : Window
         gameLogPanel.StoredSaver = SaveGameLogEntriesAsync;
         // ［鉱石］の作業ディレクトリ (trade_cache.db / gamedata_cache.db / translations.db の所在)
         orePanel.WorkDirProvider = () => WorkDir;
+        // ［BP］の作業ディレクトリ (gamedata_cache.db / trade_cache.db / translations.db の所在)
+        blueprintPanel.WorkDirProvider = () => WorkDir;
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -129,10 +131,11 @@ public partial class MainWindow : Window
         txtVoiceVoxUrl.Text = config.VoiceVoxUrl;
         txtVoiceVoxSpeaker.Text = config.VoiceVoxSpeakerId.ToString();
         chkWebAutoStart.IsChecked = config.WebServerAutoStart;
-        chkArmisticeSound.IsChecked = config.ArmisticeSoundEnabled;
+        // ［ゲームログ］の音: 表 (場面ごとの読み上げ) と既定の声。休戦ゾーン・到着のチェックは表の行の「読む」に結び付ける (XAML の Binding)
+        _gameLogVoice.Load(config);
+        grpGameLogSound.DataContext = _gameLogVoice;
+        chkGameLogVoiceVox.IsChecked = config.GameLogVoiceVoxEnabled;
         txtArmisticeSoundPath.Text = config.ArmisticeSoundPath;
-        txtArmisticeOnFootSoundPath.Text = config.ArmisticeOnFootSoundPath;
-        chkArrivalSound.IsChecked = config.ArrivalSoundEnabled;
         txtArrivalSoundPath.Text = config.ArrivalSoundPath;
         var mfs = config.MissionDetailFontSize;
         if (mfs < 8 || mfs > 30) mfs = 14;
@@ -1582,8 +1585,9 @@ public partial class MainWindow : Window
                 InvalidateImportMarks();
                 RefreshMyGear();
                 gameLogPanel?.RefreshPurchaseButtons();
-                // trade_cache.db の在庫・記録と gamedata_cache.db の資源の種類が替わったかもしれないので、［鉱石］を読み直す
+                // trade_cache.db の在庫・記録と gamedata_cache.db の資源の種類が替わったかもしれないので、［鉱石］を読み直す (［BP］も: blueprints と在庫)
                 orePanel?.Reload();
+                blueprintPanel?.Reload();
                 // trade_cache.db に残した［ゲームログ］の行 (ほかの PC の行) も替わったかもしれないので読み直す
                 gameLogPanel?.ReloadStored();
                 // ほかの取り込みがまだ走っていれば何もしない (最後に終わった取り込みが戻す)
@@ -1667,6 +1671,7 @@ public partial class MainWindow : Window
             _hangarEquip = null;
             _uexPrefetchStarted = false;
             orePanel?.Reload();   // ［鉱石］は新しいディレクトリの DB を読み直す
+            blueprintPanel?.Reload();   // ［BP］も同じく
         }
         App.Config.OutputLanguage = txtOutputLang.Text.Trim();
         App.Config.ScApiKey = txtScApiKey.Text.Trim();
@@ -1675,10 +1680,11 @@ public partial class MainWindow : Window
         App.Config.VoiceVoxUrl = txtVoiceVoxUrl.Text.Trim();
         if (int.TryParse(txtVoiceVoxSpeaker.Text.Trim(), out var spk)) App.Config.VoiceVoxSpeakerId = spk;
         App.Config.WebServerAutoStart = chkWebAutoStart.IsChecked == true;
-        App.Config.ArmisticeSoundEnabled = chkArmisticeSound.IsChecked == true;
+        // ［ゲームログ］の音: 表の「読む」(休戦ゾーン・到着は ArmisticeSoundEnabled / ArrivalSoundEnabled にも)・文・声と既定の声。覚えた読み上げの wav は捨てる
+        App.Config.GameLogVoiceVoxEnabled = chkGameLogVoiceVox.IsChecked == true;
+        _gameLogVoice.Save(App.Config);
+        GameLogVoiceVox.ClearCache();
         App.Config.ArmisticeSoundPath = txtArmisticeSoundPath.Text.Trim();
-        App.Config.ArmisticeOnFootSoundPath = txtArmisticeOnFootSoundPath.Text.Trim();
-        App.Config.ArrivalSoundEnabled = chkArrivalSound.IsChecked == true;
         App.Config.ArrivalSoundPath = txtArrivalSoundPath.Text.Trim();
         App.Config.SyncFolder = txtSyncFolder.Text.Trim();
         App.Config.UexApiKey = txtUexApiKey.Text.Trim();
@@ -1735,9 +1741,14 @@ public partial class MainWindow : Window
                 App.Config.MissionReputationMarks,
                 App.Config.ArmisticeSoundEnabled,
                 App.Config.ArmisticeSoundPath,
-                App.Config.ArmisticeOnFootSoundPath,
                 App.Config.ArrivalSoundEnabled,
                 App.Config.ArrivalSoundPath,
+                App.Config.GameLogVoiceVoxEnabled,
+                App.Config.GameLogVoiceVoxSpeakerId,
+                // 声の指定の無い場面 (SpeakerId = null) は SpeakerId を書かない (null を設定の読み込みに渡さないため)
+                GameLogVoiceItems = App.Config.GameLogVoiceItems.Select(i => i.SpeakerId is int s
+                    ? (object)new { i.Kind, i.Enabled, i.Text, SpeakerId = s }
+                    : new { i.Kind, i.Enabled, i.Text }).ToList(),
                 App.Config.TabOrder,
                 App.Config.LastTab,
                 App.Config.SyncFolder,
@@ -1758,14 +1769,62 @@ public partial class MainWindow : Window
 
     // ［ゲームログ］の音: 「参照…」で wav を選ぶ、「試聴」で欄のパス (空なら同梱の音) を鳴らす (保存前の欄の値で鳴らす)
     private void ArmisticeSoundBrowse_Click(object sender, RoutedEventArgs e) => BrowseSoundFile(txtArmisticeSoundPath);
-    private void ArmisticeOnFootSoundBrowse_Click(object sender, RoutedEventArgs e) => BrowseSoundFile(txtArmisticeOnFootSoundPath);
     private void ArrivalSoundBrowse_Click(object sender, RoutedEventArgs e) => BrowseSoundFile(txtArrivalSoundPath);
     private void ArmisticeSoundTest_Click(object sender, RoutedEventArgs e) =>
         TestSound(GameLogSoundPlayer.ResolvePath(txtArmisticeSoundPath.Text, GameLogSoundPlayer.DefaultArmisticeFile));
-    private void ArmisticeOnFootSoundTest_Click(object sender, RoutedEventArgs e) =>
-        TestSound(GameLogSoundPlayer.ResolvePath(txtArmisticeOnFootSoundPath.Text, GameLogSoundPlayer.DefaultArmisticeOnFootFile));
     private void ArrivalSoundTest_Click(object sender, RoutedEventArgs e) =>
         TestSound(GameLogSoundPlayer.ResolvePath(txtArrivalSoundPath.Text, GameLogSoundPlayer.DefaultArrivalFile));
+
+    // ［ゲームログ］の読み上げの表 (場面ごとの読む・文・声) と既定の声の選択肢
+    private readonly GameLogVoiceSettings _gameLogVoice = new();
+    private bool _gameLogVoiceSpeakersLoading;
+
+    // 設定タブを開いた (「ゲームログの音」が見えた) とき、話者の一覧がまだなら VOICEVOX から取る (取れなくても知らせない)
+    private async void GameLogSoundGroup_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (e.NewValue is true && !_gameLogVoice.SpeakersLoaded) await LoadGameLogVoiceSpeakersAsync(showError: false);
+    }
+
+    private async void GameLogVoiceSpeakers_Click(object sender, RoutedEventArgs e) => await LoadGameLogVoiceSpeakersAsync(showError: true);
+
+    // VOICEVOX の話者の一覧 (GET /speakers) を取って声の選択肢にする。URL は Web チャットの VoiceVox URL の欄 (保存前の値)
+    private async Task LoadGameLogVoiceSpeakersAsync(bool showError)
+    {
+        if (_gameLogVoiceSpeakersLoading) return;
+        _gameLogVoiceSpeakersLoading = true;
+        var url = GameLogVoiceVox.NormalizeUrl(txtVoiceVoxUrl.Text);
+        txtGameLogVoiceStatus.Text = $"URL は Web チャットの VoiceVox URL を使います。話者の一覧を取得しています ({url})…";
+        try
+        {
+            var speakers = await GameLogVoiceVox.GetSpeakersAsync(url, CancellationToken.None);
+            _gameLogVoice.SetSpeakers(speakers);
+            txtGameLogVoiceStatus.Text = $"URL は Web チャットの VoiceVox URL を使います。話者 {speakers.Count} 件 ({url})";
+        }
+        catch (Exception ex)
+        {
+            var reason = GameLogVoiceVox.Reason(ex);
+            txtGameLogVoiceStatus.Text = $"URL は Web チャットの VoiceVox URL を使います。話者の一覧を取得できませんでした: {reason} ({url})";
+            if (showError) MessageBox.Show($"VOICEVOX の話者の一覧を取得できませんでした: {reason}\n(URL: {url})", "ゲームログの音");
+        }
+        finally { _gameLogVoiceSpeakersLoading = false; }
+    }
+
+    // 表の行の「試聴」: その行の文 (保存前の値) を、その行の声 (既定なら既定の声) で VOICEVOX に読ませる。
+    // 置き換えは見本の値 ({場所} = Levski、{船} = Cutlass Black、{内容} = 見本の文、{金額} = 1000 aUEC)
+    private async void GameLogVoiceTest_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not GameLogVoiceRow row) return;
+        var template = string.IsNullOrWhiteSpace(row.Text) ? row.DefaultText : row.Text;
+        var sample = new GameLogEntry { Kind = row.Key, Content = "ここにゲームログの内容が入ります", ShipName = "Cutlass Black", Amount = 1000 };
+        var text = GameLogVoiceScenes.BuildText(template, sample, "Levski");
+        var speaker = int.TryParse(row.SpeakerKey, out var s) ? s : int.TryParse(_gameLogVoice.DefaultSpeakerKey, out var d) ? d : 16;
+        var url = GameLogVoiceVox.NormalizeUrl(txtVoiceVoxUrl.Text);
+        try { await GameLogVoicePlayer.TestAsync(url, speaker, text); }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"VOICEVOX で読み上げられませんでした: {GameLogVoiceVox.Reason(ex)}\n(URL: {url}、話者 ID {speaker})", "試聴");
+        }
+    }
 
     private static void BrowseSoundFile(TextBox target)
     {
@@ -2080,6 +2139,8 @@ public partial class MainWindow : Window
     //  2. 資源の種類 (resource_types。［ゲームログ］の商品売買の資源名) が無い・空なら、それだけを取り出す (GameDataExtractor.RebuildResourceTypesAsync)
     //  3. 着る物 (アーマー・アンダースーツ・上着) の口の定義が item_ports に無ければ、Data.p4k から取り出して足す
     //     (GameDataExtractor.RebuildCharacterPortsAsync。チャットが装備の互換性を口のデータで答えるのに使う)
+    //  4. BP (ブループリント) の表 (blueprints) が無い・空か、resource_types に原石の精錬後 (refined_uuid) が無ければ、それだけを取り出す
+    //     (GameDataExtractor.RebuildBlueprintsAsync。［BP］タブが使う)
     // 同時には走らせない (同じ Data.p4k を 2 本同時に読まないように。前が終わってから次を始める)。1 つが失敗しても次は行う。
     // インデックス構築・装備データの再抽出の最中は走らせない。starbreaker が入っていない・Data.p4k が見つからないときは走らせない (starbreaker を自動でダウンロードしない)。
     // 失敗はログに残す (cargo_scu は NULL・resource_types / item_ports は空のままなので、次の起動でまた試す)。終わったら積載量の覚えを捨てて一覧を描き直し、
@@ -2093,7 +2154,7 @@ public partial class MainWindow : Window
         {
             var workDir = App.Config.WorkingDirectory;
             if (string.IsNullOrEmpty(workDir)) workDir = AppDomain.CurrentDomain.BaseDirectory;
-            Task<(int Cargo, int Resources, string? Skipped)> task;
+            Task<(int Cargo, int Resources, int Blueprints, string? Skipped)> task;
             // 構築・再抽出・インポートの印の確認と、取り消し用の登録は _priceRefreshTasks のロックの中で行う
             // (印は取得を止める依頼より前に立つので、依頼が登録より先に来たときは、ここで印を見て始めない)
             lock (_priceRefreshTasks)
@@ -2104,14 +2165,15 @@ public partial class MainWindow : Window
                 task = Task.Run(async () =>
                 {
                     using var extractor = new GameDataExtractor(workDir);
-                    if (!extractor.IsReady) return (0, 0, "starbreaker か Data.p4k が見つからない");
+                    if (!extractor.IsReady) return (0, 0, 0, "starbreaker か Data.p4k が見つからない");
                     var needsCargo = extractor.NeedsShipCargo();
                     var needsResources = extractor.NeedsResourceTypes();
                     var needsPorts = extractor.NeedsCharacterPorts();
-                    if (!needsCargo && !needsResources && !needsPorts) return (0, 0, (string?)null);
-                    if (GameDataExtractor.IsIndexBuildRunning) return (0, 0, "インデックス構築・装備データの再抽出が走っている");
+                    var needsBlueprints = extractor.NeedsBlueprints();
+                    if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints) return (0, 0, 0, (string?)null);
+                    if (GameDataExtractor.IsIndexBuildRunning) return (0, 0, 0, "インデックス構築・装備データの再抽出が走っている");
                     ct.ThrowIfCancellationRequested();
-                    int cargo = 0, resources = 0;
+                    int cargo = 0, resources = 0, blueprints = 0;
                     // 積載量・資源の種類 (失敗はここでログに残し、口の定義へ進む。取り消しはそのまま上げる)
                     try
                     {
@@ -2145,16 +2207,31 @@ public partial class MainWindow : Window
                             Log($"[装備の口] 口の定義の取り出しに失敗しました (次の起動でまた試します): {ex.Message}");
                         }
                     }
-                    return (cargo, resources, (string?)null);
+                    // BP (ブループリント。前が終わってから)
+                    if (needsBlueprints)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        try
+                        {
+                            Log("[BP] ブループリントの表 (blueprints) が無い・空か、原石の精錬後 (refined_uuid) がまだ無いので、裏で取り出します");
+                            blueprints = await extractor.RebuildBlueprintsAsync(new Progress<string>(m => Log($"[BP] {m}")), ct);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            Log($"[BP] ブループリントの取り出しに失敗しました (次の起動でまた試します): {ex.Message}");
+                        }
+                    }
+                    return (cargo, resources, blueprints, (string?)null);
                 });
                 _startupBackfillCts = cts;
                 _startupBackfillTask = task;
             }
-            var (count, resourceCount, skipped) = await task;
+            var (count, resourceCount, blueprintCount, skipped) = await task;
             if (skipped != null)
             {
                 Log($"[積載量] 船の積載量 (SCU) の計算・資源の種類の取り出しをしませんでした ({skipped})");
                 Log($"[装備の口] 口の定義の取り出しをしませんでした ({skipped})");
+                Log($"[BP] ブループリントの取り出しをしませんでした ({skipped})");
             }
             if (count > 0) ShipCargo.Invalidate();   // 計算した値を使うよう、覚えた結果を捨てて一覧を描き直す
             if (resourceCount > 0)
@@ -2162,6 +2239,7 @@ public partial class MainWindow : Window
                 gameLogPanel?.ClearNameCache();   // 取り出した資源名を使うよう、［ゲームログ］の名前の覚えを捨てる
                 orePanel?.Reload();               // ［鉱石］の資源の一覧 (グループ) も読み直す
             }
+            if (resourceCount > 0 || blueprintCount > 0) blueprintPanel?.Reload();   // ［BP］(資源名・原石の精錬後・blueprints) を読み直す
         }
         catch (OperationCanceledException) when (cts?.IsCancellationRequested == true)
         {
@@ -2371,8 +2449,9 @@ public partial class MainWindow : Window
         // 手掘りの鉱石 → 資源の覚え (resource_types) と資源の一覧 (納品の品名の引き当て) も捨てる
         _mineralResources.Clear();
         _oreResources = null;
-        // ［鉱石］の資源の一覧・名前 (resource_types) も替わったので読み直す (一度も表示していなければ何もしない)
+        // ［鉱石］の資源の一覧・名前 (resource_types) も替わったので読み直す (一度も表示していなければ何もしない)。［BP］(blueprints・資源名) も同じく
         orePanel?.Reload();
+        blueprintPanel?.Reload();
         if (!_upgradeDataLoadedOnce) return;
         try
         {
@@ -2433,6 +2512,7 @@ public partial class MainWindow : Window
                 // ［ゲームログ］は translations.db の訳で名前を引いて覚えているので、訳が変わったら捨てる (［鉱石］の資源名も読み直す)
                 gameLogPanel?.ClearNameCache();
                 orePanel?.Reload();
+                blueprintPanel?.Reload();
                 if (changed > 0)
                 {
                     ReopenHangarEquip();
@@ -2457,6 +2537,7 @@ public partial class MainWindow : Window
     {
         gameLogPanel?.ClearNameCache();
         orePanel?.Reload();
+        blueprintPanel?.Reload();
         GameDataExtractor.NotifyItemNamesChanged();
         if (!_itemNameRefreshDeferred) return;
         _itemNameRefreshDeferred = false;
@@ -2501,6 +2582,7 @@ public partial class MainWindow : Window
         // RunDeferredItemNameRefresh でも捨てるが、チャットの自動構築 (ChatService → BuildStructuredIndexAsync) はここにしか来ない)
         gameLogPanel?.ClearNameCache();
         orePanel?.Reload();   // 別スレッドからでも呼べる (OrePanel.Reload が UI のスレッドへ回す)
+        blueprintPanel?.Reload();   // ［BP］も (構築で blueprints が作り直された。同じく UI のスレッドへ回す)
         lock (_priceRefreshTasks)
         {
             if (DeferShopPriceRequestIfImporting(dbPath, afterRebuild: true)) return;
@@ -5864,6 +5946,7 @@ public partial class MainWindow : Window
         {
             InvalidateImportMarks();
             orePanel?.Reload();
+            blueprintPanel?.Reload();   // 在庫が替わったので［BP］の在庫の欄も
         }
         error?.Throw();
     }
@@ -6162,7 +6245,7 @@ public partial class MainWindow : Window
             RefreshLoadoutGrid();
         }
         if (gearChanged) RefreshMyGear();
-        if (stockChanged) orePanel?.Reload();
+        if (stockChanged) { orePanel?.Reload(); blueprintPanel?.Reload(); }
         if (shipsChanged) RefreshMyShips();
         if (shortages.Count > 0)
         {
@@ -6233,7 +6316,7 @@ public partial class MainWindow : Window
             RefreshLoadoutGrid();
         }
         if (gearChanged) RefreshMyGear();
-        if (stockChanged) orePanel?.Reload();
+        if (stockChanged) { orePanel?.Reload(); blueprintPanel?.Reload(); }
         if (shipsChanged) RefreshMyShips();
         if (shortages.Count > 0)
         {

@@ -44,13 +44,19 @@ public class AppConfig
     public string PreferredOcrEngine { get; set; } = "Windows OCR";
 
     // ［ゲームログ］の音: 休戦ゾーンに進入・到着で鳴らすか、鳴らす wav のパス (空なら同梱の sounds\armistice_zone.wav / sounds\arrival.wav)。
-    // 休戦ゾーンに進入は、船を操縦中なら ArmisticeSoundPath、徒歩 (操縦中でない) なら ArmisticeOnFootSoundPath (空なら同梱の sounds\armistice_zone_short.wav)。
-    // 鳴らすかどうかはどちらも ArmisticeSoundEnabled
+    // 休戦ゾーンに進入は、船を操縦中のときだけ鳴らす (徒歩では鳴らさない)。ジャンプポイント脇の休憩所 (RR_JP_…) では休戦・到着とも鳴らさない
     public bool ArmisticeSoundEnabled { get; set; } = true;
     public string ArmisticeSoundPath { get; set; } = "";
+    // 使わない (徒歩の休戦ゾーンの音は鳴らさなくなった)。既存の appsettings.json との互換のため残す
     public string ArmisticeOnFootSoundPath { get; set; } = "";
     public bool ArrivalSoundEnabled { get; set; } = true;
     public string ArrivalSoundPath { get; set; } = "";
+    // ［ゲームログ］の読み上げ: VOICEVOX で場面ごとの文を読み上げるか (URL は Web チャットと同じ VoiceVoxUrl)、既定の声 (VOICEVOX のスタイルの id。16 = 九州そら ノーマル)、
+    // 場面ごとの設定 (GameLogVoiceItem。保存の無い場面は既定 (GameLogVoiceScenes.All))。読み上げられないときは休戦ゾーン進入と到着だけ上の音のファイルを鳴らす。
+    // 休戦ゾーン進入と到着を読むかは上の ArmisticeSoundEnabled / ArrivalSoundEnabled (設定タブの表の「読む」と同じもの)
+    public bool GameLogVoiceVoxEnabled { get; set; } = false;
+    public int GameLogVoiceVoxSpeakerId { get; set; } = 16;
+    public List<GameLogVoiceItem> GameLogVoiceItems { get; set; } = new();
 
     // 最上位のタブの並び (TabItem の x:Name の順。無い名は無視、載っていないタブは末尾) と、最後に見ていたタブ (x:Name。無ければ先頭)
     public List<string> TabOrder { get; set; } = new();

@@ -627,7 +627,6 @@ public partial class GameLogPanel : UserControl
                 _currentRows = result.Rows ?? [];
                 changed = true;
             }
-            PlaySounds(result.Found, result.Reset, result.Changed ? _currentRows : null);
             if (result.Reset)
             {
                 _rescanLeft = RescanTries;
@@ -643,27 +642,34 @@ public partial class GameLogPanel : UserControl
                     changed = true;
                 }
             }
-            // ミッション名: どこかのファイルで名前が分かったら、名前待ちの行 (ID の先頭 8 文字) を書き換える
-            var version = _missionNames.Version;
-            if (changed || version != _missionVersionApplied)
+            // 名前待ちの行の書き換えで例外が出ても、この回の音・読み上げの判定は飛ばさない (例外は状態欄に出す)
+            try
             {
-                _missionVersionApplied = version;
-                if (_missionNames.Apply(_backupSnapshot.Concat(_currentRows))) changed = true;
+                // ミッション名: どこかのファイルで名前が分かったら、名前待ちの行 (ID の先頭 8 文字) を書き換える
+                var version = _missionNames.Version;
+                if (changed || version != _missionVersionApplied)
+                {
+                    _missionVersionApplied = version;
+                    if (_missionNames.Apply(_backupSnapshot.Concat(_currentRows))) changed = true;
+                }
+                // 場所の名前: 同じく、名前待ちの行 (「場所 ID n」) を書き換える
+                var placeVersion = _placeNames.Version;
+                if (changed || placeVersion != _placeVersionApplied)
+                {
+                    _placeVersionApplied = placeVersion;
+                    if (_placeNames.Apply(_backupSnapshot.Concat(_currentRows))) changed = true;
+                }
+                // 船の名前: 同じく、船名待ちの呼び出しの行 (「船 ID n」「X 系（推定）」) を書き換える
+                var vehicleVersion = _vehicleClasses.Version;
+                if ((changed || vehicleVersion != _vehicleVersionApplied) && _names is { } names)
+                {
+                    _vehicleVersionApplied = vehicleVersion;
+                    if (_vehicleClasses.Apply(_backupSnapshot.Concat(_currentRows), names.Ship)) changed = true;
+                }
             }
-            // 場所の名前: 同じく、名前待ちの行 (「場所 ID n」) を書き換える
-            var placeVersion = _placeNames.Version;
-            if (changed || placeVersion != _placeVersionApplied)
-            {
-                _placeVersionApplied = placeVersion;
-                if (_placeNames.Apply(_backupSnapshot.Concat(_currentRows))) changed = true;
-            }
-            // 船の名前: 同じく、船名待ちの呼び出しの行 (「船 ID n」「X 系（推定）」) を書き換える
-            var vehicleVersion = _vehicleClasses.Version;
-            if ((changed || vehicleVersion != _vehicleVersionApplied) && _names is { } names)
-            {
-                _vehicleVersionApplied = vehicleVersion;
-                if (_vehicleClasses.Apply(_backupSnapshot.Concat(_currentRows), names.Ship)) changed = true;
-            }
+            catch (Exception ex) { _pollError = ex.Message; }
+            // 音・読み上げ: 名前待ちの行 (ミッション名・場所の名前・船の名前) を上で書き換えてから決める (読み上げる文に名前を入れるため)
+            PlaySounds(result.Found, result.Reset, result.Changed ? _currentRows : null);
             if (changed) UpdateTable();
             else FlushUnsettled();
         }
@@ -673,22 +679,35 @@ public partial class GameLogPanel : UserControl
         UpdateStatus();
     }
 
-    // 追い読みで新しく足された行から音を鳴らす (休戦ゾーンに進入・到着。判定は GameLogSoundJudge)。鳴らせなかったときはログに残すだけ
+    // 追い読みで新しく足された行から音を鳴らす (判定は GameLogSoundJudge)。鳴らせなかったときはログに残すだけ。
+    // VOICEVOX で読み上げる設定なら、場面ごとの文 (GameLogVoiceScenes) を読み上げの順番待ち (GameLogVoicePlayer) に入れる
+    // (読み上げられなければ、休戦ゾーン進入と到着だけ音のファイルを鳴らす)。読み上げない設定なら、休戦ゾーン進入と到着の音のファイルを今までどおり鳴らす
     private void PlaySounds(bool found, bool reset, IReadOnlyList<GameLogEntry>? rows)
     {
         try
         {
             var config = App.Config;
-            var sounds = _soundJudge.OnPoll(found, reset, rows, DateTime.UtcNow, config.ArmisticeSoundEnabled, config.ArrivalSoundEnabled);
-            foreach (var kind in sounds)
+            var voice = config.GameLogVoiceVoxEnabled;
+            if (voice && GameLogVoicePlayer.Log == null)
+                GameLogVoicePlayer.Log = message => Dispatcher.BeginInvoke(() => ChatService.LogExternal(message));
+            var sounds = _soundJudge.OnPoll(found, reset, rows, DateTime.UtcNow, config.ArmisticeSoundEnabled, config.ArrivalSoundEnabled,
+                voice ? scene => GameLogVoiceScenes.IsEnabled(config, scene) : null);
+            foreach (var ev in sounds)
             {
-                var path = kind switch
+                string? path = ev.Kind switch
                 {
                     GameLogSoundKind.Armistice => GameLogSoundPlayer.ResolvePath(config.ArmisticeSoundPath, GameLogSoundPlayer.DefaultArmisticeFile),
-                    GameLogSoundKind.ArmisticeOnFoot => GameLogSoundPlayer.ResolvePath(config.ArmisticeOnFootSoundPath, GameLogSoundPlayer.DefaultArmisticeOnFootFile),
-                    _ => GameLogSoundPlayer.ResolvePath(config.ArrivalSoundPath, GameLogSoundPlayer.DefaultArrivalFile),
+                    GameLogSoundKind.Arrival => GameLogSoundPlayer.ResolvePath(config.ArrivalSoundPath, GameLogSoundPlayer.DefaultArrivalFile),
+                    _ => null,
                 };
-                if (!GameLogSoundPlayer.Play(path, out var error)) ChatService.LogExternal($"[ゲームログ] {error}");
+                if (voice)
+                {
+                    // 到着の {場所} は今の場所の名前 (保留から鳴らすときも、そのとき分かっている名前)
+                    var place = ev.Kind == GameLogSoundKind.Arrival ? GameLogVoiceScenes.ArrivalPlace(ev.Entry, _placeNames) : null;
+                    var text = GameLogVoiceScenes.BuildText(GameLogVoiceScenes.TemplateOf(config, ev.Scene), ev.Entry, place);
+                    GameLogVoicePlayer.Enqueue(config.VoiceVoxUrl, GameLogVoiceScenes.SpeakerOf(config, ev.Scene), text, path);
+                }
+                else if (path != null && !GameLogSoundPlayer.Play(path, out var error)) ChatService.LogExternal($"[ゲームログ] {error}");
             }
         }
         catch (Exception ex)

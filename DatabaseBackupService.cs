@@ -26,8 +26,9 @@ public static class DatabaseBackupService
     // item_index: 品目の索引 (全文検索の表 item_index_fts は取り込まず、取り込んだ後に item_index から作り直す)。item_vectors: チャットのベクトル検索の埋め込み。
     // mission_reputation / faction_reputation / reputation_reward_amount: ミッションの派閥・貢献度 (日本語化で使う)
     // resource_types: 資源の種類 (商品売買のログの resourceGUID → 名前。インデックス構築で作る)
+    // blueprints / blueprint_materials / blueprint_pools: BP (ブループリント。［BP］タブ。インデックス構築で作る)
     private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache", "item_shop_prices", "ammo_params", "item_variants", "player_damage_params", "item_ports", "item_port_labels",
-        "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount", "resource_types"];
+        "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount", "resource_types", "blueprints", "blueprint_materials", "blueprint_pools"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
     // ore_stock / commodity_trades / mining_log: ［鉱石］タブの在庫・売買の記録・採掘の記録 (個人データ。OreService)
     // my_gear: 所持個人装備、game_log_imports: ［ゲームログ］の行を所持・在庫に入れた印 (個人データ。HangarService)

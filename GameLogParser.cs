@@ -44,8 +44,16 @@ public sealed class GameLogEntry
     public string? PendingVehicleId { get; set; }
     public string VehicleToken { get; set; } = "";
     // 区域の行: その時点で船を操縦中 (操縦席に座ってから降りるまで) なら true。ほかの行は false。
-    // 休戦ゾーンに進入の音を操縦中と徒歩で分けるのに使う (GameLogSoundJudge)
+    // 休戦ゾーンに進入の音を操縦中だけ鳴らす (徒歩では鳴らさない) のに使う (GameLogSoundJudge)
     public bool Piloting { get; init; }
+    // 区域の行: その時点の着陸場所がジャンプポイント脇の休憩所 (RequestLocationInventory の Location[…] が "RR_JP_" で始まる) なら true。
+    // 到着の行: 着いた場所がその休憩所なら true (場所の名前が着いた時点で分からなければ、直後に分かったときに付ける。PendingRawPlaceId)。
+    // 休憩所にいるあいだは休戦の音も到着の音も鳴らさないのに使う (GameLogSoundJudge)。ほかの行は false
+    public bool AtJumpPointStop { get; set; }
+    // 到着の行: 着いた場所の ID で、ログの中の場所の名前 (RR_JP_… かどうか) がまだ分からないもの。分かったら AtJumpPointStop を決めて null。
+    // 音の判定 (GameLogSoundJudge) が到着の音を待つのに使う。DB の payload_json には入れない
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? PendingRawPlaceId { get; set; }
 }
 
 // ［ゲームログ］の行のボタンの状態。Ready = 「入れる」を押せる、Imported = 入れ済み (「取り消す」を押せる)、None = ボタン無し
@@ -427,6 +435,11 @@ public sealed class GameLogParser
     private string _lastDeparturePlace = "";
     // 着陸場所の ID → 場所の名前 (このファイルの中で分かったもの)
     private readonly Dictionary<string, string> _placeNames = new(StringComparer.Ordinal);
+    // 着陸場所の ID → ログの中の場所の名前そのもの (表示名にする前。RR_JP_StantonMagnus など)。このファイルで覚えたものだけ
+    private readonly Dictionary<string, string> _placeRawNames = new(StringComparer.Ordinal);
+    // ログの中の場所の名前がまだ分からない到着の行 (PendingRawPlaceId)。着いてから RawPlaceWindow 以内に名前が分かれば AtJumpPointStop を付ける
+    private readonly List<GameLogEntry> _rawPlaceWaiting = new();
+    private static readonly TimeSpan RawPlaceWindow = TimeSpan.FromSeconds(10);
     // ファイルをまたいで共有する着陸場所の ID → 名前 (渡されたときだけ)。渡されたら、名前待ちの行の書き換えは呼ぶ側が行う
     private readonly GameLogPlaceNames? _sharedPlaceNames;
     // 名前がまだ分からない到着・出発の行 (ID → 行)。共有の対応が無いときだけ使う
@@ -838,10 +851,10 @@ public sealed class GameLogParser
             LearnPlayerName(m.Groups[1].Value);
             // 着陸場所の外 (Landing 0) で出たもの (全ログ 2,920 件中 1,136 件) はどの場所か分からないので覚えない。
             // Location[INVALID_LOCATION_ID] は場所の名前ではないので覚えない
-            if (_landingId != "0" && m.Groups[2].Value != InvalidLocation) LearnPlace(_landingId, m.Groups[2].Value);
+            if (_landingId != "0" && m.Groups[2].Value != InvalidLocation) LearnPlace(_landingId, m.Groups[2].Value, time);
             // 貨物エレベーターのキオスク操作の直後 (同じ秒) の行: その場所の ID の名前として覚える (着陸場所の外にいても)
             if (_freightLocationId.Length > 0 && m.Groups[2].Value != InvalidLocation && time - _freightKioskTime <= TimeSpan.FromSeconds(5))
-                LearnPlace(_freightLocationId, m.Groups[2].Value);
+                LearnPlace(_freightLocationId, m.Groups[2].Value, time);
             return;
         }
         if ((m = FreightKioskRegex.Match(line)).Success)
@@ -1190,6 +1203,21 @@ public sealed class GameLogParser
             ? Add(time, "ログイン", PlaceDisplay(id))
             : Add(time, "到着", PlaceDisplay(id) + ShipSuffix(), shipClass: _lastShipClass, shipName: _lastShipName);
         AttachPlace(e, id);
+        if (!login) AttachRawPlace(e, id, time);
+    }
+
+    // 到着の行に、着いた場所がジャンプポイント脇の休憩所かを付ける。ログの中の場所の名前がこのファイルでまだ分からなければ、
+    // 名前待ち (PendingRawPlaceId) にして、直後の RequestLocationInventory で分かったとき (LearnPlace) に付ける
+    private void AttachRawPlace(GameLogEntry e, string id, DateTime time)
+    {
+        if (_placeRawNames.TryGetValue(id, out var raw))
+        {
+            e.AtJumpPointStop = IsJumpPointStop(raw);
+            return;
+        }
+        _rawPlaceWaiting.RemoveAll(w => time - w.TimeUtc > RawPlaceWindow);
+        e.PendingRawPlaceId = id;
+        _rawPlaceWaiting.Add(e);
     }
 
     private void OnDepart(DateTime time)
@@ -1234,12 +1262,22 @@ public sealed class GameLogParser
         list.Add(e);
     }
 
-    // 着陸場所の ID → 名前を覚える (表示名にして覚える)。名前待ちの行があれば書き換える
-    private void LearnPlace(string id, string rawName)
+    // 着陸場所の ID → 名前を覚える (表示名にして覚える)。名前待ちの行があれば書き換える。
+    // その ID の到着の行で、ログの中の場所の名前を待っているもの (着いてから RawPlaceWindow 以内) には AtJumpPointStop を付ける (time = この行の時刻)
+    private void LearnPlace(string id, string rawName, DateTime time)
     {
         if (id.Length == 0 || rawName.Length == 0) return;
         var name = _placeName(rawName);
         _placeNames[id] = name;
+        _placeRawNames[id] = rawName;
+        _rawPlaceWaiting.RemoveAll(w =>
+        {
+            if (time - w.TimeUtc > RawPlaceWindow) return true;
+            if (w.PendingRawPlaceId != id) return false;
+            w.AtJumpPointStop = IsJumpPointStop(rawName);
+            w.PendingRawPlaceId = null;
+            return true;
+        });
         if (_sharedPlaceNames != null)
         {
             _sharedPlaceNames.Set(id, name);
@@ -1712,8 +1750,15 @@ public sealed class GameLogParser
         var title = (colon >= 0 ? text[..colon] : text).Trim().TrimEnd(':').Trim();
         if (title.EndsWith("管轄区域に進入", StringComparison.Ordinal) || Array.IndexOf(AreaHeadings, title) >= 0
             || StartsWithAny(title, AreaPrefixHeadings, out _))
-            Add(time, "区域", title, piloting: _drivingId != null);
+            Add(time, "区域", title, piloting: _drivingId != null, atJumpPointStop: AtJumpPointStop());
     }
+
+    // 今の着陸場所がジャンプポイント脇の休憩所 (場所の名前が "RR_JP_" で始まる) か。名前がこのファイルでまだ分からなければ false
+    private bool AtJumpPointStop() =>
+        _landingId != "0" && _placeRawNames.TryGetValue(_landingId, out var raw) && IsJumpPointStop(raw);
+
+    // ログの中の場所の名前 (RequestLocationInventory の Location[…]) がジャンプポイント脇の休憩所 (RR_JP_StantonMagnus など) か
+    private static bool IsJumpPointStop(string rawName) => rawName.StartsWith("RR_JP_", StringComparison.Ordinal);
 
     // 通知の文に入る書式のタグ (<EM4>…</EM4> 等)。納品の行のミッション名からは外す
     private static readonly Regex MarkupTagRegex = new(@"</?[A-Za-z][^>]*>", RegexOptions.Compiled);
@@ -2031,13 +2076,13 @@ public sealed class GameLogParser
     // ─── 共通 ───
     private GameLogEntry Add(DateTime time, string kind, string content, double? amount = null, GameLogPurchase? purchase = null,
         List<GameLogImportItem>? importItems = null, GameLogTrade? trade = null, GameLogMining? mining = null,
-        string? shipClass = null, string? shipName = null, bool piloting = false)
+        string? shipClass = null, string? shipName = null, bool piloting = false, bool atJumpPointStop = false)
     {
         var e = new GameLogEntry
         {
             TimeUtc = time, Kind = kind, Content = content, Amount = amount, Source = _source, Purchase = purchase,
             ImportItems = importItems, Trade = trade, Mining = mining, ShipClass = shipClass, ShipName = shipName,
-            Seq = System.Threading.Interlocked.Increment(ref _seq), Piloting = piloting,
+            Seq = System.Threading.Interlocked.Increment(ref _seq), Piloting = piloting, AtJumpPointStop = atJumpPointStop,
         };
         Entries.Add(e);
         Changed = true;

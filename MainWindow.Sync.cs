@@ -274,6 +274,7 @@ public partial class MainWindow
                 RefreshMyGear();
                 gameLogPanel?.RefreshPurchaseButtons();
                 orePanel?.Reload();
+                blueprintPanel?.Reload();   // ［BP］も (在庫・BP の表が取り込まれたかもしれない)
                 // ほかの PC が残した［ゲームログ］の行 (game_log_entries) も取り込まれたかもしれないので読み直す
                 gameLogPanel?.ReloadStored();
                 if (!lastImport) { }

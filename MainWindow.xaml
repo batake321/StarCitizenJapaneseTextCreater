@@ -2135,9 +2135,12 @@
                             </Grid>
                         </GroupBox>
 
-                        <GroupBox Header="ゲームログの音" Margin="0,0,0,8">
+                        <GroupBox x:Name="grpGameLogSound" Header="ゲームログの音" Margin="0,0,0,8" IsVisibleChanged="GameLogSoundGroup_IsVisibleChanged">
                             <Grid Margin="8">
                                 <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
@@ -2150,27 +2153,79 @@
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
 
-                                <CheckBox x:Name="chkArmisticeSound" Content="休戦ゾーンに進入" Grid.Row="0" VerticalAlignment="Center" Margin="0,4"/>
-                                <TextBox x:Name="txtArmisticeSoundPath" Grid.Row="0" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"
+                                <CheckBox x:Name="chkGameLogVoiceVox" Content="VOICEVOX で読み上げる（つながらないときは下の音のファイルを鳴らす）"
+                                          Grid.Row="0" Grid.ColumnSpan="4" VerticalAlignment="Center" Margin="0,4"/>
+
+                                <TextBlock Text="既定の声" Grid.Row="1" VerticalAlignment="Center" Margin="0,4"/>
+                                <ComboBox x:Name="cmbGameLogVoiceSpeaker" Grid.Row="1" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"
+                                          ItemsSource="{Binding DefaultChoices}" DisplayMemberPath="Label" SelectedValuePath="Key"
+                                          SelectedValue="{Binding DefaultSpeakerKey}"/>
+                                <Button Content="一覧を取得" Grid.Row="1" Grid.Column="2" Grid.ColumnSpan="2" Padding="10,2" Margin="6,4,0,4"
+                                        Click="GameLogVoiceSpeakers_Click"/>
+
+                                <TextBlock x:Name="txtGameLogVoiceStatus" Grid.Row="2" Grid.ColumnSpan="4" TextWrapping="Wrap" Margin="0,0,0,4"
+                                           Foreground="#666" FontSize="12"
+                                           Text="URL は Web チャットの VoiceVox URL を使います。"/>
+
+                                <Border Grid.Row="3" Grid.ColumnSpan="4" BorderBrush="#DDD" BorderThickness="1" Margin="0,4">
+                                    <StackPanel>
+                                        <Grid Background="#F2F2F2">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="40"/>
+                                                <ColumnDefinition Width="170"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="210"/>
+                                                <ColumnDefinition Width="60"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="読む" Margin="4,3"/>
+                                            <TextBlock Text="場面" Grid.Column="1" Margin="4,3"/>
+                                            <TextBlock Text="読み上げる文" Grid.Column="2" Margin="4,3"
+                                                       ToolTip="{}{場所} = 到着した場所 (名前が分からないときは取り除く)、{船} = 船の名前 (分からないときは取り除く)、{内容} = ゲームログの内容の欄、{金額} = 金額 (n aUEC)。空欄なら既定の文"/>
+                                            <TextBlock Text="声" Grid.Column="3" Margin="4,3"/>
+                                        </Grid>
+                                        <ItemsControl x:Name="icGameLogVoiceItems" ItemsSource="{Binding Rows}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid Margin="0,1">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="40"/>
+                                                            <ColumnDefinition Width="170"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="210"/>
+                                                            <ColumnDefinition Width="60"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <CheckBox IsChecked="{Binding Enabled}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        <TextBlock Text="{Binding Label}" Grid.Column="1" VerticalAlignment="Center" Margin="4,0"/>
+                                                        <TextBox Text="{Binding Text, UpdateSourceTrigger=PropertyChanged}" Grid.Column="2" VerticalAlignment="Center" Margin="2,0"/>
+                                                        <ComboBox Grid.Column="3" Margin="2,0" VerticalAlignment="Center"
+                                                                  ItemsSource="{Binding Choices}" DisplayMemberPath="Label" SelectedValuePath="Key"
+                                                                  SelectedValue="{Binding SpeakerKey}"/>
+                                                        <Button Content="試聴" Grid.Column="4" Padding="6,1" Margin="4,0" Click="GameLogVoiceTest_Click"/>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </Border>
+
+                                <CheckBox x:Name="chkArmisticeSound" Content="休戦ゾーンに進入" Grid.Row="4" VerticalAlignment="Center" Margin="0,4"
+                                          DataContext="{Binding ArmisticeRow}" IsChecked="{Binding Enabled}"
+                                          ToolTip="表の「休戦ゾーン進入（操縦中）」の「読む」と同じです"/>
+                                <TextBox x:Name="txtArmisticeSoundPath" Grid.Row="4" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"
                                          ToolTip="鳴らす wav のパス。空欄なら同梱の sounds\armistice_zone.wav"/>
-                                <Button Content="参照…" Grid.Row="0" Grid.Column="2" Padding="10,2" Margin="6,4,0,4" Click="ArmisticeSoundBrowse_Click"/>
-                                <Button Content="試聴" Grid.Row="0" Grid.Column="3" Padding="10,2" Margin="6,4,0,4" Click="ArmisticeSoundTest_Click"/>
+                                <Button Content="参照…" Grid.Row="4" Grid.Column="2" Padding="10,2" Margin="6,4,0,4" Click="ArmisticeSoundBrowse_Click"/>
+                                <Button Content="試聴" Grid.Row="4" Grid.Column="3" Padding="10,2" Margin="6,4,0,4" Click="ArmisticeSoundTest_Click"/>
 
-                                <TextBlock Text="休戦ゾーン（徒歩）" Grid.Row="1" VerticalAlignment="Center" Margin="20,4,0,4"
-                                           ToolTip="船を操縦中でないとき (ハンガーから駅へのエレベーターなど) の休戦ゾーンに進入。鳴らすかどうかは「休戦ゾーンに進入」のチェックと共通"/>
-                                <TextBox x:Name="txtArmisticeOnFootSoundPath" Grid.Row="1" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"
-                                         ToolTip="鳴らす wav のパス。空欄なら同梱の sounds\armistice_zone_short.wav"/>
-                                <Button Content="参照…" Grid.Row="1" Grid.Column="2" Padding="10,2" Margin="6,4,0,4" Click="ArmisticeOnFootSoundBrowse_Click"/>
-                                <Button Content="試聴" Grid.Row="1" Grid.Column="3" Padding="10,2" Margin="6,4,0,4" Click="ArmisticeOnFootSoundTest_Click"/>
-
-                                <CheckBox x:Name="chkArrivalSound" Content="到着" Grid.Row="2" VerticalAlignment="Center" Margin="0,4"/>
-                                <TextBox x:Name="txtArrivalSoundPath" Grid.Row="2" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"
+                                <CheckBox x:Name="chkArrivalSound" Content="到着" Grid.Row="5" VerticalAlignment="Center" Margin="0,4"
+                                          DataContext="{Binding ArrivalRow}" IsChecked="{Binding Enabled}"
+                                          ToolTip="表の「到着」の「読む」と同じです"/>
+                                <TextBox x:Name="txtArrivalSoundPath" Grid.Row="5" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"
                                          ToolTip="鳴らす wav のパス。空欄なら同梱の sounds\arrival.wav"/>
-                                <Button Content="参照…" Grid.Row="2" Grid.Column="2" Padding="10,2" Margin="6,4,0,4" Click="ArrivalSoundBrowse_Click"/>
-                                <Button Content="試聴" Grid.Row="2" Grid.Column="3" Padding="10,2" Margin="6,4,0,4" Click="ArrivalSoundTest_Click"/>
+                                <Button Content="参照…" Grid.Row="5" Grid.Column="2" Padding="10,2" Margin="6,4,0,4" Click="ArrivalSoundBrowse_Click"/>
+                                <Button Content="試聴" Grid.Row="5" Grid.Column="3" Padding="10,2" Margin="6,4,0,4" Click="ArrivalSoundTest_Click"/>
 
-                                <TextBlock Grid.Row="3" Grid.ColumnSpan="4" TextWrapping="Wrap" Margin="0,4,0,0" Foreground="#666" FontSize="12"
-                                           Text="ゲームログの追い読みで新しく出た行 (10 秒以内のもの) で鳴らします。パスが空欄なら同梱の音 (sounds フォルダ)。到着は休戦ゾーンの音の直後 60 秒は鳴らしません。"/>
+                                <TextBlock Grid.Row="6" Grid.ColumnSpan="4" TextWrapping="Wrap" Margin="0,4,0,0" Foreground="#666" FontSize="12"
+                                           Text="ゲームログの追い読みで新しく出た行 (10 秒以内のもの) で鳴らします。休戦ゾーンは船を操縦中に入ったときだけ鳴らし、ジャンプポイントの休憩所では休戦ゾーン・到着とも鳴らしません。到着は休戦ゾーンの音の直後 60 秒は鳴らしません。ほかの場面は、同じ場面が 10 秒以内に続いたら 2 つ目からは読みません。音のファイルは VOICEVOX で読み上げないとき・つながらないときに鳴らします (休戦ゾーンと到着だけ。パスが空欄なら同梱の音)。倒した相手はゲームのログに出ないので読み上げられません。"/>
                             </Grid>
                         </GroupBox>
 
@@ -2252,6 +2307,10 @@
             <!-- ［鉱石］: 採掘・積み荷の資源の在庫 (資源 × 品質) と、売買・採掘の記録 (OrePanel。trade_cache.db) -->
             <TabItem x:Name="tabOre" Header="鉱石">
                 <local:OrePanel x:Name="orePanel"/>
+            </TabItem>
+            <!-- ［BP］: ブループリント (できる品・材料・時間・入手・在庫との照合。BlueprintPanel。gamedata_cache.db の blueprints と trade_cache.db の ore_stock) -->
+            <TabItem x:Name="tabBlueprint" Header="BP">
+                <local:BlueprintPanel x:Name="blueprintPanel"/>
             </TabItem>
             <!-- ログタブ -->
             <TabItem x:Name="tabLog" Header="ログ">

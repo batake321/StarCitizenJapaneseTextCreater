@@ -1,0 +1,34 @@
+<UserControl x:Class="StarCitizenJapaneseTextCreater.BlueprintPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:StarCitizenJapaneseTextCreater">
+    <!-- ［BP］タブ: ブループリントの一覧 (gamedata_cache.db の blueprints / blueprint_materials / blueprint_pools)。
+         上に絞り込み (資源・分類・今の在庫で作れるものだけ)、下に表 (できる品・分類・材料・時間・入手・在庫)。
+         在庫は trade_cache.db の ore_stock (［鉱石］タブ) と照合する。1 列目のダブルクリックで［詳細］タブにできる品を出す -->
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <WrapPanel Grid.Row="0" Margin="0,0,0,6" VerticalAlignment="Center">
+            <TextBlock Text="資源:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <ComboBox x:Name="cmbResource" MinWidth="220" Margin="0,0,12,0" VerticalAlignment="Center" DisplayMemberPath="Label"
+                      SelectionChanged="Filter_Changed" ToolTip="その資源 (精錬後) を材料に使う BP だけを出す。原石は「原石名 → 精錬後名」で選ぶ (精錬後の資源で絞る)">
+                <ComboBox.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <VirtualizingStackPanel/>
+                    </ItemsPanelTemplate>
+                </ComboBox.ItemsPanel>
+            </ComboBox>
+            <TextBlock Text="分類:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <ComboBox x:Name="cmbCategory" MinWidth="160" Margin="0,0,12,0" VerticalAlignment="Center" SelectionChanged="Filter_Changed"/>
+            <CheckBox x:Name="chkCraftable" Content="今の在庫で作れるものだけ" VerticalAlignment="Center" Margin="0,0,12,0"
+                      Checked="Filter_Changed" Unchecked="Filter_Changed"
+                      ToolTip="［鉱石］タブの在庫 (ore_stock) で全部の枠を満たす BP (在庫の欄が「足りる」) だけを出す。原石は精錬後の資源として 1 SCU = 1 SCU で数える"/>
+            <TextBlock x:Name="txtStatus" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
+        </WrapPanel>
+
+        <local:FilterSortGrid x:Name="table" Grid.Row="1"/>
+    </Grid>
+</UserControl>

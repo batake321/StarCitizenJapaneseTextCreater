@@ -420,15 +420,16 @@ public class GameDataExtractor : IDisposable
         try
         {
             using var cmd = _db.CreateCommand();
-            cmd.CommandText = ItemPortsDdl + ItemPortLabelsDdl + ResourceTypesDdl;
+            cmd.CommandText = ItemPortsDdl + ItemPortLabelsDdl + ResourceTypesDdl + BlueprintsDdl;
             cmd.ExecuteNonQuery();
             AddMissingResourceTypesColumns(_db);
         }
         catch { }
     }
 
-    // 前の版の resource_types (group_record 列なし) に列を足す (DatabaseBackupService の復元先でも使う)。表が無ければ何もしない。
-    // 足したばかりの列は NULL のまま (NeedsResourceTypes が真になり、起動後の裏の取り出し (RebuildResourceTypesAsync) で入れ直される)
+    // 前の版の resource_types (group_record 列なし・refined_uuid 列なし) に列を足す (DatabaseBackupService の復元先でも使う)。表が無ければ何もしない。
+    // 足したばかりの列は NULL のまま (group_record は NeedsResourceTypes が真になり、起動後の裏の取り出し (RebuildResourceTypesAsync) で入れ直される。
+    // refined_uuid は NeedsBlueprints が真になり、RebuildBlueprintsAsync で埋められる)
     internal static void AddMissingResourceTypesColumns(SqliteConnection db)
     {
         var cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -438,15 +439,20 @@ public class GameDataExtractor : IDisposable
             using var reader = chk.ExecuteReader();
             while (reader.Read()) cols.Add(reader.GetString(1));
         }
-        if (cols.Count == 0 || cols.Contains("group_record")) return;
-        using var alt = db.CreateCommand();
-        alt.CommandText = "ALTER TABLE resource_types ADD COLUMN group_record TEXT";
-        alt.ExecuteNonQuery();
+        if (cols.Count == 0) return;
+        foreach (var col in new[] { "group_record", "refined_uuid" })
+        {
+            if (cols.Contains(col)) continue;
+            using var alt = db.CreateCommand();
+            alt.CommandText = $"ALTER TABLE resource_types ADD COLUMN {col} TEXT";
+            alt.ExecuteNonQuery();
+        }
     }
 
     // 資源の種類 (ResourceTypeDatabase の record の中の ResourceType)。uuid は record の _RecordId_ (商品売買のログの resourceGUID と同じ)、
     // name_key は displayName ("@items_commodities_…")、name_en は英語ローカライズで引いた英語名 (無ければ NULL)、
-    // group_record はその資源を含む直近のグループ record の名前 ("ResourceTypeGroup.Metal" 等。［鉱石］タブの一覧の絞り込みに使う)。
+    // group_record はその資源を含む直近のグループ record の名前 ("ResourceTypeGroup.Metal" 等。［鉱石］タブの一覧の絞り込みに使う)、
+    // refined_uuid は原石の精錬後の資源 (refinedVersion._RecordId_。原石でなければ NULL。［BP］タブで原石の在庫を精錬後の資源に寄せるのに使う)。
     // ［ゲームログ］の商品売買の行で資源名を出すのに使う。インデックス構築で作る (無い・空・group_record が無いなら起動後に裏で一度だけ取り出す: RebuildResourceTypesAsync)
     internal const string ResourceTypesDdl = """
 
@@ -456,8 +462,54 @@ public class GameDataExtractor : IDisposable
             name_key TEXT,
             name_en TEXT,
             extracted_at TEXT NOT NULL,
-            group_record TEXT
+            group_record TEXT,
+            refined_uuid TEXT
         );
+        """;
+
+    // BP (ブループリント)。CraftingBlueprintRecord (できる品・分類・時間・材料) と BlueprintPoolRecord (ミッション報酬の抽選プール)、
+    // CraftingGlobalParams の初期所持の白リスト (starter) から作る。インデックス構築で作り直す (ExtractBlueprintsAsync)。
+    // 前の版で構築した DB には無い (表は EnsureDb が空で作る) ので、起動後に裏で一度だけ取り出す (RebuildBlueprintsAsync。NeedsBlueprints)。
+    //   blueprints: uuid = record の _RecordId_、category は BlueprintCategoryRecord の名前 ("BlueprintCategoryRecord." を除く)、
+    //     output_record はできる品の record 名 ("EntityClassDefinition." + entityClass のファイル名。item_index にあればその綴り)、
+    //     output_name_key / output_name_en は item_index (無ければ EntityClassDefinition を問い合わせた Name キー) から、
+    //     craft_time_sec は craftTime の合計秒、process は processSpecificData._Type_、choose_count は枠のうち選ぶ数 (全部使うなら NULL)、
+    //     starter は初期所持の白リストにあれば 1
+    //   blueprint_materials: 枠ごとの材料。resource_uuid (ResourceType の _RecordId_) か item_record (CraftingCost_Item の record 名) のどちらかが '' (NULL ではない。主キーのため)。
+    //     quantity は SCU (資源) か個数 (品目)。QuantityMultiplier の context があれば掛けた値。min_quality は品質の下限 (0〜1000)
+    //   blueprint_pools: 抽選プール → BP。pool_file はプールの record 名を小文字にしたもの (missions.raw_json の blueprintPool のファイル名と結合する用)
+    internal const string BlueprintsDdl = """
+
+        CREATE TABLE IF NOT EXISTS blueprints (
+            uuid TEXT PRIMARY KEY,
+            record_name TEXT,
+            category TEXT,
+            output_record TEXT,
+            output_name_key TEXT,
+            output_name_en TEXT,
+            craft_time_sec INTEGER,
+            process TEXT,
+            choose_count INTEGER,
+            starter INTEGER,
+            extracted_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS blueprint_materials (
+            bp_uuid TEXT,
+            slot_debug_name TEXT,
+            slot_name_key TEXT,
+            resource_uuid TEXT,
+            item_record TEXT,
+            quantity REAL,
+            min_quality INTEGER,
+            PRIMARY KEY(bp_uuid, slot_debug_name, resource_uuid, item_record)
+        );
+        CREATE TABLE IF NOT EXISTS blueprint_pools (
+            pool_record TEXT,
+            pool_file TEXT,
+            bp_uuid TEXT,
+            PRIMARY KEY(pool_record, bp_uuid)
+        );
+        CREATE INDEX IF NOT EXISTS idx_blueprint_pools_file ON blueprint_pools(pool_file);
         """;
 
     // 品目 (タレット・ジンバル・船の武器と、着る物 CharacterPortRecordTypes) 自身の子ポートの定義 (record の SItemPortContainerComponentParams.Ports)。
@@ -1059,14 +1111,15 @@ public class GameDataExtractor : IDisposable
         using (var ins = _db.CreateCommand())
         {
             ins.Transaction = tx;
-            ins.CommandText = "INSERT OR REPLACE INTO resource_types(uuid,record_name,name_key,name_en,extracted_at,group_record) VALUES(@u,@rn,@k,@en,@t,@g)";
+            ins.CommandText = "INSERT OR REPLACE INTO resource_types(uuid,record_name,name_key,name_en,extracted_at,group_record,refined_uuid) VALUES(@u,@rn,@k,@en,@t,@g,@rf)";
             var pU = ins.Parameters.Add("@u", SqliteType.Text);
             var pRn = ins.Parameters.Add("@rn", SqliteType.Text);
             var pK = ins.Parameters.Add("@k", SqliteType.Text);
             var pEn = ins.Parameters.Add("@en", SqliteType.Text);
             var pT = ins.Parameters.Add("@t", SqliteType.Text);
             var pG = ins.Parameters.Add("@g", SqliteType.Text);
-            foreach (var (uuid, recordName, nameKey, groupRecord) in rows)
+            var pRf = ins.Parameters.Add("@rf", SqliteType.Text);
+            foreach (var (uuid, recordName, nameKey, groupRecord, refinedUuid) in rows)
             {
                 string? en = null;
                 if (loc != null && nameKey is { Length: > 1 } && nameKey[0] == '@' && loc.TryGetValue(nameKey[1..], out var text) && !string.IsNullOrWhiteSpace(text))
@@ -1077,6 +1130,7 @@ public class GameDataExtractor : IDisposable
                 pEn.Value = (object?)en ?? DBNull.Value;
                 pT.Value = now;
                 pG.Value = (object?)groupRecord ?? DBNull.Value;
+                pRf.Value = (object?)refinedUuid ?? DBNull.Value;
                 ins.ExecuteNonQuery();
             }
         }
@@ -1086,11 +1140,12 @@ public class GameDataExtractor : IDisposable
     }
 
     // dcb query "ResourceTypeDatabase" の出力から ResourceType を集める: (uuid = _RecordId_, record_name = _RecordName_, name_key = displayName,
-    // group_record = その resources[] を持つ直近のグループ record の _RecordName_ ("ResourceTypeGroup.Metal" 等。無ければ null))。
+    // group_record = その resources[] を持つ直近のグループ record の _RecordName_ ("ResourceTypeGroup.Metal" 等。無ければ null),
+    // refined_uuid = refinedVersion._RecordId_ (原石の精錬後の資源。無ければ null))。
     // _RecordValue_.groups[] の中の resources[] と、入れ子の groups[] をたどる。_Type_ が ResourceType のものだけ
-    internal static List<(string Uuid, string RecordName, string? NameKey, string? GroupRecord)> ParseResourceTypeDatabase(string output)
+    internal static List<(string Uuid, string RecordName, string? NameKey, string? GroupRecord, string? RefinedUuid)> ParseResourceTypeDatabase(string output)
     {
-        var rows = new List<(string, string, string?, string?)>();
+        var rows = new List<(string, string, string?, string?, string?)>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var block in SplitJsonBlocks(output))
         {
@@ -1106,7 +1161,7 @@ public class GameDataExtractor : IDisposable
     }
 
     // groupRecord は group 自身の _RecordName_ (ResourceTypeGroup.…)。無ければ (いちばん外の _RecordValue_) 親のものを引き継ぐ
-    private static void WalkResourceGroups(JsonElement group, string? groupRecord, List<(string, string, string?, string?)> rows, HashSet<string> seen)
+    private static void WalkResourceGroups(JsonElement group, string? groupRecord, List<(string, string, string?, string?, string?)> rows, HashSet<string> seen)
     {
         if (group.ValueKind != JsonValueKind.Object) return;
         if (group.TryGetProperty("_RecordName_", out var grEl) && grEl.ValueKind == JsonValueKind.String && grEl.GetString() is { Length: > 0 } gr)
@@ -1121,12 +1176,507 @@ public class GameDataExtractor : IDisposable
                 var name = r.TryGetProperty("_RecordName_", out var nmEl) && nmEl.ValueKind == JsonValueKind.String ? nmEl.GetString() : null;
                 if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(name) || !seen.Add(id)) continue;
                 var key = r.TryGetProperty("displayName", out var dnEl) && dnEl.ValueKind == JsonValueKind.String ? dnEl.GetString() : null;
-                rows.Add((id, name, string.IsNullOrWhiteSpace(key) ? null : key, groupRecord));
+                // 原石の精錬後の資源 (refinedVersion は ResourceType の record がそのまま入れ子で入っている。原石でなければ null)
+                string? refined = null;
+                if (r.TryGetProperty("refinedVersion", out var rvEl) && rvEl.ValueKind == JsonValueKind.Object
+                    && rvEl.TryGetProperty("_RecordId_", out var rvId) && rvId.ValueKind == JsonValueKind.String && rvId.GetString() is { Length: > 0 } rid)
+                    refined = rid;
+                rows.Add((id, name, string.IsNullOrWhiteSpace(key) ? null : key, groupRecord, refined));
             }
         }
         if (group.TryGetProperty("groups", out var groups) && groups.ValueKind == JsonValueKind.Array)
             foreach (var g in groups.EnumerateArray()) WalkResourceGroups(g, groupRecord, rows, seen);
     }
+
+    // === BP (ブループリント) ===
+
+    // BP の表 (blueprints) が無い・空か、resource_types に原石の精錬後 (refined_uuid) が 1 行も入っていないか (前の版で構築した DB・
+    // 前の版のバックアップを取り込んだ DB)。起動後の RebuildBlueprintsAsync を走らせるか決めるため。表と列は EnsureDb が作る
+    public bool NeedsBlueprints()
+    {
+        EnsureDb();
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "SELECT (NOT EXISTS (SELECT 1 FROM blueprints)) OR (NOT EXISTS (SELECT 1 FROM resource_types WHERE refined_uuid IS NOT NULL))";
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
+    }
+
+    // BP だけを取り出し直す (インデックス構築をせずに blueprints / blueprint_materials / blueprint_pools を作り、resource_types の refined_uuid を埋める)。
+    // 入れた BP の件数を返す。起動後に裏で一度だけ呼ばれる (MainWindow: NeedsBlueprints のとき)。
+    // RebuildResourceTypesAsync と同じく dcb query が数回なので Game2.dcb は取り出さず Data.p4k から直接読む。
+    // 途中で構築が始まったら (IsIndexBuildRunning)、構築が作り直すので書き込まずに 0 を返す
+    public async Task<int> RebuildBlueprintsAsync(IProgress<string>? progress = null, CancellationToken ct = default)
+    {
+        var p4kPath = FindDataP4k()
+            ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
+
+        await EnsureStarBreakerAsync();
+        EnsureDb();
+
+        Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
+        if (relay != null) StatusChanged += relay;
+        try
+        {
+            // 原石 → 精錬後 (refined_uuid)。resource_types の行はそのまま、refined_uuid だけ入れる (ResourceTypeDatabase を 1 回問い合わせる)
+            StatusChanged?.Invoke("原石の精錬後の資源 (refinedVersion) を取り出し中...");
+            var output = await RunDcbQueryRawAsync(p4kPath, "ResourceTypeDatabase", "*", ct);
+            var rows = ParseResourceTypeDatabase(output);
+            if (rows.Count == 0)
+                StatusChanged?.Invoke("原石の精錬後の資源 (refinedVersion) を取得できませんでした (前のデータを残します)");
+            else if (IsIndexBuildRunning)
+            {
+                StatusChanged?.Invoke("BP: インデックス構築・装備データの再抽出が始まったので、取り出した値は書き込みませんでした");
+                return 0;
+            }
+            else
+            {
+                ct.ThrowIfCancellationRequested();
+                int updated = 0;
+                using (var tx = _db!.BeginTransaction())
+                {
+                    using var upd = _db.CreateCommand();
+                    upd.Transaction = tx;
+                    upd.CommandText = "UPDATE resource_types SET refined_uuid = @rf WHERE uuid = @u";
+                    var pRf = upd.Parameters.Add("@rf", SqliteType.Text);
+                    var pU = upd.Parameters.Add("@u", SqliteType.Text);
+                    foreach (var (uuid, _, _, _, refined) in rows)
+                    {
+                        if (refined == null) continue;
+                        pRf.Value = refined;
+                        pU.Value = uuid;
+                        updated += upd.ExecuteNonQuery();
+                    }
+                    tx.Commit();
+                }
+                StatusChanged?.Invoke($"原石の精錬後の資源 (refinedVersion): {rows.Count(r => r.RefinedUuid != null)} 件のうち resource_types にある {updated} 件に入れました");
+            }
+            return await ExtractBlueprintsAsync(p4kPath, DateTime.UtcNow.ToString("o"), ct, skipWriteIfIndexBuildStarts: true);
+        }
+        finally
+        {
+            if (relay != null) StatusChanged -= relay;
+        }
+    }
+
+    private sealed class BlueprintRow
+    {
+        public string Uuid = "";
+        public string RecordName = "";       // "CraftingBlueprintRecord." を除いた record 名
+        public string? Category;
+        public string? OutputShort;          // entityClass のファイル名 (拡張子なし。元の綴り)
+        public string? OutputRecord;         // "EntityClassDefinition." + OutputShort (item_index にあればその綴り)
+        public string? OutputNameKey;
+        public string? OutputNameEn;
+        public long CraftTimeSec;
+        public string? Process;
+        public int? ChooseCount;
+        public bool Starter;
+        public List<BlueprintMaterial> Materials = new();
+    }
+
+    private sealed class BlueprintMaterial
+    {
+        public string SlotDebugName = "";
+        public string? SlotNameKey;
+        public string ResourceUuid = "";     // どちらかが '' (主キーのため NULL にしない)
+        public string ItemRecord = "";
+        public double Quantity;
+        public int MinQuality;
+    }
+
+    // BP を 3 表 (blueprints / blueprint_materials / blueprint_pools) に入れ直す。CraftingBlueprintRecord・BlueprintPoolRecord・CraftingGlobalParams を問い合わせ、
+    // item_index に無いできる品の名前は EntityClassDefinition を record 名で問い合わせて Name キーを取る (filter は大文字小文字を区別するので、
+    // 小文字のファイル名で当たらなければ未解決のまま = 名前はファイル名)。取得できなければ前の行を残して 0 を返す。入れた BP の件数を返す
+    private async Task<int> ExtractBlueprintsAsync(string p4kPath, string now, CancellationToken ct, bool skipWriteIfIndexBuildStarts = false)
+    {
+        var sw = Stopwatch.StartNew();
+        StatusChanged?.Invoke("BP (CraftingBlueprintRecord) を取り出し中...");
+        var bpJson = await RunDcbQueryRawAsync(p4kPath, "CraftingBlueprintRecord", "*", ct);
+        var bps = ParseBlueprints(bpJson);
+        if (bps.Count == 0)
+        {
+            StatusChanged?.Invoke("BP (CraftingBlueprintRecord) を取得できませんでした (前のデータを残します)");
+            return 0;
+        }
+        StatusChanged?.Invoke($"BP: {bps.Count} 件 ({sw.Elapsed.TotalSeconds:F1}秒)。抽選プール (BlueprintPoolRecord) を取り出し中...");
+        ct.ThrowIfCancellationRequested();
+        var poolJson = await RunDcbQueryRawAsync(p4kPath, "BlueprintPoolRecord", "*", ct);
+        var pools = ParseBlueprintPools(poolJson);
+        ct.ThrowIfCancellationRequested();
+        var paramsJson = await RunDcbQueryRawAsync(p4kPath, "CraftingGlobalParams", "*", ct);
+        var starters = ParseBlueprintWhitelist(paramsJson);
+        StatusChanged?.Invoke($"BP: 抽選プール {pools.Count} 件、初期所持 {starters.Count} 件");
+
+        // できる品の名前: item_index (大文字小文字を区別しない record 名で引く。あればその綴りに揃える)
+        var index = new Dictionary<string, (string Record, string? NameKey, string? NameEn)>(StringComparer.OrdinalIgnoreCase);
+        using (var cmd = _db!.CreateCommand())
+        {
+            cmd.CommandText = "SELECT record_name, name_key, name FROM item_index WHERE record_name LIKE 'EntityClassDefinition.%'";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var rec = r.GetString(0);
+                var shortName = rec["EntityClassDefinition.".Length..];
+                if (!index.ContainsKey(shortName))
+                    index[shortName] = (rec, r.IsDBNull(1) ? null : r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2));
+            }
+        }
+        var bpByShort = new Dictionary<string, BlueprintRow>(StringComparer.OrdinalIgnoreCase);
+        var unresolved = new List<string>();
+        foreach (var bp in bps)
+        {
+            bpByShort.TryAdd(bp.RecordName, bp);
+            bp.Starter = starters.Contains(bp.RecordName);
+            if (bp.OutputShort == null) continue;
+            if (index.TryGetValue(bp.OutputShort, out var hit))
+            {
+                bp.OutputRecord = hit.Record;
+                bp.OutputNameKey = hit.NameKey;
+                bp.OutputNameEn = hit.NameEn;
+            }
+            else
+            {
+                bp.OutputRecord = "EntityClassDefinition." + bp.OutputShort;
+                unresolved.Add(bp.OutputShort);
+            }
+            // 材料の品目 (手掘りの鉱物など) の record 名も item_index の綴りに揃える
+            foreach (var m in bp.Materials)
+                if (m.ItemRecord.Length > 0 && index.TryGetValue(m.ItemRecord["EntityClassDefinition.".Length..], out var ih)) m.ItemRecord = ih.Record;
+        }
+
+        // item_index に無いできる品 (採掘レーザー・燃料ノズル・ミッション品など) は EntityClassDefinition を問い合わせて Name キーを取る。
+        // entityClass のパスのファイル名は小文字で、dcb query の filter は record 名の大文字小文字を区別する (小文字のままでは 1 件も当たらない) ので、
+        // 全エンティティの種類の一覧 (QueryEntityTypesAsync。record 名が元の綴りで取れる) から小文字一致で正しい綴りを引き、その綴りで問い合わせる。
+        // output_record もその綴りに揃える (一覧に無いものはファイル名のまま)
+        if (unresolved.Count > 0)
+        {
+            var typeMap = await QueryEntityTypesAsync(p4kPath, ct);
+            var spelling = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // 短縮名 (大文字小文字を区別しない) → 元の綴りの短縮名
+            foreach (var rec in typeMap.Keys) spelling.TryAdd(rec["EntityClassDefinition.".Length..], rec["EntityClassDefinition.".Length..]);
+            var unresolvedSet = new HashSet<string>(unresolved, StringComparer.OrdinalIgnoreCase);
+            foreach (var bp in bps)
+                if (bp.OutputShort != null && unresolvedSet.Contains(bp.OutputShort) && spelling.TryGetValue(bp.OutputShort, out var sp))
+                    bp.OutputRecord = "EntityClassDefinition." + sp;
+            var queryNames = unresolved.Select(u => spelling.TryGetValue(u, out var sp) ? sp : u).ToList();
+            var filters = BuildRecordNameFilters(queryNames);
+            int unresolvedCount = unresolvedSet.Count;
+            StatusChanged?.Invoke($"BP: item_index に無いできる品 {unresolvedCount} 件の名前を取得中... ({filters.Count} 回に分けて読み込み)");
+            var loc = LoadShipNameLocalization();
+            var names = new Dictionary<string, (string Record, string? NameKey)>(StringComparer.OrdinalIgnoreCase);
+            foreach (var filter in filters)
+            {
+                ct.ThrowIfCancellationRequested();
+                var text = await RunDcbQueryRawAsync(p4kPath, "EntityClassDefinition", filter, ct);
+                foreach (var (record, nameKey) in ReadEntityNameKeys(text))
+                    names.TryAdd(record["EntityClassDefinition.".Length..], (record, nameKey));
+            }
+            var resolvedShorts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var bp in bps)
+            {
+                if (bp.OutputShort == null || bp.OutputNameKey != null || bp.OutputNameEn != null || !names.TryGetValue(bp.OutputShort, out var n)) continue;
+                bp.OutputRecord = n.Record;
+                bp.OutputNameKey = n.NameKey;
+                if (n.NameKey != null && loc != null && loc.TryGetValue(n.NameKey, out var en) && !string.IsNullOrWhiteSpace(en) && !en.StartsWith('!'))
+                    bp.OutputNameEn = en.Trim();
+                if (n.NameKey != null) resolvedShorts.Add(bp.OutputShort);
+            }
+            StatusChanged?.Invoke($"BP: item_index に無いできる品の名前を {resolvedShorts.Count} 件解決しました ({unresolvedCount - resolvedShorts.Count} 件はファイル名のまま)");
+        }
+
+        if (skipWriteIfIndexBuildStarts && IsIndexBuildRunning)
+        {
+            StatusChanged?.Invoke("BP: インデックス構築・装備データの再抽出が始まったので、取り出した値は書き込みませんでした");
+            return 0;
+        }
+        ct.ThrowIfCancellationRequested();
+
+        int poolRows = 0, materialRows = 0;
+        using (var tx = _db.BeginTransaction())
+        {
+            using (var del = _db.CreateCommand())
+            {
+                del.Transaction = tx;
+                del.CommandText = "DELETE FROM blueprint_pools; DELETE FROM blueprint_materials; DELETE FROM blueprints";
+                del.ExecuteNonQuery();
+            }
+            using (var ins = _db.CreateCommand())
+            {
+                ins.Transaction = tx;
+                ins.CommandText = "INSERT OR REPLACE INTO blueprints(uuid,record_name,category,output_record,output_name_key,output_name_en,craft_time_sec,process,choose_count,starter,extracted_at) "
+                    + "VALUES(@u,@rn,@c,@or,@nk,@ne,@ct,@p,@cc,@st,@t)";
+                var pU = ins.Parameters.Add("@u", SqliteType.Text);
+                var pRn = ins.Parameters.Add("@rn", SqliteType.Text);
+                var pC = ins.Parameters.Add("@c", SqliteType.Text);
+                var pOr = ins.Parameters.Add("@or", SqliteType.Text);
+                var pNk = ins.Parameters.Add("@nk", SqliteType.Text);
+                var pNe = ins.Parameters.Add("@ne", SqliteType.Text);
+                var pCt = ins.Parameters.Add("@ct", SqliteType.Integer);
+                var pP = ins.Parameters.Add("@p", SqliteType.Text);
+                var pCc = ins.Parameters.Add("@cc", SqliteType.Integer);
+                var pSt = ins.Parameters.Add("@st", SqliteType.Integer);
+                var pT = ins.Parameters.Add("@t", SqliteType.Text);
+                foreach (var bp in bps)
+                {
+                    pU.Value = bp.Uuid;
+                    pRn.Value = bp.RecordName;
+                    pC.Value = (object?)bp.Category ?? DBNull.Value;
+                    pOr.Value = (object?)bp.OutputRecord ?? DBNull.Value;
+                    pNk.Value = (object?)bp.OutputNameKey ?? DBNull.Value;
+                    pNe.Value = (object?)bp.OutputNameEn ?? DBNull.Value;
+                    pCt.Value = bp.CraftTimeSec;
+                    pP.Value = (object?)bp.Process ?? DBNull.Value;
+                    pCc.Value = (object?)bp.ChooseCount ?? DBNull.Value;
+                    pSt.Value = bp.Starter ? 1 : 0;
+                    pT.Value = now;
+                    ins.ExecuteNonQuery();
+                }
+            }
+            using (var ins = _db.CreateCommand())
+            {
+                ins.Transaction = tx;
+                ins.CommandText = "INSERT OR REPLACE INTO blueprint_materials(bp_uuid,slot_debug_name,slot_name_key,resource_uuid,item_record,quantity,min_quality) VALUES(@b,@s,@k,@r,@i,@q,@m)";
+                var pB = ins.Parameters.Add("@b", SqliteType.Text);
+                var pS = ins.Parameters.Add("@s", SqliteType.Text);
+                var pK = ins.Parameters.Add("@k", SqliteType.Text);
+                var pR = ins.Parameters.Add("@r", SqliteType.Text);
+                var pI = ins.Parameters.Add("@i", SqliteType.Text);
+                var pQ = ins.Parameters.Add("@q", SqliteType.Real);
+                var pM = ins.Parameters.Add("@m", SqliteType.Integer);
+                foreach (var bp in bps)
+                    foreach (var m in bp.Materials)
+                    {
+                        pB.Value = bp.Uuid;
+                        pS.Value = m.SlotDebugName;
+                        pK.Value = (object?)m.SlotNameKey ?? DBNull.Value;
+                        pR.Value = m.ResourceUuid;
+                        pI.Value = m.ItemRecord;
+                        pQ.Value = m.Quantity;
+                        pM.Value = m.MinQuality;
+                        materialRows += ins.ExecuteNonQuery();
+                    }
+            }
+            using (var ins = _db.CreateCommand())
+            {
+                ins.Transaction = tx;
+                ins.CommandText = "INSERT OR REPLACE INTO blueprint_pools(pool_record,pool_file,bp_uuid) VALUES(@p,@f,@b)";
+                var pP = ins.Parameters.Add("@p", SqliteType.Text);
+                var pF = ins.Parameters.Add("@f", SqliteType.Text);
+                var pB = ins.Parameters.Add("@b", SqliteType.Text);
+                foreach (var (poolRecord, bpShortNames) in pools)
+                {
+                    var shortName = poolRecord.StartsWith("BlueprintPoolRecord.", StringComparison.Ordinal) ? poolRecord["BlueprintPoolRecord.".Length..] : poolRecord;
+                    foreach (var bpShort in bpShortNames)
+                    {
+                        if (!bpByShort.TryGetValue(bpShort, out var bp)) continue;
+                        pP.Value = poolRecord;
+                        pF.Value = shortName.ToLowerInvariant();
+                        pB.Value = bp.Uuid;
+                        poolRows += ins.ExecuteNonQuery();
+                    }
+                }
+            }
+            tx.Commit();
+        }
+        StatusChanged?.Invoke($"BP: {bps.Count} 件、材料 {materialRows} 行、抽選プール {poolRows} 行を入れました ({sw.Elapsed.TotalSeconds:F1}秒)");
+        return bps.Count;
+    }
+
+    // dcb query "CraftingBlueprintRecord" の出力を読む。_RecordValue_.blueprint の category (BlueprintCategoryRecord.xxx)、
+    // processSpecificData (_Type_ と entityClass のパス)、tiers[0].recipe.costs (craftTime、mandatoryCost = 枠を並べた CraftingCost_Select)。
+    // mandatoryCost: 外の CraftingCost_Select (debugName "ASPECTS") の options[] が枠 (CraftingCost_Select。nameInfo.debugName / displayName)、
+    // 枠の options[] が CraftingCost_Resource (resource._RecordId_、quantity.standardCargoUnits、minQuality) か CraftingCost_Item (entityClass のパス、quantity、minQuality)。
+    // context[] の CraftingCostContext_QuantityMultiplier.multiplier は quantity に掛ける。外の count が枠の数より少なければ choose_count
+    private static List<BlueprintRow> ParseBlueprints(string output)
+    {
+        var list = new List<BlueprintRow>();
+        foreach (var block in SplitJsonBlocks(output))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                var recordName = Str(root, "_RecordName_");
+                var uuid = Str(root, "_RecordId_");
+                if (recordName == null || uuid == null || !recordName.StartsWith("CraftingBlueprintRecord.", StringComparison.Ordinal)) continue;
+                if (!root.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("blueprint", out var bp) || bp.ValueKind != JsonValueKind.Object) continue;
+                var row = new BlueprintRow { Uuid = uuid, RecordName = recordName["CraftingBlueprintRecord.".Length..] };
+                if (bp.TryGetProperty("category", out var cat) && cat.ValueKind == JsonValueKind.Object && Str(cat, "_RecordName_") is { } catName)
+                    row.Category = catName.StartsWith("BlueprintCategoryRecord.", StringComparison.Ordinal) ? catName["BlueprintCategoryRecord.".Length..] : catName;
+                if (bp.TryGetProperty("processSpecificData", out var psd) && psd.ValueKind == JsonValueKind.Object)
+                {
+                    row.Process = Str(psd, "_Type_");
+                    row.OutputShort = FileStem(Str(psd, "entityClass"));
+                }
+                if (bp.TryGetProperty("tiers", out var tiers) && tiers.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var tier in tiers.EnumerateArray())
+                    {
+                        if (tier.ValueKind != JsonValueKind.Object || !tier.TryGetProperty("recipe", out var recipe) || recipe.ValueKind != JsonValueKind.Object
+                            || !recipe.TryGetProperty("costs", out var costs) || costs.ValueKind != JsonValueKind.Object) continue;
+                        if (costs.TryGetProperty("craftTime", out var time) && time.ValueKind == JsonValueKind.Object)
+                            row.CraftTimeSec = (long)Math.Round(Num(time, "days") * 86400 + Num(time, "hours") * 3600 + Num(time, "minutes") * 60 + Num(time, "seconds"));
+                        if (costs.TryGetProperty("mandatoryCost", out var mc) && mc.ValueKind == JsonValueKind.Object)
+                        {
+                            if (Str(mc, "_Type_") == "CraftingCost_Select" && mc.TryGetProperty("options", out var slots) && slots.ValueKind == JsonValueKind.Array)
+                            {
+                                int slotCount = 0;
+                                foreach (var slot in slots.EnumerateArray())
+                                {
+                                    if (slot.ValueKind != JsonValueKind.Object) continue;
+                                    slotCount++;
+                                    ReadBlueprintSlot(slot, row.Materials);
+                                }
+                                if (mc.TryGetProperty("count", out var cnt) && cnt.ValueKind == JsonValueKind.Number && cnt.TryGetInt32(out var count) && count > 0 && count < slotCount)
+                                    row.ChooseCount = count;
+                            }
+                            else
+                                ReadBlueprintSlot(mc, row.Materials);   // 枠を並べた形でなければ、それ自体を 1 枠として読む (今のデータには無い)
+                        }
+                        break;   // tiers は 1 つ (今のデータ)。複数あっても最初のものを使う
+                    }
+                }
+                list.Add(row);
+            }
+            catch { }
+        }
+        return list;
+    }
+
+    // 枠 (CraftingCost_Select) の options[] の材料を読む。枠でなく材料そのものなら、その 1 件を枠名なしで読む
+    private static void ReadBlueprintSlot(JsonElement slot, List<BlueprintMaterial> materials)
+    {
+        var type = Str(slot, "_Type_");
+        if (type == "CraftingCost_Select")
+        {
+            string slotName = "", slotKeyRaw = "";
+            if (slot.TryGetProperty("nameInfo", out var ni) && ni.ValueKind == JsonValueKind.Object)
+            {
+                slotName = Str(ni, "debugName") ?? "";
+                slotKeyRaw = Str(ni, "displayName") ?? "";
+            }
+            var slotKey = slotKeyRaw.StartsWith('@') && slotKeyRaw.Length > 1 ? slotKeyRaw[1..] : (slotKeyRaw.Length > 0 ? slotKeyRaw : null);
+            if (slot.TryGetProperty("options", out var opts) && opts.ValueKind == JsonValueKind.Array)
+                foreach (var opt in opts.EnumerateArray())
+                    if (opt.ValueKind == JsonValueKind.Object && ReadBlueprintCost(opt, slotName, slotKey) is { } m) materials.Add(m);
+            return;
+        }
+        if (ReadBlueprintCost(slot, "", null) is { } single) materials.Add(single);
+    }
+
+    // CraftingCost_Resource / CraftingCost_Item を 1 件の材料にする。どちらでもなければ null
+    private static BlueprintMaterial? ReadBlueprintCost(JsonElement cost, string slotName, string? slotKey)
+    {
+        var type = Str(cost, "_Type_");
+        double multiplier = 1;
+        if (cost.TryGetProperty("context", out var ctx) && ctx.ValueKind == JsonValueKind.Array)
+            foreach (var c in ctx.EnumerateArray())
+                if (c.ValueKind == JsonValueKind.Object && Str(c, "_Type_") == "CraftingCostContext_QuantityMultiplier")
+                    multiplier *= Num(c, "multiplier") is var mul && mul > 0 ? mul : 1;
+        var minQuality = cost.TryGetProperty("minQuality", out var mq) && mq.ValueKind == JsonValueKind.Number && mq.TryGetInt32(out var q) ? q : 0;
+        if (type == "CraftingCost_Resource")
+        {
+            if (!cost.TryGetProperty("resource", out var res) || res.ValueKind != JsonValueKind.Object || Str(res, "_RecordId_") is not { Length: > 0 } rid) return null;
+            double qty = cost.TryGetProperty("quantity", out var qEl) && qEl.ValueKind == JsonValueKind.Object ? Num(qEl, "standardCargoUnits") : 0;
+            return new BlueprintMaterial { SlotDebugName = slotName, SlotNameKey = slotKey, ResourceUuid = rid, ItemRecord = "", Quantity = qty * multiplier, MinQuality = minQuality };
+        }
+        if (type == "CraftingCost_Item")
+        {
+            var stem = FileStem(Str(cost, "entityClass"));
+            if (stem == null) return null;
+            double qty = cost.TryGetProperty("quantity", out var qEl) && qEl.ValueKind == JsonValueKind.Number ? qEl.GetDouble() : 0;
+            return new BlueprintMaterial { SlotDebugName = slotName, SlotNameKey = slotKey, ResourceUuid = "", ItemRecord = "EntityClassDefinition." + stem, Quantity = qty * multiplier, MinQuality = minQuality };
+        }
+        return null;
+    }
+
+    // dcb query "BlueprintPoolRecord" の出力: プールの record 名 → blueprintRewards[].blueprintRecord のファイル名 (拡張子なし = BP の record 名の小文字)
+    private static List<(string PoolRecord, List<string> BlueprintShortNames)> ParseBlueprintPools(string output)
+    {
+        var list = new List<(string, List<string>)>();
+        foreach (var block in SplitJsonBlocks(output))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                var recordName = Str(root, "_RecordName_");
+                if (recordName == null || !recordName.StartsWith("BlueprintPoolRecord.", StringComparison.Ordinal)) continue;
+                var names = new List<string>();
+                if (root.TryGetProperty("_RecordValue_", out var rv) && rv.TryGetProperty("blueprintRewards", out var rewards) && rewards.ValueKind == JsonValueKind.Array)
+                    foreach (var rw in rewards.EnumerateArray())
+                        if (rw.ValueKind == JsonValueKind.Object && FileStem(Str(rw, "blueprintRecord")) is { } stem) names.Add(stem);
+                list.Add((recordName, names));
+            }
+            catch { }
+        }
+        return list;
+    }
+
+    // dcb query "CraftingGlobalParams" の出力: defaultBlueprintSelection.blueprintRecords[] のファイル名 (拡張子なし = BP の record 名の小文字)
+    private static HashSet<string> ParseBlueprintWhitelist(string output)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var block in SplitJsonBlocks(output))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                if (!doc.RootElement.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("defaultBlueprintSelection", out var sel) || sel.ValueKind != JsonValueKind.Object) continue;
+                if (sel.TryGetProperty("blueprintRecords", out var recs) && recs.ValueKind == JsonValueKind.Array)
+                    foreach (var r in recs.EnumerateArray())
+                        if (r.ValueKind == JsonValueKind.String && FileStem(r.GetString()) is { } stem) set.Add(stem);
+            }
+            catch { }
+        }
+        return set;
+    }
+
+    // dcb query "EntityClassDefinition" の出力から (record 名, 名前のローカライズキー ("@" を除く。無ければ null))。
+    // 名前は item_index と同じく Components[] の SAttachableComponentParams.AttachDef.Localization.Name
+    private static List<(string Record, string? NameKey)> ReadEntityNameKeys(string output)
+    {
+        var list = new List<(string, string?)>();
+        foreach (var block in SplitJsonBlocks(output))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(block);
+                var root = doc.RootElement;
+                var record = Str(root, "_RecordName_");
+                if (record == null || !record.StartsWith("EntityClassDefinition.", StringComparison.Ordinal)) continue;
+                string? nameKey = null;
+                if (root.TryGetProperty("_RecordValue_", out var rv) && rv.TryGetProperty("Components", out var comps) && comps.ValueKind == JsonValueKind.Array)
+                    foreach (var comp in comps.EnumerateArray())
+                    {
+                        if (comp.ValueKind != JsonValueKind.Object || Str(comp, "_Type_") != "SAttachableComponentParams") continue;
+                        if (comp.TryGetProperty("AttachDef", out var ad) && ad.ValueKind == JsonValueKind.Object
+                            && ad.TryGetProperty("Localization", out var loc) && loc.ValueKind == JsonValueKind.Object
+                            && Str(loc, "Name") is { Length: > 1 } nm && nm[0] == '@')
+                            nameKey = nm[1..];
+                        break;
+                    }
+                list.Add((record, nameKey));
+            }
+            catch { }
+        }
+        return list;
+    }
+
+    // "file://…/xxx.json" → "xxx" (拡張子なし。パスでなければそのまま)。空・null なら null
+    private static string? FileStem(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        var p = path.Replace('\\', '/');
+        var i = p.LastIndexOf('/');
+        var name = i >= 0 ? p[(i + 1)..] : p;
+        if (name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) name = name[..^5];
+        return name.Length > 0 ? name : null;
+    }
+
+    private static string? Str(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static double Num(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : 0;
 
     private async Task<int> UpdateShipCargoCoreAsync(string p4kPath, CancellationToken ct, bool skipWriteIfIndexBuildStarts = false)
     {
@@ -2108,7 +2658,7 @@ public class GameDataExtractor : IDisposable
         StatusChanged?.Invoke("ゲームデータの構造化インデックスを構築中...");
         var sw = Stopwatch.StartNew();
         int step = 0;
-        int totalSteps = 6;
+        int totalSteps = 7;
         var now = DateTime.UtcNow.ToString("o");
 
         // wiki から取って missions に入れた分 (wiki_* 列) は、構築が missions を作り直すと消えるので、消す前に控え、
@@ -2204,7 +2754,15 @@ public class GameDataExtractor : IDisposable
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { StatusChanged?.Invoke($"資源の種類 (ResourceType) の取り出しに失敗しました: {ex.Message}"); }
 
-        // Step 6: メタ情報
+        // Step 6: BP (ブループリント。［BP］タブ)。失敗しても構築は続ける (3 表は前のまま。無い・空なら起動後に裏で取り出す: RebuildBlueprintsAsync)
+        step++;
+        ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] BP (ブループリント) を抽出中...");
+        int blueprintCount = 0;
+        try { blueprintCount = await ExtractBlueprintsAsync(dataP4kPath, now, ct); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { StatusChanged?.Invoke($"BP (ブループリント) の取り出しに失敗しました: {ex.Message}"); }
+
+        // Step 7: メタ情報
         step++;
         var p4kModified = File.GetLastWriteTimeUtc(dataP4kPath);
         SetMeta("game_version", p4kModified.ToString("yyyy-MM-dd HH:mm"));
@@ -2232,7 +2790,7 @@ public class GameDataExtractor : IDisposable
 
         sw.Stop();
         ProgressChanged?.Invoke(100, $"完了！ ({sw.Elapsed.TotalSeconds:F1}秒)");
-        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}, 装備: {itemCount}, 弾: {ammoCount}, 契約: {missionCount}, 商品: {commodityCount}, 資源: {resourceCount}");
+        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}, 装備: {itemCount}, 弾: {ammoCount}, 契約: {missionCount}, 商品: {commodityCount}, 資源: {resourceCount}, BP: {blueprintCount}");
 
         // 新しい品目の売り場・価格は、構築とは別に裏で取得する (MainWindow が受けて FetchNewShopPricesAsync を走らせる)
         if (requestShopPriceFetch) ShopPriceFetchRequested?.Invoke(DbPath);

@@ -213,6 +213,26 @@ public sealed class OreService
         return list;
     }
 
+    // 在庫を読むだけ (書き込みなし。［BP］タブ (BlueprintPanel) が材料と照合するのに使う)。量が 0 以下の行は出さない (LoadStock と同じ)。
+    // trade_cache.db が無ければ null (在庫を照合できない)。読めなければ例外
+    public static List<OreStock>? LoadStockReadOnly(string tradeCacheDbPath)
+    {
+        if (!File.Exists(tradeCacheDbPath)) return null;
+        var list = new List<OreStock>();
+        using var db = new SqliteConnection($"Data Source={tradeCacheDbPath};Mode=ReadOnly;Pooling=False");
+        db.Open();
+        using (var exists = db.CreateCommand())
+        {
+            exists.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'ore_stock'";
+            if (Convert.ToInt64(exists.ExecuteScalar() ?? 0L) == 0) return list;
+        }
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT id, resource_uuid, resource_record, quality, quantity, unit, notes, updated_at FROM ore_stock WHERE quantity > 0 ORDER BY resource_record, unit, quality, id";
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) list.Add(ReadStock(r));
+        return list;
+    }
+
     private static OreStock ReadStock(SqliteDataReader r) => new()
     {
         Id = r.GetInt32(0),
@@ -953,8 +973,8 @@ public sealed class OreService
 
     // translations から keys (先頭の @ 無し) の行の (english, japanese) を引く (GameLogNames.Lookup と同じ見方)。
     // key の行と key + ",P" の行の両方を見て key の行を優先し、大文字小文字がそのまま同じ行を、違う行より優先する。
-    // 大文字小文字を区別しないため全行を読む (写しの 91,062 行で数十 ms)。DB が無い・読めないときは空
-    private static Dictionary<string, (string? En, string? Ja)> LoadTranslations(string translationsDbPath, HashSet<string> keys)
+    // 大文字小文字を区別しないため全行を読む (写しの 91,062 行で数十 ms)。DB が無い・読めないときは空。［BP］タブ (BlueprintPanel) も枠名・ミッション名に使う
+    internal static Dictionary<string, (string? En, string? Ja)> LoadTranslations(string translationsDbPath, HashSet<string> keys)
     {
         var dict = new Dictionary<string, (string? En, string? Ja)>(StringComparer.OrdinalIgnoreCase);
         var rank = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);   // 入れた行の優先度 (大きいほど優先)
@@ -1015,8 +1035,9 @@ public sealed class OreService
         return i >= 0 ? record[(i + 1)..] : record;
     }
 
-    private static string? JapaneseText(string? ja) => !string.IsNullOrWhiteSpace(ja) && !ja.StartsWith('!') ? Usable(ja) : null;
-    private static string? EnglishText(string? en) => !string.IsNullOrWhiteSpace(en) ? Usable(en) : null;
+    // ［BP］タブ (BlueprintPanel) も訳の文字の見方を揃えるために使う
+    internal static string? JapaneseText(string? ja) => !string.IsNullOrWhiteSpace(ja) && !ja.StartsWith('!') ? Usable(ja) : null;
+    internal static string? EnglishText(string? en) => !string.IsNullOrWhiteSpace(en) ? Usable(en) : null;
 
     private static string? Usable(string text)
     {
