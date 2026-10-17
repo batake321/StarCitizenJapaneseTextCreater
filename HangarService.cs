@@ -678,7 +678,7 @@ public class HangarService
                 added_at TEXT DEFAULT (datetime('now','localtime')),
                 PRIMARY KEY (log_time, player_id, shop_id, kiosk_id, item_name, quantity)
             );
-            """;
+            """ + OreService.TradeTablesDdl;   // ［鉱石］タブの 3 つの表 (ore_stock / commodity_trades / mining_log。DatabaseBackupService.EnsureTradeSchema と同じ DDL)
         cmd.ExecuteNonQuery();
         MigratePledgesSchema(db);
         MigrateStoreSchema(db);

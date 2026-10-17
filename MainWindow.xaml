@@ -2041,6 +2041,10 @@
             <TabItem Header="ゲームログ">
                 <local:GameLogPanel x:Name="gameLogPanel"/>
             </TabItem>
+            <!-- ［鉱石］: 採掘・積み荷の資源の在庫 (資源 × 品質) と、売買・採掘の記録 (OrePanel。trade_cache.db) -->
+            <TabItem Header="鉱石">
+                <local:OrePanel x:Name="orePanel"/>
+            </TabItem>
             <!-- ログタブ -->
             <TabItem Header="ログ">
                 <Grid Margin="8">

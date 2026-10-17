@@ -421,13 +421,32 @@ public class GameDataExtractor : IDisposable
             using var cmd = _db.CreateCommand();
             cmd.CommandText = ItemPortsDdl + ItemPortLabelsDdl + ResourceTypesDdl;
             cmd.ExecuteNonQuery();
+            AddMissingResourceTypesColumns(_db);
         }
         catch { }
     }
 
+    // 前の版の resource_types (group_record 列なし) に列を足す (DatabaseBackupService の復元先でも使う)。表が無ければ何もしない。
+    // 足したばかりの列は NULL のまま (NeedsResourceTypes が真になり、起動後の裏の取り出し (RebuildResourceTypesAsync) で入れ直される)
+    internal static void AddMissingResourceTypesColumns(SqliteConnection db)
+    {
+        var cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var chk = db.CreateCommand())
+        {
+            chk.CommandText = "PRAGMA table_info(resource_types)";
+            using var reader = chk.ExecuteReader();
+            while (reader.Read()) cols.Add(reader.GetString(1));
+        }
+        if (cols.Count == 0 || cols.Contains("group_record")) return;
+        using var alt = db.CreateCommand();
+        alt.CommandText = "ALTER TABLE resource_types ADD COLUMN group_record TEXT";
+        alt.ExecuteNonQuery();
+    }
+
     // 資源の種類 (ResourceTypeDatabase の record の中の ResourceType)。uuid は record の _RecordId_ (商品売買のログの resourceGUID と同じ)、
-    // name_key は displayName ("@items_commodities_…")、name_en は英語ローカライズで引いた英語名 (無ければ NULL)。
-    // ［ゲームログ］の商品売買の行で資源名を出すのに使う。インデックス構築で作る (無い・空なら起動後に裏で一度だけ取り出す: RebuildResourceTypesAsync)
+    // name_key は displayName ("@items_commodities_…")、name_en は英語ローカライズで引いた英語名 (無ければ NULL)、
+    // group_record はその資源を含む直近のグループ record の名前 ("ResourceTypeGroup.Metal" 等。［鉱石］タブの一覧の絞り込みに使う)。
+    // ［ゲームログ］の商品売買の行で資源名を出すのに使う。インデックス構築で作る (無い・空・group_record が無いなら起動後に裏で一度だけ取り出す: RebuildResourceTypesAsync)
     internal const string ResourceTypesDdl = """
 
         CREATE TABLE IF NOT EXISTS resource_types (
@@ -435,7 +454,8 @@ public class GameDataExtractor : IDisposable
             record_name TEXT NOT NULL,
             name_key TEXT,
             name_en TEXT,
-            extracted_at TEXT NOT NULL
+            extracted_at TEXT NOT NULL,
+            group_record TEXT
         );
         """;
 
@@ -975,12 +995,13 @@ public class GameDataExtractor : IDisposable
         return count;
     }
 
-    // 資源の種類 (resource_types) が空か (起動後の RebuildResourceTypesAsync を走らせるか決めるため。表は EnsureDb が作る)
+    // 資源の種類 (resource_types) が空か、グループ (group_record) が 1 行も入っていないか (前の版で取り出した DB・group_record の無い
+    // バックアップを取り込んだ DB)。起動後の RebuildResourceTypesAsync を走らせるか決めるため。表と列は EnsureDb が作る
     public bool NeedsResourceTypes()
     {
         EnsureDb();
         using var cmd = _db!.CreateCommand();
-        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM resource_types)";
+        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM resource_types WHERE group_record IS NOT NULL)";
         return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0;
     }
 
@@ -1037,13 +1058,14 @@ public class GameDataExtractor : IDisposable
         using (var ins = _db.CreateCommand())
         {
             ins.Transaction = tx;
-            ins.CommandText = "INSERT OR REPLACE INTO resource_types(uuid,record_name,name_key,name_en,extracted_at) VALUES(@u,@rn,@k,@en,@t)";
+            ins.CommandText = "INSERT OR REPLACE INTO resource_types(uuid,record_name,name_key,name_en,extracted_at,group_record) VALUES(@u,@rn,@k,@en,@t,@g)";
             var pU = ins.Parameters.Add("@u", SqliteType.Text);
             var pRn = ins.Parameters.Add("@rn", SqliteType.Text);
             var pK = ins.Parameters.Add("@k", SqliteType.Text);
             var pEn = ins.Parameters.Add("@en", SqliteType.Text);
             var pT = ins.Parameters.Add("@t", SqliteType.Text);
-            foreach (var (uuid, recordName, nameKey) in rows)
+            var pG = ins.Parameters.Add("@g", SqliteType.Text);
+            foreach (var (uuid, recordName, nameKey, groupRecord) in rows)
             {
                 string? en = null;
                 if (loc != null && nameKey is { Length: > 1 } && nameKey[0] == '@' && loc.TryGetValue(nameKey[1..], out var text) && !string.IsNullOrWhiteSpace(text))
@@ -1053,6 +1075,7 @@ public class GameDataExtractor : IDisposable
                 pK.Value = (object?)nameKey ?? DBNull.Value;
                 pEn.Value = (object?)en ?? DBNull.Value;
                 pT.Value = now;
+                pG.Value = (object?)groupRecord ?? DBNull.Value;
                 ins.ExecuteNonQuery();
             }
         }
@@ -1061,11 +1084,12 @@ public class GameDataExtractor : IDisposable
         return rows.Count;
     }
 
-    // dcb query "ResourceTypeDatabase" の出力から ResourceType を集める: (uuid = _RecordId_, record_name = _RecordName_, name_key = displayName)。
+    // dcb query "ResourceTypeDatabase" の出力から ResourceType を集める: (uuid = _RecordId_, record_name = _RecordName_, name_key = displayName,
+    // group_record = その resources[] を持つ直近のグループ record の _RecordName_ ("ResourceTypeGroup.Metal" 等。無ければ null))。
     // _RecordValue_.groups[] の中の resources[] と、入れ子の groups[] をたどる。_Type_ が ResourceType のものだけ
-    internal static List<(string Uuid, string RecordName, string? NameKey)> ParseResourceTypeDatabase(string output)
+    internal static List<(string Uuid, string RecordName, string? NameKey, string? GroupRecord)> ParseResourceTypeDatabase(string output)
     {
-        var rows = new List<(string, string, string?)>();
+        var rows = new List<(string, string, string?, string?)>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var block in SplitJsonBlocks(output))
         {
@@ -1073,16 +1097,19 @@ public class GameDataExtractor : IDisposable
             {
                 using var doc = JsonDocument.Parse(block);
                 if (!doc.RootElement.TryGetProperty("_RecordValue_", out var value)) continue;
-                WalkResourceGroups(value, rows, seen);
+                WalkResourceGroups(value, null, rows, seen);
             }
             catch { }
         }
         return rows;
     }
 
-    private static void WalkResourceGroups(JsonElement group, List<(string, string, string?)> rows, HashSet<string> seen)
+    // groupRecord は group 自身の _RecordName_ (ResourceTypeGroup.…)。無ければ (いちばん外の _RecordValue_) 親のものを引き継ぐ
+    private static void WalkResourceGroups(JsonElement group, string? groupRecord, List<(string, string, string?, string?)> rows, HashSet<string> seen)
     {
         if (group.ValueKind != JsonValueKind.Object) return;
+        if (group.TryGetProperty("_RecordName_", out var grEl) && grEl.ValueKind == JsonValueKind.String && grEl.GetString() is { Length: > 0 } gr)
+            groupRecord = gr;
         if (group.TryGetProperty("resources", out var resources) && resources.ValueKind == JsonValueKind.Array)
         {
             foreach (var r in resources.EnumerateArray())
@@ -1093,11 +1120,11 @@ public class GameDataExtractor : IDisposable
                 var name = r.TryGetProperty("_RecordName_", out var nmEl) && nmEl.ValueKind == JsonValueKind.String ? nmEl.GetString() : null;
                 if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(name) || !seen.Add(id)) continue;
                 var key = r.TryGetProperty("displayName", out var dnEl) && dnEl.ValueKind == JsonValueKind.String ? dnEl.GetString() : null;
-                rows.Add((id, name, string.IsNullOrWhiteSpace(key) ? null : key));
+                rows.Add((id, name, string.IsNullOrWhiteSpace(key) ? null : key, groupRecord));
             }
         }
         if (group.TryGetProperty("groups", out var groups) && groups.ValueKind == JsonValueKind.Array)
-            foreach (var g in groups.EnumerateArray()) WalkResourceGroups(g, rows, seen);
+            foreach (var g in groups.EnumerateArray()) WalkResourceGroups(g, groupRecord, rows, seen);
     }
 
     private async Task<int> UpdateShipCargoCoreAsync(string p4kPath, CancellationToken ct, bool skipWriteIfIndexBuildStarts = false)

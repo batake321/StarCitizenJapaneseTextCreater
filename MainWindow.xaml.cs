@@ -86,6 +86,8 @@ public partial class MainWindow : Window
         // ［ゲームログ］の購入の行の「装備に入れる」ボタン
         gameLogPanel.PurchaseClassifier = ClassifyGameLogPurchases;
         gameLogPanel.PurchaseImporter = ImportGameLogPurchase;
+        // ［鉱石］の作業ディレクトリ (trade_cache.db / gamedata_cache.db / translations.db の所在)
+        orePanel.WorkDirProvider = () => WorkDir;
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -1536,6 +1538,8 @@ public partial class MainWindow : Window
                 // trade_cache.db の印 (my_component_purchases) が替わったかもしれないので、［ゲームログ］の印の一覧を読み直す
                 InvalidateImportedPurchaseKeys();
                 gameLogPanel?.RefreshPurchaseButtons();
+                // trade_cache.db の在庫・記録と gamedata_cache.db の資源の種類が替わったかもしれないので、［鉱石］を読み直す
+                orePanel?.Reload();
                 // ほかの取り込みがまだ走っていれば何もしない (最後に終わった取り込みが戻す)
                 if (!lastImport) { }
                 else if (deferred is { } d)
@@ -1616,6 +1620,7 @@ public partial class MainWindow : Window
             _hangarEquip?.Dispose();
             _hangarEquip = null;
             _uexPrefetchStarted = false;
+            orePanel?.Reload();   // ［鉱石］は新しいディレクトリの DB を読み直す
         }
         App.Config.OutputLanguage = txtOutputLang.Text.Trim();
         App.Config.ScApiKey = txtScApiKey.Text.Trim();
@@ -2062,7 +2067,11 @@ public partial class MainWindow : Window
                 Log($"[装備の口] 口の定義の取り出しをしませんでした ({skipped})");
             }
             if (count > 0) ShipCargo.Invalidate();   // 計算した値を使うよう、覚えた結果を捨てて一覧を描き直す
-            if (resourceCount > 0) gameLogPanel?.ClearNameCache();   // 取り出した資源名を使うよう、［ゲームログ］の名前の覚えを捨てる
+            if (resourceCount > 0)
+            {
+                gameLogPanel?.ClearNameCache();   // 取り出した資源名を使うよう、［ゲームログ］の名前の覚えを捨てる
+                orePanel?.Reload();               // ［鉱石］の資源の一覧 (グループ) も読み直す
+            }
         }
         catch (OperationCanceledException) when (cts?.IsCancellationRequested == true)
         {
@@ -2269,6 +2278,8 @@ public partial class MainWindow : Window
         ShipCargo.Invalidate();
         _hangarEquip?.Dispose();
         _hangarEquip = null;
+        // ［鉱石］の資源の一覧・名前 (resource_types) も替わったので読み直す (一度も表示していなければ何もしない)
+        orePanel?.Reload();
         if (!_upgradeDataLoadedOnce) return;
         try
         {
@@ -2326,8 +2337,9 @@ public partial class MainWindow : Window
                     Log($"[品目名] 今の訳に合わせられませんでした: {ex.Message}");
                     changed = -1;
                 }
-                // ［ゲームログ］は translations.db の訳で名前を引いて覚えているので、訳が変わったら捨てる
+                // ［ゲームログ］は translations.db の訳で名前を引いて覚えているので、訳が変わったら捨てる (［鉱石］の資源名も読み直す)
                 gameLogPanel?.ClearNameCache();
+                orePanel?.Reload();
                 if (changed > 0)
                 {
                     ReopenHangarEquip();
@@ -2351,6 +2363,7 @@ public partial class MainWindow : Window
     private void RunDeferredItemNameRefresh()
     {
         gameLogPanel?.ClearNameCache();
+        orePanel?.Reload();
         GameDataExtractor.NotifyItemNamesChanged();
         if (!_itemNameRefreshDeferred) return;
         _itemNameRefreshDeferred = false;
@@ -2394,6 +2407,7 @@ public partial class MainWindow : Window
         // 構築で resource_types・item_ports 等が作り直されたので、［ゲームログ］の名前の覚えを捨てる (設定タブの構築・再抽出・インポートは
         // RunDeferredItemNameRefresh でも捨てるが、チャットの自動構築 (ChatService → BuildStructuredIndexAsync) はここにしか来ない)
         gameLogPanel?.ClearNameCache();
+        orePanel?.Reload();   // 別スレッドからでも呼べる (OrePanel.Reload が UI のスレッドへ回す)
         lock (_priceRefreshTasks)
         {
             if (DeferShopPriceRequestIfImporting(dbPath, afterRebuild: true)) return;

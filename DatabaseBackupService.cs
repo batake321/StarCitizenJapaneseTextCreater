@@ -29,7 +29,9 @@ public static class DatabaseBackupService
     private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache", "item_shop_prices", "ammo_params", "item_variants", "player_damage_params", "item_ports", "item_port_labels",
         "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount", "resource_types"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
-    private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "ship_loaners", "store_skus", "my_components", "ship_loadouts", "my_component_purchases"];
+    // ore_stock / commodity_trades / mining_log: ［鉱石］タブの在庫・売買の記録・採掘の記録 (個人データ。OreService)
+    private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "ship_loaners", "store_skus", "my_components", "ship_loadouts", "my_component_purchases",
+        "ore_stock", "commodity_trades", "mining_log"];
 
     public static string[] GetTables(BackupCategory category) => category switch
     {
@@ -100,6 +102,9 @@ public static class DatabaseBackupService
                                     DELETE FROM my_components;
                                     DELETE FROM ship_loadouts;
                                     DELETE FROM my_component_purchases;
+                                    DELETE FROM ore_stock;
+                                    DELETE FROM commodity_trades;
+                                    DELETE FROM mining_log;
                                     """;
                                 cmd.ExecuteNonQuery();
                             }
@@ -199,10 +204,11 @@ public static class DatabaseBackupService
     // ネット由来 (b で置き換え): UEX の価格・船・端末・取得時刻、RSI の Ship Matrix・ローナー・ストア
     private static readonly string[] TradeNetTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "ship_matrix", "ship_loaners", "store_skus"];
     // 個人で、行を見分けるキー (主キー) があるもの: キーで a 優先の和集合
-    private static readonly string[] TradePersonalKeyedTables = ["hangar_pledges", "hangar_ccus", "hangar_ship_marks", "ship_loadouts"];
+    // (commodity_trades / mining_log: ［鉱石］タブの売買・採掘の記録。主キーはログの行の組)
+    private static readonly string[] TradePersonalKeyedTables = ["hangar_pledges", "hangar_ccus", "hangar_ship_marks", "ship_loadouts", "commodity_trades", "mining_log"];
     // 個人で、行を見分けるキーが無いもの (主キーが無い、または中身と関係の無い連番の id だけのもの):
-    // a にその表の行が 1 行でもあれば a だけ、a が空 (表が無い) なら b の行を使う
-    private static readonly string[] TradePersonalUnkeyedTables = ["my_ships", "my_components", "hangar_items", "hangar_nameable_ships"];
+    // a にその表の行が 1 行でもあれば a だけ、a が空 (表が無い) なら b の行を使う (ore_stock: ［鉱石］タブの在庫)
+    private static readonly string[] TradePersonalUnkeyedTables = ["my_ships", "my_components", "hangar_items", "hangar_nameable_ships", "ore_stock"];
     // ［ゲームログ］の購入を所持コンポーネントに入れた印。my_components と必ず同じ側から取る:
     // my_components を a のまま残したときは印も a だけ、a が空で b の my_components を使ったときは印も b のものにする
     private const string ComponentPurchasesTable = "my_component_purchases";
@@ -838,7 +844,7 @@ public static class DatabaseBackupService
                 added_at TEXT DEFAULT (datetime('now','localtime')),
                 PRIMARY KEY (log_time, player_id, shop_id, kiosk_id, item_name, quantity)
             );
-            """;
+            """ + OreService.TradeTablesDdl;   // ［鉱石］タブの 3 つの表 (HangarService.InitDb と同じ DDL)
         cmd.ExecuteNonQuery();
 
         // 旧スキーマ (config_value_cents / availability 列なし) の hangar_pledges に列を追加する (HangarService.MigratePledgesSchema と同等)。
@@ -1254,6 +1260,8 @@ public static class DatabaseBackupService
 
         // 既存の ship_ports に min_size / max_size / port_types 列が無ければ足す (バックアップ側にあると INSERT が列不足で失敗するため)
         GameDataExtractor.AddMissingShipPortsColumns(conn);
+        // 既存の resource_types に group_record 列 (資源グループ) が無ければ足す (同じ理由)
+        GameDataExtractor.AddMissingResourceTypesColumns(conn);
 
         // 既存の ships に name_en 列 (船の英語名) が無ければ足す。バックアップ側に name_en があると INSERT が列不足で失敗するため
         var shipCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
