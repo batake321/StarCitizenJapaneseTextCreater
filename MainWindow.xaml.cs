@@ -5822,7 +5822,7 @@ public partial class MainWindow : Window
 
     // ［ゲームログ］の行 (ImportItems あり) の一覧 → それぞれのボタンの状態。
     //   None:     ボタン無し (GameLogPurchase.ImportCutoffUtc より前の行 (船の行は除く)、成功していない購入、数量が 0 以下、入れられる品が 1 つも無い、
-    //             印の無い船の行で、その船を既に持っている (所持船か同期済み保有船にある))
+    //             印の無い呼び出した船 (ship_spawn) の行で、その船を既に持っている (所持船か同期済み保有船にある))
     //   Imported: 入れられる品の全部に印がある (「取り消す」)
     //   Ready:    印の無い入れられる品がある (「入れる」)
     // 船の行 (購入した船・呼び出した船) は cutoff に関係なくボタンを出す (cutoff 前の船も「入れる」で所持船に入れられる)。
@@ -5855,8 +5855,8 @@ public partial class MainWindow : Window
                 var target = ResolveImportTarget(item).Target;
                 if (target == ImportTarget.None) continue;
                 if (marks.ContainsKey((item.Kind, item.LogKey))) { resolvable++; marked++; continue; }
-                // 印の無い船: 既に持っている船 (所持船・同期済み保有船) なら入れられない
-                if (target == ImportTarget.Ship && IsShipOwned(ResolveLogShip(item.ItemClass).Name)) continue;
+                // 印の無い呼び出した船 (ship_spawn): 既に持っている船 (所持船・同期済み保有船) なら入れられない (購入した船は所持の有無で除かない。同じ型の 2 隻目を買える)
+                if (target == ImportTarget.Ship && item.Kind == GameLogImportItem.KindShipSpawn && IsShipOwned(ResolveLogShip(item.ItemClass).Name)) continue;
                 resolvable++;
             }
             if (resolvable == 0) continue;
@@ -5960,20 +5960,23 @@ public partial class MainWindow : Window
     }
 
     // ゲームログの船 1 つを所持船に入れる (印 kind/logKey → my_ships)。購入は origin ingame (メモは今までどおり "[ゲーム内購入]" の接頭辞も付ける)、
-    // 呼び出し (ship_spawn) は origin mission (期限はログに無いので無し。所持船の一覧で入れる)。印が既にあれば false
-    private bool ImportShipFromLog(GameLogImportItem item)
+    // 呼び出し (ship_spawn) は origin mission (期限はログに無いので無し。所持船の一覧で入れる)。印が既にあれば false。
+    // auto (自動の登録) なら済の印 (kind ship_auto) も書く (HangarService.ImportShip。取り消しても消えず、再び自動で入れない)
+    private bool ImportShipFromLog(GameLogImportItem item, bool auto = false)
     {
         var ship = ResolveLogShip(item.ItemClass);
         var mission = item.Kind == GameLogImportItem.KindShipSpawn;
         var origin = mission ? MyShipEntry.OriginMission : MyShipEntry.OriginInGame;
         var notes = mission ? "" : InGameNotesMarker;
-        if (!_hangarService.ImportShip(item.Kind, item.LogKey, ship.Record, ship.Name, ship.Manufacturer, ship.Scu, notes, origin, null)) return false;
+        if (!_hangarService.ImportShip(item.Kind, item.LogKey, ship.Record, ship.Name, ship.Manufacturer, ship.Scu, notes, origin, null, auto)) return false;
         Log($"[Ship] ゲームログから追加 ({MyShipEntry.OriginLabel(origin)}): {ship.Name}{(ship.Scu > 0 ? $" ({ship.Scu} SCU)" : "")}");
         return true;
     }
 
-    // 船の行の自動の登録 (GameLogPanel.ShipImporter。まだ渡していない行だけ来る): GameLogPurchase.ImportCutoffUtc 以降の購入した船・呼び出した船のうち、
-    // まだ持っていない船 (所持船・同期済み保有船に無い) を一度だけ (印) 所持船に入れる。cutoff 前の行は入れない (ボタンで入れる)。
+    // 船の行の自動の登録 (GameLogPanel.ShipImporter。まだ渡していない行だけ来る): GameLogPurchase.ImportCutoffUtc 以降の購入した船・呼び出した船を
+    // 一度だけ所持船に入れる (済の印 kind ship_auto。取り消しても残るので、取り消した船を次の起動で再び自動で入れない。手押しの「入れる」は従来どおり入る)。
+    // 呼び出した船 (ship_spawn) は既に持っている船 (所持船・同期済み保有船にある) なら入れない。購入した船は所持の有無で除かない (同じ型の 2 隻目を買える)。
+    // cutoff 前の行は入れない (ボタンで入れる)。
     // 途中で失敗したら、入れた分の一覧は作り直したうえで例外を投げ直す (GameLogPanel が「渡した」にせずログに残し、次の作り直しでもう一度渡す)
     private bool ApplyGameLogShips(IReadOnlyList<GameLogEntry> entries)
     {
@@ -5994,8 +5997,9 @@ public partial class MainWindow : Window
                 {
                     if (!item.IsShip || item.ItemClass.Length == 0 || item.Quantity <= 0) continue;
                     if (marks.ContainsKey((item.Kind, item.LogKey))) continue;
-                    if (IsShipOwned(ResolveLogShip(item.ItemClass).Name)) continue;
-                    if (!ImportShipFromLog(item)) continue;
+                    if (marks.ContainsKey((HangarService.MarkKindShipAuto, item.LogKey))) continue;   // 自動で入れ済み (取り消し後も)
+                    if (item.Kind == GameLogImportItem.KindShipSpawn && IsShipOwned(ResolveLogShip(item.ItemClass).Name)) continue;
+                    if (!ImportShipFromLog(item, auto: true)) continue;
                     changed = true;
                     _tradeService.LoadMyShips();   // 同じ船の 2 回目の呼び出しを「持っている」と判断できるように
                 }

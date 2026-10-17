@@ -840,8 +840,16 @@ public sealed class GameLogParser
         if (HasAnyTag(line, VehicleLearnTags))
         {
             var own = HasAnyTag(line, OwnVehicleLearnTags);
+            // 「操縦」の行なら、この行で覚える前に ID のクラス名が分かっていた船 (学習済み) を控える (呼び出した船の確定に使わないため。OnPilot)
+            HashSet<string>? knownBefore = null;
+            if (own && _drivingId == null)
+            {
+                knownBefore = new(StringComparer.Ordinal);
+                foreach (Match v in VehicleRefRegex.Matches(line))
+                    if (TryGetVehicleClass(v.Groups[2].Value, out _)) knownBefore.Add(v.Groups[2].Value);
+            }
             LearnVehiclesInLine(line, own);
-            if (own && _drivingId == null) OnPilot(time, line);
+            if (knownBefore != null) OnPilot(time, line, knownBefore);
             // 経路計算の燃料の見積り: 行の中の最初の船 (自分の船) の直前の見積りとして覚える (次の量子ジャンプの行に添える)
             if ((m = FuelEstimateRegex.Match(line)).Success && ParseNumber(m.Groups[1].Value) is double fuel
                 && (m = VehicleRefRegex.Match(line)).Success)
@@ -1027,7 +1035,7 @@ public sealed class GameLogParser
             var item = new GameLogImportItem { Kind = GameLogImportItem.KindShipSpawn, LogKey = GameLogImportItem.MakeKey(LogTimeText(time), id), Quantity = 1 };
             AddWithVehicle(time, "呼び出し", id, place, ship => place == "0"
                 ? $"ハンガーエレベーターで {ship} を呼び出しました (着陸場所: {area})"
-                : $"{PlaceDisplay(place)} のハンガーエレベーターで {ship} を呼び出しました", item);
+                : $"{PlaceDisplay(place)} のハンガーエレベーターで {ship} を呼び出しました", item, spawning: true);
             return;
         }
         if ((m = SpawnedRegex.Match(line)).Success)
@@ -1074,8 +1082,9 @@ public sealed class GameLogParser
 
     // ClearDriver の後 (またはファイルの最初) で最初に出た自分の船の航法行: 行の中の最初の船を「操縦」として出す。
     // 次の ClearDriver まで出さない (同じ船の航法行が続いても 1 回だけ)。
-    // 呼び出し完了した船のクラス名がまだ分からなければ (乗船の通知が無かった)、この船のクラス名で確定する
-    private void OnPilot(DateTime time, string line)
+    // 呼び出し完了した船のクラス名がまだ分からなければ (乗船の通知が無かった)、この船のクラス名で確定する。
+    // ただし乗った船の ID がこの行より前に学習済み (knownBefore: _vehicleClasses か共有の対応にあった) なら、別の持っている船に乗っただけと見て確定には使わない
+    private void OnPilot(DateTime time, string line, HashSet<string> knownBefore)
     {
         foreach (Match m in VehicleRefRegex.Matches(line))
         {
@@ -1086,7 +1095,7 @@ public sealed class GameLogParser
             _drivingId = m.Groups[2].Value;
             _lastShipName = ship;
             _lastShipClass = cls;
-            ConfirmSpawnedVehicle(cls);
+            if (!knownBefore.Contains(_drivingId)) ConfirmSpawnedVehicle(cls);
             return;
         }
     }
@@ -1844,8 +1853,9 @@ public sealed class GameLogParser
 
     // 自分の船の ID の付いた行 (呼び出し・呼び出し完了)。クラス名が分かっていれば (このファイルか共有の対応) 船名、まだなら推定の系統 (「X 系（推定）」。
     // 共有の対応か直前の ATC の行から) か「船 ID …」で出し、後で分かったら書き換える。
-    // placeId はそのときの着陸場所の ID (名前がまだなら名前待ちにする。"0" なら無し)。item は所持船に入れる品 (呼び出しの行だけ)
-    private void AddWithVehicle(DateTime time, string kind, string id, string placeId, Func<string, string> build, GameLogImportItem? item = null)
+    // placeId はそのときの着陸場所の ID (名前がまだなら名前待ちにする。"0" なら無し)。item は所持船に入れる品 (呼び出しの行だけ)。
+    // spawning は呼び出し (SetVehicleSpawningInformations) の行。ATC の推定の時間窓の基準 (_spawnUnknown) は呼び出しの時刻だけ記録し、呼び出し完了では上書きしない
+    private void AddWithVehicle(DateTime time, string kind, string id, string placeId, Func<string, string> build, GameLogImportItem? item = null, bool spawning = false)
     {
         if (TryGetVehicleClass(id, out var cls))
         {
@@ -1867,7 +1877,7 @@ public sealed class GameLogParser
         e.PendingVehicleId = id;
         e.VehicleToken = token;
         AttachPlace(e, placeId);
-        _spawnUnknown[id] = time;
+        if (spawning) _spawnUnknown[id] = time;
         if (family != null && _sharedVehicleClasses != null) _sharedVehicleClasses.SetFamily(id, family);
         if (_sharedVehicleClasses == null)
         {

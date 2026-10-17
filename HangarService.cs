@@ -1502,17 +1502,26 @@ public class HangarService
 
     // ［ゲームログ］の船 (購入した船・呼び出した船) を所持船 (my_ships。TradeService と同じ trade_cache.db の表) に入れる。印の入れた先は my_ships、
     // my_ships.source_key に印の鍵を入れる (取り消しで消す行を見分ける)。印が既にあれば何もせず false。印と所持船は 1 つのトランザクションで書く。
-    // origin は入手の種類 (MyShipEntry.Origin*)、expiresAt は期限 (null = なし)
+    // origin は入手の種類 (MyShipEntry.Origin*)、expiresAt は期限 (null = なし)。
+    // auto (船の行の自動の登録) なら、同じ行について一度だけ行うように印 kind "ship_auto" (log_key は同じ) を済の印として先に書く
+    // (OreService.ApplyDeliveryOnce の delivered_auto と同じ。取り消しても消さない (CancelImport は kind/logKey の印だけ消す))。
+    // ship_auto の印が既にあれば何もせず false。kind/logKey の印だけ既にあれば ship_auto の印は残して false
     public const string MarkTargetMyShips = "my_ships";
+    public const string MarkKindShipAuto = "ship_auto";
 
-    public bool ImportShip(string kind, string logKey, string itemRecord, string name, string manufacturer, int scu, string notes, string origin, string? expiresAt)
+    public bool ImportShip(string kind, string logKey, string itemRecord, string name, string manufacturer, int scu, string notes, string origin, string? expiresAt, bool auto = false)
     {
         if (_dbPath == null) return false;
         using var db = new SqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         TradeService.EnsureMyShipsSchema(db);
         using var tx = db.BeginTransaction();
-        if (!InsertMark(db, tx, kind, logKey, MarkTargetMyShips, itemRecord, 1)) return false;
+        if (auto && !InsertMark(db, tx, MarkKindShipAuto, logKey, MarkTargetMyShips, itemRecord, 1)) return false;
+        if (!InsertMark(db, tx, kind, logKey, MarkTargetMyShips, itemRecord, 1))
+        {
+            if (auto) tx.Commit();   // 済の印 (ship_auto) は残す
+            return false;
+        }
         Exec(db, tx, "INSERT INTO my_ships (name, manufacturer, scu, notes, origin, expires_at, source_key) VALUES (@n, @m, @s, @no, @o, @e, @k)",
             ("@n", name), ("@m", manufacturer ?? ""), ("@s", scu), ("@no", notes ?? ""), ("@o", origin ?? ""), ("@e", (object?)expiresAt ?? DBNull.Value), ("@k", logKey));
         tx.Commit();
