@@ -118,6 +118,10 @@ public partial class MainWindow : Window
         txtVoiceVoxUrl.Text = config.VoiceVoxUrl;
         txtVoiceVoxSpeaker.Text = config.VoiceVoxSpeakerId.ToString();
         chkWebAutoStart.IsChecked = config.WebServerAutoStart;
+        chkArmisticeSound.IsChecked = config.ArmisticeSoundEnabled;
+        txtArmisticeSoundPath.Text = config.ArmisticeSoundPath;
+        chkArrivalSound.IsChecked = config.ArrivalSoundEnabled;
+        txtArrivalSoundPath.Text = config.ArrivalSoundPath;
         var mfs = config.MissionDetailFontSize;
         if (mfs < 8 || mfs > 30) mfs = 14;
         txtMissionFontSize.Text = mfs.ToString();
@@ -148,6 +152,9 @@ public partial class MainWindow : Window
 
         if (config.WebServerAutoStart)
             _ = StartWebServerAsync();
+
+        // ［ゲームログ］の追い読みをタブを開く前から始める (休戦ゾーンに進入・到着の音を、タブを開いていなくても鳴らすため)。表の列はタブの初回表示で入れる
+        gameLogPanel.EnsureStarted();
     }
 
     private void PopulateChannels()
@@ -1639,6 +1646,10 @@ public partial class MainWindow : Window
         App.Config.VoiceVoxUrl = txtVoiceVoxUrl.Text.Trim();
         if (int.TryParse(txtVoiceVoxSpeaker.Text.Trim(), out var spk)) App.Config.VoiceVoxSpeakerId = spk;
         App.Config.WebServerAutoStart = chkWebAutoStart.IsChecked == true;
+        App.Config.ArmisticeSoundEnabled = chkArmisticeSound.IsChecked == true;
+        App.Config.ArmisticeSoundPath = txtArmisticeSoundPath.Text.Trim();
+        App.Config.ArrivalSoundEnabled = chkArrivalSound.IsChecked == true;
+        App.Config.ArrivalSoundPath = txtArrivalSoundPath.Text.Trim();
         App.Config.UexApiKey = txtUexApiKey.Text.Trim();
         if (double.TryParse(txtMissionFontSize.Text.Trim(), out var fs) && fs >= 8 && fs <= 30)
         {
@@ -1691,6 +1702,10 @@ public partial class MainWindow : Window
                 App.Config.EquipmentClassMarks,
                 App.Config.BlueprintMissionMarks,
                 App.Config.MissionReputationMarks,
+                App.Config.ArmisticeSoundEnabled,
+                App.Config.ArmisticeSoundPath,
+                App.Config.ArrivalSoundEnabled,
+                App.Config.ArrivalSoundPath,
             };
 
             var json = JsonSerializer.Serialize(config, new JsonSerializerOptions
@@ -1704,6 +1719,33 @@ public partial class MainWindow : Window
         {
             MessageBox.Show($"設定保存エラー: {ex.Message}", "エラー");
         }
+    }
+
+    // ［ゲームログ］の音: 「参照…」で wav を選ぶ、「試聴」で欄のパス (空なら同梱の音) を鳴らす (保存前の欄の値で鳴らす)
+    private void ArmisticeSoundBrowse_Click(object sender, RoutedEventArgs e) => BrowseSoundFile(txtArmisticeSoundPath);
+    private void ArrivalSoundBrowse_Click(object sender, RoutedEventArgs e) => BrowseSoundFile(txtArrivalSoundPath);
+    private void ArmisticeSoundTest_Click(object sender, RoutedEventArgs e) =>
+        TestSound(GameLogSoundPlayer.ResolvePath(txtArmisticeSoundPath.Text, GameLogSoundPlayer.DefaultArmisticeFile));
+    private void ArrivalSoundTest_Click(object sender, RoutedEventArgs e) =>
+        TestSound(GameLogSoundPlayer.ResolvePath(txtArrivalSoundPath.Text, GameLogSoundPlayer.DefaultArrivalFile));
+
+    private static void BrowseSoundFile(TextBox target)
+    {
+        var dlg = new OpenFileDialog { Title = "音のファイル (wav) を選択", Filter = "WAV ファイル|*.wav|すべてのファイル|*.*" };
+        var current = target.Text.Trim();
+        if (current.Length > 0 && Path.GetDirectoryName(current) is { Length: > 0 } dir && Directory.Exists(dir)) dlg.InitialDirectory = dir;
+        else
+        {
+            var bundled = Path.Combine(AppContext.BaseDirectory, "sounds");
+            if (Directory.Exists(bundled)) dlg.InitialDirectory = bundled;
+        }
+        if (dlg.ShowDialog() != true) return;
+        target.Text = dlg.FileName;
+    }
+
+    private static void TestSound(string path)
+    {
+        if (!GameLogSoundPlayer.Play(path, out var error)) MessageBox.Show(error, "試聴");
     }
 
     // === Helpers ===

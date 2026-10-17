@@ -42,6 +42,12 @@ public class AppConfig
     // UEX Capture
     public string UexApiKey { get; set; } = "";
     public string PreferredOcrEngine { get; set; } = "Windows OCR";
+
+    // ［ゲームログ］の音: 休戦ゾーンに進入・到着で鳴らすか、鳴らす wav のパス (空なら同梱の sounds\armistice_zone.wav / sounds\arrival.wav)
+    public bool ArmisticeSoundEnabled { get; set; } = true;
+    public string ArmisticeSoundPath { get; set; } = "";
+    public bool ArrivalSoundEnabled { get; set; } = true;
+    public string ArrivalSoundPath { get; set; } = "";
 }
 
 public class TranslationConfig

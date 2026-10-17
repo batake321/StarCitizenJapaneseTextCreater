@@ -416,6 +416,20 @@ public sealed class GameLogParser
     // 直前の ATC (Connection Flow の communication partner ATC_DataManager…) とその時刻 (ハンガー要求に添える)
     private string? _lastAtc;
     private DateTime _lastAtcTime;
+    // 船の ID → 直前の経路計算 (<Calculate Route>) の燃料の見積り (量子ジャンプの行に添える。同じ船の最新のもの)
+    private readonly Dictionary<string, double> _routeFuel = new(StringComparer.Ordinal);
+    // 直前の燃料低下の通知 (船のクラス名 (分からなければ "") とその時刻)。同じ船で FuelLowWindow 以内に続く通知は行にしない (最初の 1 件だけ)
+    private string? _lastFuelLowShip;
+    private DateTime _lastFuelLowTime;
+    // 直前の保険請求失敗の行とその時刻 (直後 (ClaimFailedWindow 以内) の [CLAIM FAILED] の場所を書き足す)
+    private GameLogEntry? _lastClaimFailed;
+    private DateTime _lastClaimFailedTime;
+    // 完了を待っている保険請求 (旧ビルド) の行 (URN + requestId → 行)
+    private readonly Dictionary<string, GameLogEntry> _pendingClaims = new(StringComparer.Ordinal);
+    // 燃料低下の通知は約 2 分おきに繰り返す (全ログ 30 件の実測)。同じ船で 10 分以内に続くものは最初の 1 件だけ行にする
+    private static readonly TimeSpan FuelLowWindow = TimeSpan.FromMinutes(10);
+    // <Claim Failed> の直後とみなす [CLAIM FAILED] の行の時間 (全ログ 2 件の実測では同じミリ秒)
+    private static readonly TimeSpan ClaimFailedWindow = TimeSpan.FromSeconds(10);
 
     // 同じ着陸場所を出てからこの時間以内に戻ったら、出入りの繰り返しとみなして出発の行を取り消す (最初の到着と最後の出発だけ残る)。
     // 昨夜のログの Area141 では出てから 110 秒・197 秒で戻っている
@@ -537,6 +551,10 @@ public sealed class GameLogParser
         "<Channel Created>",               // nickname="自分の名前"
         "<CEntity::OnOwnerRemoved - entity attachment>",   // 自分の船の ID → クラス名を覚えるだけ (parent … name = クラス_ID)
         "<ATC_Reset_VehiclesBeingStoredCleared>",          // 呼び出した船の系統の推定 (ATC '系統_ShipATCDataManager_<ID>')
+        "<Claim Failed>",                                  // 保険請求の失敗 (理由)
+        "[CLAIM FAILED]",                                  // 同上の直後の行 (ATC Location: 場所)
+        "<CWallet::ProcessClaimToNextStep> New Insurance Claim Request",         // 保険請求 (2026-05-14 までのビルド)
+        "<CWallet::RmMulticastOnProcessClaimCallback> Claim Complete",           // 同上の完了
         .. VehicleLearnTags,
         .. InventoryTags,
         .. FreightTags,
@@ -638,6 +656,17 @@ public sealed class GameLogParser
     private static readonly Regex ChannelRegex = new(@"^チャンネル「(.*)」 (に参加しました|を退出しました)", RegexOptions.Compiled);
     // RequestLocationInventory の Location[…] に出る、場所でない値
     private const string InvalidLocation = "INVALID_LOCATION_ID";
+    // 量子航法の経路計算の燃料の見積り: <Calculate Route> … | クラス_ID[ID]|CSCItemNavigation::CalculateRoute|Successfully calculated route to 行き先 fuel estimate 1446.415649
+    // (単位は不明。船は VehicleRefRegex で行の中の最初のもの)
+    private static readonly Regex FuelEstimateRegex = new(@"<Calculate Route> .*?Successfully calculated route to .*? fuel estimate ([0-9.]+)", RegexOptions.Compiled);
+    // 保険請求の失敗: <Claim Failed> Claim failed with error: FAILED_PRECONDITION(9): 'Claim vehicle failed: ItemOnCooldown' [Team_…]
+    private static readonly Regex ClaimFailedRegex = new(@"<Claim Failed> Claim failed with error: (.*?)\s*(?:\[Team_.*)?$", RegexOptions.Compiled);
+    // 同上の直後の行: … [CLAIM FAILED] ShipSelectorKiosk_… [id] - ATC: ATC_… [id], ATC Location: RR_JP_NyxPyro [3978634644] [Team_…]
+    private static readonly Regex ClaimFailedPlaceRegex = new(@"\[CLAIM FAILED\] .*?ATC Location: (\S+) \[\d+\]", RegexOptions.Compiled);
+    // 保険請求 (旧ビルド): <CWallet::ProcessClaimToNextStep> New Insurance Claim Request - entitlementURN: urn:…, requestId : 1
+    private static readonly Regex ClaimRequestRegex = new(@"<CWallet::ProcessClaimToNextStep> New Insurance Claim Request - entitlementURN: (\S+?), requestId\s*:\s*(\d+)", RegexOptions.Compiled);
+    // 同上の完了: <CWallet::RmMulticastOnProcessClaimCallback> Claim Complete - entitlementURN: urn:…, result: 11,  requestId: 1
+    private static readonly Regex ClaimCompleteRegex = new(@"<CWallet::RmMulticastOnProcessClaimCallback> Claim Complete - entitlementURN: (\S+?), result: (\S+?),\s*requestId\s*:\s*(\d+)", RegexOptions.Compiled);
 
     // ─── 採掘 (手掘り) の行 ───
     // 手に持った: Player[名前] Attachment[Harvestable_Mineral_1H_鉱石_ID, Harvestable_Mineral_1H_鉱石, ID] Status[persistent] Port[weapon_attach_hand_right]
@@ -813,6 +842,42 @@ public sealed class GameLogParser
             var own = HasAnyTag(line, OwnVehicleLearnTags);
             LearnVehiclesInLine(line, own);
             if (own && _drivingId == null) OnPilot(time, line);
+            // 経路計算の燃料の見積り: 行の中の最初の船 (自分の船) の直前の見積りとして覚える (次の量子ジャンプの行に添える)
+            if ((m = FuelEstimateRegex.Match(line)).Success && ParseNumber(m.Groups[1].Value) is double fuel
+                && (m = VehicleRefRegex.Match(line)).Success)
+                _routeFuel[m.Groups[2].Value] = fuel;
+            return;
+        }
+        if (line.Contains("<Claim Failed>", StringComparison.Ordinal))
+        {
+            if (!(m = ClaimFailedRegex.Match(line)).Success) return;
+            _lastClaimFailed = Add(time, "保険請求失敗", m.Groups[1].Value.Trim());
+            _lastClaimFailedTime = time;
+            return;
+        }
+        if (line.Contains("[CLAIM FAILED]", StringComparison.Ordinal))
+        {
+            // 直前 (ClaimFailedWindow 以内) の保険請求失敗の行に場所 (ATC Location。場所の名前は _placeName で日本語に) を書き足す
+            if (!(m = ClaimFailedPlaceRegex.Match(line)).Success) return;
+            if (_lastClaimFailed is not { } failed || time - _lastClaimFailedTime > ClaimFailedWindow) return;
+            _lastClaimFailed = null;
+            failed.Content += $" / 場所: {_placeName(m.Groups[1].Value)}";
+            Changed = true;
+            return;
+        }
+        if ((m = ClaimRequestRegex.Match(line)).Success)
+        {
+            // 保険請求 (旧ビルド。船名は出ない): 「請求 #<requestId>（…<URN の末尾 8 文字>）」。完了が来たら同じ行に書き足す
+            var urn = m.Groups[1].Value;
+            var requestId = m.Groups[2].Value;
+            _pendingClaims[urn + "\u001f" + requestId] = Add(time, "保険請求", $"請求 #{requestId}（…{UrnTail(urn)}）");
+            return;
+        }
+        if ((m = ClaimCompleteRegex.Match(line)).Success)
+        {
+            if (!_pendingClaims.Remove(m.Groups[1].Value + "\u001f" + m.Groups[3].Value, out var claim)) return;
+            claim.Content += $" → 完了 (result {m.Groups[2].Value})";
+            Changed = true;
             return;
         }
         if (HasAnyTag(line, InventoryTags))
@@ -933,14 +998,19 @@ public sealed class GameLogParser
         {
             var ship = "";
             string? cls = null;
+            double? fuel = null;
             if ((m = VehicleRefRegex.Match(line)).Success)
             {
                 cls = m.Groups[1].Value;
                 LearnVehicle(m.Groups[2].Value, cls);
                 ship = _shipName(cls);
+                // 同じ船の直前の経路計算 (<Calculate Route>) の燃料の見積り (そのファイルでまだ無ければ添えない)
+                if (_routeFuel.TryGetValue(m.Groups[2].Value, out var f)) fuel = f;
             }
             // 行き先は最後に選んだもの。そのファイルでまだ選んでいなければ船名だけ
             var content = _quantumTarget == null ? ship : ship.Length > 0 ? $"{ship} → {_quantumTarget}" : _quantumTarget;
+            // 燃料の見積りは整数に丸めて添える (単位は不明なので付けない)
+            if (fuel is double fe) content += $"{(content.Length > 0 ? " / " : "")}燃料見積り {fe.ToString("#,0", CultureInfo.InvariantCulture)}";
             Add(time, "量子ジャンプ", content, shipClass: cls, shipName: cls != null ? ship : null);
             return;
         }
@@ -1432,7 +1502,16 @@ public sealed class GameLogParser
         ("目標撤回", "目標撤回"),
         ("目標中断", "目標撤回"),
     ];
-    private static readonly string[] AreaHeadings = ["休戦ゾーンに進入 - 戦闘禁止", "休戦ゾーンを突破 - 注意せよ", "立入禁止区域から退出"];
+    // 「Armistice Zone 内 - 戦闘行為厳禁」「Armistice Zone から離脱 - 注意して航行せよ」は旧訳 (logbackups に 1,076 件・945 件)
+    private static readonly string[] AreaHeadings =
+    [
+        "休戦ゾーンに進入 - 戦闘禁止", "休戦ゾーンを突破 - 注意せよ", "立入禁止区域から退出",
+        "Armistice Zone 内 - 戦闘行為厳禁", "Armistice Zone から離脱 - 注意して航行せよ",
+    ];
+    // 休戦ゾーンへの進入の行 (種類「区域」) の内容 (音を鳴らす判定 GameLogSoundJudge が使う)
+    public static readonly string[] ArmisticeEnterHeadings = ["休戦ゾーンに進入 - 戦闘禁止", "Armistice Zone 内 - 戦闘行為厳禁"];
+    // 燃料低下の通知の見出し (本文は給油の案内で 3 種類。船名・残量は無い)
+    private const string FuelLowHeading = "燃料低下";
     // 区域 (見出しの前方一致)。logbackups での実際の文は「制限区域から離脱中: 」「私有地に進入: 」「私有地を突破: 」(本文は空)
     private static readonly string[] AreaPrefixHeadings = ["制限区域から離脱中", "私有地に進入", "私有地を突破"];
 
@@ -1454,6 +1533,18 @@ public sealed class GameLogParser
             if (_lastAtc != null && time - _lastAtcTime <= AtcWindow) parts.Add(AtcPlace(_lastAtc));
             if (_lastShipName != null) parts.Add($"船: {_lastShipName}");
             Add(time, "ハンガー要求", string.Join(" / ", parts), shipClass: _lastShipClass, shipName: _lastShipName);
+            return;
+        }
+
+        // 燃料低下 (約 2 分おきに繰り返す): 内容は直前に操縦していた船 (分からなければ空)。同じ船で FuelLowWindow 以内に続くものは最初の 1 件だけ
+        // (続く通知からも時間を測るので、低下したままの間は 1 件)
+        if (text.StartsWith(FuelLowHeading, StringComparison.Ordinal))
+        {
+            var ship = _lastShipClass ?? "";
+            var repeat = _lastFuelLowShip == ship && time - _lastFuelLowTime <= FuelLowWindow;
+            _lastFuelLowShip = ship;
+            _lastFuelLowTime = time;
+            if (!repeat) Add(time, "燃料低下", _lastShipName ?? "", shipClass: _lastShipClass, shipName: _lastShipName);
             return;
         }
 
@@ -1819,6 +1910,9 @@ public sealed class GameLogParser
         double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : null;
 
     private static string ShortGuid(string guid) => guid.Length > 8 ? guid[..8] : guid;
+
+    // 保険請求の URN (urn:sc:global:entitlement:uuid:<guid> / urn:sc:entitygraph:ltp:geid:<数字>) の末尾 8 文字
+    private static string UrnTail(string urn) => urn.Length > 8 ? urn[^8..] : urn;
 
     // ─── ファイルの読み方 ───
 

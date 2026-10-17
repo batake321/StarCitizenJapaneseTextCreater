@@ -20,9 +20,13 @@ public partial class GameLogPanel : UserControl
     // 見つかったらやめる。ゲームが Game.log を移すのが少し遅れる場合に備える
     private const int RescanTries = 60;
 
-    private bool _initialized;
+    // 表の列を入れたか (タブの初回表示で)。読み込みを始めたか (EnsureStarted。タブを開いていなくても MainWindow の Window_Loaded から始める)
+    private bool _columnsSet;
+    private bool _started;
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private bool _polling;
+    // 追い読みで新しく足された行から鳴らす音を決める (休戦ゾーンに進入・到着)。設定の有効/無効とファイルは鳴らすときに App.Config から読む
+    private readonly GameLogSoundJudge _soundJudge = new();
 
     private GameLogNames? _names;
     private GameLogTail? _tail;
@@ -89,24 +93,40 @@ public partial class GameLogPanel : UserControl
         _timer.Tick += async (_, _) => await PollAsync();
         Loaded += (_, _) =>
         {
-            if (!_initialized)
+            var columnsJustSet = false;
+            if (!_columnsSet)
             {
-                _initialized = true;
+                _columnsSet = true;
                 // 表の部品の例外でもアプリを落とさず、1 行の知らせにする
-                try
-                {
-                    table.SetColumns(Columns());
-                    if (!Start()) return;
-                }
+                try { table.SetColumns(Columns()); }
                 catch (Exception ex) { ShowMessage($"読み込めませんでした: {ex.Message}"); return; }
+                columnsJustSet = true;
             }
-            if (_tail == null || _timer.IsEnabled) return;
-            // 初回の表示で読み始め、以後はタブを表示していない間も 1 秒ごとに読む
-            _timer.Start();
-            _ = PollAsync();
+            EnsureStarted();
+            // 読み込みが先に始まっていた (Window_Loaded の EnsureStarted) ときは、列の無いまま入れた行を列つきで作り直す
+            // (SetItems は列が決まってから入れないと空のセルになり、SetColumns は行を作り直さない)
+            if (columnsJustSet && _tail != null) UpdateTable();
         };
         // タイマーを止めるのはアプリの終了時だけ
         Dispatcher.ShutdownStarted += (_, _) => _timer.Stop();
+    }
+
+    // 読み込み (Start) と 1 秒ごとの追い読みを始める (まだなら)。タブを開いていなくても音が鳴るよう MainWindow の Window_Loaded からも呼ぶ。
+    // 二重には始めない。以後はタブを表示していない間も 1 秒ごとに読む
+    public void EnsureStarted()
+    {
+        if (!_started)
+        {
+            _started = true;
+            try
+            {
+                if (!Start()) return;
+            }
+            catch (Exception ex) { ShowMessage($"読み込めませんでした: {ex.Message}"); return; }
+        }
+        if (_tail == null || _timer.IsEnabled) return;
+        _timer.Start();
+        _ = PollAsync();
     }
 
     private static string WorkDir()
@@ -456,6 +476,7 @@ public partial class GameLogPanel : UserControl
                 _currentRows = result.Rows ?? [];
                 changed = true;
             }
+            PlaySounds(result.Found, result.Reset, result.Changed ? _currentRows : null);
             if (result.Reset) _rescanLeft = RescanTries;
             lock (_backupLock)
             {
@@ -493,6 +514,27 @@ public partial class GameLogPanel : UserControl
         finally { _polling = false; }
         if (_rescanLeft > 0 && !_rescanRunning) _ = RescanAsync();
         UpdateStatus();
+    }
+
+    // 追い読みで新しく足された行から音を鳴らす (休戦ゾーンに進入・到着。判定は GameLogSoundJudge)。鳴らせなかったときはログに残すだけ
+    private void PlaySounds(bool found, bool reset, IReadOnlyList<GameLogEntry>? rows)
+    {
+        try
+        {
+            var config = App.Config;
+            var sounds = _soundJudge.OnPoll(found, reset, rows, DateTime.UtcNow, config.ArmisticeSoundEnabled, config.ArrivalSoundEnabled);
+            foreach (var kind in sounds)
+            {
+                var path = kind == GameLogSoundKind.Armistice
+                    ? GameLogSoundPlayer.ResolvePath(config.ArmisticeSoundPath, GameLogSoundPlayer.DefaultArmisticeFile)
+                    : GameLogSoundPlayer.ResolvePath(config.ArrivalSoundPath, GameLogSoundPlayer.DefaultArrivalFile);
+                if (!GameLogSoundPlayer.Play(path, out var error)) ChatService.LogExternal($"[ゲームログ] {error}");
+            }
+        }
+        catch (Exception ex)
+        {
+            ChatService.LogExternal($"[ゲームログ] 音を鳴らせませんでした: {ex.Message}");
+        }
     }
 
     // 表に入れる (新しい順。同じ時刻は読んだ順の逆)。絞り込み・並べ替えは表の部品が残す

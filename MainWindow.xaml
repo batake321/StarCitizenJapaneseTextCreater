@@ -2135,6 +2135,37 @@
                             </Grid>
                         </GroupBox>
 
+                        <GroupBox Header="ゲームログの音" Margin="0,0,0,8">
+                            <Grid Margin="8">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <CheckBox x:Name="chkArmisticeSound" Content="休戦ゾーンに進入" Grid.Row="0" VerticalAlignment="Center" Margin="0,4"/>
+                                <TextBox x:Name="txtArmisticeSoundPath" Grid.Row="0" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"
+                                         ToolTip="鳴らす wav のパス。空欄なら同梱の sounds\armistice_zone.wav"/>
+                                <Button Content="参照…" Grid.Row="0" Grid.Column="2" Padding="10,2" Margin="6,4,0,4" Click="ArmisticeSoundBrowse_Click"/>
+                                <Button Content="試聴" Grid.Row="0" Grid.Column="3" Padding="10,2" Margin="6,4,0,4" Click="ArmisticeSoundTest_Click"/>
+
+                                <CheckBox x:Name="chkArrivalSound" Content="到着" Grid.Row="1" VerticalAlignment="Center" Margin="0,4"/>
+                                <TextBox x:Name="txtArrivalSoundPath" Grid.Row="1" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"
+                                         ToolTip="鳴らす wav のパス。空欄なら同梱の sounds\arrival.wav"/>
+                                <Button Content="参照…" Grid.Row="1" Grid.Column="2" Padding="10,2" Margin="6,4,0,4" Click="ArrivalSoundBrowse_Click"/>
+                                <Button Content="試聴" Grid.Row="1" Grid.Column="3" Padding="10,2" Margin="6,4,0,4" Click="ArrivalSoundTest_Click"/>
+
+                                <TextBlock Grid.Row="2" Grid.ColumnSpan="4" TextWrapping="Wrap" Margin="0,4,0,0" Foreground="#666" FontSize="12"
+                                           Text="ゲームログの追い読みで新しく出た行 (10 秒以内のもの) で鳴らします。パスが空欄なら同梱の音 (sounds フォルダ)。到着は休戦ゾーンの音の直後 60 秒は鳴らしません。"/>
+                            </Grid>
+                        </GroupBox>
+
                         <GroupBox Header="AI バックエンド状態" Margin="0,0,0,8" Padding="8">
                             <StackPanel>
                                 <TextBlock x:Name="txtBackendSummary" TextWrapping="Wrap" Margin="0,0,0,8"
