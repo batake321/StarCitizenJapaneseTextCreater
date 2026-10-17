@@ -161,10 +161,16 @@ public sealed class OreService
         var db = new SqliteConnection($"Data Source={_dbPath}");
         db.Open();
         using var cmd = db.CreateCommand();
-        cmd.CommandText = TradeTablesDdl;
+        // 印の表 (game_log_imports) もここで書くので、HangarService の DDL も通す
+        cmd.CommandText = TradeTablesDdl + HangarService.GearImportTablesDdl;
         cmd.ExecuteNonQuery();
         return db;
     }
+
+    // 印 (game_log_imports) の kind・入れた先
+    public const string MarkKindTrade = "trade";
+    public const string MarkKindMined = "mined";
+    public const string MarkTargetStock = "ore_stock";
 
     private bool DbExists => _dbPath != null && File.Exists(_dbPath);
 
@@ -586,47 +592,186 @@ public sealed class OreService
     // まだ反映していない (applied_to_stock = 0) 記録を log_time の順に在庫へ入れる:
     //   売買: 成功した (result = '') 行の 買い +quantity_scu / 売り −quantity_scu (品質 NULL、単位 SCU)。失敗した行・SCU の無い行は在庫を変えずに反映済みにする
     //   採掘: +quantity (単位は行の unit (既定 個)、品質は行の quality)。資源を引けていない行 (resource_uuid = '') は反映せず 0 のまま残す
+    // stockCutoffUtc より前の行 (log_time で比べる) は在庫を変えずに反映済みにする (過去のログの記録は残すが、在庫は動かさない。null なら全部反映)。
+    // 在庫を変えた行には印 (game_log_imports: kind trade / mined、入れた先 ore_stock、quantity は変えた量 (売りは負)) を書く
+    // (［ゲームログ］の「取り消す」・取引の失敗の後付けで戻すため)。
     // 在庫は 0 より下に下げない (AdjustStockCore)。戻り値は (反映した売買の件数, 反映した採掘の件数, 0 で止めた量の合計)
-    public (int Trades, int Mining, double Clamped) ApplyToStock()
+    public (int Trades, int Mining, double Clamped) ApplyToStock(DateTime? stockCutoffUtc = null)
     {
         using var db = Open();
         using var tx = db.BeginTransaction();
         int trades = 0, mining = 0;
         double clamped = 0;
+        bool AfterCutoff(string logTime) => stockCutoffUtc is not { } c || (TryParseLogTime(logTime, out var t) && t >= c);
 
-        var pending = new List<(long RowId, string Kind, string Uuid, string Record, double? Scu, bool Ok)>();
+        var pending = new List<(long RowId, string LogTime, string PlayerId, string ShopId, string KioskId, string Kind, string Uuid, string Record, double? Scu, string Raw, bool Ok)>();
         using (var cmd = db.CreateCommand())
         {
             cmd.Transaction = tx;
-            cmd.CommandText = "SELECT rowid, kind, resource_uuid, resource_record, quantity_scu, result FROM commodity_trades WHERE applied_to_stock = 0 ORDER BY log_time, rowid";
+            cmd.CommandText = "SELECT rowid, log_time, player_id, shop_id, kiosk_id, kind, resource_uuid, resource_record, quantity_scu, quantity_raw, result FROM commodity_trades WHERE applied_to_stock = 0 ORDER BY log_time, rowid";
             using var r = cmd.ExecuteReader();
-            while (r.Read()) pending.Add((r.GetInt64(0), Str(r, 1), Str(r, 2), Str(r, 3), Dbl(r, 4), Str(r, 5).Length == 0));
+            while (r.Read()) pending.Add((r.GetInt64(0), Str(r, 1), Str(r, 2), Str(r, 3), Str(r, 4), Str(r, 5), Str(r, 6), Str(r, 7), Dbl(r, 8), Str(r, 9), Str(r, 10).Length == 0));
         }
         foreach (var p in pending)
         {
-            if (p.Ok && p.Uuid.Length > 0 && p.Scu is > 0 and var scu)
-                clamped += AdjustStockCore(db, tx, p.Uuid, p.Record, null, UnitScu, p.Kind == "sell" ? -scu : scu);
+            if (p.Ok && p.Uuid.Length > 0 && p.Scu is > 0 and var scu && AfterCutoff(p.LogTime))
+            {
+                var delta = p.Kind == "sell" ? -scu : scu;
+                var key = GameLogTrade.MakeKey(p.LogTime, p.PlayerId, p.ShopId, p.KioskId, p.Kind, p.Uuid, p.Raw);
+                if (HangarService.InsertMark(db, tx, MarkKindTrade, key, MarkTargetStock, p.Uuid, delta))
+                    clamped += AdjustStockCore(db, tx, p.Uuid, p.Record, null, UnitScu, delta);
+            }
             Exec(db, tx, "UPDATE commodity_trades SET applied_to_stock = 1 WHERE rowid = @id", ("@id", p.RowId));
             trades++;
         }
 
-        var mined = new List<(long RowId, string Uuid, string Record, double Qty, string Unit, int? Quality)>();
+        var mined = new List<(long RowId, string LogTime, string Class, string EntityId, string Uuid, string Record, double Qty, string Unit, int? Quality)>();
         using (var cmd = db.CreateCommand())
         {
             cmd.Transaction = tx;
-            cmd.CommandText = "SELECT rowid, resource_uuid, resource_record, quantity, unit, quality FROM mining_log WHERE applied_to_stock = 0 AND resource_uuid != '' ORDER BY log_time, rowid";
+            cmd.CommandText = "SELECT rowid, log_time, mineral_class, entity_id, resource_uuid, resource_record, quantity, unit, quality FROM mining_log WHERE applied_to_stock = 0 AND resource_uuid != '' ORDER BY log_time, rowid";
             using var r = cmd.ExecuteReader();
             while (r.Read())
-                mined.Add((r.GetInt64(0), Str(r, 1), Str(r, 2), Dbl(r, 3) ?? 0, Str(r, 4) is { Length: > 0 } u ? u : UnitPiece, r.IsDBNull(5) ? null : r.GetInt32(5)));
+                mined.Add((r.GetInt64(0), Str(r, 1), Str(r, 2), Str(r, 3), Str(r, 4), Str(r, 5), Dbl(r, 6) ?? 0, Str(r, 7) is { Length: > 0 } u ? u : UnitPiece, r.IsDBNull(8) ? null : r.GetInt32(8)));
         }
         foreach (var m in mined)
         {
-            if (m.Qty > 0) clamped += AdjustStockCore(db, tx, m.Uuid, m.Record, m.Quality, m.Unit, m.Qty);
+            if (m.Qty > 0 && AfterCutoff(m.LogTime))
+            {
+                var key = GameLogMining.MakeKey(m.LogTime, m.Class, m.EntityId);
+                if (HangarService.InsertMark(db, tx, MarkKindMined, key, MarkTargetStock, m.Uuid, m.Qty))
+                    clamped += AdjustStockCore(db, tx, m.Uuid, m.Record, m.Quality, m.Unit, m.Qty);
+            }
             Exec(db, tx, "UPDATE mining_log SET applied_to_stock = 1 WHERE rowid = @id", ("@id", m.RowId));
             mining++;
         }
         tx.Commit();
         return (trades, mining, clamped);
+    }
+
+    // ［ゲームログ］の「入れる」「減らす」(在庫へ): 印 (kind, logKey → ore_stock) を書いて在庫を quantity だけ変える (負なら引く。0 より下には下げない)。
+    // 印の quantity には実際に変えた量 (引ききれなかった分を除く) を書く (「取り消す」で戻す量)。印が既にあれば何もせず (false, 0)。
+    // 戻り値は (変えたか, 引ききれなかった量)
+    public (bool Applied, double Shortage) ImportToStock(string kind, string logKey, string resourceUuid, string resourceRecord, int? quality, string unit, double quantity)
+    {
+        CheckQuality(quality);
+        CheckUnit(unit);
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        var result = ImportToStockCore(db, tx, kind, logKey, resourceUuid, resourceRecord, quality, unit, quantity);
+        tx.Commit();
+        return result;
+    }
+
+    private static (bool Applied, double Shortage) ImportToStockCore(SqliteConnection db, SqliteTransaction tx, string kind, string logKey, string resourceUuid, string resourceRecord, int? quality, string unit, double quantity)
+    {
+        if (!HangarService.InsertMark(db, tx, kind, logKey, MarkTargetStock, resourceUuid, quantity)) return (false, 0);
+        var clamped = AdjustStockCore(db, tx, resourceUuid, resourceRecord, quality, unit, quantity);
+        if (clamped > 0)
+            Exec(db, tx, "UPDATE game_log_imports SET quantity = @q WHERE kind = @k AND log_key = @l", ("@q", quantity + clamped), ("@k", kind), ("@l", logKey));
+        return (true, clamped);
+    }
+
+    // 納品の自動の減算: 同じ納品について一度だけ (印 kind "delivered_auto" を済の印として残し、取り消しても消さない) 在庫から quantity を引く
+    // (印 kind delivered、単位 個、品質なし)。二度目以降・既に delivered の印があるときは (false, 0)。戻り値は ImportToStock と同じ
+    public const string MarkKindDelivered = "delivered";
+    public const string MarkKindDeliveredAuto = "delivered_auto";
+
+    public (bool Applied, double Shortage) ApplyDeliveryOnce(string logKey, string resourceUuid, string resourceRecord, double quantity)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        if (!HangarService.InsertMark(db, tx, MarkKindDeliveredAuto, logKey, MarkTargetStock, resourceUuid, -quantity)) return (false, 0);
+        var result = ImportToStockCore(db, tx, MarkKindDelivered, logKey, resourceUuid, resourceRecord, null, UnitPiece, -quantity);
+        tx.Commit();
+        return result;
+    }
+
+    // ［ゲームログ］の「取り消す」(在庫から): 印 (入れた先が ore_stock) を消し、入れた量を在庫から引く (0 より下には下げない)。
+    // 単位は 採掘 (mined) なら 個、売買 (trade) なら SCU、品質は無し (入れたときと同じ)。戻り値は (印があったか, 引ききれなかった量)
+    public (bool Found, double Shortage) CancelStockImport(string kind, string logKey)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        GameLogImportMark? mark = null;
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "SELECT target, item_record, quantity FROM game_log_imports WHERE kind = @k AND log_key = @l";
+            cmd.Parameters.AddWithValue("@k", kind);
+            cmd.Parameters.AddWithValue("@l", logKey);
+            using var r = cmd.ExecuteReader();
+            if (r.Read()) mark = new GameLogImportMark(kind, logKey, Str(r, 0), Str(r, 1), Dbl(r, 2) ?? 0);
+        }
+        if (mark == null || mark.Target != MarkTargetStock) return (false, 0);
+        var unit = kind == MarkKindTrade ? UnitScu : UnitPiece;
+        var clamped = mark.ItemRecord.Length > 0 && mark.Quantity != 0 ? AdjustStockCore(db, tx, mark.ItemRecord, "", null, unit, -mark.Quantity) : 0;
+        HangarService.DeleteMark(db, tx, kind, logKey);
+        tx.Commit();
+        return (true, clamped);
+    }
+
+    // 取引の結果が後から分かった (失敗が結び付いた) とき: 同じ鍵 (主キー) の行の result を書き換える。
+    // 成功として既に在庫へ反映してあれば (印 kind trade がある) 反映を戻して印を消す。行が無ければ false。
+    // 利益の計算し直し (RecomputeProfits) は呼ぶ側で行う
+    public bool UpdateTradeResult(string logTime, string playerId, string shopId, string kioskId, string kind, string resourceUuid, string quantityRaw, string result)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        int n;
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = """
+                UPDATE commodity_trades SET result = @res
+                WHERE log_time = @t AND player_id = @p AND shop_id = @s AND kiosk_id = @k AND kind = @kind AND resource_uuid = @u AND quantity_raw = @raw AND result != @res
+                """;
+            cmd.Parameters.AddWithValue("@res", result ?? "");
+            cmd.Parameters.AddWithValue("@t", logTime);
+            cmd.Parameters.AddWithValue("@p", playerId ?? "");
+            cmd.Parameters.AddWithValue("@s", shopId ?? "");
+            cmd.Parameters.AddWithValue("@k", kioskId ?? "");
+            cmd.Parameters.AddWithValue("@kind", kind);
+            cmd.Parameters.AddWithValue("@u", resourceUuid ?? "");
+            cmd.Parameters.AddWithValue("@raw", quantityRaw ?? "");
+            n = cmd.ExecuteNonQuery();
+        }
+        if (n == 0) { tx.Commit(); return false; }
+        if (!string.IsNullOrEmpty(result))
+        {
+            var key = GameLogTrade.MakeKey(logTime, playerId ?? "", shopId ?? "", kioskId ?? "", kind, resourceUuid ?? "", quantityRaw ?? "");
+            double? applied = null;
+            using (var cmd = db.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = "SELECT quantity FROM game_log_imports WHERE kind = @k AND log_key = @l AND target = @tg";
+                cmd.Parameters.AddWithValue("@k", MarkKindTrade);
+                cmd.Parameters.AddWithValue("@l", key);
+                cmd.Parameters.AddWithValue("@tg", MarkTargetStock);
+                applied = cmd.ExecuteScalar() is double d ? d : null;
+            }
+            if (applied is { } delta && delta != 0 && (resourceUuid ?? "").Length > 0)
+            {
+                AdjustStockCore(db, tx, resourceUuid!, "", null, UnitScu, -delta);
+                HangarService.DeleteMark(db, tx, MarkKindTrade, key);
+            }
+        }
+        tx.Commit();
+        return true;
+    }
+
+    // 売りの行の利益 (鍵 → (利益, 利益率))。計算前 (NULL) の行は入れない。［ゲームログ］の売却の行に添えるのに使う
+    public Dictionary<string, (double Profit, double? Rate)> LoadSellProfits()
+    {
+        var dict = new Dictionary<string, (double, double?)>(StringComparer.Ordinal);
+        if (!DbExists) return dict;
+        using var db = Open();
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT log_time, player_id, shop_id, kiosk_id, kind, resource_uuid, quantity_raw, profit_auec, profit_rate FROM commodity_trades WHERE kind = 'sell' AND profit_auec IS NOT NULL";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            dict[GameLogTrade.MakeKey(Str(r, 0), Str(r, 1), Str(r, 2), Str(r, 3), Str(r, 4), Str(r, 5), Str(r, 6))] = (Dbl(r, 7) ?? 0, Dbl(r, 8));
+        return dict;
     }
 
     // === 資源の一覧 (gamedata_cache.db の resource_types + translations.db) ===
@@ -663,9 +808,11 @@ public sealed class OreService
         ["ResourceTypeGroup.Waste"] = ("@items_commodities_type_waste", "Waste"),
     };
 
-    // 一覧に入れるか: グループが OreGroups で、名前のキーがあり、プレースホルダ (@LOC_PLACEHOLDER) でも special_ (季節の品) でもないもの
+    // 一覧に入れるか: グループが OreGroups で、名前のキーが @items_commodities_ で始まり (CO2・ShipAmmunition・AceInterceptorHelmet・Armillaria 等の
+    // 商品でないものを除く)、プレースホルダ (@LOC_PLACEHOLDER) でも special_ (季節の品) でもないもの
     private static bool IsOreListed(string groupRecord, string? nameKey) =>
         OreGroups.Contains(groupRecord) && nameKey is { Length: > 1 }
+        && nameKey.StartsWith("@items_commodities_", StringComparison.OrdinalIgnoreCase)
         && !nameKey.Contains("PLACEHOLDER", StringComparison.OrdinalIgnoreCase)
         && !nameKey.Contains("_special_", StringComparison.OrdinalIgnoreCase);
 

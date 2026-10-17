@@ -83,9 +83,16 @@ public partial class MainWindow : Window
         // 装備タブの表: Ctrl+C で選んだセルの文字だけをコピーする
         DataGridCellCopy.Attach(dgMyComponents);
         DataGridCellCopy.Attach(dgLoadout);
+        DataGridCellCopy.Attach(dgMyGear);
         // ［ゲームログ］の購入の行の「装備に入れる」ボタン
-        gameLogPanel.PurchaseClassifier = ClassifyGameLogPurchases;
-        gameLogPanel.PurchaseImporter = ImportGameLogPurchase;
+        gameLogPanel.ImportClassifier = ClassifyGameLogImports;
+        gameLogPanel.Importer = ImportGameLogEntry;
+        gameLogPanel.Canceller = CancelGameLogEntry;
+        gameLogPanel.RecordsImporter = ImportGameLogRecords;
+        gameLogPanel.TradeResultUpdater = UpdateGameLogTradeResult;
+        gameLogPanel.DeliveryImporter = ApplyGameLogDeliveries;
+        gameLogPanel.SellProfit = key => orePanel.TryGetSellProfit(key);
+        gameLogPanel.DetailOpener = OpenGameLogItemDetail;
         // ［鉱石］の作業ディレクトリ (trade_cache.db / gamedata_cache.db / translations.db の所在)
         orePanel.WorkDirProvider = () => WorkDir;
     }
@@ -1535,8 +1542,9 @@ public partial class MainWindow : Window
                 if (reopenEquip) ReopenHangarEquip();
                 // 取り込みの中で品目名を今の訳に合わせている (DatabaseBackupService)。取り込みの間に頼まれた分はここで行う
                 if (lastImport) RunDeferredItemNameRefresh();
-                // trade_cache.db の印 (my_component_purchases) が替わったかもしれないので、［ゲームログ］の印の一覧を読み直す
-                InvalidateImportedPurchaseKeys();
+                // trade_cache.db の印 (game_log_imports) と所持個人装備 (my_gear) が替わったかもしれないので、［ゲームログ］の印の一覧と所持個人装備を読み直す
+                InvalidateImportMarks();
+                RefreshMyGear();
                 gameLogPanel?.RefreshPurchaseButtons();
                 // trade_cache.db の在庫・記録と gamedata_cache.db の資源の種類が替わったかもしれないので、［鉱石］を読み直す
                 orePanel?.Reload();
@@ -2278,6 +2286,9 @@ public partial class MainWindow : Window
         ShipCargo.Invalidate();
         _hangarEquip?.Dispose();
         _hangarEquip = null;
+        // 手掘りの鉱石 → 資源の覚え (resource_types) と資源の一覧 (納品の品名の引き当て) も捨てる
+        _mineralResources.Clear();
+        _oreResources = null;
         // ［鉱石］の資源の一覧・名前 (resource_types) も替わったので読み直す (一度も表示していなければ何もしない)
         orePanel?.Reload();
         if (!_upgradeDataLoadedOnce) return;
@@ -5253,8 +5264,8 @@ public partial class MainWindow : Window
         {
             txtCompStatus.Text = $"読み込みエラー: {ex.Message}";
         }
-        // ［ゲームログ］の「装備に入れる」ボタンの状態も決め直す (装備 DB を開き直したときなど)。印の一覧も読み直す
-        InvalidateImportedPurchaseKeys();
+        // ［ゲームログ］の「入れる」「取り消す」ボタンの状態も決め直す (装備 DB を開き直したときなど)。印の一覧も読み直す
+        InvalidateImportMarks();
         gameLogPanel?.RefreshPurchaseButtons();
     }
 
@@ -5424,36 +5435,364 @@ public partial class MainWindow : Window
         RefreshLoadoutGrid();
     }
 
-    // ［ゲームログ］の購入の一覧 → それぞれの「装備に入れる」ボタンの状態 (HangarService.ClassifyPurchase)。
-    // 装備 DB (_hangarEquip) が開いていないとき・ボタンを付ける時刻 (GameLogPurchase.ImportCutoffUtc) 以降の成功した購入が無いときは、
-    // trade_cache.db を開かずにすべてボタン無し
-    // 印の一覧 (my_component_purchases) は覚えておき、印が変わったとき (購入を入れた・インポート・所持リストの読み直し) だけ読み直す
-    // (InvalidateImportedPurchaseKeys)。入れられる品の索引がまだ無ければ裏で作り (ゲームログの表を初めて作ったとき)、
-    // できるまではボタン無しにして、できたら表を作り直す
-    private IReadOnlyList<PurchaseImportState> ClassifyGameLogPurchases(IReadOnlyList<GameLogPurchase> purchases)
+    // === ［個人装備］タブの下段: 所持個人装備 (my_gear)。所持コンポーネントと同じ作り ===
+
+    private List<MyGear> _myGear = new();                 // my_gear の写し
+    private List<MyGearRow> _myGearRows = new();          // dgMyGear の表示行
+    private bool _gearTypeComboPopulated;                 // cmbGearType は 1 度だけ埋める
+    private bool _myGearLoadedOnce;                       // 所持個人装備の枠を一度でも表示した (表示するまで DB は読まない)
+
+    // 所持個人装備の枠 (GroupBox) を初めて表示したときに読む
+    private void MyGearGroup_Loaded(object sender, RoutedEventArgs e)
     {
-        var states = new PurchaseImportState[purchases.Count];
+        if (_myGearLoadedOnce) return;
+        _myGearLoadedOnce = true;
+        RefreshMyGear();
+    }
+
+    // 装備 DB の読み込み口 (_hangarEquip) がまだ無ければ開く (LoadUpgradeData と同じ開き方。gamedata_cache.db が無い/開けない場合は null のまま)
+    private void EnsureHangarEquip()
+    {
+        if (_hangarEquip != null) return;
+        var gamedataPath = Path.Combine(WorkDir, "gamedata_cache.db");
+        if (!File.Exists(gamedataPath)) return;
+        try { _hangarEquip = new EquipmentService(gamedataPath); }
+        catch (Exception ex) { Log($"[Gear] 装備DBを開けませんでした: {ex.Message}"); }
+    }
+
+    // my_gear を読み直してグリッドに出す。種別コンボは初回のみ埋める。一度も表示していなければ何もしない (表示したときに読む)
+    private void RefreshMyGear()
+    {
+        if (dgMyGear == null || !_myGearLoadedOnce) return;   // XAML 読込中・まだ表示していない
+        try
+        {
+            dgMyGear.CommitEdit(DataGridEditingUnit.Row, true);
+            EnsureHangarEquip();
+            _hangarService.SetCacheDir(WorkDir);
+            _myGear = _hangarService.LoadMyGear();
+            _myGearRows = _myGear
+                .Select(g => new MyGearRow(g)
+                {
+                    // 名称の欄は保存した item_name ではなく、item_record から引いた今の名前 (今の訳に合わせた item_index.name)
+                    CurrentName = HangarService.MyGearDisplayName(g, _hangarEquip),
+                    OnUsableChanged = MyGearUsable_Changed,
+                    OnQuantityChanged = MyGearQuantity_Changed,
+                })
+                .ToList();
+            var selectedId = (dgMyGear.SelectedItem as MyGearRow)?.Id;
+            dgMyGear.ItemsSource = null;
+            dgMyGear.ItemsSource = _myGearRows;
+            if (selectedId != null)
+                dgMyGear.SelectedItem = _myGearRows.FirstOrDefault(g => g.Id == selectedId.Value);
+            txtGearStatus.Text = _hangarEquip == null
+                ? "gamedata_cache.db がありません (個人装備の検索・追加はできません)"
+                : $"所持個人装備: {_myGear.Count} 件";
+            PopulateGearTypeCombo();
+        }
+        catch (Exception ex)
+        {
+            txtGearStatus.Text = $"読み込みエラー: {ex.Message}";
+        }
+        // ［ゲームログ］の「入れる」「取り消す」ボタンの状態も決め直す
+        InvalidateImportMarks();
+        gameLogPanel?.RefreshPurchaseButtons();
+    }
+
+    private void PopulateGearTypeCombo()
+    {
+        if (_gearTypeComboPopulated || _hangarEquip == null) return;
+        var categories = new List<EquipmentCategory>();
+        foreach (var (key, displayName, _) in EquipmentService.GearCategories)
+        {
+            var count = _hangarEquip.GetGearItems(key).Count;
+            if (count > 0) categories.Add(new EquipmentCategory { Key = key, DisplayName = displayName, Count = count });
+        }
+        cmbGearType.ItemsSource = categories;
+        if (categories.Count > 0) cmbGearType.SelectedIndex = 0;   // SelectionChanged → RefreshGearCandidates
+        _gearTypeComboPopulated = true;
+    }
+
+    private void GearType_Changed(object sender, SelectionChangedEventArgs e) => RefreshGearCandidates();
+    private void GearSearch_TextChanged(object sender, TextChangedEventArgs e) => RefreshGearCandidates();
+
+    // 種別 + 検索語で item_index を引き、候補コンボに出す
+    private void RefreshGearCandidates()
+    {
+        if (cmbGearCandidates == null) return;
+        if (_hangarEquip == null || cmbGearType.SelectedItem is not EquipmentCategory cat)
+        {
+            cmbGearCandidates.ItemsSource = null;
+            return;
+        }
+        try
+        {
+            var search = txtGearSearch.Text.Trim();
+            var items = _hangarEquip.GetGearItems(cat.Key, search.Length > 0 ? search : null);
+            var list = new List<CompCandidate>(items.Count);
+            foreach (var i in items)
+            {
+                var parts = new List<string> { i.Name };
+                if (i.SizeDisplay.Length > 0) parts.Add(i.SizeDisplay);
+                var type = EquipmentService.GearTypeDisplay(i.ItemType, i.SubType);
+                if (type.Length > 0) parts.Add($"[{type}]");
+                list.Add(new CompCandidate { Item = i, Name = i.Name, Display = string.Join(" ", parts) });
+            }
+            cmbGearCandidates.ItemsSource = list;
+            if (list.Count > 0) cmbGearCandidates.SelectedIndex = 0;
+        }
+        catch (Exception ex)
+        {
+            txtGearStatus.Text = $"候補の取得エラー: {ex.Message}";
+        }
+    }
+
+    private void AddMyGear_Click(object sender, RoutedEventArgs e)
+    {
+        if (_hangarEquip == null)
+        {
+            MessageBox.Show("gamedata_cache.db がありません。個人装備を追加できません。", "個人装備");
+            return;
+        }
+        if (cmbGearCandidates.SelectedItem is not CompCandidate cand)
+        {
+            MessageBox.Show("候補から個人装備を選択してください。", "入力エラー");
+            return;
+        }
+        if (!int.TryParse(txtGearQty.Text.Trim(), out var qty) || qty < 1)
+        {
+            MessageBox.Show("数量は 1 以上の整数で入力してください。", "入力エラー");
+            return;
+        }
+        var g = new MyGear
+        {
+            ItemRecord = cand.Item.RecordName,
+            ItemName = cand.Name,
+            ItemType = cand.Item.ItemType,
+            SubType = cand.Item.SubType,
+            Size = cand.Item.Size,
+            Quantity = qty,
+            Usable = chkGearUsable.IsChecked == true,
+            Notes = txtGearNotes.Text.Trim(),
+        };
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _hangarService.AddMyGear(g);
+            Log($"[Gear] 追加: {g.ItemName} ({g.TypeDisplay}) ×{qty}{(g.Usable ? "" : " (使用不可)")}");
+            txtGearNotes.Text = "";
+            txtGearQty.Text = "1";
+            RefreshMyGear();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"保存に失敗しました: {ex.Message}", "エラー");
+        }
+    }
+
+    private void DeleteMyGear_Click(object sender, RoutedEventArgs e)
+    {
+        if (dgMyGear.SelectedItem is not MyGearRow row) return;
+        var g = row.Model;
+        if (MessageBox.Show($"「{row.ItemName}」({row.TypeDisplay} ×{g.Quantity}) を削除しますか？", "確認", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _hangarService.DeleteMyGear(g.Id);
+            Log($"[Gear] 削除: {row.ItemName}");
+            RefreshMyGear();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"削除に失敗しました: {ex.Message}", "エラー");
+        }
+    }
+
+    // 「使用可」チェックの変更 (MyGearRow.Usable の setter から) → DB へ書き戻す
+    private void MyGearUsable_Changed(MyGearRow row)
+    {
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _hangarService.UpdateMyGear(row.Model);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"保存に失敗しました: {ex.Message}", "エラー");
+        }
+    }
+
+    // 数量の欄の書き換え (MyGearRow.Quantity の setter から)。表の編集の確定の最中なので、読み直しは後で行う
+    private void MyGearQuantity_Changed(MyGearRow row, int quantity) =>
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => ApplyMyGearQuantity(row, quantity));
+
+    // 数量を quantity にする (UpdateMyGear)。0 になるなら行を消すか確かめ、「いいえ」なら変えない。負の数は受け付けない
+    private void ApplyMyGearQuantity(MyGearRow row, int quantity)
+    {
+        var g = row.Model;
+        try
+        {
+            if (quantity < 0)
+            {
+                MessageBox.Show("数量は 0 以上の整数で入力してください。", "入力エラー");
+            }
+            else if (quantity == 0)
+            {
+                if (MessageBox.Show($"数量が 0 になります。「{row.ItemName}」({row.TypeDisplay}) の行を削除しますか？", "確認", MessageBoxButton.YesNo) == MessageBoxResult.Yes)
+                {
+                    _hangarService.SetCacheDir(WorkDir);
+                    _hangarService.DeleteMyGear(g.Id);
+                    Log($"[Gear] 削除: {row.ItemName}");
+                }
+            }
+            else
+            {
+                var before = g.Quantity;
+                g.Quantity = quantity;
+                _hangarService.SetCacheDir(WorkDir);
+                _hangarService.UpdateMyGear(g);
+                Log($"[Gear] 数量: {row.ItemName} ×{before} → ×{quantity}");
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"保存に失敗しました: {ex.Message}", "エラー");
+        }
+        RefreshMyGear();
+    }
+
+    // 所持個人装備の名前のダブルクリック → ［詳細］タブにその品目を出す
+    private void GearName_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ClickCount == 2 && (sender as FrameworkElement)?.DataContext is MyGearRow row) DetailPanel.Request(row.ItemRecord, row.ItemName);
+    }
+
+    // === ［ゲームログ］の「入れる」「取り消す」(購入・採掘・貨物エレベーターで降ろした品 → 所持コンポーネント / 所持個人装備 / 鉱石の在庫) ===
+
+    // ［鉱石］の在庫への入れ・取り消し (OreService。trade_cache.db)。表の読み直しは orePanel.Reload
+    private readonly OreService _oreService = new();
+    // 印 (game_log_imports) の覚え。印が変わったとき (入れた・取り消した・インポート・所持リストの読み直し) に捨てる (InvalidateImportMarks)。UI のスレッドだけで使う
+    private Dictionary<(string Kind, string LogKey), GameLogImportMark>? _importMarks;
+    // 手掘りの鉱石のクラス名 → 資源 (resource_types)。引けなかったものも覚える (gamedata_cache.db が替わったら捨てる: ReopenHangarEquip)
+    private readonly Dictionary<string, (string Uuid, string Record)?> _mineralResources = new(StringComparer.OrdinalIgnoreCase);
+
+    private void InvalidateImportMarks() => _importMarks = null;
+
+    private Dictionary<(string Kind, string LogKey), GameLogImportMark> ImportMarks()
+    {
+        if (_importMarks == null)
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _importMarks = _hangarService.LoadImportMarks();
+        }
+        return _importMarks;
+    }
+
+    // 行の品の入れ先。None = 入れられない (item_index に無い・入れられる種類でない・資源を引けない)
+    private enum ImportTarget { None, Component, Gear, Stock }
+
+    // 品の入れ先を決める。
+    //   purchase / dropped: 船のコンポーネント (FindOwnableComponent) → 個人装備 (FindOwnableGear)。降ろした品の鉱石は入れない (採掘で既に在庫に足しているため)
+    //   mined:              手掘りの鉱石 (Harvestable_Mineral_1H_<X> → resource_types)
+    //   delivered:          通知の品名 (日本語) を resource_types の日本語名・英語名で引く (在庫から引く)
+    // 装備 DB (_hangarEquip) が無ければコンポーネント・個人装備には入れられない
+    private (ImportTarget Target, EquipmentItem? Item, (string Uuid, string Record)? Resource) ResolveImportTarget(GameLogImportItem item)
+    {
+        switch (item.Kind)
+        {
+            case GameLogImportItem.KindMined:
+                if (!_mineralResources.TryGetValue(item.ItemClass, out var res))
+                    _mineralResources[item.ItemClass] = res = OreService.ResolveMineralResource(Path.Combine(WorkDir, "gamedata_cache.db"), item.ItemClass);
+                return res is { } r ? (ImportTarget.Stock, null, r) : (ImportTarget.None, null, null);
+            case GameLogImportItem.KindDelivered:
+                return ResolveResourceByName(item.DisplayName) is { } d ? (ImportTarget.Stock, null, d) : (ImportTarget.None, null, null);
+            default:
+                if (_hangarEquip is { } equip)
+                {
+                    var record = "EntityClassDefinition." + item.ItemClass;
+                    if (equip.FindOwnableComponent(record) is { } comp) return (ImportTarget.Component, comp, null);
+                    if (equip.FindOwnableGear(record) is { } gear) return (ImportTarget.Gear, gear, null);
+                }
+                return (ImportTarget.None, null, null);
+        }
+    }
+
+    // 資源の種類 (resource_types + 翻訳) の全件 (納品の品名 → 資源)。初めて要るときに読み、gamedata_cache.db が替わったら捨てる (ReopenHangarEquip)
+    private List<OreResource>? _oreResources;
+
+    private (string Uuid, string Record)? ResolveResourceByName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        _oreResources ??= OreService.LoadResources(Path.Combine(WorkDir, "gamedata_cache.db"), Path.Combine(WorkDir, "translations.db"));
+        var n = name.Trim();
+        var hit = _oreResources.FirstOrDefault(x => string.Equals(x.NameJa, n, StringComparison.OrdinalIgnoreCase))
+                  ?? _oreResources.FirstOrDefault(x => string.Equals(x.NameEn, n, StringComparison.OrdinalIgnoreCase));
+        return hit != null ? (hit.Uuid, hit.RecordName) : null;
+    }
+
+    // 納品の行の自動の減算 (GameLogPanel.DeliveryImporter。まだ渡していない行だけ来る): GameLogPurchase.ImportCutoffUtc 以降で資源を引けた行について、
+    // 一度だけ (OreService.ApplyDeliveryOnce) 在庫から引く。足りなければ 0 で止めて Log に出す
+    private void ApplyGameLogDeliveries(IReadOnlyList<GameLogEntry> entries)
+    {
+        var changed = false;
+        try
+        {
+            _oreService.SetCacheDir(WorkDir);
+            foreach (var e in entries)
+            {
+                if (e.TimeUtc < GameLogPurchase.ImportCutoffUtc || e.ImportItems is not { Count: > 0 } items) continue;
+                foreach (var item in items)
+                {
+                    if (item.Kind != GameLogImportItem.KindDelivered || item.Quantity <= 0) continue;
+                    if (ResolveResourceByName(item.DisplayName) is not { } r) continue;
+                    var (applied, shortage) = _oreService.ApplyDeliveryOnce(item.LogKey, r.Uuid, r.Record, item.Quantity);
+                    if (!applied) continue;
+                    changed = true;
+                    Log($"[Ore] 納品で在庫から引きました: {item.DisplayName} ×{item.Quantity}" + (shortage > 0 ? $"（在庫が足りず 0 で止めました。引けなかった数 {shortage:0.##}）" : ""));
+                }
+            }
+        }
+        catch (Exception ex) { Log($"[Ore] 納品の在庫への反映に失敗しました: {ex.Message}"); }
+        if (!changed) return;
+        InvalidateImportMarks();
+        orePanel?.Reload();
+    }
+
+    // ［ゲームログ］の行 (ImportItems あり) の一覧 → それぞれのボタンの状態。
+    //   None:     ボタン無し (GameLogPurchase.ImportCutoffUtc より前の行、成功していない購入、数量が 0 以下、入れられる品が 1 つも無い)
+    //   Imported: 入れられる品の全部に印がある (「取り消す」)
+    //   Ready:    印の無い入れられる品がある (「入れる」)
+    // 入れられる品の索引 (FindOwnableComponent) がまだ無ければ裏で作り (ゲームログの表を初めて作ったとき)、できるまではボタン無しにして、できたら表を作り直す
+    private IReadOnlyList<PurchaseImportState> ClassifyGameLogImports(IReadOnlyList<GameLogEntry> entries)
+    {
+        var states = new PurchaseImportState[entries.Count];
+        if (!entries.Any(e => e.TimeUtc >= GameLogPurchase.ImportCutoffUtc)) return states;
+        // 装備 DB の読み込み口がまだ無ければ開く (船のコンポーネント・個人装備の判定に要る。gamedata_cache.db が無ければ null のまま)
+        EnsureHangarEquip();
         var equip = _hangarEquip;
-        if (equip == null || !purchases.Any(p => p.Succeeded && p.TimeUtc >= GameLogPurchase.ImportCutoffUtc)) return states;
-        if (!equip.IsOwnableIndexReady)
+        if (equip != null && !equip.IsOwnableIndexReady)
         {
             PrepareOwnableIndex(equip);
             return states;
         }
-        if (_importedPurchaseKeys == null)
+        var marks = ImportMarks();
+        for (int i = 0; i < entries.Count; i++)
         {
-            _hangarService.SetCacheDir(WorkDir);
-            _importedPurchaseKeys = _hangarService.LoadImportedPurchaseKeys();
+            var e = entries[i];
+            if (e.TimeUtc < GameLogPurchase.ImportCutoffUtc || e.ImportItems is not { Count: > 0 } items) continue;
+            if (e.Purchase is { } p && !p.Succeeded) continue;
+            int resolvable = 0, marked = 0;
+            foreach (var item in items)
+            {
+                if (item.Quantity <= 0) continue;
+                if (ResolveImportTarget(item).Target == ImportTarget.None) continue;
+                resolvable++;
+                if (marks.ContainsKey((item.Kind, item.LogKey))) marked++;
+            }
+            if (resolvable == 0) continue;
+            states[i] = marked == resolvable ? PurchaseImportState.Imported : PurchaseImportState.Ready;
         }
-        for (int i = 0; i < purchases.Count; i++)
-            states[i] = HangarService.ClassifyPurchase(purchases[i], equip, _importedPurchaseKeys, GameLogPurchase.ImportCutoffUtc).State;
         return states;
     }
-
-    // ［ゲームログ］の印の一覧の覚え (ClassifyGameLogPurchases)。UI のスレッドだけで使う
-    private HashSet<string>? _importedPurchaseKeys;
-
-    private void InvalidateImportedPurchaseKeys() => _importedPurchaseKeys = null;
 
     // 入れられる品の索引を作っている裏の作業 (構築・再抽出・インポートの前に終わるまで待つ。gamedata_cache.db を読んでいるため)
     private Task? _ownableIndexTask;
@@ -5471,42 +5810,182 @@ public partial class MainWindow : Window
         if (ReferenceEquals(_hangarEquip, equip)) gameLogPanel?.RefreshPurchaseButtons();
     }
 
-    // ［ゲームログ］の「装備に入れる」: 購入を所持コンポーネントに入れる (名前・種別・サイズ・グレードは手入力の追加の候補と同じ。使用可、メモ無し)。
-    // 印が既にあれば (入れ済み) 何もしない
-    private void ImportGameLogPurchase(GameLogPurchase p)
+    // ［ゲームログ］の「入れる」: 行の品を全部、入れ先 (所持コンポーネント / 所持個人装備 / 鉱石の在庫) に入れる (印は品ごと。印が既にある品は飛ばす)。
+    // 名前・種別・サイズ・グレードは手入力の追加の候補と同じ (使用可、メモ無し)。鉱石は品質なし・単位 個
+    private void ImportGameLogEntry(GameLogEntry e)
     {
-        var equip = _hangarEquip;
-        if (equip == null)
-        {
-            MessageBox.Show("gamedata_cache.db がありません。コンポーネントを追加できません。", "装備");
-            return;
-        }
+        if (e.ImportItems is not { Count: > 0 } items) return;
+        var stockChanged = false;
+        var componentsChanged = false;
+        var gearChanged = false;
+        var shortages = new List<string>();
         try
         {
             _hangarService.SetCacheDir(WorkDir);
-            var (state, item) = HangarService.ClassifyPurchase(p, equip, _hangarService.LoadImportedPurchaseKeys(), GameLogPurchase.ImportCutoffUtc);
-            if (state == PurchaseImportState.Ready && item != null)
+            _oreService.SetCacheDir(WorkDir);
+            foreach (var item in items)
             {
-                var c = new MyComponent
+                if (item.Quantity <= 0) continue;
+                var (target, found, resource) = ResolveImportTarget(item);
+                switch (target)
                 {
-                    ItemRecord = item.RecordName,
-                    ItemName = item.Name,
-                    ItemType = item.ItemType,
-                    Size = item.Size,
-                    Grade = item.Grade,
-                    Quantity = p.Quantity,
-                    Usable = true,
-                    Notes = "",
-                };
-                if (_hangarService.ImportPurchasedComponent(p, c))
-                    Log($"[Equip] ゲームログの購入から追加: {c.ItemName} ({c.ItemType} {c.SizeDisplay} {c.GradeDisplay}) ×{c.Quantity}");
+                    case ImportTarget.Component when found != null:
+                    {
+                        var c = new MyComponent
+                        {
+                            ItemRecord = found.RecordName, ItemName = found.Name, ItemType = found.ItemType, Size = found.Size, Grade = found.Grade,
+                            Quantity = item.Quantity, Usable = true, Notes = "",
+                        };
+                        if (_hangarService.ImportComponent(item.Kind, item.LogKey, c))
+                        {
+                            componentsChanged = true;
+                            Log($"[Equip] ゲームログから追加: {c.ItemName} ({c.ItemType} {c.SizeDisplay} {c.GradeDisplay}) ×{c.Quantity}");
+                        }
+                        break;
+                    }
+                    case ImportTarget.Gear when found != null:
+                    {
+                        var g = new MyGear
+                        {
+                            ItemRecord = found.RecordName, ItemName = found.Name, ItemType = found.ItemType, SubType = found.SubType, Size = found.Size,
+                            Quantity = item.Quantity, Usable = true, Notes = "",
+                        };
+                        if (_hangarService.ImportGear(item.Kind, item.LogKey, g))
+                        {
+                            gearChanged = true;
+                            Log($"[Gear] ゲームログから追加: {g.ItemName} ({g.TypeDisplay}) ×{g.Quantity}");
+                        }
+                        break;
+                    }
+                    case ImportTarget.Stock when resource is { } r:
+                    {
+                        // 納品 (delivered) は在庫から引く (「減らす」)。採掘 (mined) は足す
+                        var delivered = item.Kind == GameLogImportItem.KindDelivered;
+                        var (applied, shortage) = _oreService.ImportToStock(item.Kind, item.LogKey, r.Uuid, r.Record, null, OreService.UnitPiece, delivered ? -item.Quantity : item.Quantity);
+                        if (applied)
+                        {
+                            stockChanged = true;
+                            Log(delivered
+                                ? $"[Ore] ゲームログの納品で在庫から引きました: {item.DisplayName} ×{item.Quantity}" + (shortage > 0 ? $"（在庫が足りず 0 で止めました。引けなかった数 {shortage:0.##}）" : "")
+                                : $"[Ore] ゲームログから在庫へ: {item.DisplayName} ×{item.Quantity}");
+                            if (shortage > 0) shortages.Add($"{item.DisplayName}: {shortage:0.##}");
+                        }
+                        break;
+                    }
+                }
             }
-            RefreshMyComponents();
-            RefreshLoadoutGrid();
         }
         catch (Exception ex)
         {
             MessageBox.Show($"保存に失敗しました: {ex.Message}", "エラー");
+        }
+        InvalidateImportMarks();
+        if (componentsChanged)
+        {
+            RefreshMyComponents();
+            RefreshLoadoutGrid();
+        }
+        if (gearChanged) RefreshMyGear();
+        if (stockChanged) orePanel?.Reload();
+        if (shortages.Count > 0)
+        {
+            var text = "在庫が足りなかったので 0 で止めました (引けなかった数): " + string.Join(", ", shortages);
+            Log($"[ゲームログ] {text}");
+            MessageBox.Show(text, "ゲームログ");
+        }
+    }
+
+    // ［ゲームログ］の「取り消す」: 行の品の印を消し、入れた数を所持・在庫から引く (納品は引いた数を戻す)。0 より下には下げない (引ききれなければ Log と知らせで伝える)
+    private void CancelGameLogEntry(GameLogEntry e)
+    {
+        if (e.ImportItems is not { Count: > 0 } items) return;
+        var shortages = new List<string>();
+        var stockChanged = false;
+        var componentsChanged = false;
+        var gearChanged = false;
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _oreService.SetCacheDir(WorkDir);
+            var marks = ImportMarks();
+            foreach (var item in items)
+            {
+                if (!marks.TryGetValue((item.Kind, item.LogKey), out var mark)) continue;
+                if (mark.Target == OreService.MarkTargetStock)
+                {
+                    var (found, shortage) = _oreService.CancelStockImport(item.Kind, item.LogKey);
+                    if (!found) continue;
+                    stockChanged = true;
+                    Log(mark.Quantity < 0
+                        ? $"[Ore] ゲームログの取り消し: {item.DisplayName} ×{-mark.Quantity:0.##} を在庫に戻しました"
+                        : $"[Ore] ゲームログの取り消し: {item.DisplayName} ×{item.Quantity} を在庫から引きました");
+                    if (shortage > 0) shortages.Add($"{item.DisplayName}: {shortage:0.##}");
+                }
+                else
+                {
+                    var (found, shortage) = _hangarService.CancelImport(item.Kind, item.LogKey);
+                    if (!found) continue;
+                    if (mark.Target == "my_gear") gearChanged = true; else componentsChanged = true;
+                    Log($"[{(mark.Target == "my_gear" ? "Gear" : "Equip")}] ゲームログの取り消し: {item.DisplayName} ×{item.Quantity} を所持から引きました");
+                    if (shortage > 0) shortages.Add($"{item.DisplayName}: {shortage}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"保存に失敗しました: {ex.Message}", "エラー");
+        }
+        InvalidateImportMarks();
+        if (componentsChanged)
+        {
+            RefreshMyComponents();
+            RefreshLoadoutGrid();
+        }
+        if (gearChanged) RefreshMyGear();
+        if (stockChanged) orePanel?.Reload();
+        if (shortages.Count > 0)
+        {
+            var text = "所持・在庫が足りなかったので 0 で止めました (引けなかった数): " + string.Join(", ", shortages);
+            Log($"[ゲームログ] {text}");
+            MessageBox.Show(text, "ゲームログ");
+        }
+    }
+
+    // ［ゲームログ］の売買・採掘の記録 → ［鉱石］(OrePanel.ImportLogRecords)。GameLogParser の型を OrePanel の型に写す
+    private void ImportGameLogRecords(IReadOnlyList<GameLogTrade> trades, IReadOnlyList<GameLogMining> mining)
+    {
+        if (orePanel == null) return;
+        orePanel.ImportLogRecords(trades.Select(ToOreTrade).ToList(),
+            mining.Select(m => new OreMiningRecord(m.LogTime, m.PlayerName, m.MineralClass, m.EntityId, 1, OreService.UnitPiece, null, "hand")).ToList());
+        // 採掘・売買の自動取り込みは印 (kind mined / trade) を書くので、ボタンの状態を決め直す
+        InvalidateImportMarks();
+    }
+
+    private static OreTradeRecord ToOreTrade(GameLogTrade t) =>
+        new(t.LogTime, t.PlayerId, t.ShopId, t.KioskId, t.ShopName, t.Kind, t.ResourceUuid, "", t.QuantityScu, t.QuantityRaw, t.TotalAuec, t.TransactionMode, t.Result);
+
+    private void UpdateGameLogTradeResult(GameLogTrade t)
+    {
+        if (orePanel == null) return;
+        orePanel.UpdateTradeResult(ToOreTrade(t));
+        InvalidateImportMarks();
+    }
+
+    // ［ゲームログ］の内容の欄の品名のダブルクリック → ［詳細］。record が item_index (items) にあれば品目で、無いもの (鉱石) は名前で検索した状態で開く
+    private void OpenGameLogItemDetail(GameLogImportItem item)
+    {
+        var record = "EntityClassDefinition." + item.ItemClass;
+        EquipmentItem? found = null;
+        try { found = _hangarEquip?.GetItemByRecord(record); }
+        catch (Exception ex) { Log($"[ゲームログ] 詳細の品目を決められませんでした ({item.ItemClass}): {ex.Message}"); }
+        if (found != null) DetailPanel.Request(found.RecordName, found.Name);
+        else
+        {
+            // 「日本語 (英語)」の日本語の部分で検索する
+            var name = item.DisplayName;
+            var paren = name.IndexOf(" (", StringComparison.Ordinal);
+            if (paren > 0) name = name[..paren];
+            DetailPanel.RequestSearch(name.Length > 0 ? name : item.ItemClass);
         }
     }
 
@@ -7155,6 +7634,50 @@ public class MyComponentRow : INotifyPropertyChanged
     public string GradeDisplay => Model.GradeDisplay;
     // 性能の欄 (種類ごとに 1 つの代表の値。EquipmentService.ComponentPerfLabel。record の基本値)
     public string PerfDisplay { get; set; } = "";
+    public int Quantity
+    {
+        get => Model.Quantity;
+        set
+        {
+            if (Model.Quantity == value) return;
+            OnQuantityChanged?.Invoke(this, value);
+        }
+    }
+    public string Notes => Model.Notes;
+    public string AddedAt => Model.AddedAt;
+
+    public bool Usable
+    {
+        get => Model.Usable;
+        set
+        {
+            if (Model.Usable == value) return;
+            Model.Usable = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Usable)));
+            OnUsableChanged?.Invoke(this);
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+}
+
+// 所持個人装備 (dgMyGear) の表示行。MyGear を包み、Usable の変更を OnUsableChanged 経由で DB へ書き戻す (MyComponentRow と同じ流儀)
+public class MyGearRow : INotifyPropertyChanged
+{
+    public MyGear Model { get; }
+    public Action<MyGearRow>? OnUsableChanged { get; set; }
+    // 数量の欄の書き換え (新しい数量)。Model は書き換えず、受け手が確かめてから DB へ書き戻して読み直す
+    public Action<MyGearRow, int>? OnQuantityChanged { get; set; }
+
+    public MyGearRow(MyGear model) => Model = model;
+
+    public int Id => Model.Id;
+    public string ItemRecord => Model.ItemRecord;
+    // 表示名: item_record から引いた今の名前 (HangarService.MyGearDisplayName)。空なら保存した item_name
+    public string CurrentName { get; set; } = "";
+    public string ItemName => CurrentName.Length > 0 ? CurrentName : Model.ItemName;
+    public string TypeDisplay => Model.TypeDisplay;
+    public string SizeDisplay => Model.SizeDisplay;
     public int Quantity
     {
         get => Model.Quantity;

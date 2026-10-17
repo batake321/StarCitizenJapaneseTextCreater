@@ -135,6 +135,31 @@ public class MyComponent
     };
 }
 
+// 所持している個人装備 (my_gear) の 1 行。個人武器・武器の付属品 (弾倉・照準器・下部・ユーティリティ)・アーマー・服・消耗品・ガジェット・手榴弾
+// (EquipmentService.IsGearType)。同じ品 (item_record と使用可が同じ) は 1 行にまとめて数量を足す (my_components と同じ流儀)。色違いは別の品
+public class MyGear
+{
+    public int Id { get; set; }
+    public string ItemRecord { get; set; } = "";      // item_index.record_name
+    public string ItemName { get; set; } = "";        // 表示名 (追加したときの item_index.name)
+    public string ItemType { get; set; } = "";        // item_index.item_type (WeaponPersonal / Char_Armor_Helmet / FPS_Consumable …)
+    public string SubType { get; set; } = "";         // item_index.sub_type (Medium / Magazine / MedPack …)
+    public int Size { get; set; }
+    public int Quantity { get; set; } = 1;
+    public bool Usable { get; set; } = true;
+    public string Notes { get; set; } = "";
+    public string AddedAt { get; set; } = "";
+
+    public string SizeDisplay => Size > 0 ? $"S{Size}" : "";
+    public string TypeDisplay => EquipmentService.GearTypeDisplay(ItemType, SubType);
+}
+
+// ［ゲームログ］の行を所持・在庫に入れた印 (game_log_imports) の 1 行。
+//   Kind: purchase | mined | dropped | trade、LogKey: 行の鍵 (GameLogImportItem.LogKey / GameLogTrade.Key)、
+//   Target: 入れた先 my_components | my_gear | ore_stock、ItemRecord: 入れた品 (my_components / my_gear は item_record、ore_stock は資源の uuid)、
+//   Quantity: 入れた数 (ore_stock の売買は符号つきの SCU。取り消し・戻しで引く)
+public sealed record GameLogImportMark(string Kind, string LogKey, string Target, string ItemRecord, double Quantity);
+
 // 保有船 1 機の 1 ポートの装備状態 (デフォルト装備 + ship_loadouts の上書き)
 public class ShipPortLoadout
 {
@@ -678,11 +703,66 @@ public class HangarService
                 added_at TEXT DEFAULT (datetime('now','localtime')),
                 PRIMARY KEY (log_time, player_id, shop_id, kiosk_id, item_name, quantity)
             );
-            """ + OreService.TradeTablesDdl;   // ［鉱石］タブの 3 つの表 (ore_stock / commodity_trades / mining_log。DatabaseBackupService.EnsureTradeSchema と同じ DDL)
+            """ + OreService.TradeTablesDdl   // ［鉱石］タブの 3 つの表 (ore_stock / commodity_trades / mining_log。DatabaseBackupService.EnsureTradeSchema と同じ DDL)
+            + GearImportTablesDdl;            // 所持個人装備 (my_gear) と［ゲームログ］の印 (game_log_imports)
         cmd.ExecuteNonQuery();
         MigratePledgesSchema(db);
         MigrateStoreSchema(db);
         MigrateShipMatrixSchema(db);
+        MigrateComponentPurchases(db);
+    }
+
+    // 所持個人装備 (my_gear) と、［ゲームログ］の行を所持・在庫に入れた印 (game_log_imports。主キーは (kind, log_key))。
+    // HangarService.InitDb・DatabaseBackupService.EnsureTradeSchema・OreService.Open から使う (同じ形を 1 か所に置く)
+    internal const string GearImportTablesDdl = """
+
+        CREATE TABLE IF NOT EXISTS my_gear (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_record TEXT NOT NULL,
+            item_name TEXT DEFAULT '',
+            item_type TEXT DEFAULT '',
+            sub_type TEXT DEFAULT '',
+            size INTEGER DEFAULT 0,
+            quantity INTEGER DEFAULT 1,
+            usable INTEGER DEFAULT 1,
+            notes TEXT DEFAULT '',
+            added_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE TABLE IF NOT EXISTS game_log_imports (
+            kind TEXT NOT NULL,
+            log_key TEXT NOT NULL,
+            target TEXT NOT NULL,
+            item_record TEXT NOT NULL DEFAULT '',
+            quantity REAL NOT NULL DEFAULT 0,
+            added_at TEXT DEFAULT (datetime('now','localtime')),
+            PRIMARY KEY (kind, log_key)
+        );
+        """;
+
+    // 旧の印の表 (my_component_purchases) の行を game_log_imports に写す SQL (kind purchase、鍵は GameLogPurchase.MakeKey と同じ
+    // 時刻・playerId・shopId・kioskId・itemName・quantity を U+001F でつないだもの、入れた先は my_components)。
+    // 写した後に取り消した印が次の起動で戻らないよう、InitDb では一度だけ行う (hangar_meta の ComponentPurchasesMigratedKey)。
+    // バックアップの取り込みで旧表の行が入ったとき (DatabaseBackupService.ImportTradeDb) はそのたびに行う
+    internal const string MigrateComponentPurchasesSql = """
+        INSERT OR IGNORE INTO game_log_imports (kind, log_key, target, item_record, quantity, added_at)
+        SELECT 'purchase', log_time || char(31) || player_id || char(31) || shop_id || char(31) || kiosk_id || char(31) || item_name || char(31) || quantity,
+               'my_components', COALESCE(item_record, ''), quantity, added_at
+        FROM my_component_purchases
+        """;
+    private const string ComponentPurchasesMigratedKey = "game_log_imports_migrated";
+
+    private static void MigrateComponentPurchases(SqliteConnection db)
+    {
+        using (var check = db.CreateCommand())
+        {
+            check.CommandText = "SELECT value FROM hangar_meta WHERE key = @k";
+            check.Parameters.AddWithValue("@k", ComponentPurchasesMigratedKey);
+            if (check.ExecuteScalar() is string) return;
+        }
+        using var tx = db.BeginTransaction();
+        Exec(db, tx, MigrateComponentPurchasesSql);
+        Exec(db, tx, "INSERT OR REPLACE INTO hangar_meta (key, value) VALUES (@k, @v)", ("@k", ComponentPurchasesMigratedKey), ("@v", "1"));
+        tx.Commit();
     }
 
     // 旧スキーマ (cargocapacity 列なし) の ship_matrix に列を追加する。DROP はしない (足したばかりの列は NULL。次の Ship Matrix の取得で入る)
@@ -1336,61 +1416,124 @@ public class HangarService
         tx.Commit();
     }
 
-    // ［ゲームログ］の購入を所持コンポーネントに入れた印 (my_component_purchases) の一覧 (GameLogPurchase.Key)
-    public HashSet<string> LoadImportedPurchaseKeys()
+    // === ［ゲームログ］の印 (game_log_imports) ===
+
+    // 印の全部 ((kind, log_key) → 印)。表が無い (DB がまだ無い) なら空
+    public Dictionary<(string Kind, string LogKey), GameLogImportMark> LoadImportMarks()
     {
-        var set = new HashSet<string>(StringComparer.Ordinal);
-        if (_dbPath == null || !File.Exists(_dbPath)) return set;
+        var dict = new Dictionary<(string, string), GameLogImportMark>();
+        if (_dbPath == null || !File.Exists(_dbPath)) return dict;
         using var db = new SqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var cmd = db.CreateCommand();
-        cmd.CommandText = "SELECT log_time, player_id, shop_id, kiosk_id, item_name, quantity FROM my_component_purchases";
+        cmd.CommandText = "SELECT kind, log_key, target, item_record, quantity FROM game_log_imports";
         using var r = cmd.ExecuteReader();
         while (r.Read())
-            set.Add(GameLogPurchase.MakeKey(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetInt32(5)));
-        return set;
+        {
+            var mark = new GameLogImportMark(r.GetString(0), r.GetString(1), r.IsDBNull(2) ? "" : r.GetString(2), r.IsDBNull(3) ? "" : r.GetString(3), r.IsDBNull(4) ? 0 : r.GetDouble(4));
+            dict[(mark.Kind, mark.LogKey)] = mark;
+        }
+        return dict;
     }
 
-    // ［ゲームログ］の購入 p を所持コンポーネント c として入れる (AddMyComponent と同じく同じ品には数量を足す)。
-    // 購入の印 (時刻・playerId・shopId・kioskId・itemName・quantity) を my_component_purchases に残し、印が既にあれば何もせず false。
-    // 印と所持コンポーネントは 1 つのトランザクションで書く (片方だけ残らないように)
-    public bool ImportPurchasedComponent(GameLogPurchase p, MyComponent c)
+    // 印 1 つ (無ければ null)
+    public GameLogImportMark? GetImportMark(string kind, string logKey)
+    {
+        if (_dbPath == null || !File.Exists(_dbPath)) return null;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        return ReadMark(db, null, kind, logKey);
+    }
+
+    private static GameLogImportMark? ReadMark(SqliteConnection db, SqliteTransaction? tx, string kind, string logKey)
+    {
+        using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "SELECT target, item_record, quantity FROM game_log_imports WHERE kind = @k AND log_key = @l";
+        cmd.Parameters.AddWithValue("@k", kind);
+        cmd.Parameters.AddWithValue("@l", logKey);
+        using var r = cmd.ExecuteReader();
+        return r.Read() ? new GameLogImportMark(kind, logKey, r.IsDBNull(0) ? "" : r.GetString(0), r.IsDBNull(1) ? "" : r.GetString(1), r.IsDBNull(2) ? 0 : r.GetDouble(2)) : null;
+    }
+
+    // 印を書く (INSERT OR IGNORE)。既にあれば false。OreService からも使う (同じ DB の別の口)
+    internal static bool InsertMark(SqliteConnection db, SqliteTransaction tx, string kind, string logKey, string target, string itemRecord, double quantity)
+    {
+        using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "INSERT OR IGNORE INTO game_log_imports (kind, log_key, target, item_record, quantity) VALUES (@k, @l, @t, @r, @q)";
+        cmd.Parameters.AddWithValue("@k", kind);
+        cmd.Parameters.AddWithValue("@l", logKey);
+        cmd.Parameters.AddWithValue("@t", target);
+        cmd.Parameters.AddWithValue("@r", itemRecord);
+        cmd.Parameters.AddWithValue("@q", quantity);
+        return cmd.ExecuteNonQuery() > 0;
+    }
+
+    internal static void DeleteMark(SqliteConnection db, SqliteTransaction tx, string kind, string logKey) =>
+        Exec(db, tx, "DELETE FROM game_log_imports WHERE kind = @k AND log_key = @l", ("@k", kind), ("@l", logKey));
+
+    // ［ゲームログ］の行の品を所持コンポーネント c として入れる (AddMyComponent と同じく同じ品には数量を足す)。印 (kind, logKey → my_components) を残し、
+    // 印が既にあれば何もせず false。印と所持コンポーネントは 1 つのトランザクションで書く (片方だけ残らないように)
+    public bool ImportComponent(string kind, string logKey, MyComponent c)
     {
         if (_dbPath == null) return false;
         using var db = new SqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var tx = db.BeginTransaction();
-        using (var cmd = db.CreateCommand())
-        {
-            cmd.Transaction = tx;
-            cmd.CommandText = """
-                INSERT OR IGNORE INTO my_component_purchases (log_time, player_id, shop_id, kiosk_id, item_name, quantity, item_record)
-                VALUES (@t, @p, @s, @k, @i, @q, @r)
-                """;
-            cmd.Parameters.AddWithValue("@t", p.LogTime);
-            cmd.Parameters.AddWithValue("@p", p.PlayerId);
-            cmd.Parameters.AddWithValue("@s", p.ShopId);
-            cmd.Parameters.AddWithValue("@k", p.KioskId);
-            cmd.Parameters.AddWithValue("@i", p.ItemName);
-            cmd.Parameters.AddWithValue("@q", p.Quantity);
-            cmd.Parameters.AddWithValue("@r", c.ItemRecord);
-            if (cmd.ExecuteNonQuery() == 0) return false;   // 入れ済み (tx は Commit せずに捨てる)
-        }
+        if (!InsertMark(db, tx, kind, logKey, "my_components", c.ItemRecord, c.Quantity)) return false;   // 入れ済み (tx は Commit せずに捨てる)
         AddOrMergeMyComponent(db, tx, c);
         tx.Commit();
         return true;
     }
 
-    // ［ゲームログ］の購入の行のボタン (装備に入れる) の状態。
-    //   None:     ボタンを出さない (成功していない・数量が読めない (0 以下)・cutoffUtc より前・品が item_index に無いか所持リストに入れられる種類でない)
-    //   Imported: 入れ済み (印がある)
-    //   Ready:    入れられる (item に入れる品)
-    public static (PurchaseImportState State, EquipmentItem? Item) ClassifyPurchase(GameLogPurchase p, EquipmentService equip, ISet<string> importedKeys, DateTime cutoffUtc)
+    // 同じく所持個人装備 g として入れる (印の入れた先は my_gear)
+    public bool ImportGear(string kind, string logKey, MyGear g)
     {
-        if (!p.Succeeded || p.Quantity <= 0 || p.TimeUtc < cutoffUtc) return (PurchaseImportState.None, null);
-        var item = equip.FindOwnableComponent("EntityClassDefinition." + p.ItemName);
-        if (item == null) return (PurchaseImportState.None, null);
-        return (importedKeys.Contains(p.Key) ? PurchaseImportState.Imported : PurchaseImportState.Ready, item);
+        if (_dbPath == null) return false;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var tx = db.BeginTransaction();
+        if (!InsertMark(db, tx, kind, logKey, "my_gear", g.ItemRecord, g.Quantity)) return false;
+        AddOrMergeMyGear(db, tx, g);
+        tx.Commit();
+        return true;
+    }
+
+    // 「取り消す」: 印 (入れた先が my_components / my_gear のもの) を消し、入れた品の数量を所持から引く。同じ item_record の行から
+    // 使用可の行・id の小さい行の順に引き、0 より下には下げない (0 で止める)。戻り値は (印があったか, 引ききれなかった数)。
+    // 入れた先が ore_stock の印はここでは扱わない (OreService.CancelStockImport)
+    public (bool Found, int Shortage) CancelImport(string kind, string logKey)
+    {
+        if (_dbPath == null) return (false, 0);
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var tx = db.BeginTransaction();
+        var mark = ReadMark(db, tx, kind, logKey);
+        if (mark == null) return (false, 0);
+        var table = mark.Target switch { "my_components" => "my_components", "my_gear" => "my_gear", _ => null };
+        if (table == null) return (false, 0);
+        var remaining = (int)Math.Round(mark.Quantity);
+        var rows = new List<(int Id, int Qty)>();
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = $"SELECT id, COALESCE(quantity, 1) FROM {table} WHERE item_record = @r ORDER BY (COALESCE(usable, 1) != 0) DESC, id";
+            cmd.Parameters.AddWithValue("@r", mark.ItemRecord);
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) rows.Add((r.GetInt32(0), r.GetInt32(1)));
+        }
+        foreach (var (id, qty) in rows)
+        {
+            if (remaining <= 0) break;
+            var take = Math.Min(qty, remaining);
+            if (take <= 0) continue;
+            Exec(db, tx, $"UPDATE {table} SET quantity = @q WHERE id = @id", ("@q", qty - take), ("@id", id));
+            remaining -= take;
+        }
+        DeleteMark(db, tx, kind, logKey);
+        tx.Commit();
+        return (true, remaining);
     }
 
     public void UpdateMyComponent(MyComponent c)
@@ -1409,6 +1552,149 @@ public class HangarService
         using var db = new SqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         Exec(db, "DELETE FROM my_components WHERE id = @id", ("@id", id));
+    }
+
+    // === 所持個人装備 (my_gear)。my_components と同じ流儀 ===
+
+    // 所持個人装備の表示名: item_record から今の名前 (item_index.name) を引いて出す。引けないときだけ保存した item_name
+    public static string MyGearDisplayName(MyGear g, EquipmentService? equip)
+        => equip?.GetCurrentItemName(g.ItemRecord) ?? g.ItemName;
+
+    // 読む前に、同じ品 (item_record と使用可が同じ) の行を 1 行にまとめる (MergeDuplicateMyGear)
+    public List<MyGear> LoadMyGear()
+    {
+        var list = new List<MyGear>();
+        if (_dbPath == null || !File.Exists(_dbPath)) return list;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        MergeDuplicateMyGear(db);
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT id, item_record, item_name, item_type, sub_type, size, quantity, usable, notes, added_at FROM my_gear ORDER BY item_type, sub_type, item_name, id";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            list.Add(new MyGear
+            {
+                Id = r.GetInt32(0),
+                ItemRecord = r.IsDBNull(1) ? "" : r.GetString(1),
+                ItemName = r.IsDBNull(2) ? "" : r.GetString(2),
+                ItemType = r.IsDBNull(3) ? "" : r.GetString(3),
+                SubType = r.IsDBNull(4) ? "" : r.GetString(4),
+                Size = r.IsDBNull(5) ? 0 : r.GetInt32(5),
+                Quantity = r.IsDBNull(6) ? 1 : r.GetInt32(6),
+                Usable = r.IsDBNull(7) || r.GetInt32(7) != 0,
+                Notes = r.IsDBNull(8) ? "" : r.GetString(8),
+                AddedAt = r.IsDBNull(9) ? "" : r.GetString(9),
+            });
+        }
+        return list;
+    }
+
+    // 追加する。同じ品 (item_record と使用可が同じ) の行が既にあれば、新しい行を作らずその行の数量に足す (メモは JoinNotes で連結)。
+    // 追加した (または足した) 行の id を返す
+    public int AddMyGear(MyGear g)
+    {
+        if (_dbPath == null) return 0;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var tx = db.BeginTransaction();
+        var id = AddOrMergeMyGear(db, tx, g);
+        tx.Commit();
+        return id;
+    }
+
+    private static int AddOrMergeMyGear(SqliteConnection db, SqliteTransaction tx, MyGear g)
+    {
+        int? existingId = null;
+        var existingNotes = "";
+        using (var find = db.CreateCommand())
+        {
+            find.Transaction = tx;
+            find.CommandText = "SELECT id, COALESCE(notes, '') FROM my_gear WHERE item_record = @r AND (COALESCE(usable, 1) != 0) = @u ORDER BY id LIMIT 1";
+            find.Parameters.AddWithValue("@r", g.ItemRecord);
+            find.Parameters.AddWithValue("@u", g.Usable ? 1 : 0);
+            using var r = find.ExecuteReader();
+            if (r.Read())
+            {
+                existingId = r.GetInt32(0);
+                existingNotes = r.GetString(1);
+            }
+        }
+        using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
+        if (existingId is int eid)
+        {
+            cmd.CommandText = "UPDATE my_gear SET quantity = COALESCE(quantity, 1) + @q, notes = @o WHERE id = @id";
+            cmd.Parameters.AddWithValue("@q", g.Quantity);
+            cmd.Parameters.AddWithValue("@o", JoinNotes([existingNotes, g.Notes ?? ""]));
+            cmd.Parameters.AddWithValue("@id", eid);
+            cmd.ExecuteNonQuery();
+            g.Id = eid;
+            return eid;
+        }
+        cmd.CommandText = """
+            INSERT INTO my_gear (item_record, item_name, item_type, sub_type, size, quantity, usable, notes)
+            VALUES (@r, @n, @t, @st, @s, @q, @u, @o);
+            SELECT last_insert_rowid();
+            """;
+        cmd.Parameters.AddWithValue("@r", g.ItemRecord);
+        cmd.Parameters.AddWithValue("@n", g.ItemName ?? "");
+        cmd.Parameters.AddWithValue("@t", g.ItemType ?? "");
+        cmd.Parameters.AddWithValue("@st", g.SubType ?? "");
+        cmd.Parameters.AddWithValue("@s", g.Size);
+        cmd.Parameters.AddWithValue("@q", g.Quantity);
+        cmd.Parameters.AddWithValue("@u", g.Usable ? 1 : 0);
+        cmd.Parameters.AddWithValue("@o", g.Notes ?? "");
+        var id = (int)(long)(cmd.ExecuteScalar() ?? 0L);
+        g.Id = id;
+        return id;
+    }
+
+    // 同じ品 (item_record と使用可が同じ) の行が 2 行以上あれば、id のいちばん小さい行に数量を合計してまとめ、ほかの行を消す (MergeDuplicateMyComponents と同じ)
+    private static void MergeDuplicateMyGear(SqliteConnection db)
+    {
+        var groups = new Dictionary<(string Record, bool Usable), List<(int Id, int Qty, string Notes)>>();
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.CommandText = "SELECT id, item_record, COALESCE(quantity, 1), COALESCE(usable, 1), COALESCE(notes, '') FROM my_gear ORDER BY id";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var key = (r.IsDBNull(1) ? "" : r.GetString(1), r.GetInt32(3) != 0);
+                if (!groups.TryGetValue(key, out var rows)) groups[key] = rows = new();
+                rows.Add((r.GetInt32(0), r.GetInt32(2), r.GetString(4)));
+            }
+        }
+        var dups = groups.Values.Where(g => g.Count > 1).ToList();
+        if (dups.Count == 0) return;
+        using var tx = db.BeginTransaction();
+        foreach (var rows in dups)
+        {
+            var keep = rows[0];
+            Exec(db, tx, "UPDATE my_gear SET quantity = @q, notes = @o WHERE id = @id",
+                ("@q", rows.Sum(x => x.Qty)), ("@o", JoinNotes(rows.Select(x => x.Notes))), ("@id", keep.Id));
+            foreach (var other in rows.Skip(1))
+                Exec(db, tx, "DELETE FROM my_gear WHERE id = @id", ("@id", other.Id));
+        }
+        tx.Commit();
+    }
+
+    public void UpdateMyGear(MyGear g)
+    {
+        if (_dbPath == null) return;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        Exec(db, "UPDATE my_gear SET item_record = @r, item_name = @n, item_type = @t, sub_type = @st, size = @s, quantity = @q, usable = @u, notes = @o WHERE id = @id",
+            ("@r", g.ItemRecord), ("@n", g.ItemName ?? ""), ("@t", g.ItemType ?? ""), ("@st", g.SubType ?? ""), ("@s", g.Size),
+            ("@q", g.Quantity), ("@u", g.Usable ? 1 : 0), ("@o", g.Notes ?? ""), ("@id", g.Id));
+    }
+
+    public void DeleteMyGear(int id)
+    {
+        if (_dbPath == null) return;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        Exec(db, "DELETE FROM my_gear WHERE id = @id", ("@id", id));
     }
 
     // port_name → item_record ('' = 空スロット)

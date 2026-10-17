@@ -24,12 +24,81 @@ public sealed class GameLogEntry
     public string? PendingPlaceId { get; set; }
     // 店の購入の行 (種類「購入」「購入失敗」) の依頼の中身。ほかの行は null
     public GameLogPurchase? Purchase { get; init; }
-    // ［ゲームログ］タブが決める「装備に入れる」ボタンの状態 (UI のスレッドだけで使う)
+    // 所持・在庫に入れられる品 (購入・採掘・貨物エレベーターで降ろした品の行)。ほかの行は null。
+    // 1 行に複数の品 (降ろした品) があるので一覧。印 (game_log_imports) は品ごとに付ける
+    public List<GameLogImportItem>? ImportItems { get; init; }
+    // ［ゲームログ］タブが決める「入れる」「取り消す」ボタンの状態 (UI のスレッドだけで使う)
     public PurchaseImportState ImportState { get; set; }
+    // 商品売買の行 (種類「商品購入」「商品売却」「取引失敗」) の中身 (［鉱石］の commodity_trades に入れる)。ほかの行は null
+    public GameLogTrade? Trade { get; init; }
+    // 採掘の行の中身 (［鉱石］の mining_log に入れる)。ほかの行は null
+    public GameLogMining? Mining { get; init; }
 }
 
-// ［ゲームログ］の購入の行の「装備に入れる」ボタンの状態 (HangarService.ClassifyPurchase)
+// ［ゲームログ］の行のボタンの状態。Ready = 「入れる」を押せる、Imported = 入れ済み (「取り消す」を押せる)、None = ボタン無し
 public enum PurchaseImportState { None, Ready, Imported }
+
+// 所持・在庫に入れられる品 1 つ (GameLogEntry.ImportItems)。
+//   Kind: 印の種類 "purchase" (店の購入) | "mined" (採掘) | "dropped" (貨物エレベーターで降ろした)
+//   LogKey: 印の鍵 (同じ出来事なら今の Game.log と過去のログで同じになる文字。purchase は GameLogPurchase.Key、
+//           mined は 時刻・クラス名・個体 ID、dropped は 降ろした時刻・クラス名)
+//   ItemClass: ログの中の品の内部名 (店の itemName / ItemClass / Harvestable_Mineral_1H_<X>)。item_index の record は "EntityClassDefinition." + これ
+//   Quantity: 数。DisplayName: 内容の欄に出した品名 (ダブルクリックで品を見分けるのに使う)
+public sealed class GameLogImportItem
+{
+    public string Kind { get; init; } = "";
+    public string LogKey { get; init; } = "";
+    public string ItemClass { get; init; } = "";
+    public int Quantity { get; init; }
+    public string DisplayName { get; init; } = "";
+
+    public const string KindPurchase = "purchase";
+    public const string KindMined = "mined";
+    public const string KindDropped = "dropped";
+    // 納品 (在庫から引く。鍵は 納品の時刻・MissionId・ObjectiveId、ItemClass は無し (品名は通知の日本語))
+    public const string KindDelivered = "delivered";
+    public const char KeySeparator = '\u001f';
+
+    public static string MakeKey(params string[] parts) => string.Join(KeySeparator, parts);
+}
+
+// 商品売買の行の中身 (SendCommodityBuyRequest / SendCommoditySellRequest の行)。Kind は "buy" | "sell"。
+// Result は '' が成功、失敗は後から来る RmToken_CommodityTransactionResponse の result の文字 (解析の途中で書き換わる)。
+// Key は commodity_trades の主キーの組 (時刻・playerId・shopId・kioskId・kind・resourceGUID・quantity の文字)
+public sealed class GameLogTrade
+{
+    public string LogTime { get; init; } = "";
+    public string PlayerId { get; init; } = "";
+    public string ShopId { get; init; } = "";
+    public string KioskId { get; init; } = "";
+    public string ShopName { get; init; } = "";
+    public string Kind { get; init; } = "buy";
+    public string ResourceUuid { get; init; } = "";
+    public double? QuantityScu { get; init; }
+    public string QuantityRaw { get; init; } = "";
+    public double? TotalAuec { get; init; }
+    public string TransactionMode { get; init; } = "";
+    public string Result { get; set; } = "";
+
+    public string Key => MakeKey(LogTime, PlayerId, ShopId, KioskId, Kind, ResourceUuid, QuantityRaw);
+
+    public static string MakeKey(string logTime, string playerId, string shopId, string kioskId, string kind, string resourceUuid, string quantityRaw) =>
+        string.Join(GameLogImportItem.KeySeparator, logTime, playerId, shopId, kioskId, kind, resourceUuid, quantityRaw);
+}
+
+// 採掘 (手掘り) の行の中身。Key は mining_log の主キーの組 (時刻・クラス名・個体 ID) で、印 (kind "mined") の鍵と同じ
+public sealed class GameLogMining
+{
+    public string LogTime { get; init; } = "";
+    public string PlayerName { get; init; } = "";
+    public string MineralClass { get; init; } = "";
+    public string EntityId { get; init; } = "";
+
+    public string Key => MakeKey(LogTime, MineralClass, EntityId);
+
+    public static string MakeKey(string logTime, string mineralClass, string entityId) =>
+        string.Join(GameLogImportItem.KeySeparator, logTime, mineralClass, entityId);
+}
 
 // 店で買う依頼 (SendShopBuyRequest / SendStandardItemBuyRequest の行) の中身。Succeeded は結果 (RmShopFlowResponse) が Success だったとき true。
 // LogTime は行頭の時刻の文字 (UTC。"2026-10-15T13:41:22.633")。Key は購入を見分ける組 (時刻・playerId・shopId・kioskId・itemName・quantity)。
@@ -166,6 +235,8 @@ public sealed class GameLogParser
     private readonly Func<string, string?> _resourceName;
     // 場所の名前 (RequestLocationInventory の Location[…]、ATC 名から取った場所) → 表示名 (翻訳 DB に同じキーがあれば日本語。無ければそのまま)
     private readonly Func<string, string> _placeName;
+    // 店の品目の内部名 → 「日本語 (英語)」(貨物エレベーターで降ろした品の名前。引けなければ内部名のまま)
+    private readonly Func<string, string> _itemLabel;
 
     // 拾った行 (読んだ順)
     public List<GameLogEntry> Entries { get; } = new();
@@ -253,7 +324,8 @@ public sealed class GameLogParser
 
     public GameLogParser(string source, Func<string, string>? shipName = null, Func<string, string>? itemName = null,
         GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
-        Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null)
+        Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null,
+        Func<string, string>? itemLabel = null)
     {
         _source = source;
         _shipName = shipName ?? (s => s);
@@ -264,7 +336,29 @@ public sealed class GameLogParser
         _resourceName = resourceName ?? (_ => null);
         _placeName = placeName ?? (s => s);
         _sharedPlaceNames = sharedPlaceNames;
+        _itemLabel = itemLabel ?? _itemName;
     }
+
+    // ─── 貨物エレベーター ───
+    // 自分のキオスク操作 (Freight Inventory Grid Requesting Inventory) の時刻と場所の ID (着陸場所の ID と同じ値。"" = まだ無い)
+    private DateTime _freightKioskTime = DateTime.MinValue;
+    private string _freightLocationId = "";
+    // 台に置いた品 (Type[Drop] の依頼)。依頼番号 → (クラス名, 個体 ID (Unstow で分かる。まだなら null), 置いた時刻)。
+    // 拾い直した (個体 ID の右手 AttachmentReceived) ものは除く。下げたときにクラスごとに数えて行にし、空にする
+    private readonly List<(int Request, string Class, string? Id, DateTime Time)> _platformItems = new();
+    private DateTime _lastDropTime = DateTime.MinValue;
+    // Unstow (床・台に出した) で分かった個体 ID の全部 (同じ個体の右手 AttachmentReceived は採掘の候補にしない)
+    private readonly HashSet<string> _unstowed = new(StringComparer.Ordinal);
+    // 下げの途中 (ClosingFrontGate / LoweringPlatform を見た) か。ClosedIdle で確定する
+    private bool _freightLowering;
+    // 呼び出し (FillUnstowRequest) の数と時刻 (直後の RaisingPlatform で行にする)
+    private int _freightUnstowCount = -1;
+    private DateTime _freightUnstowTime = DateTime.MinValue;
+    // キオスク操作から Drop までの窓、最後の Drop から下げの完了までの窓、キオスク操作から下げの完了までの窓 (昨夜のログ: Drop はキオスク操作の 57 秒後から、
+    // 下げの完了は最後の Drop の 45 秒後・キオスク操作の 13 秒後)、FillUnstowRequest から RaisingPlatform までの窓 (15 Oct のログで 4〜6 秒)
+    private static readonly TimeSpan FreightDropWindow = TimeSpan.FromSeconds(120);
+    private static readonly TimeSpan FreightLowerWindow = TimeSpan.FromSeconds(300);
+    private static readonly TimeSpan FreightRaiseWindow = TimeSpan.FromSeconds(60);
 
     // 船の ID → クラス名を覚えるだけの行 (クラス_ID[ID] / 'クラス_ID' [ID] の形で船が出る)。船でないもの (AImodule_ATC_… や飲み物の瓶など) も
     // 同じ形で出るので、クラス名が船 (_isVehicleClass) のものだけ覚える。
@@ -298,6 +392,15 @@ public sealed class GameLogParser
         "<EquipItem>",
         "<InventoryManagement>",
         "<InventoryManagementRequest>",
+        "<UnstowPendingEntities>",   // 所持品から床・台に出した個体 (Unstow Request[n] … finalized spawn of 'クラス_ID')
+    ];
+
+    // 貨物エレベーターの行
+    private static readonly string[] FreightTags =
+    [
+        "<CSCLoadingPlatformManager::OnLoadingPlatformStateChanged>",            // 台の状態 (ClosingFrontGate → LoweringPlatform → ClosedIdle / RaisingPlatform)
+        "<CEntityComponentFreightElevatorUIProvider::FillUnstowRequest>",        // 呼び出し (Entities: n, Location: L)
+        "<CEntityComponentFreightElevatorUIProvider::Client_SendRequest>",       // 要求が断られた (Failed_FreightEntitiesMismatch)
     ];
 
     // 拾う行のタグ。これを含まない行は解析しない (過去ログは合計 600MB ほどあるので、先に string.Contains で絞る)
@@ -327,6 +430,7 @@ public sealed class GameLogParser
         "<CEntity::OnOwnerRemoved - entity attachment>",   // 自分の船の ID → クラス名を覚えるだけ (parent … name = クラス_ID)
         .. VehicleLearnTags,
         .. InventoryTags,
+        .. FreightTags,
     ];
 
     public static bool HasTag(string line)
@@ -350,7 +454,7 @@ public sealed class GameLogParser
     // 衝突: Fatal Collision occured for vehicle 船_ID [Part: …, Pos: …, Zone: 場所, PlayerPilot: 1] after hitting entity: 相手 [Zone: …
     private static readonly Regex CollisionRegex = new(@"<FatalCollision> Fatal Collision occured for vehicle (\S+) \[.*?Zone: ([^,\]]*), PlayerPilot: \d+\] after hitting entity: (.+?) \[Zone:", RegexOptions.Compiled);
     // 通知: Added notification "見出し: 本文" [番号] to queue. New queue size: n, MissionId: [guid], ObjectiveId: [...]
-    private static readonly Regex NotificationRegex = new(@"<SHUDEvent_OnNotification> Added notification ""(.*)"" \[\d+\] to queue\.(?:.*?MissionId: \[([0-9A-Fa-f-]*)\])?", RegexOptions.Compiled);
+    private static readonly Regex NotificationRegex = new(@"<SHUDEvent_OnNotification> Added notification ""(.*)"" \[\d+\] to queue\.(?:.*?MissionId: \[([0-9A-Fa-f-]*)\])?(?:, ObjectiveId: \[([^\]]*)\])?", RegexOptions.Compiled);
     // 続きの行が来なかった通知 (行末の " [番号] to queue. が無い): 1 行目の文だけ (MissionId は無い)
     private static readonly Regex NotificationCutRegex = new(@"<SHUDEvent_OnNotification> Added notification ""(.*)$", RegexOptions.Compiled);
     // 契約の終了: Ending mission for player. MissionId[guid] ... CompletionType[Complete|Fail|Abandon] Reason[...]
@@ -367,6 +471,26 @@ public sealed class GameLogParser
     private static readonly Regex CommoditySellRegex = new(@"<CEntityComponentCommodityUIProvider::SendCommoditySellRequest> .*? shopName\[([^\]]*)\].*? amount\[([-0-9.]+)\].*? resourceGUID\[([^\]]*)\].*? quantity\[([^\]]*)\]", RegexOptions.Compiled);
     // 商品の取引のエラー: Commodity Transaction Response Error - playerId[..] result[InsuffientStock] type[Selling]
     private static readonly Regex CommodityErrorRegex = new(@"<CEntityComponentCommodityUIProvider::RmToken_CommodityTransactionResponse> .*? result\[([^\]]*)\] type\[([^\]]*)\]", RegexOptions.Compiled);
+    // 商品売買の playerId・shopId・kioskId (買い・売りとも playerId[..] shopId[..] shopName[..] kioskId[..] の順) と transactionMode[..] (売りだけ)
+    private static readonly Regex CommodityIdsRegex = new(@"playerId\[([^\]]*)\] shopId\[([^\]]*)\] shopName\[[^\]]*\] kioskId\[([^\]]*)\]", RegexOptions.Compiled);
+    private static readonly Regex TransactionModeRegex = new(@"transactionMode\[([^\]]*)\]", RegexOptions.Compiled);
+    // ─── 貨物エレベーター ───
+    // 自分のキオスク操作: <InventoryManagement> Freight Inventory Grid Requesting Inventory[ID:Location:場所の ID] for Player[名前]
+    // (場所の ID は <Update Inventory Location> の Landing の ID と同じ値。直後の <RequestLocationInventory> で名前が分かる)
+    private static readonly Regex FreightKioskRegex = new(@"<InventoryManagement> Freight Inventory Grid Requesting Inventory\[\d+:Location:(\d+)\] for Player\[([^\]]*)\]", RegexOptions.Compiled);
+    // 台の状態: … [LoadingPlatformManager_FreightElevator_…] Platform state changed to 状態 (ShipElevator は見ない)
+    private static readonly Regex FreightStateRegex = new(@"<CSCLoadingPlatformManager::OnLoadingPlatformStateChanged> .*?\[LoadingPlatformManager_FreightElevator_[^\]]*\] Platform state changed to (\w+)", RegexOptions.Compiled);
+    // 呼び出し: … Processed bindings into transfer request - Entities: n, Location: L
+    private static readonly Regex FreightUnstowRegex = new(@"<CEntityComponentFreightElevatorUIProvider::FillUnstowRequest> .*?Entities: (\d+), Location: (\d+)", RegexOptions.Compiled);
+    // 断られた: … Error validating freight items. result[Failed_FreightEntitiesMismatch]
+    private static readonly Regex FreightErrorRegex = new(@"<CEntityComponentFreightElevatorUIProvider::Client_SendRequest> .*?result\[([^\]]*)\]", RegexOptions.Compiled);
+    // 台に置いた品: New Request[n] Player[名前] Type[Drop] … ItemClass[クラス] … Caller[…::DropItemFromContainerImpl] (1 行 1 個。
+    // 旧タグ <InventoryManagement> New request[n] も同じ形)
+    private static readonly Regex DropRegex = new(@"New [Rr]equest\[(\d+)\] Player\[[^\]]*\] Type\[Drop\] .*?ItemClass\[([^\]]+)\] .*?Caller\[[^\]]*::DropItemFromContainerImpl\]", RegexOptions.Compiled);
+    // 床・台に出た個体: <UnstowPendingEntities> Unstow Request[n] for '名前' [id] finalized spawn of 'クラス_ID' [ID]
+    private static readonly Regex UnstowRegex = new(@"<UnstowPendingEntities> Unstow Request\[(\d+)\] .*?finalized spawn of '([A-Za-z][A-Za-z0-9_]*?)_(\d{6,})' \[\3\]", RegexOptions.Compiled);
+    // 納品の目標達成の本文: 品名 を n/n
+    private static readonly Regex DeliveryRegex = new(@"^(.+?) を (\d+)/(\d+)$", RegexOptions.Compiled);
     // 量子ジャンプの行き先: Player has selected point XXX as their destination
     private static readonly Regex QuantumTargetRegex = new(@"<Player Selected Quantum Target - Local> .*?Player has selected point (.+?) as their destination", RegexOptions.Compiled);
     // 行の中の船: クラス_ID[ID] (量子ジャンプの行の | DRAK_Ironclad_819458464586[819458464586]|)
@@ -530,6 +654,21 @@ public sealed class GameLogParser
             // 着陸場所の外 (Landing 0) で出たもの (全ログ 2,920 件中 1,136 件) はどの場所か分からないので覚えない。
             // Location[INVALID_LOCATION_ID] は場所の名前ではないので覚えない
             if (_landingId != "0" && m.Groups[2].Value != InvalidLocation) LearnPlace(_landingId, m.Groups[2].Value);
+            // 貨物エレベーターのキオスク操作の直後 (同じ秒) の行: その場所の ID の名前として覚える (着陸場所の外にいても)
+            if (_freightLocationId.Length > 0 && m.Groups[2].Value != InvalidLocation && time - _freightKioskTime <= TimeSpan.FromSeconds(5))
+                LearnPlace(_freightLocationId, m.Groups[2].Value);
+            return;
+        }
+        if ((m = FreightKioskRegex.Match(line)).Success)
+        {
+            LearnPlayerName(m.Groups[2].Value);
+            _freightKioskTime = time;
+            _freightLocationId = m.Groups[1].Value;
+            return;
+        }
+        if (HasAnyTag(line, FreightTags))
+        {
+            OnFreight(time, line);
             return;
         }
         if (line.Contains("<Connection Flow>", StringComparison.Ordinal))
@@ -577,12 +716,12 @@ public sealed class GameLogParser
         }
         if ((m = NotificationRegex.Match(line)).Success)
         {
-            OnNotification(time, m.Groups[1].Value, m.Groups[2].Success ? m.Groups[2].Value : "");
+            OnNotification(time, m.Groups[1].Value, m.Groups[2].Success ? m.Groups[2].Value : "", m.Groups[3].Success ? m.Groups[3].Value : "");
             return;
         }
         if ((m = NotificationCutRegex.Match(line)).Success)
         {
-            OnNotification(time, m.Groups[1].Value, "");
+            OnNotification(time, m.Groups[1].Value, "", "");
             return;
         }
         if ((m = EndMissionRegex.Match(line)).Success)
@@ -603,7 +742,9 @@ public sealed class GameLogParser
                 ShopId = ids.Success ? ids.Groups[2].Value : "",
                 KioskId = ids.Success ? ids.Groups[3].Value : "",
             };
-            var e = Add(time, "購入", $"{_itemName(item)} × {m.Groups[4].Value} / 店: {m.Groups[1].Value}", ParseNumber(m.Groups[2].Value), purchase);
+            var itemName = _itemName(item);
+            var e = Add(time, "購入", $"{itemName} × {m.Groups[4].Value} / 店: {m.Groups[1].Value}", ParseNumber(m.Groups[2].Value), purchase,
+                importItems: [new GameLogImportItem { Kind = GameLogImportItem.KindPurchase, LogKey = purchase.Key, ItemClass = item, Quantity = purchase.Quantity, DisplayName = itemName }]);
             _pendingPurchases.Add(e);
             return;
         }
@@ -635,7 +776,8 @@ public sealed class GameLogParser
             // quantity は cSCU (1/100 SCU) なので SCU に直す。price は合計金額 (全ログ 53 件すべてで shopPricePerCentiSCU × quantity(cSCU) = price)
             var price = ParseNumber(m.Groups[2].Value);
             var scu = ParseNumber(m.Groups[4].Value) is double c ? c / 100 : (double?)null;
-            var e = Add(time, "商品購入", $"{ResourceDisplay(m.Groups[3].Value)} {CommodityAmountText(scu, m.Groups[4].Value, price)} / 店: {m.Groups[1].Value}", price);
+            var e = Add(time, "商品購入", $"{ResourceDisplay(m.Groups[3].Value)} {CommodityAmountText(scu, m.Groups[4].Value, price)} / 店: {m.Groups[1].Value}", price,
+                trade: MakeTrade(sm.Groups[1].Value, line, m.Groups[1].Value, "buy", m.Groups[3].Value, scu, m.Groups[4].Value, price));
             _pendingCommodity["Buying"] = e;
             return;
         }
@@ -644,7 +786,8 @@ public sealed class GameLogParser
             // 売りの quantity には単位が付かないが SCU (全ログ 238 件: 同じ資源の amount ÷ quantity が購入の price ÷ SCU と同じ桁で、
             // 行末の Cargo Box Data の boxSize × unitAmount と一致するか、それより大きい (箱の大きさが混ざった分))。amount は合計金額
             var amount = ParseNumber(m.Groups[2].Value);
-            var e = Add(time, "商品売却", $"{ResourceDisplay(m.Groups[3].Value)} {CommodityAmountText(ParseNumber(m.Groups[4].Value), m.Groups[4].Value, amount)} / 店: {m.Groups[1].Value}", amount);
+            var e = Add(time, "商品売却", $"{ResourceDisplay(m.Groups[3].Value)} {CommodityAmountText(ParseNumber(m.Groups[4].Value), m.Groups[4].Value, amount)} / 店: {m.Groups[1].Value}", amount,
+                trade: MakeTrade(sm.Groups[1].Value, line, m.Groups[1].Value, "sell", m.Groups[3].Value, ParseNumber(m.Groups[4].Value), m.Groups[4].Value, amount));
             _pendingCommodity["Selling"] = e;
             return;
         }
@@ -655,6 +798,7 @@ public sealed class GameLogParser
             _pendingCommodity.Remove(type);
             e.Kind = "取引失敗";
             e.Content += $" / 結果: {m.Groups[1].Value}";
+            if (e.Trade != null) e.Trade.Result = m.Groups[1].Value.Length > 0 ? m.Groups[1].Value : "Failed";
             Changed = true;
             return;
         }
@@ -880,10 +1024,30 @@ public sealed class GameLogParser
         var last = _lastMined;
         _lastMined = null;
         Match m;
+        if ((m = UnstowRegex.Match(line)).Success)
+        {
+            // 床・台に出た個体 (取り出し・台に置いた品)。同じ個体を右手に持っても採掘の候補にしない。台に置いた品 (Drop の依頼) なら個体 ID を入れる
+            var id = m.Groups[3].Value;
+            _unstowed.Add(id);
+            if (int.TryParse(m.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var req))
+            {
+                var i = _platformItems.FindIndex(p => p.Request == req && p.Id == null);
+                if (i >= 0) _platformItems[i] = (req, _platformItems[i].Class, id, _platformItems[i].Time);
+            }
+            return;
+        }
+        if ((m = DropRegex.Match(line)).Success)
+        {
+            OnDrop(time, m.Groups[1].Value, m.Groups[2].Value);
+            return;
+        }
         if ((m = MineralAttachedRegex.Match(line)).Success)
         {
             var cls = m.Groups[1].Value;
             var id = m.Groups[2].Value;
+            // 台に置いた品を拾い直した: 台から除く
+            var dropped = _platformItems.FindLastIndex(p => p.Id == id);
+            if (dropped >= 0) _platformItems.RemoveAt(dropped);
             if (_pendingEquip.Remove(cls, out var equipTime))
             {
                 // 窓を過ぎた候補は捨てる (取り出しとみなさず、拾得の候補として扱う)
@@ -894,6 +1058,8 @@ public sealed class GameLogParser
                 }
             }
             if (_takenOut.Contains(id)) return;
+            // Unstow で床・台に出た個体 (エレベーターの台から拾い直したものなど) は採掘ではない。本物の採掘の個体 ID は事前に Unstow に出ない
+            if (_unstowed.Contains(id)) return;
             _mineCandidates[id] = (time, cls);
             return;
         }
@@ -904,8 +1070,13 @@ public sealed class GameLogParser
         }
         if ((m = MineralStoreRegex.Match(line)).Success)
         {
-            if (!_mineCandidates.Remove(m.Groups[2].Value, out var c)) return;
-            var e = Add(c.Time, "採掘", $"{MineralName(c.Class)} ×1");
+            var id = m.Groups[2].Value;
+            if (!_mineCandidates.Remove(id, out var c)) return;
+            var logTime = LogTimeText(c.Time);
+            var mining = new GameLogMining { LogTime = logTime, PlayerName = _playerName ?? "", MineralClass = c.Class, EntityId = id };
+            var name = MineralName(c.Class);
+            var e = Add(c.Time, "採掘", $"{name} ×1", mining: mining,
+                importItems: [new GameLogImportItem { Kind = GameLogImportItem.KindMined, LogKey = mining.Key, ItemClass = c.Class, Quantity = 1, DisplayName = name }]);
             _lastMined = (e, c.Class);
             return;
         }
@@ -951,6 +1122,118 @@ public sealed class GameLogParser
         return text;
     }
 
+    // 商品売買の行の中身 (［鉱石］の commodity_trades へ)。playerId・shopId・kioskId は行の中から、transactionMode は売りの行だけにある
+    private static GameLogTrade MakeTrade(string logTime, string line, string shopName, string kind, string resourceGuid, double? scu, string rawQuantity, double? total)
+    {
+        var ids = CommodityIdsRegex.Match(line);
+        var mode = TransactionModeRegex.Match(line);
+        return new GameLogTrade
+        {
+            LogTime = logTime, ShopName = shopName, Kind = kind, ResourceUuid = resourceGuid, QuantityScu = scu, QuantityRaw = rawQuantity, TotalAuec = total,
+            PlayerId = ids.Success ? ids.Groups[1].Value : "",
+            ShopId = ids.Success ? ids.Groups[2].Value : "",
+            KioskId = ids.Success ? ids.Groups[3].Value : "",
+            TransactionMode = mode.Success ? mode.Groups[1].Value : "",
+        };
+    }
+
+    // 行頭の時刻の文字 (UTC。"2026-10-15T13:41:22.633")。印・記録の鍵に使う
+    private static string LogTimeText(DateTime time) => time.ToString("yyyy-MM-dd'T'HH:mm:ss.fff", CultureInfo.InvariantCulture);
+
+    // ─── 貨物エレベーター ───
+    // 台に置いた品 (Type[Drop])。自分のキオスク操作から FreightDropWindow 以内のものだけ数える (個体 ID は後の Unstow で入る)
+    private void OnDrop(DateTime time, string request, string itemClass)
+    {
+        if (_freightLocationId.Length == 0 || time - _freightKioskTime > FreightDropWindow) return;
+        if (!int.TryParse(request, NumberStyles.None, CultureInfo.InvariantCulture, out var req)) return;
+        _platformItems.Add((req, itemClass, null, time));
+        _lastDropTime = time;
+    }
+
+    // 台の状態・呼び出し・断られた
+    private void OnFreight(DateTime time, string line)
+    {
+        Match m;
+        if ((m = FreightStateRegex.Match(line)).Success)
+        {
+            var state = m.Groups[1].Value;
+            // 下げ: 自分のキオスク操作から FreightLowerWindow 以内の ClosingFrontGate / LoweringPlatform → ClosedIdle (他人の操作でも同じ行が出るので窓で絞る)
+            if (state is "ClosingFrontGate" or "LoweringPlatform")
+            {
+                if (_freightLocationId.Length > 0 && time - _freightKioskTime <= FreightLowerWindow) _freightLowering = true;
+                return;
+            }
+            if (state == "ClosedIdle")
+            {
+                if (!_freightLowering) return;
+                _freightLowering = false;
+                if (time - _freightKioskTime > FreightLowerWindow) return;
+                OnFreightLowered(time);
+                return;
+            }
+            if (state == "RaisingPlatform")
+            {
+                if (_freightUnstowCount < 0 || time - _freightUnstowTime > FreightRaiseWindow) return;
+                var n = _freightUnstowCount;
+                var t = _freightUnstowTime;
+                _freightUnstowCount = -1;
+                if (n <= 0) return;   // 品の無い呼び出し (Entities: 0) は行にしない
+                var place = _freightLocationId;
+                AttachPlace(Add(t, "貨物エレベーター", $"{PlaceDisplay(place)} の貨物エレベーターで {n} 品を呼び出しました"), place);
+                return;
+            }
+            return;
+        }
+        if ((m = FreightUnstowRegex.Match(line)).Success)
+        {
+            // 呼び出し (品名は出ない)。場所の ID はキオスク操作のものと同じ値なので、ここで覚え直す
+            _freightUnstowCount = int.TryParse(m.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var n) ? n : 0;
+            _freightUnstowTime = time;
+            if (_freightLocationId.Length == 0) _freightLocationId = m.Groups[2].Value;
+            return;
+        }
+        if ((m = FreightErrorRegex.Match(line)).Success)
+        {
+            Add(time, "貨物エレベーター", "貨物エレベーターの要求が断られました");
+            return;
+        }
+    }
+
+    // 下げが完了した: 台に置いた品 (最後の Drop から FreightLowerWindow 以内) をクラスごとに数えて 1 行にする。
+    // 「<場所> の貨物エレベーターで <品名 ×n、…> を降ろしました」(品名は「日本語 (英語)」。並びは最初に置いた順)。品が無ければ行にしない
+    private void OnFreightLowered(DateTime time)
+    {
+        if (_platformItems.Count == 0) return;
+        if (time - _lastDropTime > FreightLowerWindow)
+        {
+            _platformItems.Clear();
+            return;
+        }
+        var counts = new List<(string Class, int Count)>();
+        foreach (var p in _platformItems)
+        {
+            var i = counts.FindIndex(c => c.Class == p.Class);
+            if (i >= 0) counts[i] = (p.Class, counts[i].Count + 1);
+            else counts.Add((p.Class, 1));
+        }
+        _platformItems.Clear();
+        var logTime = LogTimeText(time);
+        var items = new List<GameLogImportItem>(counts.Count);
+        var names = new List<string>(counts.Count);
+        foreach (var (cls, count) in counts)
+        {
+            var name = cls.StartsWith(MineralClassPrefix, StringComparison.Ordinal) ? MineralName(cls) : _itemLabel(cls);
+            names.Add($"{name} ×{count}");
+            items.Add(new GameLogImportItem
+            {
+                Kind = GameLogImportItem.KindDropped, LogKey = GameLogImportItem.MakeKey(logTime, cls), ItemClass = cls, Quantity = count, DisplayName = name,
+            });
+        }
+        var place = _freightLocationId;
+        var e = Add(time, "貨物エレベーター", $"{PlaceDisplay(place)} の貨物エレベーターで {string.Join("、", names)} を降ろしました", importItems: items);
+        AttachPlace(e, place);
+    }
+
     // ─── 衝突 ───
     // 同じ時刻・同じ船の行が部位ごとに複数出るので 1 件にまとめる (相手が違えば並べる)
     private void OnCollision(DateTime time, string stamp, string vehicle, string zone, string target)
@@ -991,7 +1274,7 @@ public sealed class GameLogParser
     // 区域 (見出しの前方一致)。logbackups での実際の文は「制限区域から離脱中: 」「私有地に進入: 」「私有地を突破: 」(本文は空)
     private static readonly string[] AreaPrefixHeadings = ["制限区域から離脱中", "私有地に進入", "私有地を突破"];
 
-    private void OnNotification(DateTime time, string text, string missionId)
+    private void OnNotification(DateTime time, string text, string missionId, string objectiveId)
     {
         if (missionId.Trim('0', '-').Length == 0) missionId = "";   // 00000000-0000-… はミッション無し
 
@@ -1028,7 +1311,10 @@ public sealed class GameLogParser
         foreach (var (heading, kind) in ObjectiveHeadings)
         {
             if (!text.StartsWith(heading, StringComparison.Ordinal)) continue;
-            Add(time, kind, Body(text[heading.Length..]));
+            var body = Body(text[heading.Length..]);
+            Add(time, kind, body);
+            // 納品: 目標達成「品名 を n/n」(両数が同じ) で ObjectiveId が dropoff_… のもの。目標達成の行はそのまま残し、納品の行を足す
+            if (kind == "目標達成" && objectiveId.StartsWith("dropoff_", StringComparison.OrdinalIgnoreCase)) OnDelivery(time, body, missionId, objectiveId);
             return;
         }
         // 区域: 見出し (": " の前) そのもの
@@ -1037,6 +1323,35 @@ public sealed class GameLogParser
         if (title.EndsWith("管轄区域に進入", StringComparison.Ordinal) || Array.IndexOf(AreaHeadings, title) >= 0
             || StartsWithAny(title, AreaPrefixHeadings, out _))
             Add(time, "区域", title);
+    }
+
+    // 通知の文に入る書式のタグ (<EM4>…</EM4> 等)。納品の行のミッション名からは外す
+    private static readonly Regex MarkupTagRegex = new(@"</?[A-Za-z][^>]*>", RegexOptions.Compiled);
+    private static string StripTags(string text) => MarkupTagRegex.Replace(text, "").Trim();
+
+    // 納品の行: 「<品名> ×n（<ミッション名>）」。ミッション名がまだ分からなければ省いて出し、分かったら書き足す (ApplyMissionName)。
+    // 在庫から引く品 (kind delivered。鍵は 時刻・MissionId・ObjectiveId、品名は通知の日本語のまま) を付ける
+    private void OnDelivery(DateTime time, string body, string missionId, string objectiveId)
+    {
+        var m = DeliveryRegex.Match(body);
+        if (!m.Success || m.Groups[2].Value != m.Groups[3].Value) return;
+        var itemName = m.Groups[1].Value.Trim();
+        var content = $"{itemName} ×{m.Groups[2].Value}";
+        string? name = null;
+        var known = missionId.Length > 0
+                    && (_missionNames.TryGetValue(missionId, out name) || (_sharedMissionNames != null && _sharedMissionNames.TryGet(missionId, out name)));
+        var count = int.TryParse(m.Groups[2].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var n) ? n : 0;
+        var e = Add(time, "納品", known ? $"{content}（{StripTags(name!)}）" : content,
+            importItems: [new GameLogImportItem
+            {
+                Kind = GameLogImportItem.KindDelivered, LogKey = GameLogImportItem.MakeKey(LogTimeText(time), missionId, objectiveId),
+                ItemClass = "", Quantity = count, DisplayName = itemName,
+            }]);
+        if (known || missionId.Length == 0) return;
+        e.PendingMissionId = missionId;
+        if (_sharedMissionNames != null) return;
+        if (!_missionWaiting.TryGetValue(missionId, out var list)) _missionWaiting[missionId] = list = new();
+        list.Add(e);
     }
 
     private static bool StartsWithAny(string text, string[] headings, out string rest)
@@ -1093,10 +1408,17 @@ public sealed class GameLogParser
         Changed = true;
     }
 
-    // 名前待ちの契約終了の行に名前を入れる。"契約終了" の行は末尾に " (CompletionType)" が付いているので、先頭の ID だけを置き換える
+    // 名前待ちの契約終了の行に名前を入れる。"契約終了" の行は末尾に " (CompletionType)" が付いているので、先頭の ID だけを置き換える。
+    // 納品の行 (名前を省いて出してある) は末尾に「（名前）」を書き足す
     public static void ApplyMissionName(GameLogEntry e, string name)
     {
         if (e.PendingMissionId is not { } id) return;
+        if (e.Kind == "納品")
+        {
+            e.Content += $"（{StripTags(name)}）";
+            e.PendingMissionId = null;
+            return;
+        }
         var shortId = MissionShort(id);
         e.Content = e.Content.StartsWith(shortId, StringComparison.Ordinal) ? name + e.Content[shortId.Length..] : name;
         e.PendingMissionId = null;
@@ -1195,11 +1517,13 @@ public sealed class GameLogParser
     }
 
     // ─── 共通 ───
-    private GameLogEntry Add(DateTime time, string kind, string content, double? amount = null, GameLogPurchase? purchase = null)
+    private GameLogEntry Add(DateTime time, string kind, string content, double? amount = null, GameLogPurchase? purchase = null,
+        List<GameLogImportItem>? importItems = null, GameLogTrade? trade = null, GameLogMining? mining = null)
     {
         var e = new GameLogEntry
         {
             TimeUtc = time, Kind = kind, Content = content, Amount = amount, Source = _source, Purchase = purchase,
+            ImportItems = importItems, Trade = trade, Mining = mining,
             Seq = System.Threading.Interlocked.Increment(ref _seq),
         };
         Entries.Add(e);
@@ -1220,9 +1544,10 @@ public sealed class GameLogParser
     // 過去のログ 1 ファイルを全部読む。ゲームが書き込み中でも開けるように共有で開く
     public static List<GameLogEntry> ParseFile(string path, string source, Func<string, string>? shipName = null, Func<string, string>? itemName = null,
         GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
-        Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null)
+        Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null,
+        Func<string, string>? itemLabel = null)
     {
-        var parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames);
+        var parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames, itemLabel);
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var reader = new StreamReader(fs, LogEncoding, detectEncodingFromByteOrderMarks: false);
         string? line;
@@ -1252,6 +1577,7 @@ public sealed class GameLogTail
     private readonly Func<string, string?>? _resourceName;
     private readonly Func<string, string>? _placeName;
     private readonly GameLogPlaceNames? _sharedPlaceNames;
+    private readonly Func<string, string>? _itemLabel;
     private long _position;
     private long _lastLength;
     private byte[]? _head;                   // 覚えている先頭の 1 行 (改行まで)。まだ分からなければ null
@@ -1262,7 +1588,8 @@ public sealed class GameLogTail
 
     public GameLogTail(string path, string source, Func<string, string>? shipName = null, Func<string, string>? itemName = null,
         GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
-        Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null)
+        Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null,
+        Func<string, string>? itemLabel = null)
     {
         _path = path;
         _source = source;
@@ -1274,7 +1601,8 @@ public sealed class GameLogTail
         _resourceName = resourceName;
         _placeName = placeName;
         _sharedPlaceNames = sharedPlaceNames;
-        Parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames);
+        _itemLabel = itemLabel;
+        Parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames, itemLabel);
     }
 
     // 増えた分を読む。戻り値: ファイルがあったか。reset = 最初から読み直した (それまでの行は捨てた)
@@ -1291,7 +1619,7 @@ public sealed class GameLogTail
         {
             _position = 0;
             _lastLength = 0;
-            Parser = new GameLogParser(_source, _shipName, _itemName, _sharedMissionNames, _translate, _isVehicleClass, _resourceName, _placeName, _sharedPlaceNames);
+            Parser = new GameLogParser(_source, _shipName, _itemName, _sharedMissionNames, _translate, _isVehicleClass, _resourceName, _placeName, _sharedPlaceNames, _itemLabel);
             reset = true;
         }
         if (head != null) _head = head;

@@ -52,15 +52,31 @@ public partial class GameLogPanel : UserControl
     private int _rescanLeft;
     private bool _rescanRunning;
 
-    // 購入の行の「装備に入れる」ボタン (MainWindow が渡す)。
-    //   PurchaseClassifier: 購入の一覧 → それぞれのボタンの状態 (HangarService.ClassifyPurchase)。null なら、どの行にもボタンを出さない
-    //   PurchaseImporter:   購入 1 件を所持コンポーネントに入れる。入れたら (または入れ済みと分かったら) 表を作り直す
-    public Func<IReadOnlyList<GameLogPurchase>, IReadOnlyList<PurchaseImportState>>? PurchaseClassifier { get; set; }
-    public Action<GameLogPurchase>? PurchaseImporter { get; set; }
+    // 所持・在庫に入れられる行 (購入・採掘・貨物エレベーターで降ろした品。GameLogEntry.ImportItems あり) のボタン「入れる」「取り消す」(MainWindow が渡す)。
+    //   ImportClassifier: その行の一覧 → それぞれのボタンの状態 (None = 出さない、Ready = 「入れる」、Imported = 「取り消す」)。null なら、どの行にもボタンを出さない
+    //   Importer:         1 行の品を全部入れる (印は品ごと)。Canceller: 1 行の印を消して所持・在庫から引く。どちらも後で表を作り直す
+    public Func<IReadOnlyList<GameLogEntry>, IReadOnlyList<PurchaseImportState>>? ImportClassifier { get; set; }
+    public Action<GameLogEntry>? Importer { get; set; }
+    public Action<GameLogEntry>? Canceller { get; set; }
+    // 売買・採掘の記録の自動取り込み (MainWindow → OrePanel.ImportLogRecords)。表を作り直すたびに、まだ渡していない行だけを渡す。
+    // TradeResultUpdater: 渡した後に取引の結果 (失敗) が結び付いた行。SellProfit: 売却の行の鍵 (GameLogTrade.Key) → (利益, 利益率) (計算前なら null)
+    public Action<IReadOnlyList<GameLogTrade>, IReadOnlyList<GameLogMining>>? RecordsImporter { get; set; }
+    public Action<GameLogTrade>? TradeResultUpdater { get; set; }
+    // 納品の行 (kind delivered の品) の自動の減算 (MainWindow)。まだ渡していない行だけを渡す
+    public Action<IReadOnlyList<GameLogEntry>>? DeliveryImporter { get; set; }
+    private readonly HashSet<string> _handedDeliveries = new(StringComparer.Ordinal);
+    public Func<string, (double Profit, double? Rate)?>? SellProfit { get; set; }
+    // 内容の欄の品名のダブルクリック → ［詳細］(MainWindow が DetailPanel.Request / RequestSearch に回す)
+    public Action<GameLogImportItem>? DetailOpener { get; set; }
+
+    // 渡した売買の記録 (鍵 → そのときの結果) と採掘の記録 (鍵)。UI のスレッドだけで使う
+    private readonly Dictionary<string, string> _handedTrades = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _handedMining = new(StringComparer.Ordinal);
 
     public GameLogPanel()
     {
         InitializeComponent();
+        table.CellDoubleClicked += OnCellDoubleClicked;
         _timer.Tick += async (_, _) => await PollAsync();
         Loaded += (_, _) =>
         {
@@ -91,7 +107,9 @@ public partial class GameLogPanel : UserControl
         return workDir;
     }
 
-    // 列: 日時 (ローカル時刻)、種類、内容、金額、ログ (どのファイル由来か。今の Game.log は「現在」)、装備 (購入の行の「装備に入れる」)
+    // 列: 日時 (ローカル時刻)、種類、内容、金額、ログ (どのファイル由来か。今の Game.log は「現在」)、所持 (購入・採掘・降ろした品の行の「入れる」「取り消す」)
+    private const int ContentColumn = 2;
+
     private List<GridColumnSpec> Columns() =>
     [
         new()
@@ -101,7 +119,7 @@ public partial class GameLogPanel : UserControl
             Key = o => ((GameLogEntry)o).TimeUtc,
         },
         new() { Header = "種類", Text = o => ((GameLogEntry)o).Kind, Key = o => ((GameLogEntry)o).Kind is { Length: > 0 } s ? s : null },
-        new() { Header = "内容", Filterable = false, Text = o => ((GameLogEntry)o).Content, Key = o => ((GameLogEntry)o).Content is { Length: > 0 } s ? s : null },
+        new() { Header = "内容", Filterable = false, Text = o => ContentText((GameLogEntry)o), Key = o => ContentText((GameLogEntry)o) is { Length: > 0 } s ? s : null },
         // 数値の列には絞り込みのボタン (Select) を出さない (並べ替えはできる)
         new()
         {
@@ -109,36 +127,133 @@ public partial class GameLogPanel : UserControl
             Text = o => ((GameLogEntry)o).Amount?.ToString("#,0.##") ?? "", Key = o => ((GameLogEntry)o).Amount,
         },
         new() { Header = "ログ", Text = o => ((GameLogEntry)o).Source, Key = o => ((GameLogEntry)o).Source is { Length: > 0 } s ? s : null },
-        // 装備: 成功した購入のうち所持コンポーネントに入れられるものに「装備に入れる」(入れ済みなら押せない「入れ済み」)
+        // 所持: 所持・在庫に入れられる行に「入れる」、入れた後は「取り消す」(印を消して所持・在庫から引く)
         new()
         {
-            Header = "装備",
-            Text = o => ((GameLogEntry)o).ImportState switch { PurchaseImportState.Ready => "装備に入れる", PurchaseImportState.Imported => "入れ済み", _ => "" },
-            Key = o => ((GameLogEntry)o).ImportState switch { PurchaseImportState.Ready => "装備に入れる", PurchaseImportState.Imported => "入れ済み", _ => null },
-            Button = o => ((GameLogEntry)o).ImportState switch { PurchaseImportState.Ready => true, PurchaseImportState.Imported => false, _ => null },
-            ButtonClick = o => { if (((GameLogEntry)o).Purchase is { } p) ImportPurchase(p); },
+            Header = "所持",
+            Text = o => ButtonText((GameLogEntry)o),
+            Key = o => ButtonText((GameLogEntry)o) is { Length: > 0 } s ? s : null,
+            Button = o => ((GameLogEntry)o).ImportState switch { PurchaseImportState.Ready => true, PurchaseImportState.Imported => true, _ => null },
+            ButtonClick = o => OnImportButton((GameLogEntry)o),
         },
     ];
 
-    // 「装備に入れる」が押されたとき: MainWindow に入れてもらい、ボタンの状態を作り直す
-    private void ImportPurchase(GameLogPurchase p)
+    // 内容の欄の文字。売却の行 (成功したもの) には、［鉱石］の売買の記録で計算した利益を添える (計算前なら添えない。利益率が無ければ利益だけ)
+    private string ContentText(GameLogEntry e)
     {
-        PurchaseImporter?.Invoke(p);
+        if (e.Trade is not { Kind: "sell" } t || t.Result.Length > 0 || SellProfit == null) return e.Content;
+        (double Profit, double? Rate)? p;
+        try { p = SellProfit(t.Key); }
+        catch { return e.Content; }
+        if (p is not { } v) return e.Content;
+        var text = $"{e.Content} / 利益 {v.Profit:+#,0;-#,0;0} aUEC";
+        if (v.Rate is { } r) text += $" ({r.ToString("0.0%", System.Globalization.CultureInfo.InvariantCulture)})";
+        return text;
+    }
+
+    // ボタンの文字: Ready は「入れる」(納品の行 (在庫から引く) は「減らす」)、Imported は「取り消す」
+    private static string ButtonText(GameLogEntry e) => e.ImportState switch
+    {
+        PurchaseImportState.Ready => e.ImportItems is { Count: > 0 } items && items.All(i => i.Kind == GameLogImportItem.KindDelivered) ? "減らす" : "入れる",
+        PurchaseImportState.Imported => "取り消す",
+        _ => "",
+    };
+
+    // 「入れる」「取り消す」が押されたとき: MainWindow に入れて (取り消して) もらい、ボタンの状態を作り直す
+    private void OnImportButton(GameLogEntry e)
+    {
+        if (e.ImportState == PurchaseImportState.Ready) Importer?.Invoke(e);
+        else if (e.ImportState == PurchaseImportState.Imported) Canceller?.Invoke(e);
+        else return;
         UpdateTable();
     }
 
-    // 購入の行のボタンの状態を決める (PurchaseClassifier)。失敗したらボタンを出さない
-    private void ClassifyPurchases(IReadOnlyList<GameLogEntry> entries)
+    // 内容の欄のダブルクリック: 押した位置にある品名の品 (品が 1 つの行はどこを押しても) を［詳細］に出す
+    private void OnCellDoubleClicked(int column, object source, int charIndex)
     {
-        var rows = entries.Where(e => e.Purchase != null).ToList();
+        if (column != ContentColumn || source is not GameLogEntry e || e.ImportItems is not { Count: > 0 } items || DetailOpener == null) return;
+        GameLogImportItem? hit = null;
+        if (charIndex >= 0)
+        {
+            foreach (var item in items)
+            {
+                if (item.DisplayName.Length == 0) continue;
+                var at = e.Content.IndexOf(item.DisplayName, StringComparison.Ordinal);
+                if (at >= 0 && charIndex >= at && charIndex <= at + item.DisplayName.Length) { hit = item; break; }
+            }
+        }
+        hit ??= items.Count == 1 ? items[0] : null;
+        if (hit != null) DetailOpener(hit);
+    }
+
+    // 所持・在庫に入れられる行のボタンの状態を決める (ImportClassifier)。失敗したらボタンを出さない
+    private void ClassifyImports(IReadOnlyList<GameLogEntry> entries)
+    {
+        var rows = entries.Where(e => e.ImportItems is { Count: > 0 }).ToList();
         foreach (var e in rows) e.ImportState = PurchaseImportState.None;
-        if (PurchaseClassifier == null || rows.Count == 0) return;
+        if (ImportClassifier == null || rows.Count == 0) return;
         try
         {
-            var states = PurchaseClassifier(rows.Select(e => e.Purchase!).ToList());
+            var states = ImportClassifier(rows);
             for (int i = 0; i < rows.Count && i < states.Count; i++) rows[i].ImportState = states[i];
         }
         catch { foreach (var e in rows) e.ImportState = PurchaseImportState.None; }
+    }
+
+    // 売買・採掘の記録を［鉱石］へ渡す (まだ渡していない行だけ。古い順)。渡した後に結果 (失敗) が結び付いた売買は TradeResultUpdater へ。
+    // 失敗しても表は作る (次の作り直しでもう一度渡す)
+    private void HandOverRecords(IReadOnlyList<GameLogEntry> entries)
+    {
+        if (RecordsImporter == null) return;
+        var trades = new List<GameLogTrade>();
+        var mining = new List<GameLogMining>();
+        var changed = new List<GameLogTrade>();
+        for (int i = entries.Count - 1; i >= 0; i--)
+        {
+            var e = entries[i];
+            if (e.Trade is { } t)
+            {
+                if (!_handedTrades.TryGetValue(t.Key, out var prev)) trades.Add(t);
+                else if (prev != t.Result) changed.Add(t);
+            }
+            if (e.Mining is { } m && !_handedMining.Contains(m.Key)) mining.Add(m);
+        }
+        try
+        {
+            if (trades.Count > 0 || mining.Count > 0) RecordsImporter(trades, mining);
+            foreach (var t in trades) _handedTrades[t.Key] = t.Result;
+            foreach (var m in mining) _handedMining.Add(m.Key);
+            if (TradeResultUpdater != null)
+            {
+                foreach (var t in changed)
+                {
+                    TradeResultUpdater(t);
+                    _handedTrades[t.Key] = t.Result;
+                }
+            }
+        }
+        catch { }
+        HandOverDeliveries(entries);
+    }
+
+    // 納品の行 (kind delivered の品) をまだ渡していないものだけ DeliveryImporter へ (古い順)
+    private void HandOverDeliveries(IReadOnlyList<GameLogEntry> entries)
+    {
+        if (DeliveryImporter == null) return;
+        var list = new List<GameLogEntry>();
+        for (int i = entries.Count - 1; i >= 0; i--)
+        {
+            var e = entries[i];
+            if (e.ImportItems is not { Count: > 0 } items || items[0].Kind != GameLogImportItem.KindDelivered) continue;
+            if (!_handedDeliveries.Contains(items[0].LogKey)) list.Add(e);
+        }
+        if (list.Count == 0) return;
+        try
+        {
+            DeliveryImporter(list);
+            foreach (var e in list) _handedDeliveries.Add(e.ImportItems![0].LogKey);
+        }
+        catch { }
     }
 
     // 船名・品名の覚えた結果を捨てる。MainWindow から、訳・品目名 (item_index.name) が替わったときに呼ぶ。
@@ -165,7 +280,7 @@ public partial class GameLogPanel : UserControl
         _names = new GameLogNames(Path.Combine(workDir, "gamedata_cache.db"), Path.Combine(workDir, "translations.db"));
         _logPath = Path.Combine(gamePath, "Game.log");
         _tail = new GameLogTail(_logPath, CurrentSource, _names.Ship, _names.Item, _missionNames, _names.Translate, _names.IsVehicleClass, _names.Resource,
-            _names.Place, _placeNames);
+            _names.Place, _placeNames, _names.ItemLabel);
 
         // 過去のログ: 初回の一覧はここで取り (再起動の後に探すときに、新しいファイルと見分けるため)、読むのは裏で行う
         _backupDir = Path.Combine(gamePath, "logbackups");
@@ -203,7 +318,7 @@ public partial class GameLogPanel : UserControl
             try
             {
                 var rows = GameLogParser.ParseFile(f.FullName, Path.GetFileNameWithoutExtension(f.Name), names.Ship, names.Item, _missionNames,
-                    names.Translate, names.IsVehicleClass, names.Resource, names.Place, _placeNames);
+                    names.Translate, names.IsVehicleClass, names.Resource, names.Place, _placeNames, names.ItemLabel);
                 lock (_backupLock)
                 {
                     _backupRows.AddRange(rows);
@@ -327,7 +442,8 @@ public partial class GameLogPanel : UserControl
         var entries = _backupSnapshot.Concat(_currentRows)
             .OrderByDescending(e => e.TimeUtc).ThenByDescending(e => e.Seq)
             .ToList();
-        ClassifyPurchases(entries);
+        HandOverRecords(entries);
+        ClassifyImports(entries);
         table.SetItems(entries.Cast<object>().ToList());
     }
 
@@ -420,6 +536,7 @@ public partial class GameLogPanel : UserControl
             {
                 _ships.Clear();
                 _items.Clear();
+                _itemLabels.Clear();
                 _resources.Clear();
                 _translations.Clear();
                 _vehicleClasses.Clear();
@@ -429,6 +546,41 @@ public partial class GameLogPanel : UserControl
 
         public string Ship(string className) => Resolve(className, _ships, ResolveShip);
         public string Item(string itemName) => Resolve(itemName, _items, name => ResolveName("items", name));
+        // 品目の内部名 → 「日本語 (英語)」(貨物エレベーターで降ろした品)。items.name のキーを翻訳 DB で引いて Label にする。
+        // items に無ければ item_index の name_ja (無ければ name)。引けなければ内部名のまま
+        public string ItemLabel(string itemName) => Resolve(itemName, _itemLabels, ResolveItemLabel);
+        private readonly Dictionary<string, string> _itemLabels = new(StringComparer.Ordinal);
+
+        private string? ResolveItemLabel(string name)
+        {
+            string? key = null, indexName = null;
+            using (var game = Open(_gamedataCacheDbPath))
+            {
+                if (game != null)
+                {
+                    using (var cmd = game.CreateCommand())
+                    {
+                        cmd.CommandText = "SELECT name FROM items WHERE record_name = @r LIMIT 1";
+                        cmd.Parameters.AddWithValue("@r", "EntityClassDefinition." + name);
+                        key = cmd.ExecuteScalar() as string;
+                    }
+                    if (key == null)
+                    {
+                        using var cmd = game.CreateCommand();
+                        cmd.CommandText = "SELECT COALESCE(NULLIF(name_ja, ''), name) FROM item_index WHERE record_name = @r COLLATE NOCASE LIMIT 1";
+                        cmd.Parameters.AddWithValue("@r", "EntityClassDefinition." + name);
+                        indexName = cmd.ExecuteScalar() as string;
+                    }
+                }
+            }
+            if (key != null)
+            {
+                var (en, ja) = Lookup(key);
+                var label = Label(JapaneseText(ja), EnglishText(en));
+                if (label != null) return label;
+            }
+            return indexName != null ? Usable(indexName) : null;
+        }
         // 場所の名前 (ログの Location[Stanton2_Orison] や ATC 名から取った Orison) → 翻訳 DB に同じキーがあれば日本語 (無ければ英語)。
         // キーで引けなければ、english が場所の名前と一致する行 (大文字小文字は区別しない) の japanese (ATC から取った Orison → Stanton2_Orison の ORISON)。
         // それも無ければそのまま。翻訳 DB のキーは場所の名前そのもの (Stanton2_Orison、RR_CRU_L1、Stanton1_Lorville)。

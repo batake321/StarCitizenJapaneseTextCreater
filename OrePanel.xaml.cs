@@ -334,6 +334,7 @@ public partial class OrePanel : UserControl
             _service.SetCacheDir(WorkDir());
             tblTrades.SetItems(_service.LoadTrades());
             tblMining.SetItems(_service.LoadMining());
+            ReloadSellProfits();
         }
         catch (Exception ex)
         {
@@ -399,7 +400,8 @@ public partial class OrePanel : UserControl
             {
                 _service.SetCacheDir(WorkDir());
                 sells = _service.RecomputeProfits();
-                applied = _service.ApplyToStock();
+                applied = _service.ApplyToStock(GameLogPurchase.ImportCutoffUtc);
+                ReloadSellProfits();
             }
             RefreshStock();
             RefreshTables();
@@ -430,7 +432,9 @@ public partial class OrePanel : UserControl
             if (t > 0 || m > 0)
             {
                 _service.RecomputeProfits();
-                _service.ApplyToStock();
+                // 在庫を変えるのは GameLogPurchase.ImportCutoffUtc 以降の行だけ (それより前の記録は反映済みにするだけ)
+                _service.ApplyToStock(GameLogPurchase.ImportCutoffUtc);
+                ReloadSellProfits();
             }
         }
         if (t > 0 || m > 0)
@@ -439,6 +443,60 @@ public partial class OrePanel : UserControl
             else Dispatcher.BeginInvoke(RefreshAfterImport);
         }
         return (t, m);
+    }
+
+    // 取引の結果 (失敗) が後から結び付いたとき (GameLogPanel.TradeResultUpdater): 同じ鍵の行の result を書き換え (在庫へ反映済みなら戻す)、
+    // 利益を計算し直して表を作り直す。行が無ければ (まだ入れていない) false
+    public bool UpdateTradeResult(OreTradeRecord r)
+    {
+        bool updated;
+        lock (_importLock)
+        {
+            _service.SetCacheDir(WorkDir());
+            updated = _service.UpdateTradeResult(r.LogTime, r.PlayerId, r.ShopId, r.KioskId, r.Kind, r.ResourceUuid, r.QuantityRaw, r.Result ?? "");
+            if (updated)
+            {
+                _service.RecomputeProfits();
+                ReloadSellProfits();
+            }
+        }
+        if (updated)
+        {
+            if (Dispatcher.CheckAccess()) RefreshAfterImport();
+            else Dispatcher.BeginInvoke(RefreshAfterImport);
+        }
+        return updated;
+    }
+
+    // 売却の行の利益 (鍵 → (利益, 利益率))。GameLogPanel の売却の行に添える。計算前の行は null。
+    // 利益を計算し直すたびに読み直す (_profitLock で守る。GameLogPanel は UI のスレッドから引く)
+    private readonly object _profitLock = new();
+    private Dictionary<string, (double Profit, double? Rate)> _sellProfits = new(StringComparer.Ordinal);
+    private bool _profitsLoaded;   // 一度も読んでいなければ、初めて引かれたときに DB から読む (［鉱石］を表示していなくても売却の行に添えられるように)
+
+    public (double Profit, double? Rate)? TryGetSellProfit(string key)
+    {
+        if (!_profitsLoaded)
+        {
+            lock (_importLock)
+            {
+                _service.SetCacheDir(WorkDir());
+                ReloadSellProfits();
+            }
+        }
+        lock (_profitLock) return _sellProfits.TryGetValue(key, out var v) ? v : null;
+    }
+
+    private void ReloadSellProfits()
+    {
+        Dictionary<string, (double Profit, double? Rate)> dict;
+        try { dict = _service.LoadSellProfits(); }
+        catch { return; }
+        lock (_profitLock)
+        {
+            _sellProfits = dict;
+            _profitsLoaded = true;
+        }
     }
 
     private void RefreshAfterImport()

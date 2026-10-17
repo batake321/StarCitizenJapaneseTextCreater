@@ -30,8 +30,9 @@ public static class DatabaseBackupService
         "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount", "resource_types"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
     // ore_stock / commodity_trades / mining_log: ［鉱石］タブの在庫・売買の記録・採掘の記録 (個人データ。OreService)
+    // my_gear: 所持個人装備、game_log_imports: ［ゲームログ］の行を所持・在庫に入れた印 (個人データ。HangarService)
     private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "ship_loaners", "store_skus", "my_components", "ship_loadouts", "my_component_purchases",
-        "ore_stock", "commodity_trades", "mining_log"];
+        "ore_stock", "commodity_trades", "mining_log", "my_gear", "game_log_imports"];
 
     public static string[] GetTables(BackupCategory category) => category switch
     {
@@ -105,6 +106,8 @@ public static class DatabaseBackupService
                                     DELETE FROM ore_stock;
                                     DELETE FROM commodity_trades;
                                     DELETE FROM mining_log;
+                                    DELETE FROM my_gear;
+                                    DELETE FROM game_log_imports;
                                     """;
                                 cmd.ExecuteNonQuery();
                             }
@@ -207,11 +210,12 @@ public static class DatabaseBackupService
     // (commodity_trades / mining_log: ［鉱石］タブの売買・採掘の記録。主キーはログの行の組)
     private static readonly string[] TradePersonalKeyedTables = ["hangar_pledges", "hangar_ccus", "hangar_ship_marks", "ship_loadouts", "commodity_trades", "mining_log"];
     // 個人で、行を見分けるキーが無いもの (主キーが無い、または中身と関係の無い連番の id だけのもの):
-    // a にその表の行が 1 行でもあれば a だけ、a が空 (表が無い) なら b の行を使う (ore_stock: ［鉱石］タブの在庫)
-    private static readonly string[] TradePersonalUnkeyedTables = ["my_ships", "my_components", "hangar_items", "hangar_nameable_ships", "ore_stock"];
-    // ［ゲームログ］の購入を所持コンポーネントに入れた印。my_components と必ず同じ側から取る:
+    // a にその表の行が 1 行でもあれば a だけ、a が空 (表が無い) なら b の行を使う (ore_stock: ［鉱石］タブの在庫、my_gear: 所持個人装備)
+    private static readonly string[] TradePersonalUnkeyedTables = ["my_ships", "my_components", "hangar_items", "hangar_nameable_ships", "ore_stock", "my_gear"];
+    // ［ゲームログ］の行を所持・在庫に入れた印 (game_log_imports と、旧の my_component_purchases)。my_components と必ず同じ側から取る:
     // my_components を a のまま残したときは印も a だけ、a が空で b の my_components を使ったときは印も b のものにする
     private const string ComponentPurchasesTable = "my_component_purchases";
+    private const string GameLogImportsTable = "game_log_imports";
     // hangar_meta のうちネット由来のデータ (ship_matrix / ship_loaners / store_skus) の取得時刻のキー (b を使う)。ほかのキー (同期の時刻・残高) は個人
     private static readonly string[] HangarMetaNetKeys = ["ship_matrix_fetched_at", "loaners_fetched_at", "store_fetched_at"];
 
@@ -249,7 +253,8 @@ public static class DatabaseBackupService
             conn.Open();
             if (srcTrans == null && (TableExists(conn, "translations") || TableExists(conn, "glossary"))) srcTrans = p;
             if (srcIndex == null && (TableExists(conn, "items") || TableExists(conn, "item_index") || TableExists(conn, "knowledge") || TableExists(conn, "gamedata_meta"))) srcIndex = p;
-            if (srcTrade == null && (TableExists(conn, "trade_prices") || TableExists(conn, "my_ships") || TableExists(conn, "hangar_pledges"))) srcTrade = p;
+            if (srcTrade == null && (TableExists(conn, "trade_prices") || TableExists(conn, "my_ships") || TableExists(conn, "hangar_pledges")
+                                     || TableExists(conn, "ore_stock") || TableExists(conn, "my_gear"))) srcTrade = p;
         }
 
         var doTrans = srcTrans != null && (cats.Contains(BackupCategory.Translations) || cats.Contains(BackupCategory.Glossary));
@@ -524,16 +529,20 @@ public static class DatabaseBackupService
         var componentsFromB = false;   // my_components を b から入れたか (ComponentPurchasesTable の扱いに使う)
         foreach (var table in TradeTables)
         {
-            if (table == ComponentPurchasesTable)
+            if (table == ComponentPurchasesTable || table == GameLogImportsTable)
             {
                 if (!componentsFromB) continue;
                 // 印も b のものだけにする (b に表が無ければ印は空)
                 EnsureTradeSchemaTable(conn, tx);
                 Exec(conn, tx, $"DELETE FROM main.{Q(table)}");
-                if (!SourceTableExists(conn, tx, table)) continue;
-                var cols = string.Join(", ", CommonColumns(conn, tx, table).Select(Q));
-                var n = Exec(conn, tx, $"INSERT OR IGNORE INTO main.{Q(table)} ({cols}) SELECT {cols} FROM src.{Q(table)}");
-                onStatus?.Invoke($"{table}: {n} 件追加");
+                if (SourceTableExists(conn, tx, table))
+                {
+                    var cols = string.Join(", ", CommonColumns(conn, tx, table).Select(Q));
+                    var n = Exec(conn, tx, $"INSERT OR IGNORE INTO main.{Q(table)} ({cols}) SELECT {cols} FROM src.{Q(table)}");
+                    onStatus?.Invoke($"{table}: {n} 件追加");
+                }
+                // 旧の印 (my_component_purchases) しか無いバックアップ (前の版) からも印が残るよう、旧表の行を game_log_imports に写す
+                if (table == GameLogImportsTable) Exec(conn, tx, HangarService.MigrateComponentPurchasesSql);
                 continue;
             }
             if (!SourceTableExists(conn, tx, table)) continue;
@@ -571,7 +580,8 @@ public static class DatabaseBackupService
         tx.Commit();
     }
 
-    // a に印の表 (ComponentPurchasesTable) が無ければ作る (b に表が無いときも空の表を用意するため。形は EnsureTradeSchema と同じ)
+    // a に印の表 (ComponentPurchasesTable / GameLogImportsTable。game_log_imports と一緒に my_gear も) が無ければ作る
+    // (b に表が無いときも空の表を用意するため。形は EnsureTradeSchema と同じ)
     private static void EnsureTradeSchemaTable(SqliteConnection conn, SqliteTransaction tx) =>
         Exec(conn, tx, """
             CREATE TABLE IF NOT EXISTS main.my_component_purchases (
@@ -584,8 +594,8 @@ public static class DatabaseBackupService
                 item_record TEXT DEFAULT '',
                 added_at TEXT DEFAULT (datetime('now','localtime')),
                 PRIMARY KEY (log_time, player_id, shop_id, kiosk_id, item_name, quantity)
-            )
-            """);
+            );
+            """ + HangarService.GearImportTablesDdl);
 
     // a の DB を開き、b を "src" として読む
     private static SqliteConnection OpenWithSource(string aPath, string bPath)
@@ -844,7 +854,8 @@ public static class DatabaseBackupService
                 added_at TEXT DEFAULT (datetime('now','localtime')),
                 PRIMARY KEY (log_time, player_id, shop_id, kiosk_id, item_name, quantity)
             );
-            """ + OreService.TradeTablesDdl;   // ［鉱石］タブの 3 つの表 (HangarService.InitDb と同じ DDL)
+            """ + OreService.TradeTablesDdl   // ［鉱石］タブの 3 つの表 (HangarService.InitDb と同じ DDL)
+            + HangarService.GearImportTablesDdl;   // 所持個人装備 (my_gear) と［ゲームログ］の印 (game_log_imports)
         cmd.ExecuteNonQuery();
 
         // 旧スキーマ (config_value_cents / availability 列なし) の hangar_pledges に列を追加する (HangarService.MigratePledgesSchema と同等)。

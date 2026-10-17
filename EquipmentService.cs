@@ -666,6 +666,124 @@ public class EquipmentService : IDisposable
         return result;
     }
 
+    // === 所持個人装備 (my_gear) に入れられる品 ===
+
+    // 個人装備の種類 (item_index.item_type)。Key は追加パネルの種類の選択肢。Types は当たる item_type (Char_Clothing は前方一致)。
+    // 武器の付属品 (WeaponAttachment) は個人用の sub_type (Magazine / IronSight / BottomAttachment / Utility) だけ
+    // (Barrel / FiringMechanism / PowerArray / Ventilation は船舶武器の部品。2026-10-17 の gamedata_cache.db の item_index で確認)
+    public static readonly IReadOnlyList<(string Key, string DisplayName, string[] Types)> GearCategories =
+    [
+        ("WeaponPersonal", "個人武器", ["WeaponPersonal"]),
+        ("WeaponAttachment", "武器の付属品", ["WeaponAttachment"]),
+        ("Char_Armor_Helmet", "ヘルメット", ["Char_Armor_Helmet"]),
+        ("Char_Armor_Torso", "胴アーマー", ["Char_Armor_Torso"]),
+        ("Char_Armor_Arms", "腕アーマー", ["Char_Armor_Arms"]),
+        ("Char_Armor_Legs", "脚アーマー", ["Char_Armor_Legs"]),
+        ("Char_Armor_Undersuit", "アンダースーツ", ["Char_Armor_Undersuit"]),
+        ("Char_Armor_Backpack", "バックパック", ["Char_Armor_Backpack", "Char_Clothing_Backpack"]),
+        ("Char_Clothing", "服", ["Char_Clothing_Torso_0", "Char_Clothing_Torso_1", "Char_Clothing_Torso_2", "Char_Clothing_Legs", "Char_Clothing_Feet", "Char_Clothing_Hands", "Char_Clothing_Hat"]),
+        ("FPS_Consumable", "消耗品", ["FPS_Consumable"]),
+        ("Gadget", "ガジェット", ["Gadget"]),
+        ("Grenade", "手榴弾", ["Grenade"]),
+    ];
+    private static readonly HashSet<string> PersonalAttachmentSubTypes = new(StringComparer.OrdinalIgnoreCase) { "Magazine", "IronSight", "BottomAttachment", "Utility" };
+
+    // item_type (と WeaponAttachment の sub_type) が所持個人装備に入れられる種類か
+    public static bool IsGearType(string? itemType, string? subType)
+    {
+        var t = itemType ?? "";
+        if (t.Equals("WeaponAttachment", StringComparison.OrdinalIgnoreCase)) return PersonalAttachmentSubTypes.Contains(subType ?? "");
+        foreach (var (_, _, types) in GearCategories)
+            foreach (var x in types)
+                if (x.Equals(t, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    // 所持個人装備の種別の欄: 種類の名前 (GearCategories の DisplayName)。武器の付属品は sub_type も添える (弾倉 / 照準器 / 下部 / ユーティリティ)
+    public static string GearTypeDisplay(string? itemType, string? subType)
+    {
+        var t = itemType ?? "";
+        string? name = null;
+        foreach (var (_, display, types) in GearCategories)
+            if (types.Any(x => x.Equals(t, StringComparison.OrdinalIgnoreCase))) { name = display; break; }
+        if (name == null) return t;
+        if (t.Equals("WeaponAttachment", StringComparison.OrdinalIgnoreCase))
+        {
+            var sub = (subType ?? "") switch
+            {
+                "Magazine" => "弾倉", "IronSight" => "照準器", "BottomAttachment" => "下部", "Utility" => "ユーティリティ", var s => s,
+            };
+            if (sub.Length > 0) name += $" ({sub})";
+        }
+        return name;
+    }
+
+    // record (EntityClassDefinition. 付き) が item_index にあり、所持個人装備に入れられる種類 (IsGearType) なら、その品 (item_index の行)。
+    // そうでなければ null。結果は覚えておく。表示名がプレースホルダ・空なら record 名 (QueryItemIndexByRecord)
+    private readonly Dictionary<string, EquipmentItem?> _ownableGearResults = new(StringComparer.OrdinalIgnoreCase);
+
+    public EquipmentItem? FindOwnableGear(string record)
+    {
+        var key = (record ?? "").Trim();
+        if (key.Length == 0) return null;
+        if (_ownableGearResults.TryGetValue(key, out var cached)) return cached;
+        EquipmentItem? result = null;
+        try
+        {
+            var item = QueryItemIndexByRecord(key);
+            if (item != null && IsGearType(item.ItemType, item.SubType)) result = item;
+        }
+        catch (SqliteException) { return null; }   // item_index を読めない (覚えず、次にもう一度引く)
+        _ownableGearResults[key] = result;
+        return result;
+    }
+
+    // 種類 (GearCategories の Key) と検索語 (名前 / メーカー / レコード名の一部) で item_index を引く (追加パネルの候補)。
+    // 表示名がプレースホルダ・空のものは除く。並びは名前
+    public List<EquipmentItem> GetGearItems(string categoryKey, string? search = null)
+    {
+        var cat = GearCategories.FirstOrDefault(c => c.Key == categoryKey);
+        if (cat.Types == null || cat.Types.Length == 0) return new List<EquipmentItem>();
+        using var cmd = _conn.CreateCommand();
+        var typeParams = new List<string>();
+        for (int i = 0; i < cat.Types.Length; i++)
+        {
+            typeParams.Add($"@t{i}");
+            cmd.Parameters.AddWithValue($"@t{i}", cat.Types[i]);
+        }
+        var conditions = new List<string> { $"item_type IN ({string.Join(", ", typeParams)})" };
+        if (categoryKey == "WeaponAttachment")
+        {
+            var subs = PersonalAttachmentSubTypes.Select((s, i) => { cmd.Parameters.AddWithValue($"@s{i}", s); return $"@s{i}"; }).ToList();
+            conditions.Add($"sub_type IN ({string.Join(", ", subs)})");
+        }
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            conditions.Add("(name LIKE @q OR COALESCE(manufacturer, '') LIKE @q OR record_name LIKE @q)");
+            cmd.Parameters.AddWithValue("@q", $"%{search}%");
+        }
+        var sizeExpr = _hasItemIndexSize ? "COALESCE(size, 0)" : "0";
+        cmd.CommandText = $"SELECT record_name, name, item_type, sub_type, manufacturer, {sizeExpr} FROM item_index WHERE {string.Join(" AND ", conditions)} ORDER BY name, record_name";
+        var items = new List<EquipmentItem>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var name = reader.IsDBNull(1) ? "" : reader.GetString(1);
+            if (IsPlaceholderName(name)) continue;
+            var rec = reader.GetString(0);
+            var indexSize = reader.IsDBNull(5) ? 0 : reader.GetInt32(5);
+            items.Add(new EquipmentItem
+            {
+                RecordName = rec, Name = name,
+                ItemType = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                SubType = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                Manufacturer = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                Size = indexSize > 0 ? indexSize : SizeFromRecordName(rec),
+            });
+        }
+        return items;
+    }
+
     // record 名 1 件を items から引く (ツールチップ / 装備インベントリ用)。
     // ship_ports.equipped_item は "POWR_AEGS_S01_Regulus_SCItem" 形式、items.record_name / item_index.record_name は
     // "EntityClassDefinition.POWR_AEGS_S01_Regulus_SCItem" 形式なので、そのまま → "EntityClassDefinition." 前置 →

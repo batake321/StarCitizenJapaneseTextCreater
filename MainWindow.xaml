@@ -1764,8 +1764,129 @@
                 <local:GearTablePanel IsShip="True"/>
             </TabItem>
 
+            <!-- ［個人装備］: 上に装備の表、下に所持している個人装備 (my_gear。所持コンポーネントと同じ作り。初めて表示したときに読む) -->
             <TabItem Header="個人装備">
-                <local:GearTablePanel IsShip="False"/>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="2*" MinHeight="160"/>
+                        <RowDefinition Height="*" MinHeight="180"/>
+                    </Grid.RowDefinitions>
+                    <local:GearTablePanel Grid.Row="0" IsShip="False"/>
+                    <GroupBox Grid.Row="1" Header="所持個人装備" Margin="8,0,8,8" Loaded="MyGearGroup_Loaded">
+                        <Grid Margin="4">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <DataGrid x:Name="dgMyGear" Grid.Row="0" AutoGenerateColumns="False" IsReadOnly="False"
+                                      CanUserAddRows="False" CanUserDeleteRows="False"
+                                      SelectionMode="Single" GridLinesVisibility="Horizontal"
+                                      AlternatingRowBackground="#FAFAFA" FontSize="12" RowHeight="26" HeadersVisibility="Column"
+                                      HorizontalScrollBarVisibility="Auto">
+                                <DataGrid.RowStyle>
+                                    <Style TargetType="DataGridRow">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Usable}" Value="False">
+                                                <Setter Property="Foreground" Value="#999"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGrid.RowStyle>
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="種別" Binding="{Binding TypeDisplay}" Width="150" IsReadOnly="True">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="名称" Binding="{Binding ItemName}" Width="260" IsReadOnly="True">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="VerticalAlignment" Value="Center"/>
+                                                <Setter Property="FontWeight" Value="Bold"/>
+                                                <EventSetter Event="MouseLeftButtonDown" Handler="GearName_MouseDown"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Size" Binding="{Binding SizeDisplay}" Width="50" IsReadOnly="True">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <!-- 数量: 書き換えられる。MyGearRow.Quantity の setter が MyGearQuantity_Changed で DB へ書き戻す (0 なら行を消すか確かめる) -->
+                                    <DataGridTextColumn Header="数量" Binding="{Binding Quantity}" Width="50" IsReadOnly="False">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <!-- 使用可: MyGearRow.Usable の setter が DB へ書き戻す -->
+                                    <DataGridCheckBoxColumn Header="使用可" Width="60" IsReadOnly="False"
+                                                            Binding="{Binding Usable, UpdateSourceTrigger=PropertyChanged}"/>
+                                    <DataGridTextColumn Header="メモ" Binding="{Binding Notes}" Width="*" IsReadOnly="True">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="VerticalAlignment" Value="Center"/>
+                                                <Setter Property="Foreground" Value="#666"/>
+                                                <Setter Property="ToolTip" Value="{Binding Notes}"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="追加日" Binding="{Binding AddedAt}" Width="130" IsReadOnly="True">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Foreground" Value="#999"/><Setter Property="FontSize" Value="11"/></Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
+
+                            <!-- 追加パネル: 種類で絞る → 検索 → 候補 → 数量・使用可・メモ -->
+                            <Grid Grid.Row="1" Margin="0,6,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="150"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="50"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="150"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="種別:" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                <ComboBox x:Name="cmbGearType" Grid.Column="1" Margin="0,0,8,0" VerticalAlignment="Center"
+                                          DisplayMemberPath="DisplayName" SelectionChanged="GearType_Changed"/>
+                                <TextBlock Text="検索:" Grid.Column="2" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                <TextBox x:Name="txtGearSearch" Grid.Column="3" Margin="0,0,8,0" VerticalAlignment="Center"
+                                         TextChanged="GearSearch_TextChanged" ToolTip="名称 / メーカー / レコード名の一部で絞り込み"/>
+                                <TextBlock Text="候補:" Grid.Column="4" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                <ComboBox x:Name="cmbGearCandidates" Grid.Column="5" Margin="0,0,8,0" VerticalAlignment="Center"
+                                          DisplayMemberPath="Display" MinWidth="200">
+                                    <ComboBox.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <VirtualizingStackPanel/>
+                                        </ItemsPanelTemplate>
+                                    </ComboBox.ItemsPanel>
+                                </ComboBox>
+                                <TextBlock Text="数量:" Grid.Column="6" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                <TextBox x:Name="txtGearQty" Grid.Column="7" Text="1" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                                <CheckBox x:Name="chkGearUsable" Grid.Column="8" Content="使用可" IsChecked="True" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBlock Text="メモ:" Grid.Column="9" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                <TextBox x:Name="txtGearNotes" Grid.Column="10" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                                <Button Content="追加" Grid.Column="11" Click="AddMyGear_Click" Padding="16,4"
+                                        FontWeight="Bold" Background="#4CAF50" Foreground="White"/>
+                            </Grid>
+
+                            <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,6,0,0">
+                                <Button Content="選択を削除" Click="DeleteMyGear_Click" Padding="12,4" Margin="0,0,8,0" Foreground="#D32F2F"/>
+                                <TextBlock x:Name="txtGearStatus" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
+                            </StackPanel>
+                        </Grid>
+                    </GroupBox>
+                </Grid>
             </TabItem>
 
             <!-- チャットタブ -->

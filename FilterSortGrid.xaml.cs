@@ -40,6 +40,9 @@ public partial class FilterSortGrid : UserControl
 {
     // 名前の列 (1 列目) のセルをダブルクリックしたとき。引数は行の元のオブジェクト (SetItems に渡したもの)
     public event Action<object>? NameDoubleClicked;
+    // どの列でも、セルをダブルクリックしたとき。引数は (列の番号, 行の元のオブジェクト, 押した位置の文字の番号 (セルの文字の先頭から。分からなければ -1))
+    // (［ゲームログ］の内容の欄の品名のダブルクリックに使う)
+    public event Action<int, object, int>? CellDoubleClicked;
 
     private sealed class GridRow
     {
@@ -68,9 +71,25 @@ public partial class FilterSortGrid : UserControl
         grid.MouseDoubleClick += (_, e) =>
         {
             var cell = FindParent<DataGridCell>(e.OriginalSource as DependencyObject);
-            if (cell == null || grid.Columns.IndexOf(cell.Column) != 0 || cell.DataContext is not GridRow row) return;
-            NameDoubleClicked?.Invoke(row.Source);
+            if (cell == null || cell.DataContext is not GridRow row) return;
+            var col = grid.Columns.IndexOf(cell.Column);
+            if (col == 0) NameDoubleClicked?.Invoke(row.Source);
+            if (CellDoubleClicked != null) CellDoubleClicked(col, row.Source, CharIndexAt(e.OriginalSource as DependencyObject, e));
         };
+    }
+
+    // ダブルクリックした位置の、セルの文字の先頭からの文字の番号。セルの TextBlock の上でなければ -1
+    private static int CharIndexAt(DependencyObject? origin, MouseButtonEventArgs e)
+    {
+        var tb = origin as TextBlock ?? FindParent<TextBlock>(origin);
+        if (tb == null) return -1;
+        try
+        {
+            var pointer = tb.GetPositionFromPoint(e.GetPosition(tb), true);
+            if (pointer == null) return -1;
+            return new System.Windows.Documents.TextRange(tb.ContentStart, pointer).Text.Length;
+        }
+        catch { return -1; }
     }
 
     // 列を決める (行・絞り込み・並べ替えは消える)
