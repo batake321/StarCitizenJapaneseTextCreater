@@ -6250,7 +6250,7 @@ public partial class MainWindow : Window
     {
         if (orePanel == null) return;
         orePanel.ImportLogRecords(trades.Select(ToOreTrade).ToList(),
-            mining.Select(m => new OreMiningRecord(m.LogTime, m.PlayerName, m.MineralClass, m.EntityId, 1, OreService.UnitPiece, null, "hand")).ToList());
+            mining.Select(m => new OreMiningRecord(m.LogTime, m.PlayerName, m.MineralClass, m.EntityId, m.Quantity, OreService.UnitPiece, null, m.Method)).ToList());
         // 採掘・売買の自動取り込みは印 (kind mined / trade) を書くので、ボタンの状態を決め直す
         InvalidateImportMarks();
     }

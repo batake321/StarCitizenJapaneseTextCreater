@@ -51,7 +51,7 @@ public sealed class CommodityTrade
     public bool Succeeded => Result.Length == 0;
 }
 
-// 採掘の記録 (mining_log) の 1 行。主キーは (log_time, mineral_class, entity_id)。method は "hand" | "ship" | "manual"
+// 採掘の記録 (mining_log) の 1 行。主キーは (log_time, mineral_class, entity_id)。method は "hand" | "ship" | "geo" (ATLS GEO の入れ物から回収) | "manual"
 public sealed class MiningLog
 {
     public string LogTime { get; set; } = "";

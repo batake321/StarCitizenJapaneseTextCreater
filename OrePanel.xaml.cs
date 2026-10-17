@@ -11,7 +11,7 @@ namespace StarCitizenJapaneseTextCreater;
 public sealed record OreTradeRecord(string LogTime, string PlayerId, string ShopId, string KioskId, string ShopName, string Kind,
     string ResourceUuid, string ResourceRecord, double? QuantityScu, string QuantityRaw, double? TotalAuec, string TransactionMode, string Result);
 
-// 同じく採掘 1 件。MineralClass は手掘りの鉱石のクラス名 (Harvestable_Mineral_1H_<X>)、EntityId は個体の ID、Method: "hand" | "ship" | "manual"。
+// 同じく採掘 1 件。MineralClass は手掘りの鉱石のクラス名 (Harvestable_Mineral_1H_<X>)、EntityId は個体の ID、Method: "hand" | "ship" | "geo" (ATLS GEO の入れ物から回収) | "manual"。
 // ResourceUuid が空なら、MineralClass から resource_types の ResourceType.<X> を引いて入れる (OreService.ResolveMineralResource)
 public sealed record OreMiningRecord(string LogTime, string PlayerName, string MineralClass, string EntityId, double Quantity, string Unit,
     int? Quality, string Method, string ResourceUuid = "", string ResourceRecord = "");
@@ -385,6 +385,7 @@ public partial class OrePanel : UserControl
     {
         "hand" => "手掘り",
         "ship" => "船",
+        "geo" => "GEO",
         "manual" => "手入力",
         _ => method,
     };

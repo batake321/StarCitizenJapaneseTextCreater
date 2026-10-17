@@ -54,7 +54,7 @@ public enum PurchaseImportState { None, Ready, Imported }
 // 所持・在庫に入れられる品 1 つ (GameLogEntry.ImportItems)。
 //   Kind: 印の種類 "purchase" (店の購入) | "mined" (採掘) | "dropped" (貨物エレベーターで降ろした)
 //   LogKey: 印の鍵 (同じ出来事なら今の Game.log と過去のログで同じになる文字。purchase は GameLogPurchase.Key、
-//           mined は 時刻・クラス名・個体 ID、dropped は 降ろした時刻・クラス名)
+//           mined は 時刻・クラス名・個体 ID (GEO から回収は個体 ID の代わりに依頼番号 "Request[n]")、dropped は 降ろした時刻・クラス名)
 //   ItemClass: ログの中の品の内部名 (店の itemName / ItemClass / Harvestable_Mineral_1H_<X>)。item_index の record は "EntityClassDefinition." + これ
 //   Quantity: 数。DisplayName: 内容の欄に出した品名 (ダブルクリックで品を見分けるのに使う)
 //   IsVehicle: 店で買った品が船・車両 (item_index の Vehicle 系か ships にある) なら true (所持船に入れる)。
@@ -106,13 +106,17 @@ public sealed class GameLogTrade
         string.Join(GameLogImportItem.KeySeparator, logTime, playerId, shopId, kioskId, kind, resourceUuid, quantityRaw);
 }
 
-// 採掘 (手掘り) の行の中身。Key は mining_log の主キーの組 (時刻・クラス名・個体 ID) で、印 (kind "mined") の鍵と同じ
+// 採掘の行の中身。Key は mining_log の主キーの組 (時刻・クラス名・個体 ID) で、印 (kind "mined") の鍵と同じ。
+// 手掘り (Method "hand") は 1 個ずつで EntityId は個体 ID。ATLS GEO の入れ物から回収 (Method "geo") は個体 ID が無いので
+// EntityId は依頼番号 ("Request[n]")、Quantity は回収した数
 public sealed class GameLogMining
 {
     public string LogTime { get; init; } = "";
     public string PlayerName { get; init; } = "";
     public string MineralClass { get; init; } = "";
     public string EntityId { get; init; } = "";
+    public int Quantity { get; init; } = 1;
+    public string Method { get; init; } = "hand";
 
     public string Key => MakeKey(LogTime, MineralClass, EntityId);
 
@@ -383,6 +387,15 @@ public sealed class GameLogParser
     // 直前に確定した採掘の行 (直後の Update Container Items で所持数を添える)
     private (GameLogEntry Entry, string Class)? _lastMined;
 
+    // ─── 入れ物の間の移動 (ATLS GEO の入れ物からの回収・SCU コンテナへの出し入れ) ───
+    // 入れ物の ID → クラス名 (このファイルの中で分かったもの)。<AttachmentReceived> の Attachment[Carryable_…_ID, Carryable_…, ID] と
+    // <Inventory Token Flow> の Inventory[クラス_ID, ID] から覚える。クラス名に inventory_argoGeo を含めば GEO の入れ物、
+    // InventoryContainer_<n>SCU を含めば n SCU コンテナ。それ以外 (バックパックなど) は所持品
+    private readonly Dictionary<string, string> _containerClasses = new(StringComparer.Ordinal);
+    // 結果を待っている鉱石の移動の依頼 (Type[Move] で ItemClass が Harvestable_Mineral_1H_*)。依頼番号 → (時刻, クラス名, 元の入れ物の ID, 先の入れ物の ID, 数)。
+    // 数は同じ依頼の <Inventory Mgmt Request Queued> の Source[…] amount[n] から (まだなら 0)。<Player Inventory Request Complete> の Result[Succeed] で確定する
+    private readonly Dictionary<int, (DateTime Time, string Class, string Source, string Target, int Amount)> _pendingMoves = new();
+
     // 結果を待っている店の購入 (古い順。結果はいちばん新しいものに結び付ける。行そのものは Entries にある)
     private readonly List<GameLogEntry> _pendingPurchases = new();
     // 結果を待っている商品の取引 (type: Buying / Selling → 行)
@@ -522,6 +535,15 @@ public sealed class GameLogParser
         "<UnstowPendingEntities>",   // 所持品から床・台に出した個体 (Unstow Request[n] … finalized spawn of 'クラス_ID')
     ];
 
+    // 入れ物の間の移動の行 (OnInventoryMove)。OnInventory とは分けて扱う (手掘りの Store の直後の「所持 N」の判定 (_lastMined) に触れないため。
+    // Queued の行は Type[Store] … Item[Harvestable_…_ID] も含むので、OnInventory の MineralStoreRegex に当てない)
+    private static readonly string[] InventoryMoveTags =
+    [
+        "<Inventory Mgmt Request Queued>",        // 依頼の中身 (Source[クラス] amount[n])
+        "<Player Inventory Request Complete>",    // 依頼の結果 (Result[Succeed])
+        "<Inventory Token Flow>",                 // 入れ物の ID → クラス名 (Inventory[クラス_ID, ID])
+    ];
+
     // 貨物エレベーターの行
     private static readonly string[] FreightTags =
     [
@@ -562,6 +584,7 @@ public sealed class GameLogParser
         "<CWallet::RmMulticastOnProcessClaimCallback> Claim Complete",           // 同上の完了
         .. VehicleLearnTags,
         .. InventoryTags,
+        .. InventoryMoveTags,
         .. FreightTags,
     ];
 
@@ -689,6 +712,21 @@ public sealed class GameLogParser
     // しまった後の個数: Player '名前' [id] adding 1 stack(s) to N stack(s) of Entity Class[Harvestable_Mineral_1H_鉱石] Rank[…]
     private static readonly Regex ContainerAddRegex = new(@"<Update Container Items Add New Item> .*?adding \d+ stack\(s\) to (\d+) stack\(s\) of Entity Class\[([^\]]+)\]", RegexOptions.Compiled);
     private const string MineralClassPrefix = "Harvestable_Mineral_1H_";
+
+    // ─── 入れ物の間の移動の行 ───
+    // 入れ物を手に持った: <AttachmentReceived> Player[名前] Attachment[Carryable_2H_FL_05x05x05_inventory_argoGeo_ID, Carryable_2H_FL_05x05x05_inventory_argoGeo, ID] …
+    private static readonly Regex CarryableAttachedRegex = new(@"<AttachmentReceived> .*?Attachment\[(Carryable_[A-Za-z0-9_]+?)_(\d{6,}), \1, \2\]", RegexOptions.Compiled);
+    // 入れ物を開いた: <Inventory Token Flow> Requesting access token for User[名前, id] on Inventory[Carryable_TBO_InventoryContainer_2SCU_ID, ID]
+    private static readonly Regex TokenFlowInventoryRegex = new(@"<Inventory Token Flow> .*?on Inventory\[([A-Za-z][A-Za-z0-9_]*?)_(\d{6,}), \2\]", RegexOptions.Compiled);
+    // 鉱石の移動の依頼: <Add Inventory Management Move> New Request[n] Player[名前] Type[Move] SourceInventory[ID:Container:0] TargetInventory[ID:Container:0] ItemClass[Harvestable_Mineral_1H_鉱石] …
+    private static readonly Regex MineralMoveRegex = new(@"<Add Inventory Management Move> New Request\[(\d+)\] Player\[[^\]]*\] Type\[Move\] SourceInventory\[(\d+):Container:\d+\] TargetInventory\[(\d+):Container:\d+\] ItemClass\[(Harvestable_Mineral_1H_[A-Za-z0-9_]+)\]", RegexOptions.Compiled);
+    // 同じ依頼の中身: <Inventory Mgmt Request Queued> Queued Request[n] Type[Move] for '名前' [id] Source Inventory[…] Target Inventory[…]. Source[Harvestable_Mineral_1H_鉱石] amount[54] rank[…]. …
+    private static readonly Regex MoveQueuedRegex = new(@"<Inventory Mgmt Request Queued> Queued Request\[(\d+)\] Type\[Move\] .*?\. Source\[[^\]]*\] amount\[(\d+)\]", RegexOptions.Compiled);
+    // 依頼の結果: <Player Inventory Request Complete> Request[n] for '名前' [id] Type[Move] Result[Succeed] …
+    private static readonly Regex MoveCompleteRegex = new(@"<Player Inventory Request Complete> Request\[(\d+)\] .*?Type\[Move\] Result\[([^\]]*)\]", RegexOptions.Compiled);
+    // n SCU コンテナのクラス名: …InventoryContainer_2SCU…
+    private static readonly Regex ScuContainerRegex = new(@"InventoryContainer_(\d+)SCU", RegexOptions.Compiled);
+    private const string GeoContainerMark = "inventory_argoGeo";
 
     // 1 行を渡す (行末の \r は付いていてもよい)
     public void FeedLine(string line)
@@ -892,6 +930,11 @@ public sealed class GameLogParser
             if (!_pendingClaims.Remove(m.Groups[1].Value + "\u001f" + m.Groups[3].Value, out var claim)) return;
             claim.Content += $" → 完了 (result {m.Groups[2].Value})";
             Changed = true;
+            return;
+        }
+        if (HasAnyTag(line, InventoryMoveTags))
+        {
+            OnInventoryMove(time, line);
             return;
         }
         if (HasAnyTag(line, InventoryTags))
@@ -1277,6 +1320,19 @@ public sealed class GameLogParser
         var last = _lastMined;
         _lastMined = null;
         Match m;
+        if ((m = CarryableAttachedRegex.Match(line)).Success)
+        {
+            // 入れ物 (GEO の入れ物など) を手に持った: ID → クラス名を覚えるだけ (鉱石ではないので採掘の候補にはならない)
+            _containerClasses[m.Groups[2].Value] = m.Groups[1].Value;
+            return;
+        }
+        if ((m = MineralMoveRegex.Match(line)).Success)
+        {
+            // 鉱石の移動の依頼: 数 (Queued) と結果 (Complete) を待つ
+            if (int.TryParse(m.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var req))
+                _pendingMoves[req] = (time, m.Groups[4].Value, m.Groups[2].Value, m.Groups[3].Value, 0);
+            return;
+        }
         if ((m = UnstowRegex.Match(line)).Success)
         {
             // 床・台に出た個体 (取り出し・台に置いた品)。同じ個体を右手に持っても採掘の候補にしない。台に置いた品 (Drop の依頼) なら個体 ID を入れる
@@ -1339,6 +1395,66 @@ public sealed class GameLogParser
             lm.Entry.Content += $"（所持 {to + 1}）";
             Changed = true;
         }
+    }
+
+    // ─── 入れ物の間の移動 (ATLS GEO の入れ物からの回収・SCU コンテナへの出し入れ) ───
+    // 依頼の中身 (Queued) で数を入れ、結果 (Complete) の Result[Succeed] で行にする。入れ物の ID → クラス名は <Inventory Token Flow> からも覚える。
+    //   元が GEO の入れ物 → 「採掘」(GEO から回収。mining_log (method geo) と印 (kind mined、数 n) を付ける。在庫 +n は手掘りと同じ経路)
+    //   元か先が n SCU コンテナ → 「移動」(在庫は変えない)
+    //   それ以外 (所持品の中の移動) → 出さない
+    private void OnInventoryMove(DateTime time, string line)
+    {
+        Match m;
+        if ((m = TokenFlowInventoryRegex.Match(line)).Success)
+        {
+            _containerClasses[m.Groups[2].Value] = m.Groups[1].Value;
+            return;
+        }
+        if ((m = MoveQueuedRegex.Match(line)).Success)
+        {
+            if (!int.TryParse(m.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var req)) return;
+            if (!_pendingMoves.TryGetValue(req, out var p)) return;
+            if (int.TryParse(m.Groups[2].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var amount))
+                _pendingMoves[req] = (p.Time, p.Class, p.Source, p.Target, amount);
+            return;
+        }
+        if ((m = MoveCompleteRegex.Match(line)).Success)
+        {
+            if (!int.TryParse(m.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var req)) return;
+            if (!_pendingMoves.Remove(req, out var p)) return;
+            if (m.Groups[2].Value != "Succeed" || p.Amount <= 0) return;
+            var name = MineralName(p.Class);
+            if (IsGeoContainer(p.Source))
+            {
+                var mining = new GameLogMining
+                {
+                    LogTime = LogTimeText(p.Time), PlayerName = _playerName ?? "", MineralClass = p.Class, EntityId = $"Request[{req}]",
+                    Quantity = p.Amount, Method = "geo",
+                };
+                Add(p.Time, "採掘", $"{name} ×{p.Amount}（GEO から回収）", mining: mining,
+                    importItems: [new GameLogImportItem { Kind = GameLogImportItem.KindMined, LogKey = mining.Key, ItemClass = p.Class, Quantity = p.Amount, DisplayName = name }]);
+                return;
+            }
+            var from = ScuContainerSize(p.Source);
+            var to = ScuContainerSize(p.Target);
+            if (from == null && to == null) return;
+            var text = $"{name} ×{p.Amount} を";
+            if (from != null) text += $" {from} SCU コンテナから";
+            if (to != null) text += $" {to} SCU コンテナへ";
+            Add(p.Time, "移動", text);
+        }
+    }
+
+    // 入れ物の ID が GEO の入れ物 (クラス名に inventory_argoGeo を含む) か
+    private bool IsGeoContainer(string id) =>
+        _containerClasses.TryGetValue(id, out var cls) && cls.Contains(GeoContainerMark, StringComparison.Ordinal);
+
+    // 入れ物の ID が n SCU コンテナ (クラス名に InventoryContainer_<n>SCU を含む) なら n の文字、そうでなければ null
+    private string? ScuContainerSize(string id)
+    {
+        if (!_containerClasses.TryGetValue(id, out var cls)) return null;
+        var m = ScuContainerRegex.Match(cls);
+        return m.Success ? m.Groups[1].Value : null;
     }
 
     // 鉱石のクラス名 Harvestable_Mineral_1H_<X> → 名前。翻訳 DB の items_commodities_<x> (無ければ <X> のまま)
