@@ -1517,8 +1517,9 @@ public class HangarService
         return list;
     }
 
-    // 行を残す (INSERT OR IGNORE。1 つのトランザクション)。鍵 (time_utc, kind, content) が既にある行は入れない。入れた行数を返す
-    public int SaveGameLogEntries(IReadOnlyList<GameLogEntry> entries, string machine)
+    // 行を残す (INSERT OR IGNORE。1 つのトランザクション)。鍵 (time_utc, kind, content) が既にある行は入れない。入れた行数を返す。
+    // entries は行の写し (GameLogStore.ToRow。裏のスレッドから呼べる)
+    public int SaveGameLogEntries(IReadOnlyList<GameLogStore.Row> entries, string machine)
     {
         if (_dbPath == null || entries.Count == 0) return 0;
         using var db = new SqliteConnection($"Data Source={_dbPath}");
@@ -1540,13 +1541,13 @@ public class HangarService
         var inserted = 0;
         foreach (var e in entries)
         {
-            pT.Value = GameLogStore.TimeText(e.TimeUtc);
+            pT.Value = e.TimeText;
             pK.Value = e.Kind;
             pC.Value = e.Content;
             pA.Value = e.Amount is { } a ? a : DBNull.Value;
             pSc.Value = (object?)e.ShipClass ?? DBNull.Value;
             pSn.Value = (object?)e.ShipName ?? DBNull.Value;
-            pP.Value = GameLogStore.ToJson(e);
+            pP.Value = e.PayloadJson;
             inserted += cmd.ExecuteNonQuery();
         }
         tx.Commit();

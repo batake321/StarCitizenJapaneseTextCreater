@@ -45,6 +45,11 @@ public static class GameLogStore
 
     public static string ToJson(GameLogEntry e) => JsonSerializer.Serialize(e, JsonOptions);
 
+    // game_log_entries に入れる 1 行の写し (列の値と payload_json まで作ったもの)。UI のスレッドで GameLogEntry から作り (ToRow)、裏のスレッドで DB に入れる
+    public sealed record Row(string TimeText, string Kind, string Content, double? Amount, string? ShipClass, string? ShipName, string PayloadJson);
+
+    public static Row ToRow(GameLogEntry e) => new(TimeText(e.TimeUtc), e.Kind, e.Content, e.Amount, e.ShipClass, e.ShipName, ToJson(e));
+
     // payload_json → 行。Source は保存した PC の名前にする。読めなければ null
     public static GameLogEntry? FromJson(string json, string machine)
     {

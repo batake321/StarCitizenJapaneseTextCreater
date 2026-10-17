@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
@@ -22,16 +23,19 @@ namespace StarCitizenJapaneseTextCreater;
 //   自分の trade_cache.db と translations.db の quick_check が ok でなければ取り込まない (gamedata_cache.db は quick_check せず、knowledge の INSERT が失敗したらその相手を失敗にする)。trade_cache.db と translations.db は VACUUM INTO で控えを作り、失敗したら戻す
 //   (gamedata_cache.db は knowledge の 1 トランザクションだけなので控えは作らない)。
 //   取り込んだ後、翻訳の個人行か用語集が 1 行でも変わっていたときだけ、品目名・日本語名を今の訳に合わせる (GameDataExtractor.RefreshItemNamesFromTranslations)。
-// 状態: 作業フォルダの sync_state.json (lastExportUtc と、相手の PC ごとの lastImportedUtc)。
-// 書き出しと取り込みは同時に走らせない (Gate)
+//   両方で変更があるとき (相手の json の imported[自分] が自分の lastExportUtc より古い = 相手がこちらの最新の書き出しを取り込まずに書き出した。
+//   自分が一度も書き出していなければ見ない) は自動では取り込まない (Candidate.BothChanged)。手動 (force) のときだけ取り込む
+// 状態: 作業フォルダの sync_state.json (lastExportUtc、lastExportHash (最後に書き出した個人データの内容のハッシュ)、相手の PC ごとの lastImportedUtc)。
+// 書き出しは個人データの内容のハッシュ (ContentHash) が前回の書き出しと同じなら行わない (ExportResult.Unchanged。force なら常に書き出す)
+// 書き出しと取り込みは同時に走らせない (Gate。［ゲームログ］の行の保存と通常のインポートも同じ門を取る)
 internal static class SyncService
 {
     internal const string StateFileName = "sync_state.json";
     private const string ZipSuffix = "_sync.zip";
     private const string JsonSuffix = "_sync.json";
 
-    // 書き出しと取り込みを同時に走らせないための門
-    private static readonly SemaphoreSlim Gate = new(1, 1);
+    // 書き出し・取り込み・［ゲームログ］の行の保存 (MainWindow.SaveGameLogEntriesAsync)・通常のインポート (ImportDb_Click) を同時に走らせないための門
+    internal static readonly SemaphoreSlim Gate = new(1, 1);
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
@@ -41,19 +45,23 @@ internal static class SyncService
         public string Machine { get; set; } = "";
         public string ExportedAtUtc { get; set; } = "";   // "o" 形式
         public string AppVersion { get; set; } = "";
+        // 相手の PC 名 → その相手の書き出しのうち取り込み済みの最新の exportedAtUtc ("o" 形式)。古い版の書き出しには無い (null)
+        public Dictionary<string, string>? Imported { get; set; }
     }
 
     // 作業フォルダの sync_state.json
     internal sealed class State
     {
         public string? LastExportUtc { get; set; }
+        public string? LastExportHash { get; set; }
         public Dictionary<string, string> LastImportedUtc { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
-    // 取り込みの候補 (共有フォルダの、自分以外の新しい書き出し)
-    internal sealed record Candidate(string Machine, DateTime ExportedAtUtc, string JsonPath, string ZipPath);
+    // 取り込みの候補 (共有フォルダの、自分以外の新しい書き出し)。BothChanged: 相手がこちらの最新の書き出しを取り込まずに書き出したもの (自動では取り込まない)
+    internal sealed record Candidate(string Machine, DateTime ExportedAtUtc, string JsonPath, string ZipPath, bool BothChanged);
 
-    internal sealed record ExportResult(string ZipPath, long ZipBytes, DateTime ExportedAtUtc, Dictionary<string, int> RowCounts);
+    // Unchanged: 内容が前回の書き出しと同じだったので書き出さなかった (ZipPath は前回のパス、ZipBytes は 0)
+    internal sealed record ExportResult(string ZipPath, long ZipBytes, DateTime ExportedAtUtc, Dictionary<string, int> RowCounts, bool Unchanged = false);
 
     internal sealed record ImportedPeer(string Machine, DateTime ExportedAtUtc, Dictionary<string, int> RowCounts, int TranslationsChanged, int GlossaryChanged);
 
@@ -61,6 +69,8 @@ internal static class SyncService
     {
         public List<ImportedPeer> Imported { get; } = new();
         public List<string> Errors { get; } = new();
+        // 両方で変更があるので自動では取り込まなかった相手 (force でないとき)
+        public List<string> SkippedBothChanged { get; } = new();
         // 取り込みで変わった (足した + 書き換えた) 翻訳の個人行と用語集の行の合計 (どちらも 0 なら日本語名の付け直しをしない)
         public int TranslationsChanged { get; set; }
         public int GlossaryChanged { get; set; }
@@ -123,10 +133,11 @@ internal static class SyncService
 
     // ===== 書き出し =====
 
-    public static Task<ExportResult> ExportAsync(string syncFolder, string workDir, string machine, string appVersion, Action<string>? log = null) =>
-        Task.Run(() => Export(syncFolder, workDir, machine, appVersion, log));
+    // force: 内容が前回の書き出しと同じでも書き出す (手動のボタン)
+    public static Task<ExportResult> ExportAsync(string syncFolder, string workDir, string machine, string appVersion, Action<string>? log = null, bool force = false) =>
+        Task.Run(() => Export(syncFolder, workDir, machine, appVersion, log, force));
 
-    public static ExportResult Export(string syncFolder, string workDir, string machine, string appVersion, Action<string>? log = null)
+    public static ExportResult Export(string syncFolder, string workDir, string machine, string appVersion, Action<string>? log = null, bool force = false)
     {
         if (string.IsNullOrWhiteSpace(syncFolder)) throw new InvalidOperationException("共有フォルダが設定されていません");
         if (!Directory.Exists(syncFolder)) throw new DirectoryNotFoundException($"共有フォルダが見つかりません: {syncFolder}");
@@ -158,20 +169,32 @@ internal static class SyncService
                 SqliteConnection.ClearAllPools();
                 if (Directory.GetFiles(tempDir).Length == 0) throw new InvalidOperationException("作業フォルダに書き出す DB がありません");
 
+                // 個人データの内容のハッシュ。前回の書き出しと同じなら書き出さない (取り込むたびに書き出して 2 台で同じ内容が往復しないように)
+                var hash = ContentHash(tempDir);
+                SqliteConnection.ClearAllPools();
+                var state = LoadState(workDir, log);
+                var zipFinal = Path.Combine(syncFolder, ZipFileName(machine));
+                if (!force && state.LastExportHash != null && string.Equals(state.LastExportHash, hash, StringComparison.Ordinal))
+                    return new ExportResult(zipFinal, 0, ParseUtc(state.LastExportUtc) ?? exportedAt, counts, Unchanged: true);
+
                 ZipFile.CreateFromDirectory(tempDir, tempZip, CompressionLevel.Optimal, false);
 
                 // 一時名に写してから置き換える (読んでいる途中の相手に欠けたファイルを見せないため)。json は zip の後
-                var zipFinal = Path.Combine(syncFolder, ZipFileName(machine));
                 var zipTmp = zipFinal + ".tmp";
                 File.Copy(tempZip, zipTmp, overwrite: true);
                 File.Move(zipTmp, zipFinal, overwrite: true);
                 var jsonFinal = Path.Combine(syncFolder, JsonFileName(machine));
                 var jsonTmp = jsonFinal + ".tmp";
-                File.WriteAllText(jsonTmp, JsonSerializer.Serialize(new Manifest { Machine = machine, ExportedAtUtc = Fmt(exportedAt), AppVersion = appVersion }, JsonOptions));
+                var manifest = new Manifest
+                {
+                    Machine = machine, ExportedAtUtc = Fmt(exportedAt), AppVersion = appVersion,
+                    Imported = new Dictionary<string, string>(state.LastImportedUtc, StringComparer.OrdinalIgnoreCase),
+                };
+                File.WriteAllText(jsonTmp, JsonSerializer.Serialize(manifest, JsonOptions));
                 File.Move(jsonTmp, jsonFinal, overwrite: true);
 
-                var state = LoadState(workDir, log);
                 state.LastExportUtc = Fmt(exportedAt);
+                state.LastExportHash = hash;
                 SaveState(workDir, state);
                 return new ExportResult(zipFinal, new FileInfo(zipFinal).Length, exportedAt, counts);
             }
@@ -209,6 +232,66 @@ internal static class SyncService
         DatabaseBackupService.Exec(conn, null, "VACUUM");
     }
 
+    // 書き出す個人データ (tempDir の DB = 書き出す表だけになった写し) の内容のハッシュ (SHA-256 の 16 進)。
+    // DB をファイル名順、表を名前順に、各表の全行を全列の値の順 (主キーの列を先に) に並べ、列の値を種類つきの文字に正規化して連結したものをハッシュにする。
+    // rowid は使わない (取り込みの DELETE → INSERT で rowid が変わっても内容が同じなら同じハッシュになるように)
+    internal static string ContentHash(string tempDir)
+    {
+        using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        void Feed(string s) => sha.AppendData(System.Text.Encoding.UTF8.GetBytes(s));
+        foreach (var dbPath in Directory.GetFiles(tempDir, "*.db").OrderBy(p => Path.GetFileName(p), StringComparer.Ordinal))
+        {
+            Feed("\u001d" + Path.GetFileName(dbPath) + "\n");
+            using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Pooling=False");
+            conn.Open();
+            var tables = new List<string>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name";
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) tables.Add(r.GetString(0));
+            }
+            foreach (var table in tables)
+            {
+                // 列 (主キーの列を pk の順で先に、残りは表の定義の順)
+                var cols = new List<(string Name, int Pk, int Cid)>();
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = $"PRAGMA table_info({DatabaseBackupService.Q(table)})";
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read()) cols.Add((r.GetString(1), r.GetInt32(5), r.GetInt32(0)));
+                }
+                if (cols.Count == 0) continue;
+                var ordered = cols.Where(c => c.Pk > 0).OrderBy(c => c.Pk).Concat(cols.Where(c => c.Pk == 0).OrderBy(c => c.Cid)).Select(c => DatabaseBackupService.Q(c.Name)).ToList();
+                var colList = string.Join(", ", ordered);
+                var orderBy = string.Join(", ", ordered.Select(c => c + " COLLATE BINARY"));
+                Feed("\u001c" + table + "\n");
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = $"SELECT {colList} FROM {DatabaseBackupService.Q(table)} ORDER BY {orderBy}";
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read())
+                    {
+                        for (int i = 0; i < r.FieldCount; i++)
+                        {
+                            if (i > 0) Feed("\u001f");
+                            if (r.IsDBNull(i)) { Feed("N"); continue; }
+                            switch (r.GetFieldType(i))
+                            {
+                                case var t when t == typeof(long): Feed("I" + r.GetInt64(i).ToString(CultureInfo.InvariantCulture)); break;
+                                case var t when t == typeof(double): Feed("R" + r.GetDouble(i).ToString("R", CultureInfo.InvariantCulture)); break;
+                                case var t when t == typeof(byte[]): Feed("B" + Convert.ToHexString((byte[])r.GetValue(i))); break;
+                                default: Feed("T" + r.GetString(i)); break;
+                            }
+                        }
+                        Feed("\u001e");
+                    }
+                }
+            }
+        }
+        return Convert.ToHexString(sha.GetHashAndReset());
+    }
+
     // 空の DB (destPath) を作り、元の DB (srcPath) を ATTACH して、表ごとに元と同じ DDL で作って行を写す (where が null なら全行)
     private static void ExportPersonalTables(string srcPath, string destPath, Dictionary<string, int> counts, params (string Table, string? Where)[] specs)
     {
@@ -239,7 +322,9 @@ internal static class SyncService
 
     // ===== 取り込み =====
 
-    // 共有フォルダの、自分以外の新しい書き出し (古い順)。読めない json・zip の無いものは log に残して飛ばす
+    // 共有フォルダの、自分以外の新しい書き出し (古い順)。読めない json・zip の無いものは log に残して飛ばす。
+    // 両方で変更があるもの (相手の json の imported[自分] が自分の lastExportUtc より古い。自分が一度も書き出していなければ見ない) は BothChanged = true で返す
+    // (自動の取り込みでは飛ばし、手動では取り込む。どちらにするかは呼ぶ側)
     public static List<Candidate> ListCandidates(string syncFolder, string workDir, string machine, Action<string>? log = null)
     {
         var result = new List<Candidate>();
@@ -262,18 +347,29 @@ internal static class SyncService
             if (state.LastImportedUtc.TryGetValue(m.Machine, out var lastStr) && ParseUtc(lastStr) is { } last && exportedAt.Value <= last) continue;
             var zipPath = Path.Combine(syncFolder, fileName[..^JsonSuffix.Length] + ZipSuffix);
             if (!File.Exists(zipPath)) { log?.Invoke($"{fileName} の横に {Path.GetFileName(zipPath)} が無いので飛ばします"); continue; }
-            result.Add(new Candidate(m.Machine, exportedAt.Value, jsonPath, zipPath));
+            // 両方で変更があるか: 自分が書き出したことがあり、相手がその最新の書き出しを取り込んでいない (imported に自分が無い・古い版で imported 自体が無いのも「取り込んでいない」)
+            var bothChanged = false;
+            if (lastExport != DateTime.MinValue)
+            {
+                DateTime? importedMine = null;
+                if (m.Imported != null)
+                    foreach (var kv in m.Imported)
+                        if (string.Equals(kv.Key, machine, StringComparison.OrdinalIgnoreCase)) { importedMine = ParseUtc(kv.Value); break; }
+                bothChanged = (importedMine ?? DateTime.MinValue) < lastExport;
+            }
+            result.Add(new Candidate(m.Machine, exportedAt.Value, jsonPath, zipPath, bothChanged));
         }
         return result.OrderBy(c => c.ExportedAtUtc).ToList();
     }
 
+    // force: 両方で変更がある相手 (Candidate.BothChanged) も取り込む (手動のボタン)
     public static Task<ImportResult> ImportAsync(string syncFolder, string workDir, string machine, Action<string>? log = null,
-        Action<string, string, Action<string>?>? refreshItemNames = null) =>
-        Task.Run(() => Import(syncFolder, workDir, machine, log, refreshItemNames));
+        Action<string, string, Action<string>?>? refreshItemNames = null, bool force = false) =>
+        Task.Run(() => Import(syncFolder, workDir, machine, log, refreshItemNames, force));
 
     // refreshItemNames: 翻訳の個人行が変わったときに呼ぶ (gamedata_cache.db のパス, 作業フォルダ, log)。null なら GameDataExtractor.RefreshItemNamesFromTranslations
     public static ImportResult Import(string syncFolder, string workDir, string machine, Action<string>? log = null,
-        Action<string, string, Action<string>?>? refreshItemNames = null)
+        Action<string, string, Action<string>?>? refreshItemNames = null, bool force = false)
     {
         if (string.IsNullOrWhiteSpace(syncFolder)) throw new InvalidOperationException("共有フォルダが設定されていません");
         if (!Directory.Exists(syncFolder)) throw new DirectoryNotFoundException($"共有フォルダが見つかりません: {syncFolder}");
@@ -282,6 +378,11 @@ internal static class SyncService
         try
         {
             var candidates = ListCandidates(syncFolder, workDir, machine, log);
+            if (!force)
+            {
+                foreach (var c in candidates.Where(c => c.BothChanged)) result.SkippedBothChanged.Add(c.Machine);
+                candidates = candidates.Where(c => !c.BothChanged).ToList();
+            }
             if (candidates.Count == 0) return result;
 
             var transPath = Path.Combine(workDir, "translations.db");
@@ -418,6 +519,10 @@ internal static class SyncService
                 var cols = string.Join(", ", DatabaseBackupService.CommonColumns(conn, tx, table).Select(DatabaseBackupService.Q));
                 DatabaseBackupService.Exec(conn, tx, $"DELETE FROM main.{q}");
                 counts[table] = DatabaseBackupService.Exec(conn, tx, $"INSERT INTO main.{q} ({cols}) SELECT {cols} FROM src.{q}");
+                // my_ships を相手で置き換えたら、所持船の装備 (ship_loadouts の "my|{my_ships.id}" の行) も自分のを消して相手のにする
+                // (相手の my_ships の id と対応するため。ship_loadouts の相手の行はこの後の INSERT OR REPLACE で入る。"my|" 以外のキーは触らない)
+                if (table == "my_ships" && DatabaseBackupService.Scalar(conn, tx, "SELECT COUNT(*) FROM main.sqlite_master WHERE type = 'table' AND name = 'ship_loadouts'") > 0)
+                    counts["ship_loadouts (my| 削除)"] = DatabaseBackupService.Exec(conn, tx, "DELETE FROM main.ship_loadouts WHERE substr(ship_key, 1, 3) = 'my|'");
             }
             else if (table == "hangar_meta")
             {

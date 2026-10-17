@@ -51,10 +51,11 @@ public partial class GameLogPanel : UserControl
 
     // trade_cache.db に残した行 (game_log_entries。GameLogStore)。
     //   StoredLoader: 残してある行の全部 (保存した PC の名前つき) と、読めなかった行の数 (MainWindow → HangarService。裏のスレッドで呼ぶ)
-    //   StoredSaver:  手元の確定済みの行を残す (INSERT OR IGNORE。入れた行数を返す。MainWindow → HangarService。UI のスレッドから呼ぶ)
+    //   StoredSaver:  手元の確定済みの行の写し (GameLogStore.Row) を残す (INSERT OR IGNORE。入れた行数を返す。MainWindow → HangarService。
+    //                 UI のスレッドから呼び、保存は裏のスレッドで行われる (Task))
     // 表には自分以外の PC の行を手元の行と合わせて出す (手元の Game.log が無ければ自分の行も)。同じ鍵は手元の行を優先 (GameLogStore.Merge)
     public Func<(List<StoredGameLogEntry> Rows, int Broken)>? StoredLoader { get; set; }
-    public Func<IReadOnlyList<GameLogEntry>, int>? StoredSaver { get; set; }
+    public Func<IReadOnlyList<GameLogStore.Row>, Task<int>>? StoredSaver { get; set; }
     private static readonly string OwnMachine = Environment.MachineName;
     private StoredGameLogEntry[] _storedRows = [];   // UI のスレッドだけで使う
     private int _storedShown;                         // 表に合わせて出している DB の行の数 (状態の表示用)
@@ -63,6 +64,10 @@ public partial class GameLogPanel : UserControl
     // 残した行の鍵 (GameLogStore.Key。同じ行は起動のあいだ 1 回だけ渡す) と、まだ確定していない手元の行 (追い読みのたびに確定したものから残す)
     private readonly HashSet<string> _savedKeys = new(StringComparer.Ordinal);
     private List<GameLogEntry> _unsettled = new();
+    // 保存中・保存待ちの行 (SaveToStore。保存は裏で 1 回ずつ行い、保存中に頼まれた分は終わってから次に回す)。_savingKeys はその鍵 (二重に渡さないため)
+    private readonly HashSet<string> _savingKeys = new(StringComparer.Ordinal);
+    private readonly List<GameLogEntry> _storePending = new();
+    private bool _storeSaving;
 
     // 過去のログ (裏のスレッドで足す。_backupLock で守る)
     private readonly object _backupLock = new();
@@ -410,9 +415,15 @@ public partial class GameLogPanel : UserControl
         {
             var e = local[i];
             if (!GameLogStore.IsSettled(e, e.Source == CurrentSource, now)) _unsettled.Add(e);
-            else if (!_savedKeys.Contains(GameLogStore.Key(e))) list.Add(e);
+            else if (!IsSavedOrSaving(e)) list.Add(e);
         }
         SaveToStore(list);
+    }
+
+    private bool IsSavedOrSaving(GameLogEntry e)
+    {
+        var key = GameLogStore.Key(e);
+        return _savedKeys.Contains(key) || _savingKeys.Contains(key);
     }
 
     // 表を作り直さなかった追い読みの回でも、時間が経って確定した行を残す
@@ -425,7 +436,7 @@ public partial class GameLogPanel : UserControl
         foreach (var e in _unsettled)
         {
             if (!GameLogStore.IsSettled(e, e.Source == CurrentSource, now)) rest.Add(e);
-            else if (!_savedKeys.Contains(GameLogStore.Key(e))) list.Add(e);
+            else if (!IsSavedOrSaving(e)) list.Add(e);
         }
         if (list.Count == 0 && rest.Count == _unsettled.Count) return;
         _unsettled = rest;
@@ -433,19 +444,46 @@ public partial class GameLogPanel : UserControl
     }
 
     // 行を DB に残す (StoredSaver。INSERT OR IGNORE なので既にある行は入らない)。残した鍵は覚えて、同じ行は起動のあいだ 1 回だけ渡す。
+    // 行の写し (GameLogStore.ToRow。payload_json まで) を UI のスレッドで取り、保存は裏 (StoredSaver の Task) で行う。
+    // 保存中にもう一度頼まれたら重ねず、終わってから次の分を保存する。残した鍵は保存が終わってから UI のスレッドで _savedKeys に入れる。
     // 失敗したら「残した」にせず、次の表の作り直しでもう一度渡す
     private void SaveToStore(List<GameLogEntry> list)
     {
         if (list.Count == 0 || StoredSaver == null) return;
+        foreach (var e in list) _savingKeys.Add(GameLogStore.Key(e));
+        _storePending.AddRange(list);
+        if (_storeSaving) return;
+        _ = SaveStoreLoopAsync();
+    }
+
+    private async Task SaveStoreLoopAsync()
+    {
+        _storeSaving = true;
         try
         {
-            StoredSaver(list);
-            foreach (var e in list) _savedKeys.Add(GameLogStore.Key(e));
+            while (_storePending.Count > 0 && StoredSaver is { } saver)
+            {
+                var batch = _storePending.ToList();
+                _storePending.Clear();
+                var rows = batch.Select(GameLogStore.ToRow).ToList();   // 写し (UI のスレッドで)
+                try
+                {
+                    await saver(rows);
+                    foreach (var e in batch)
+                    {
+                        var key = GameLogStore.Key(e);
+                        _savingKeys.Remove(key);
+                        _savedKeys.Add(key);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    foreach (var e in batch) _savingKeys.Remove(GameLogStore.Key(e));
+                    ChatService.LogExternal($"[ゲームログ] 行を trade_cache.db に残せませんでした (次の表の作り直しでもう一度残します): {ex.Message}");
+                }
+            }
         }
-        catch (Exception ex)
-        {
-            ChatService.LogExternal($"[ゲームログ] 行を trade_cache.db に残せませんでした (次の表の作り直しでもう一度残します): {ex.Message}");
-        }
+        finally { _storeSaving = false; }
     }
 
     // 読み込みを始める。ゲームのフォルダが無ければ案内を出して false

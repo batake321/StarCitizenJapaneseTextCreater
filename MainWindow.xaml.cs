@@ -97,7 +97,7 @@ public partial class MainWindow : Window
         gameLogPanel.ShipDetailOpener = OpenGameLogShipDetail;
         // ［ゲームログ］の行を trade_cache.db に残す・ほかの PC の行を読む (game_log_entries)
         gameLogPanel.StoredLoader = LoadGameLogEntries;
-        gameLogPanel.StoredSaver = SaveGameLogEntries;
+        gameLogPanel.StoredSaver = SaveGameLogEntriesAsync;
         // ［鉱石］の作業ディレクトリ (trade_cache.db / gamedata_cache.db / translations.db の所在)
         orePanel.WorkDirProvider = () => WorkDir;
     }
@@ -110,8 +110,7 @@ public partial class MainWindow : Window
         RestoreWindowState(config);
 
         // 最上位のタブの並びと最後に見ていたタブを戻し、ドラッグでの並べ替えを受け付ける (TabReorder。並びは落とした直後と終了時に保存)
-        TabReorder.ApplyOrder(tabMain, config.TabOrder);
-        if (TabReorder.Find(tabMain, config.LastTab) is { } lastTab) tabMain.SelectedItem = lastTab;
+        TabReorder.ApplyOrder(tabMain, config.TabOrder, config.LastTab);
         TabReorder.Attach(tabMain, onReordered: () =>
         {
             SaveTabState();
@@ -1547,9 +1546,21 @@ public partial class MainWindow : Window
             try
             {
                 await GameDataExtractor.PauseShopPriceFetchAsync();
-                await DatabaseBackupService.ImportFromZipAsync(dlg.FileName, DbPath, IndexDbPath,
-                    selectDlg.SelectedCategories,
-                    s => Dispatcher.Invoke(() => txtBackupStatus.Text = s), tradeDbImportPath);
+                // PC 間の同期の書き出し・取り込みと［ゲームログ］の行の保存と同じ DB に同時に書かないよう、同じ門 (SyncService.Gate) を取ってから取り込む
+                // (取れるまで待つ。UI は await で止めない)。この間はゲーム起動時の自動の取り込みを飛ばす (_importDbRunning)
+                _importDbRunning = true;
+                try
+                {
+                    await SyncService.Gate.WaitAsync();
+                    try
+                    {
+                        await DatabaseBackupService.ImportFromZipAsync(dlg.FileName, DbPath, IndexDbPath,
+                            selectDlg.SelectedCategories,
+                            s => Dispatcher.Invoke(() => txtBackupStatus.Text = s), tradeDbImportPath);
+                    }
+                    finally { SyncService.Gate.Release(); }
+                }
+                finally { _importDbRunning = false; }
             }
             finally
             {
@@ -6259,10 +6270,23 @@ public partial class MainWindow : Window
         return (rows, broken);
     }
 
-    private int SaveGameLogEntries(IReadOnlyList<GameLogEntry> entries)
+    // ［ゲームログ］の確定済みの行 (写し) を trade_cache.db に残す。裏のスレッドで書き、PC 間の同期の書き出し・取り込み・通常のインポートと同じ DB に
+    // 同時に書かないよう同じ門 (SyncService.Gate) を取る (取れるまで待つ。UI は止めない)。LoadGameLogEntries と同じく専用の HangarService で書く
+    private async Task<int> SaveGameLogEntriesAsync(IReadOnlyList<GameLogStore.Row> rows)
     {
-        _hangarService.SetCacheDir(WorkDir);
-        return _hangarService.SaveGameLogEntries(entries, Environment.MachineName);
+        var workDir = WorkDir;
+        var machine = Environment.MachineName;
+        await SyncService.Gate.WaitAsync();
+        try
+        {
+            return await Task.Run(() =>
+            {
+                var hangar = new HangarService();
+                hangar.SetCacheDir(workDir);
+                return hangar.SaveGameLogEntries(rows, machine);
+            });
+        }
+        finally { SyncService.Gate.Release(); }
     }
 
     // ［ゲームログ］の内容の欄の船のダブルクリック → ［詳細］。クラス名が分かっていて ships にあればその品目 (ships.record_name)、

@@ -40,7 +40,13 @@ internal static class TabReorder
         };
         tab.DragOver += (_, e) =>
         {
-            if (!e.Data.GetDataPresent(DataFormat)) return;   // ほかのドラッグ (ファイル等) には触らない
+            // ほかのドラッグ (ファイル等) は受け付けない (AllowDrop = true のままだと受け付けるカーソルになるので、None にして止める)
+            if (!e.Data.GetDataPresent(DataFormat))
+            {
+                e.Effects = DragDropEffects.None;
+                e.Handled = true;
+                return;
+            }
             e.Effects = HeaderItemAt(tab, e.OriginalSource) != null ? DragDropEffects.Move : DragDropEffects.None;
             e.Handled = true;
         };
@@ -55,7 +61,8 @@ internal static class TabReorder
         };
     }
 
-    // dragged を target の前 (after = false) か後ろ (after = true) へ動かす。選択中のタブは Remove の前に覚えて戻す。
+    // dragged を target の前 (after = false) か後ろ (after = true) へ動かす。
+    // 選択中のタブを Remove すると別のタブが選ばれてその中身の Loaded が走るので、Remove の前に選択を外し (SelectedIndex = -1)、Insert の後に元の選択へ戻す。
     // 並びが変わったら true
     public static bool Move(TabControl tab, TabItem dragged, TabItem target, bool after)
     {
@@ -64,6 +71,7 @@ internal static class TabReorder
         var from = items.IndexOf(dragged);
         if (from < 0 || items.IndexOf(target) < 0) return false;
         var selected = tab.SelectedItem;
+        tab.SelectedIndex = -1;
         items.Remove(dragged);
         var idx = items.IndexOf(target) + (after ? 1 : 0);
         items.Insert(idx, dragged);
@@ -75,29 +83,35 @@ internal static class TabReorder
     public static List<string> GetOrder(TabControl tab) =>
         tab.Items.OfType<TabItem>().Select(t => t.Name).Where(n => !string.IsNullOrEmpty(n)).ToList();
 
-    // 保存した並び (x:Name の一覧) に並べ直す。一覧に無いタブは今の順のまま末尾、存在しない名は無視。選択中のタブは保つ
-    public static void ApplyOrder(TabControl tab, IEnumerable<string>? order)
+    // 保存した並び (x:Name の一覧) に並べ直し、selectName のタブ (最後に見ていたタブ。無ければ今の選択) を選ぶ。
+    // 一覧に無いタブは今の順のまま末尾、存在しない名は無視。
+    // 起動時 (Window_Loaded) は先頭のタブが選ばれているので、Remove で別のタブが選ばれて Loaded が走らないよう、選択を外してから並べ替えて最後に選ぶ
+    public static void ApplyOrder(TabControl tab, IEnumerable<string>? order, string? selectName)
     {
-        if (order == null) return;
         var items = tab.Items;
-        var byName = new Dictionary<string, object>(StringComparer.Ordinal);
-        foreach (var t in items.OfType<TabItem>())
-            if (!string.IsNullOrEmpty(t.Name) && !byName.ContainsKey(t.Name)) byName[t.Name] = t;
-        var desired = new List<object>();
-        foreach (var name in order)
-            if (name != null && byName.TryGetValue(name, out var t) && !desired.Contains(t)) desired.Add(t);
-        foreach (var item in items)
-            if (!desired.Contains(item)) desired.Add(item);
-        if (desired.SequenceEqual(items.Cast<object>())) return;
-
-        var selected = tab.SelectedItem;
-        for (int i = 0; i < desired.Count; i++)
+        var selected = Find(tab, selectName) ?? tab.SelectedItem;
+        if (order != null)
         {
-            if (ReferenceEquals(items[i], desired[i])) continue;
-            items.Remove(desired[i]);
-            items.Insert(i, desired[i]);
+            var byName = new Dictionary<string, object>(StringComparer.Ordinal);
+            foreach (var t in items.OfType<TabItem>())
+                if (!string.IsNullOrEmpty(t.Name) && !byName.ContainsKey(t.Name)) byName[t.Name] = t;
+            var desired = new List<object>();
+            foreach (var name in order)
+                if (name != null && byName.TryGetValue(name, out var t) && !desired.Contains(t)) desired.Add(t);
+            foreach (var item in items)
+                if (!desired.Contains(item)) desired.Add(item);
+            if (!desired.SequenceEqual(items.Cast<object>()))
+            {
+                tab.SelectedIndex = -1;
+                for (int i = 0; i < desired.Count; i++)
+                {
+                    if (ReferenceEquals(items[i], desired[i])) continue;
+                    items.Remove(desired[i]);
+                    items.Insert(i, desired[i]);
+                }
+            }
         }
-        tab.SelectedItem = selected;
+        if (selected != null) tab.SelectedItem = selected;
     }
 
     // x:Name のタブ。無ければ null
