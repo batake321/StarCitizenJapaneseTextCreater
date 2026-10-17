@@ -11,6 +11,37 @@ public partial class App : Application
     // この起動中は個人の設定ファイルへ保存しない (壊れた設定ファイルの控えを作れなかったとき。AppConfigLoader)
     public static bool ConfigSaveDisabled { get; private set; }
 
+    // 二重起動を防ぐための名前つき Mutex (ログオン中のユーザーの中で 1 つ)。アプリが終わるまで持っておく
+    private const string SingleInstanceMutexName = @"Local\StarCitizenJapaneseTextCreater_SingleInstance";
+    private static System.Threading.Mutex? _singleInstance;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    // 先に起動しているほうのウィンドウを前に出す (最小化されていれば元に戻す)。見つからなくても何もしない
+    private static void ActivateRunningInstance()
+    {
+        try
+        {
+            using var current = System.Diagnostics.Process.GetCurrentProcess();
+            foreach (var p in System.Diagnostics.Process.GetProcessesByName(current.ProcessName))
+            {
+                using (p)
+                {
+                    if (p.Id == current.Id || p.MainWindowHandle == IntPtr.Zero) continue;
+                    if (IsIconic(p.MainWindowHandle)) ShowWindow(p.MainWindowHandle, 9);   // SW_RESTORE
+                    SetForegroundWindow(p.MainWindowHandle);
+                    return;
+                }
+            }
+        }
+        catch { }
+    }
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -20,6 +51,16 @@ public partial class App : Application
             RunBackupExport(e.Args[1]);
             // Shutdown() は遅延実行なので、その前に App.xaml の StartupUri が MainWindow を作ってしまい、
             // 終了コードが 1 になる (呼び出し側のスクリプトが失敗と誤判定する)。ここで確実に終わらせる
+            Environment.Exit(0);
+            return;
+        }
+
+        // 二重起動を防ぐ: 2 つ起動すると、ゲームログの音・読み上げが 2 回ずれて重なり、同じ DB に 2 つから書き込む。
+        // すでに起動していれば、そのウィンドウを前に出して、こちらは終わる
+        _singleInstance = new System.Threading.Mutex(true, SingleInstanceMutexName, out var createdNew);
+        if (!createdNew)
+        {
+            ActivateRunningInstance();
             Environment.Exit(0);
             return;
         }

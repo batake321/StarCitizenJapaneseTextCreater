@@ -544,7 +544,8 @@ public partial class GameLogPanel : UserControl
         _names = new GameLogNames(Path.Combine(workDir, "gamedata_cache.db"), Path.Combine(workDir, "translations.db"));
         _logPath = Path.Combine(gamePath, "Game.log");
         _tail = new GameLogTail(_logPath, CurrentSource, _names.Ship, _names.Item, _missionNames, _names.Translate, _names.IsVehicleClass, _names.Resource,
-            _names.Place, _placeNames, _names.ItemLabel, _vehicleClasses, _names.ShipClassByName, _names.Blueprints, _names.BlueprintHeadings());
+            _names.Place, _placeNames, _names.ItemLabel, _vehicleClasses, _names.ShipClassByName, _names.Blueprints, _names.BlueprintHeadings(),
+            _names.RescueHeadings());
 
         // 過去のログ: 初回の一覧はここで取り (再起動の後に探すときに、新しいファイルと見分けるため)、読むのは裏で行う
         _backupDir = Path.Combine(gamePath, "logbackups");
@@ -583,7 +584,7 @@ public partial class GameLogPanel : UserControl
             {
                 var rows = GameLogParser.ParseFile(f.FullName, Path.GetFileNameWithoutExtension(f.Name), names.Ship, names.Item, _missionNames,
                     names.Translate, names.IsVehicleClass, names.Resource, names.Place, _placeNames, names.ItemLabel, _vehicleClasses, names.ShipClassByName,
-                    names.Blueprints, names.BlueprintHeadings());
+                    names.Blueprints, names.BlueprintHeadings(), names.RescueHeadings());
                 lock (_backupLock)
                 {
                     _backupRows.AddRange(rows);
@@ -747,8 +748,8 @@ public partial class GameLogPanel : UserControl
                 };
                 if (voice)
                 {
-                    // 到着の {場所} は今の場所の名前 (保留から鳴らすときも、そのとき分かっている名前)
-                    var place = ev.Kind == GameLogSoundKind.Arrival ? GameLogVoiceScenes.ArrivalPlace(ev.Entry, _placeNames) : null;
+                    // 到着・復活の {場所} は今の場所の名前 (保留から鳴らすときも、そのとき分かっている名前)
+                    var place = GameLogVoiceScenes.PlaceOf(ev, _placeNames);
                     var text = GameLogVoiceScenes.BuildText(GameLogVoiceScenes.TemplateOf(config, ev.Scene), ev.Entry, place);
                     GameLogVoicePlayer.Enqueue(config.VoiceVoxUrl, GameLogVoiceScenes.SpeakerOf(config, ev.Scene), text, path);
                 }
@@ -830,6 +831,7 @@ public partial class GameLogPanel : UserControl
     //   船かどうか: クラス名が ships にあるか、item_index の Vehicle 系 (item_type に Vehicle を含む) にあるか
     //   BP: BP受信の通知の品名 → できる品の名前が一致する BP (BlueprintPanel.BlueprintsByOutputName。覚えるのは BlueprintPanel 側 (DB ファイルが変われば作り直す))
     //   BP受信の見出し: 翻訳 DB の crafting_hud_notification_received_blueprint (,P) の日本語・英語の %s の前 (GameLogParser.BlueprintHeadingFromTemplate)
+    //   救急サービスの通知の見出し: 翻訳 DB の hud_incapacitated_landingZoneRescue_notification (,P) の日本語・英語 (GameLogParser.RescueHeadingFromText)
     // 翻訳 DB の引き方は GameDataQueryService の LocReader.Text / ResolveItemNameJa と同じ
     // (key か key + ",P" の行。"!" で始まる訳・空の訳は英語。プレースホルダは使わない)。引けなければ内部名のまま。
     // DB は名前を引くたびに開いて閉じる (Pooling=False。開いたままだと設定の［DB クリア］で DB を消せない)
@@ -882,6 +884,7 @@ public partial class GameLogPanel : UserControl
                 _vehicleClasses.Clear();
                 _places.Clear();
                 _blueprintHeadings = null;
+                _rescueHeadings = null;
             }
         }
 
@@ -907,6 +910,26 @@ public partial class GameLogPanel : UserControl
             }
         }
         private List<string>? _blueprintHeadings;
+
+        // 救急サービスの通知の見出し (翻訳 DB の今の文言から作ったもの。日本語・英語のうち作れたもの)。読めなければ空 (覚えず、次の時にもう一度引く)
+        public IReadOnlyList<string> RescueHeadings()
+        {
+            lock (_lock)
+            {
+                if (_rescueHeadings != null) return _rescueHeadings;
+                var list = new List<string>();
+                try
+                {
+                    var (en, ja) = Lookup("@hud_incapacitated_landingZoneRescue_notification");
+                    foreach (var t in new[] { JapaneseText(ja), EnglishText(en) })
+                        if (GameLogParser.RescueHeadingFromText(t) is { } h && !list.Contains(h)) list.Add(h);
+                }
+                catch { return list; }
+                if (list.Count > 0) _rescueHeadings = list;   // 空 (翻訳 DB が無い・キーが無い) なら覚えず、次の時にもう一度引く
+                return list;
+            }
+        }
+        private List<string>? _rescueHeadings;
 
         public string Ship(string className) => Resolve(className, _ships, ResolveShip);
         public string Item(string itemName) => Resolve(itemName, _items, name => ResolveName("items", name));

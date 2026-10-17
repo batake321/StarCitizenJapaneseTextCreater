@@ -442,6 +442,19 @@ public sealed class GameLogParser
     private string _lastCollisionKey = "";
     private GameLogEntry? _lastCollision;
     private readonly List<string> _lastCollisionTargets = new();
+    // 直前の衝突 (FatalCollision) の船 (末尾に _ID の付いた名前) と時刻。死亡の行に「（衝突）」を添えるのに使う (まだ無ければ null)
+    private string? _lastFatalVehicle;
+    private DateTime _lastFatalTime;
+    // 直前の死亡の行の時刻 (救急サービスの通知で死亡の行を重ねて出さないため。まだ無ければ null)
+    private DateTime? _lastDeathTime;
+    // 死亡の行を出してから、まだ復活の行を出していないか (次の「前の Location が 0 の場所の変化」を「復活」にする)
+    private bool _respawnPending;
+    // 死亡の直前 (DeathCollisionWindow 以内) の同じ船の衝突なら死亡の行に「（衝突）」を添える
+    private static readonly TimeSpan DeathCollisionWindow = TimeSpan.FromSeconds(5);
+    // 救急サービスの通知の直前 (RescueDeathWindow 以内) に死亡の行があれば、その通知では死亡の行を出さない
+    private static readonly TimeSpan RescueDeathWindow = TimeSpan.FromSeconds(10);
+    // 救急サービスの通知の見出し (RescueHeadings と、渡された翻訳 DB の文言から作った見出し)
+    private readonly string[] _rescueHeadings;
 
     // 自分の名前 (<Update Inventory Location> Player [名前] / <RequestLocationInventory> Player[名前] / <Channel Created> nickname="名前")。分かるまで null
     private string? _playerName;
@@ -504,7 +517,8 @@ public sealed class GameLogParser
         GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
         Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null,
         Func<string, string>? itemLabel = null, GameLogVehicleClasses? sharedVehicleClasses = null, Func<string, string?>? shipClassByName = null,
-        Func<string, IReadOnlyList<GameLogBlueprint>?>? blueprintByName = null, IReadOnlyList<string>? blueprintHeadings = null)
+        Func<string, IReadOnlyList<GameLogBlueprint>?>? blueprintByName = null, IReadOnlyList<string>? blueprintHeadings = null,
+        IReadOnlyList<string>? rescueHeadings = null)
     {
         _source = source;
         _shipName = shipName ?? (s => s);
@@ -520,6 +534,7 @@ public sealed class GameLogParser
         _shipClassByName = shipClassByName ?? (_ => null);
         _blueprintByName = blueprintByName ?? (_ => null);
         _blueprintHeadings = MergeHeadings(BlueprintHeadings, blueprintHeadings);
+        _rescueHeadings = MergeHeadings(RescueHeadings, rescueHeadings);
     }
 
     // ─── 貨物エレベーター ───
@@ -542,6 +557,12 @@ public sealed class GameLogParser
     private static readonly TimeSpan FreightDropWindow = TimeSpan.FromSeconds(120);
     private static readonly TimeSpan FreightLowerWindow = TimeSpan.FromSeconds(300);
     private static readonly TimeSpan FreightRaiseWindow = TimeSpan.FromSeconds(60);
+    // 貨物エレベーターの端末の件数 (Inventory Result Item Count:[n]) の最後の値 (場所の ID → 件数。自分の Player の行だけ)
+    private readonly Dictionary<string, int> _freightCounts = new(StringComparer.Ordinal);
+    // 下げ始めた (ClosingFrontGate / LoweringPlatform で _freightLowering になった) ときの場所の ID・時刻・その場所の件数 (分からなければ null)。
+    // 置いた品 (_platformItems) の行を出さなかったときに、その場所の次の件数 (FreightCountWindow 以内) が増えていれば増えた数で行にする
+    private (string Place, DateTime Start, int Before)? _freightCountWatch;
+    private static readonly TimeSpan FreightCountWindow = TimeSpan.FromSeconds(120);
 
     // 船の ID → クラス名を覚えるだけの行 (クラス_ID[ID] / 'クラス_ID' [ID] の形で船が出る)。船でないもの (AImodule_ATC_… や飲み物の瓶など) も
     // 同じ形で出るので、クラス名が船 (_isVehicleClass) のものだけ覚える。
@@ -562,6 +583,7 @@ public sealed class GameLogParser
         "<Command Module Ship Spawned Paired>",
         "<Bad Spawn Position>",
         "<Boundary Violation>",
+        "<ActorAction_ResetActionState>",   // 動作のやり直し (Player: ARGO_ATLS_887288041042 [887288041042]。乗り物を動かしている間に出る。空白つきの形)
     ];
     private static readonly string[] VehicleLearnTags = [.. OwnVehicleLearnTags, .. OtherVehicleLearnTags];
 
@@ -586,6 +608,9 @@ public sealed class GameLogParser
         "<Player Inventory Request Complete>",    // 依頼の結果 (Result[Succeed])
         "<Inventory Token Flow>",                 // 入れ物の ID → クラス名 (Inventory[クラス_ID, ID])
     ];
+
+    // 貨物エレベーターの端末で品を移した行 (MoveItemStack Success)。覚えている場所の件数を捨てるのに使う
+    private const string FreightMoveTag = "<CEntityComponentFreightElevatorUIProvider::RmTokenMoveItemStackResult>";
 
     // 貨物エレベーターの行
     private static readonly string[] FreightTags =
@@ -629,6 +654,7 @@ public sealed class GameLogParser
         .. InventoryTags,
         .. InventoryMoveTags,
         .. FreightTags,
+        FreightMoveTag,
     ];
 
     public static bool HasTag(string line)
@@ -648,7 +674,8 @@ public sealed class GameLogParser
     private static readonly Regex StampRegex = new(@"^<(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})Z>", RegexOptions.Compiled);
 
     // 死亡: Actor '名前' [id] ejected from zone '乗っていた船_ID' [id] to zone '場所' [id] due to ...
-    private static readonly Regex DeadRegex = new(@"<\[ActorState\] Dead> .*? ejected from zone '([^']*)' \[\d+\] to zone '([^']*)'", RegexOptions.Compiled);
+    // (Actor '名前' [id] は無いビルドもありうるので省略可。取れたら自分の名前と比べる)
+    private static readonly Regex DeadRegex = new(@"<\[ActorState\] Dead> .*?(?:Actor '([^']*)' \[\d+\] )?ejected from zone '([^']*)' \[\d+\] to zone '([^']*)'", RegexOptions.Compiled);
     // 衝突: Fatal Collision occured for vehicle 船_ID [Part: …, Pos: …, Zone: 場所, PlayerPilot: 1] after hitting entity: 相手 [Zone: …
     private static readonly Regex CollisionRegex = new(@"<FatalCollision> Fatal Collision occured for vehicle (\S+) \[.*?Zone: ([^,\]]*), PlayerPilot: \d+\] after hitting entity: (.+?) \[Zone:", RegexOptions.Compiled);
     // 通知: Added notification "見出し: 本文" [番号] to queue. New queue size: n, MissionId: [guid], ObjectiveId: [...]
@@ -676,6 +703,8 @@ public sealed class GameLogParser
     // 自分のキオスク操作: <InventoryManagement> Freight Inventory Grid Requesting Inventory[ID:Location:場所の ID] for Player[名前]
     // (場所の ID は <Update Inventory Location> の Landing の ID と同じ値。直後の <RequestLocationInventory> で名前が分かる)
     private static readonly Regex FreightKioskRegex = new(@"<InventoryManagement> Freight Inventory Grid Requesting Inventory\[\d+:Location:(\d+)\] for Player\[([^\]]*)\]", RegexOptions.Compiled);
+    // 端末の件数: <InventoryManagement> Freight Inventory Grid InventoryDataRequest Successful for Player[名前] Inventory[ID:Location:場所の ID] Inventory Result Item Count:[n]
+    private static readonly Regex FreightCountRegex = new(@"<InventoryManagement> Freight Inventory Grid InventoryDataRequest Successful for Player\[([^\]]*)\] Inventory\[\d+:Location:(\d+)\] Inventory Result Item Count:\[(\d+)\]", RegexOptions.Compiled);
     // 台の状態: … [LoadingPlatformManager_FreightElevator_…] Platform state changed to 状態 (ShipElevator は見ない)
     private static readonly Regex FreightStateRegex = new(@"<CSCLoadingPlatformManager::OnLoadingPlatformStateChanged> .*?\[LoadingPlatformManager_FreightElevator_[^\]]*\] Platform state changed to (\w+)", RegexOptions.Compiled);
     // 呼び出し: … Processed bindings into transfer request - Entities: n, Location: L
@@ -692,6 +721,8 @@ public sealed class GameLogParser
     // 量子ジャンプの行き先: Player has selected point XXX as their destination
     private static readonly Regex QuantumTargetRegex = new(@"<Player Selected Quantum Target - Local> .*?Player has selected point (.+?) as their destination", RegexOptions.Compiled);
     // 行の中の船: クラス_ID[ID] (量子ジャンプの行の | DRAK_Ironclad_819458464586[819458464586]|)
+    // 動作のやり直しの行の乗り物: Player: クラス_ID [ID] (クラスと [ID] の間に空白がある形)
+    private static readonly Regex PlayerVehicleRefRegex = new(@"Player: ([A-Za-z][A-Za-z0-9_]*?)_(\d{6,}) \[\2\]", RegexOptions.Compiled);
     private static readonly Regex VehicleRefRegex = new(@"([A-Za-z][A-Za-z0-9_]*?)_(\d{6,})\[\2\]", RegexOptions.Compiled);
     // 行の中の船 (引用符の形): Entity 'クラス_ID' [ID] (<Boundary Violation>)
     private static readonly Regex QuotedVehicleRefRegex = new(@"'([A-Za-z][A-Za-z0-9_]*?)_(\d{6,})' \[\2\]", RegexOptions.Compiled);
@@ -872,7 +903,7 @@ public sealed class GameLogParser
         {
             if (!(m = UpdateLocationRegex.Match(line)).Success) return;
             LearnPlayerName(m.Groups[1].Value);
-            OnLanding(time, m.Groups[3].Value, m.Groups[4].Value);
+            OnLanding(time, m.Groups[3].Value, m.Groups[4].Value, m.Groups[5].Value);
             return;
         }
         if (line.Contains("<RequestLocationInventory>", StringComparison.Ordinal))
@@ -892,6 +923,17 @@ public sealed class GameLogParser
             LearnPlayerName(m.Groups[2].Value);
             _freightKioskTime = time;
             _freightLocationId = m.Groups[1].Value;
+            return;
+        }
+        // 端末の件数 (行は <InventoryManagement> なので、このあと今までどおり OnInventory にも渡す)
+        if ((m = FreightCountRegex.Match(line)).Success && int.TryParse(m.Groups[3].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var freightCount))
+            OnFreightCount(time, m.Groups[1].Value, m.Groups[2].Value, freightCount);
+        // 貨物エレベーターの端末で品を移した (入れ物 → 場所など): 移した先の件数の行はその場で出ないので、覚えている件数は古くなる。
+        // 端末を最後に開いた場所の件数を捨てる (古い件数のまま空の台を下げて「n 品を降ろしました」が出ないように)
+        if (line.Contains(FreightMoveTag, StringComparison.Ordinal))
+        {
+            if (_freightLocationId.Length > 0 && line.Contains("MoveItemStack Success", StringComparison.Ordinal))
+                _freightCounts.Remove(_freightLocationId);
             return;
         }
         if (HasAnyTag(line, FreightTags))
@@ -987,9 +1029,17 @@ public sealed class GameLogParser
         }
         if ((m = DeadRegex.Match(line)).Success)
         {
-            var from = m.Groups[1].Value;
+            var from = m.Groups[2].Value;
+            // 船の ID とクラス名は誰の行でも覚える (前と同じ)
             LearnVehicleFromName(from);
-            Add(time, "死亡", $"{ShipDisplay(from)} / 場所: {m.Groups[2].Value}", shipClass: ShipClassOf(from), shipName: ShipDisplay(from));
+            // 自分の名前が分かっていて、死んだのが別の名前なら、死亡の行も復活待ちも作らない (名前がまだ分からなければ受け付ける)
+            if (m.Groups[1].Success && _playerName != null && m.Groups[1].Value != _playerName) return;
+            // 「<船> で死亡（<場所>）」。場所は今の着陸場所の名前が分かればそれ、無ければゾーンの内部名。
+            // 直前 (DeathCollisionWindow 以内) に同じ船の衝突があれば「（衝突）」を添える
+            var place = DeathPlace() ?? m.Groups[3].Value;
+            var collided = _lastFatalVehicle == from && time - _lastFatalTime <= DeathCollisionWindow;
+            Add(time, "死亡", $"{ShipDisplay(from)} で死亡（{place}）{(collided ? "（衝突）" : "")}", shipClass: ShipClassOf(from), shipName: ShipDisplay(from));
+            OnDeath(time);
             return;
         }
         if ((m = CollisionRegex.Match(line)).Success)
@@ -1204,13 +1254,30 @@ public sealed class GameLogParser
     // 同じ ID が続くとき (Landing [x] -> [x]) は、外にいた (_landingId が "0") なら到着、いたままなら何もしない。
     // locationFrom は Location の前の ID。0 (ログイン・リスポーン直後: Location [0] -> [X]) なら「到着」ではなく「ログイン」にする
     // (量子ジャンプで着いたときは Landing の前が 0 でも Location の前は 0 でない)。着陸場所の状態の更新は到着と同じ
-    private void OnLanding(DateTime time, string to, string locationFrom)
+    // 死亡の行の後 (_respawnPending) で最初の Location [0] -> [X] は「復活」にする。死亡の前と同じ着陸場所 (to が _landingId と同じ) でも出す
+    // Landing が 0 のまま (船の医療ベッドで生き返ったときなど) でも復活の行を出し、場所は Location の今の ID (locationTo) にする。復活待ちは必ず解く
+    private void OnLanding(DateTime time, string to, string locationFrom, string locationTo)
     {
+        if (locationFrom == "0" && _respawnPending)
+        {
+            _respawnPending = false;
+            if (to != "0") OnRespawn(time, to);
+            else OnRespawnOutside(time, locationTo);
+            return;
+        }
         if (to != "0")
         {
             if (to != _landingId) OnArrive(time, to, login: locationFrom == "0");
         }
         else if (_landingId != "0") OnDepart(time);
+    }
+
+    // 着陸場所の外 (Landing 0) での復活: 内容は Location の ID の表示名 (名前がまだなら名前待ち)。着陸場所の外にいるので _landingId は 0 にする (出発の行は出さない)
+    private void OnRespawnOutside(DateTime time, string locationId)
+    {
+        _landingId = "0";
+        _lastDeparture = null;
+        AttachPlace(Add(time, "復活", PlaceDisplay(locationId)), locationId);
     }
 
     // login = true なら種類「ログイン」(内容は場所名だけ。船は添えない)。それ以外の扱い (場所の状態・再入の取り消し・場所名の遅延解決) は到着と同じ
@@ -1235,6 +1302,27 @@ public sealed class GameLogParser
         AttachPlace(e, id);
         if (!login) AttachRawPlace(e, id, time);
     }
+
+    // 復活の行 (内容は場所名だけ。名前がまだなら名前待ち)。場所の状態の更新はログインと同じ。
+    // 再入の取り消し (同じ場所に ReentryWindow 以内に戻った) はしない (復活の行は必ず出す)。直前の出発の行はそのまま残す
+    private void OnRespawn(DateTime time, string id)
+    {
+        _landingId = id;
+        _placeId = id;
+        if (_confirmId != null && id != _confirmPlace) _confirmId = null;   // 別の着陸場所へ移った: 呼び出した船の確定は諦める
+        _lastDeparture = null;
+        AttachPlace(Add(time, "復活", PlaceDisplay(id)), id);
+    }
+
+    // 死亡を覚える (救急サービスの通知と重ねないため・次の Location [0] -> [X] を復活にするため)
+    private void OnDeath(DateTime time)
+    {
+        _lastDeathTime = time;
+        _respawnPending = true;
+    }
+
+    // 死亡の行の場所: 今の着陸場所の名前 (着陸場所の外か、名前が分からなければ null)
+    private string? DeathPlace() => _landingId != "0" && TryGetPlaceName(_landingId, out var name) ? name : null;
 
     // 到着の行に、着いた場所がジャンプポイント脇の休憩所かを付ける。ログの中の場所の名前がこのファイルでまだ分からなければ、
     // 名前待ち (PendingRawPlaceId) にして、直後の RequestLocationInventory で分かったとき (LearnPlace) に付ける
@@ -1597,7 +1685,13 @@ public sealed class GameLogParser
             // 下げ: 自分のキオスク操作から FreightLowerWindow 以内の ClosingFrontGate / LoweringPlatform → ClosedIdle (他人の操作でも同じ行が出るので窓で絞る)
             if (state is "ClosingFrontGate" or "LoweringPlatform")
             {
-                if (_freightLocationId.Length > 0 && time - _freightKioskTime <= FreightLowerWindow) _freightLowering = true;
+                if (_freightLocationId.Length > 0 && time - _freightKioskTime <= FreightLowerWindow)
+                {
+                    // 下げ始め: そのときの場所の件数を控える (件数が分からなければ件数の行は出さない)
+                    if (!_freightLowering)
+                        _freightCountWatch = _freightCounts.TryGetValue(_freightLocationId, out var before) ? (_freightLocationId, time, before) : null;
+                    _freightLowering = true;
+                }
                 return;
             }
             if (state == "ClosedIdle")
@@ -1669,6 +1763,22 @@ public sealed class GameLogParser
         var place = _freightLocationId;
         var e = Add(time, "貨物エレベーター", $"{PlaceDisplay(place)} の貨物エレベーターで {string.Join("、", names)} を降ろしました", importItems: items);
         AttachPlace(e, place);
+        _freightCountWatch = null;   // 品名つきの行を出したので、件数の行は出さない
+    }
+
+    // 端末の件数 (自分の Player の行だけ)。下げ始めの後 (FreightCountWindow 以内) のその場所の最初の件数で、置いた品の行を出していなければ、
+    // 下げ始めの件数から増えた数で「<場所> の貨物エレベーターで <n> 品を降ろしました（品名はログに無し）」の行にする (トラクタービームで載せたときなど。
+    // 品名が無いので「所持」のボタン (ImportItems) は付けない)。増えていなければ出さない。件数は場所ごとに最後の値として覚える
+    private void OnFreightCount(DateTime time, string player, string place, int count)
+    {
+        if (_playerName == null || player != _playerName) return;
+        if (_freightCountWatch is { } w && w.Place == place)
+        {
+            _freightCountWatch = null;
+            if (time - w.Start <= FreightCountWindow && _platformItems.Count == 0 && count > w.Before)
+                AttachPlace(Add(time, "貨物エレベーター", $"{PlaceDisplay(place)} の貨物エレベーターで {count - w.Before} 品を降ろしました（品名はログに無し）"), place);
+        }
+        _freightCounts[place] = count;
     }
 
     // ─── 衝突 ───
@@ -1676,6 +1786,8 @@ public sealed class GameLogParser
     private void OnCollision(DateTime time, string stamp, string vehicle, string zone, string target)
     {
         LearnVehicleFromName(vehicle);
+        _lastFatalVehicle = vehicle;
+        _lastFatalTime = time;
         var key = stamp + "\u0001" + vehicle;
         if (_lastCollision != null && key == _lastCollisionKey)
         {
@@ -1723,6 +1835,17 @@ public sealed class GameLogParser
     // %s の前 (区切りの ": " を除く)。2026-10-17 の Game.log の実例は日本語の「設計図を受信しました: Neutrinoレーシングヘルメット WhiteHot: 」(英語の実例は未確認)。
     // 日本語化ファイルの版で文言が変わることがあるので、翻訳 DB の今の文言から作った見出し (コンストラクタの blueprintHeadings) も受け付ける
     public static readonly string[] BlueprintHeadings = ["設計図を受信しました", "Received Blueprint"];
+    // 救急サービスの通知 (翻訳 DB の hud_incapacitated_landingZoneRescue_notification) の見出し。
+    // 日本語化ファイルの版で文言が変わることがあるので、翻訳 DB の今の文言から作った見出し (コンストラクタの rescueHeadings) も受け付ける
+    public static readonly string[] RescueHeadings = ["スタンバイ、現地の救急サービス出動", "Standby, Local Emergency Services Are En Route"];
+
+    // 翻訳 DB の救急サービスの通知の文言 → 見出し (前後の空白と末尾の ":" を除く。空なら null)
+    public static string? RescueHeadingFromText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var head = text.Trim().TrimEnd(':', '：').Trim();
+        return head.Length > 0 ? head : null;
+    }
     // BP受信の行に契約名を添える「直前の契約完了」の窓 (契約完了の行の時刻から)。2026-10-17 の実例は契約完了 (EndMission) の 1.4 秒後と 1.9 秒後
     private static readonly TimeSpan BlueprintContractWindow = TimeSpan.FromSeconds(30);
 
@@ -1780,6 +1903,17 @@ public sealed class GameLogParser
             return;
         }
 
+        // 救急サービスの通知 (「スタンバイ、現地の救急サービス出動: 」): 直前 (RescueDeathWindow 以内) に死亡の行が無ければ、ここで死亡の行を出す (船の外での死亡)。
+        // 内容は「死亡（<場所>）」(場所は今の着陸場所の名前。分からなければ「死亡」だけ)
+        if (Array.IndexOf(_rescueHeadings, NotificationTitle(text)) >= 0)
+        {
+            if (_lastDeathTime is { } dt && time - dt <= RescueDeathWindow) return;
+            var place = DeathPlace();
+            Add(time, "死亡", place != null ? $"死亡（{place}）" : "死亡");
+            OnDeath(time);
+            return;
+        }
+
         // BP受信: 「設計図を受信しました: 品名: 」(見出しの直後は区切り。本文の後ろの ": " は Body で除く)
         if (StartsWithAny(text, _blueprintHeadings, out var bpRest) && bpRest.Length > 0 && (bpRest[0] == ':' || bpRest[0] == '：' || bpRest[0] == ' '))
         {
@@ -1809,11 +1943,17 @@ public sealed class GameLogParser
             return;
         }
         // 区域: 見出し (": " の前) そのもの
-        var colon = text.IndexOf(": ", StringComparison.Ordinal);
-        var title = (colon >= 0 ? text[..colon] : text).Trim().TrimEnd(':').Trim();
+        var title = NotificationTitle(text);
         if (title.EndsWith("管轄区域に進入", StringComparison.Ordinal) || Array.IndexOf(AreaHeadings, title) >= 0
             || StartsWithAny(title, AreaPrefixHeadings, out _))
             Add(time, "区域", title, piloting: _drivingId != null, atJumpPointStop: AtJumpPointStop());
+    }
+
+    // 通知の見出し (": " の前。前後の空白と末尾の ":" を除く)
+    private static string NotificationTitle(string text)
+    {
+        var colon = text.IndexOf(": ", StringComparison.Ordinal);
+        return (colon >= 0 ? text[..colon] : text).Trim().TrimEnd(':').Trim();
     }
 
     // 今の着陸場所がジャンプポイント脇の休憩所 (場所の名前が "RR_JP_" で始まる) か。名前がこのファイルでまだ分からなければ false
@@ -2075,6 +2215,7 @@ public sealed class GameLogParser
     {
         foreach (Match m in VehicleRefRegex.Matches(line)) LearnVehicleIfShip(m.Groups[2].Value, m.Groups[1].Value, own);
         foreach (Match m in QuotedVehicleRefRegex.Matches(line)) LearnVehicleIfShip(m.Groups[2].Value, m.Groups[1].Value, own);
+        foreach (Match m in PlayerVehicleRefRegex.Matches(line)) LearnVehicleIfShip(m.Groups[2].Value, m.Groups[1].Value, own);
     }
 
     private void LearnVehicleIfShip(string id, string className, bool own)
@@ -2201,10 +2342,11 @@ public sealed class GameLogParser
         GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
         Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null,
         Func<string, string>? itemLabel = null, GameLogVehicleClasses? sharedVehicleClasses = null, Func<string, string?>? shipClassByName = null,
-        Func<string, IReadOnlyList<GameLogBlueprint>?>? blueprintByName = null, IReadOnlyList<string>? blueprintHeadings = null)
+        Func<string, IReadOnlyList<GameLogBlueprint>?>? blueprintByName = null, IReadOnlyList<string>? blueprintHeadings = null,
+        IReadOnlyList<string>? rescueHeadings = null)
     {
         var parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames, itemLabel, sharedVehicleClasses, shipClassByName,
-            blueprintByName, blueprintHeadings);
+            blueprintByName, blueprintHeadings, rescueHeadings);
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var reader = new StreamReader(fs, LogEncoding, detectEncodingFromByteOrderMarks: false);
         string? line;
@@ -2239,6 +2381,7 @@ public sealed class GameLogTail
     private readonly Func<string, string?>? _shipClassByName;
     private readonly Func<string, IReadOnlyList<GameLogBlueprint>?>? _blueprintByName;
     private readonly IReadOnlyList<string>? _blueprintHeadings;
+    private readonly IReadOnlyList<string>? _rescueHeadings;
     private long _position;
     private long _lastLength;
     private byte[]? _head;                   // 覚えている先頭の 1 行 (改行まで)。まだ分からなければ null
@@ -2251,7 +2394,8 @@ public sealed class GameLogTail
         GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
         Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null,
         Func<string, string>? itemLabel = null, GameLogVehicleClasses? sharedVehicleClasses = null, Func<string, string?>? shipClassByName = null,
-        Func<string, IReadOnlyList<GameLogBlueprint>?>? blueprintByName = null, IReadOnlyList<string>? blueprintHeadings = null)
+        Func<string, IReadOnlyList<GameLogBlueprint>?>? blueprintByName = null, IReadOnlyList<string>? blueprintHeadings = null,
+        IReadOnlyList<string>? rescueHeadings = null)
     {
         _path = path;
         _source = source;
@@ -2268,8 +2412,9 @@ public sealed class GameLogTail
         _shipClassByName = shipClassByName;
         _blueprintByName = blueprintByName;
         _blueprintHeadings = blueprintHeadings;
+        _rescueHeadings = rescueHeadings;
         Parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames, itemLabel, sharedVehicleClasses, shipClassByName,
-            blueprintByName, blueprintHeadings);
+            blueprintByName, blueprintHeadings, rescueHeadings);
     }
 
     // 増えた分を読む。戻り値: ファイルがあったか。reset = 最初から読み直した (それまでの行は捨てた)
@@ -2287,7 +2432,7 @@ public sealed class GameLogTail
             _position = 0;
             _lastLength = 0;
             Parser = new GameLogParser(_source, _shipName, _itemName, _sharedMissionNames, _translate, _isVehicleClass, _resourceName, _placeName, _sharedPlaceNames, _itemLabel, _sharedVehicleClasses, _shipClassByName,
-                _blueprintByName, _blueprintHeadings);
+                _blueprintByName, _blueprintHeadings, _rescueHeadings);
             reset = true;
         }
         if (head != null) _head = head;

@@ -31,6 +31,8 @@ public static class GameLogVoiceScenes
     public const string Armistice = "休戦ゾーン進入";
     public const string Arrival = "到着";
     public const string Jurisdiction = "管轄区域に進入";
+    // 復活 (種類「復活」。{場所} は到着と同じ規則で埋める: PlaceOf)
+    public const string Respawn = "復活";
 
     public static readonly GameLogVoiceScene[] All =
     [
@@ -49,6 +51,7 @@ public static class GameLogVoiceScenes
         new("納品", "納品", "{内容}", false),
         new("目標達成", "目標達成", "{内容}", false),
         new("死亡", "死亡", "死亡しました。", false),
+        new(Respawn, "復活", "{場所}で復活しました。", false),
         new("燃料低下", "燃料低下", "燃料が少なくなっています。", false),
         new("購入", "購入", "{内容}", false),
         new("商品購入", "商品購入", "{内容}", false),
@@ -149,6 +152,10 @@ public static class GameLogVoiceScenes
 
     // 船の名前が読める名前か (内部名のまま (「_」を含む) は読まない)
     public static bool IsReadableShip(string? ship) => ship is { Length: > 0 } s && !s.Contains('_');
+
+    // 読み上げる文の {場所} に入れる場所 (到着の音と、復活の場面は ArrivalPlace。ほかは null)
+    public static string? PlaceOf(GameLogSoundEvent ev, GameLogPlaceNames? sharedPlaceNames) =>
+        ev.Kind == GameLogSoundKind.Arrival || ev.Scene == Respawn ? ArrivalPlace(ev.Entry, sharedPlaceNames) : null;
 
     // 到着の行の場所の表示名。名前待ち (PendingPlaceId) なら共有の場所名から引き (無ければ null)、名前が入っていれば内容から船の部分 (" / 船: …") を除いたもの
     public static string? ArrivalPlace(GameLogEntry e, GameLogPlaceNames? sharedPlaceNames)
