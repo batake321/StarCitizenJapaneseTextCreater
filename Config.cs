@@ -48,6 +48,13 @@ public class AppConfig
     public string ArmisticeSoundPath { get; set; } = "";
     public bool ArrivalSoundEnabled { get; set; } = true;
     public string ArrivalSoundPath { get; set; } = "";
+
+    // 最上位のタブの並び (TabItem の x:Name の順。無い名は無視、載っていないタブは末尾) と、最後に見ていたタブ (x:Name。無ければ先頭)
+    public List<string> TabOrder { get; set; } = new();
+    public string LastTab { get; set; } = "";
+
+    // PC 間の同期: 個人データの書き出し・取り込みに使う共有フォルダ (空なら同期しない)
+    public string SyncFolder { get; set; } = "";
 }
 
 public class TranslationConfig

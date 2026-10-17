@@ -25,7 +25,7 @@
 
         <TabControl x:Name="tabMain" Grid.Row="1" Margin="8,4,8,8">
             <!-- 翻訳タブ -->
-            <TabItem Header="翻訳">
+            <TabItem x:Name="tabTranslate" Header="翻訳">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -69,7 +69,7 @@
             </TabItem>
 
             <!-- 翻訳エディタタブ -->
-            <TabItem Header="翻訳エディタ">
+            <TabItem x:Name="tabEditor" Header="翻訳エディタ">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -163,7 +163,7 @@
             </TabItem>
 
             <!-- 用語集タブ -->
-            <TabItem Header="用語集">
+            <TabItem x:Name="tabGlossary" Header="用語集">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -213,7 +213,7 @@
             </TabItem>
 
             <!-- プロファイルタブ -->
-            <TabItem Header="プロファイル">
+            <TabItem x:Name="tabProfile" Header="プロファイル">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -277,7 +277,7 @@
             </TabItem>
 
             <!-- コモディティタブ -->
-            <TabItem Header="コモディティ">
+            <TabItem x:Name="tabCommodity" Header="コモディティ">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -590,7 +590,7 @@
             </TabItem>
 
             <!-- 船舶管理タブ -->
-            <TabItem Header="船舶管理">
+            <TabItem x:Name="tabShips" Header="船舶管理">
                 <TabControl x:Name="tabShipManagement" Margin="4">
                     <TabItem Header="所持船">
                 <Grid Margin="8">
@@ -1496,7 +1496,7 @@
             </TabItem>
 
             <!-- 価格キャプチャタブ -->
-            <TabItem Header="価格キャプチャ">
+            <TabItem x:Name="tabCapture" Header="価格キャプチャ">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -1639,7 +1639,7 @@
             </TabItem>
 
             <!-- ミッションタブ -->
-            <TabItem Header="ミッション">
+            <TabItem x:Name="tabMission" Header="ミッション">
                 <Grid Margin="8">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="200"/>
@@ -1759,12 +1759,12 @@
             </TabItem>
 
             <!-- 船舶戦闘タブ (船の武器を 1 つの表に。ミサイル・魚雷・ロケットポッドは除く) -->
-            <TabItem Header="船舶戦闘">
+            <TabItem x:Name="tabShipCombat" Header="船舶戦闘">
                 <local:WeaponTablePanel IsShip="True"/>
             </TabItem>
 
             <!-- 個人戦闘タブ: ［表］(個人武器を 1 つの表に。医療ガンは除く) と［ダメージ判定］(アタッチメントを付けたときの値) -->
-            <TabItem Header="個人戦闘">
+            <TabItem x:Name="tabPersonalCombat" Header="個人戦闘">
                 <TabControl Margin="4">
                     <TabItem Header="表">
                         <local:WeaponTablePanel IsShip="False"/>
@@ -1776,12 +1776,12 @@
             </TabItem>
 
             <!-- ［船舶装備］［個人装備］: 装備を種類ごとに 1 つの表に出す (表の部品 FilterSortGrid。GearTablePanel) -->
-            <TabItem Header="船舶装備">
+            <TabItem x:Name="tabShipGear" Header="船舶装備">
                 <local:GearTablePanel IsShip="True"/>
             </TabItem>
 
             <!-- ［個人装備］: 上に装備の表、下に所持している個人装備 (my_gear。所持コンポーネントと同じ作り。初めて表示したときに読む) -->
-            <TabItem Header="個人装備">
+            <TabItem x:Name="tabPersonalGear" Header="個人装備">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="2*" MinHeight="160"/>
@@ -1911,7 +1911,7 @@
                 <local:DetailPanel x:Name="detailPanel"/>
             </TabItem>
 
-            <TabItem Header="チャット">
+            <TabItem x:Name="tabChat" Header="チャット">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -1979,7 +1979,7 @@
             </TabItem>
 
             <!-- 設定タブ -->
-            <TabItem Header="設定">
+            <TabItem x:Name="tabSettings" Header="設定">
                 <ScrollViewer Margin="8" VerticalScrollBarVisibility="Auto">
                     <StackPanel>
                         <GroupBox Header="基本設定" Margin="0,0,0,8">
@@ -2200,21 +2200,53 @@
                             </StackPanel>
                         </GroupBox>
 
+                        <!-- PC 間の同期 (SyncService / MainWindow.Sync.cs): 共有フォルダを介して個人データを複数の PC で合わせる -->
+                        <GroupBox Header="PC 間の同期" Margin="0,0,0,8">
+                            <Grid Margin="8">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <TextBlock Text="共有フォルダ:" Grid.Row="0" VerticalAlignment="Center" Margin="0,4"/>
+                                <TextBox x:Name="txtSyncFolder" Grid.Row="0" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"
+                                         ToolTip="同期に使う共有フォルダ (ネットワークドライブや NAS のフォルダ)。空欄なら同期しません。「設定を保存」で有効になります"/>
+                                <Button Content="参照…" Grid.Row="0" Grid.Column="2" Padding="10,2" Margin="6,4,0,4" Click="SyncBrowse_Click"/>
+
+                                <StackPanel Grid.Row="1" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="0,4">
+                                    <Button Content="今すぐ書き出す" Click="SyncExportNow_Click" Padding="14,6" Margin="0,0,8,0"/>
+                                    <Button Content="今すぐ取り込む" Click="SyncImportNow_Click" Padding="14,6"/>
+                                </StackPanel>
+
+                                <TextBlock x:Name="txtSyncStatus" Grid.Row="2" Grid.ColumnSpan="3" TextWrapping="Wrap" Foreground="#666" Margin="0,4,0,0"/>
+
+                                <TextBlock Grid.Row="3" Grid.ColumnSpan="3" TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontSize="12"
+                                           Text="所持船・所持部品・在庫・手動の訳・用語集・記憶などの個人データだけを、この PC の名前の小さな ZIP として共有フォルダに置き、ほかの PC の新しい書き出しを取り込みます。起動時 (取り込み → 書き出し)・ゲーム起動時 (取り込み)・ゲーム中 10 分ごと・ゲーム終了時・終了時 (書き出し) に自動で行います。手動のボタンは欄のフォルダで動きます。"/>
+                            </Grid>
+                        </GroupBox>
+
                         <Button Content="設定を保存" Click="SaveSettings_Click" Style="{StaticResource ActionButton}"
                                 FontWeight="Bold" HorizontalAlignment="Left"/>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
             <!-- ［ゲームログ］: Game.log と過去のログから出来事を拾って表に出す (GameLogPanel) -->
-            <TabItem Header="ゲームログ">
+            <TabItem x:Name="tabGameLog" Header="ゲームログ">
                 <local:GameLogPanel x:Name="gameLogPanel"/>
             </TabItem>
             <!-- ［鉱石］: 採掘・積み荷の資源の在庫 (資源 × 品質) と、売買・採掘の記録 (OrePanel。trade_cache.db) -->
-            <TabItem Header="鉱石">
+            <TabItem x:Name="tabOre" Header="鉱石">
                 <local:OrePanel x:Name="orePanel"/>
             </TabItem>
             <!-- ログタブ -->
-            <TabItem Header="ログ">
+            <TabItem x:Name="tabLog" Header="ログ">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="*"/>

@@ -23,6 +23,9 @@ public partial class GameLogPanel : UserControl
     // 表の列を入れたか (タブの初回表示で)。読み込みを始めたか (EnsureStarted。タブを開いていなくても MainWindow の Window_Loaded から始める)
     private bool _columnsSet;
     private bool _started;
+
+    // Game.log が最初から読み直しになった (ゲームの再起動) ときに UI のスレッドで知らせる (最初の読み込みでは出ない)
+    public event Action? GameLogReset;
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private bool _polling;
     // 追い読みで新しく足された行から鳴らす音を決める (休戦ゾーンに進入・到着)。設定の有効/無効とファイルは鳴らすときに App.Config から読む
@@ -477,7 +480,12 @@ public partial class GameLogPanel : UserControl
                 changed = true;
             }
             PlaySounds(result.Found, result.Reset, result.Changed ? _currentRows : null);
-            if (result.Reset) _rescanLeft = RescanTries;
+            if (result.Reset)
+            {
+                _rescanLeft = RescanTries;
+                // ゲーム起動 (Game.log が最初から読み直しになった) を知らせる (MainWindow の PC 間の同期が取り込みに使う)
+                GameLogReset?.Invoke();
+            }
             lock (_backupLock)
             {
                 if (_backupChanged)

@@ -106,6 +106,15 @@ public partial class MainWindow : Window
         // Restore window position/size
         RestoreWindowState(config);
 
+        // 最上位のタブの並びと最後に見ていたタブを戻し、ドラッグでの並べ替えを受け付ける (TabReorder。並びは落とした直後と終了時に保存)
+        TabReorder.ApplyOrder(tabMain, config.TabOrder);
+        if (TabReorder.Find(tabMain, config.LastTab) is { } lastTab) tabMain.SelectedItem = lastTab;
+        TabReorder.Attach(tabMain, onReordered: () =>
+        {
+            SaveTabState();
+            SaveConfigToFile();
+        });
+
         txtGamePath.Text = config.GamePath;
         txtSettingsGamePath.Text = config.GamePath;
         txtWorkDir.Text = config.WorkingDirectory;
@@ -155,6 +164,9 @@ public partial class MainWindow : Window
 
         // ［ゲームログ］の追い読みをタブを開く前から始める (休戦ゾーンに進入・到着の音を、タブを開いていなくても鳴らすため)。表の列はタブの初回表示で入れる
         gameLogPanel.EnsureStarted();
+
+        // PC 間の同期 (MainWindow.Sync.cs): 起動時の取り込み → 書き出しと、ゲーム起動・ゲーム中・ゲーム終了の見回り
+        InitSync();
     }
 
     private void PopulateChannels()
@@ -1650,6 +1662,7 @@ public partial class MainWindow : Window
         App.Config.ArmisticeSoundPath = txtArmisticeSoundPath.Text.Trim();
         App.Config.ArrivalSoundEnabled = chkArrivalSound.IsChecked == true;
         App.Config.ArrivalSoundPath = txtArrivalSoundPath.Text.Trim();
+        App.Config.SyncFolder = txtSyncFolder.Text.Trim();
         App.Config.UexApiKey = txtUexApiKey.Text.Trim();
         if (double.TryParse(txtMissionFontSize.Text.Trim(), out var fs) && fs >= 8 && fs <= 30)
         {
@@ -1706,6 +1719,9 @@ public partial class MainWindow : Window
                 App.Config.ArmisticeSoundPath,
                 App.Config.ArrivalSoundEnabled,
                 App.Config.ArrivalSoundPath,
+                App.Config.TabOrder,
+                App.Config.LastTab,
+                App.Config.SyncFolder,
             };
 
             var json = JsonSerializer.Serialize(config, new JsonSerializerOptions
@@ -3779,7 +3795,17 @@ public partial class MainWindow : Window
             config.WindowWidth = Width;
             config.WindowHeight = Height;
         }
+        SaveTabState();
         SaveConfigToFile();
+        // PC 間の同期: 終了時の書き出し (設定の保存の後。共有フォルダへは裏のスレッドで触り、最大 10 秒待つ)
+        SyncExportOnClosing();
+    }
+
+    // 最上位のタブの並びと今見ているタブを設定に入れる (保存は SaveConfigToFile)
+    private void SaveTabState()
+    {
+        App.Config.TabOrder = TabReorder.GetOrder(tabMain);
+        App.Config.LastTab = (tabMain.SelectedItem as TabItem)?.Name ?? "";
     }
 
     private void RestoreWindowState(AppConfig config)

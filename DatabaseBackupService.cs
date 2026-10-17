@@ -31,7 +31,7 @@ public static class DatabaseBackupService
     private static readonly string[] KnowledgeTables = ["knowledge"];
     // ore_stock / commodity_trades / mining_log: ［鉱石］タブの在庫・売買の記録・採掘の記録 (個人データ。OreService)
     // my_gear: 所持個人装備、game_log_imports: ［ゲームログ］の行を所持・在庫に入れた印 (個人データ。HangarService)
-    private static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "ship_loaners", "store_skus", "my_components", "ship_loadouts", "my_component_purchases",
+    internal static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "ship_loaners", "store_skus", "my_components", "ship_loadouts", "my_component_purchases",
         "ore_stock", "commodity_trades", "mining_log", "my_gear", "game_log_imports"];
 
     public static string[] GetTables(BackupCategory category) => category switch
@@ -205,20 +205,22 @@ public static class DatabaseBackupService
 
     // 交易 DB (trade_cache.db) の表の扱い
     // ネット由来 (b で置き換え): UEX の価格・船・端末・取得時刻、RSI の Ship Matrix・ローナー・ストア
-    private static readonly string[] TradeNetTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "ship_matrix", "ship_loaners", "store_skus"];
+    internal static readonly string[] TradeNetTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "ship_matrix", "ship_loaners", "store_skus"];
     // 個人で、行を見分けるキー (主キー) があるもの: キーで a 優先の和集合
     // (commodity_trades / mining_log: ［鉱石］タブの売買・採掘の記録。主キーはログの行の組)
-    private static readonly string[] TradePersonalKeyedTables = ["hangar_pledges", "hangar_ccus", "hangar_ship_marks", "ship_loadouts", "commodity_trades", "mining_log"];
-    // 個人で、行を見分けるキーが無いもの (主キーが無い、または中身と関係の無い連番の id だけのもの):
-    // a にその表の行が 1 行でもあれば a だけ、a が空 (表が無い) なら b の行を使う (my_gear: 所持個人装備)
-    private static readonly string[] TradePersonalUnkeyedTables = ["my_ships", "my_components", "hangar_items", "hangar_nameable_ships", "my_gear"];
-    // ［ゲームログ］の行を所持・在庫に入れた印 (game_log_imports と、旧の my_component_purchases) と、［鉱石］タブの在庫 (ore_stock。印が在庫を指す)。
-    // my_components と必ず同じ側から取る: my_components を a のまま残したときは印も在庫も a だけ、a が空で b の my_components を使ったときは印も在庫も b のものにする
-    private const string ComponentPurchasesTable = "my_component_purchases";
-    private const string GameLogImportsTable = "game_log_imports";
-    private const string OreStockTable = "ore_stock";
+    internal static readonly string[] TradePersonalKeyedTables = ["hangar_pledges", "hangar_ccus", "hangar_ship_marks", "ship_loadouts", "commodity_trades", "mining_log"];
+    // 個人で、行を見分ける主キーが無いもの (主キーが無い、または中身と関係の無い連番の id だけのもの): 自然な鍵で a 優先の和集合
+    //   my_ships: 正規化した船名 (HangarService.NormalizeShipName。所持船の名前一致の流儀) が a に無い b の船を足す。a にある船はそのまま (数量の概念なし)
+    //   my_components / my_gear: item_record と使用可 (usable) が同じなら a の行を残して quantity は max(a, b)、notes は JoinNotes。無い品は b から足す
+    //   hangar_items / hangar_nameable_ships: 全列で重複を除いた和集合
+    internal static readonly string[] TradePersonalUnkeyedTables = ["my_ships", "my_components", "hangar_items", "hangar_nameable_ships", "my_gear"];
+    // ［ゲームログ］の行を所持・在庫に入れた印 (game_log_imports と、旧の my_component_purchases): 主キーで a 優先の和集合 (Keyed と同じ)。
+    // ［鉱石］タブの在庫 (ore_stock): 資源 (resource_uuid) × 品質 (quality) × 単位 (unit) が同じなら a の行を残して quantity は max、無ければ b から足す
+    internal const string ComponentPurchasesTable = "my_component_purchases";
+    internal const string GameLogImportsTable = "game_log_imports";
+    internal const string OreStockTable = "ore_stock";
     // hangar_meta のうちネット由来のデータ (ship_matrix / ship_loaners / store_skus) の取得時刻のキー (b を使う)。ほかのキー (同期の時刻・残高) は個人
-    private static readonly string[] HangarMetaNetKeys = ["ship_matrix_fetched_at", "loaners_fetched_at", "store_fetched_at"];
+    internal static readonly string[] HangarMetaNetKeys = ["ship_matrix_fetched_at", "loaners_fetched_at", "store_fetched_at"];
 
     public static async Task ImportFromZipAsync(string zipPath, string translationDbPath, string indexDbPath,
         IEnumerable<BackupCategory> categories, Action<string>? onStatus = null, string? tradeDbPath = null)
@@ -402,9 +404,9 @@ public static class DatabaseBackupService
     }
 
     // 控えの置き場所 (取り込み先と同じフォルダ)
-    private static string CreateImportBackup(string dbPath)
+    internal static string CreateImportBackup(string dbPath, string suffix = ".import.bak")
     {
-        var bak = dbPath + ".import.bak";
+        var bak = dbPath + suffix;
         TryDelete(bak);
         using var conn = new SqliteConnection($"Data Source={dbPath};Pooling=False");
         conn.Open();
@@ -417,7 +419,7 @@ public static class DatabaseBackupService
     }
 
     // 控えから戻す (SQLite のバックアップで書き戻すので、ほかで開いている接続があっても戻せる)
-    private static void RestoreImportBackup(string backupPath, string dbPath)
+    internal static void RestoreImportBackup(string backupPath, string dbPath)
     {
         using var bak = new SqliteConnection($"Data Source={backupPath};Mode=ReadOnly;Pooling=False");
         bak.Open();
@@ -426,7 +428,7 @@ public static class DatabaseBackupService
         bak.BackupDatabase(dest);
     }
 
-    private static void TryDelete(string path)
+    internal static void TryDelete(string path)
     {
         try { if (File.Exists(path)) File.Delete(path); } catch { }
     }
@@ -524,22 +526,23 @@ public static class DatabaseBackupService
         tx.Commit();
     }
 
-    // trade_cache.db: ネット由来の表は b で置き換え、個人の表は a 優先 (TradePersonalKeyedTables / TradePersonalUnkeyedTables の説明のとおり)。
-    // hangar_meta はキーで分ける (HangarMetaNetKeys は b、ほかは a 優先の和集合)
+    // trade_cache.db: ネット由来の表は b で置き換え、個人の表は a 優先の和集合 (TradePersonalKeyedTables / TradePersonalUnkeyedTables の説明のとおり)。
+    // hangar_meta はキーで分ける (HangarMetaNetKeys は b、ほかは a 優先の和集合)。
+    // 所持船 (my_ships) で b から足した船の id が a の id とぶつかって変わったときは、その船の装備 (ship_loadouts の "my|{id}") も新しい id で入れる
     private static void ImportTradeDb(string aPath, string bPath, Action<string>? onStatus)
     {
         using var conn = OpenWithSource(aPath, bPath);
+        // 所持船の名寄せ (NormalizeShipName) は a の Ship Matrix と同梱の別名表で行う (HangarService は a と同じフォルダの trade_cache.db を開くので、
+        // トランザクションを始める前に、a と b の船名をまとめて正規化しておく)
+        var shipNames = NormalizeMyShipNames(conn, aPath);
         using var tx = conn.BeginTransaction();
-        var componentsFromB = false;   // my_components を b から入れたか (ComponentPurchasesTable / GameLogImportsTable / OreStockTable の扱いに使う)
+        Dictionary<long, long>? myShipIdMap = null;   // b の my_ships.id → a での id (足した船は入れた id、a にあった船は a の同じ船の id)
         foreach (var table in TradeTables)
         {
-            if (table == ComponentPurchasesTable || table == GameLogImportsTable || table == OreStockTable)
+            if (table == ComponentPurchasesTable || table == GameLogImportsTable)
             {
-                if (!componentsFromB) continue;
-                // 印も在庫も b のものだけにする (b に表が無ければ空)。a に表が無ければ作る (ore_stock は OreService の DDL)
-                if (table == OreStockTable) Exec(conn, tx, OreService.TradeTablesDdl);
-                else EnsureTradeSchemaTable(conn, tx);
-                Exec(conn, tx, $"DELETE FROM main.{Q(table)}");
+                // 印は主キーで a 優先の和集合。a に表が無ければ作る
+                EnsureTradeSchemaTable(conn, tx);
                 if (SourceTableExists(conn, tx, table))
                 {
                     var cols = string.Join(", ", CommonColumns(conn, tx, table).Select(Q));
@@ -547,7 +550,9 @@ public static class DatabaseBackupService
                     onStatus?.Invoke($"{table}: {n} 件追加");
                 }
                 // 旧の印 (my_component_purchases) しか無いバックアップ (前の版) からも印が残るよう、旧表の行を game_log_imports に写す
-                if (table == GameLogImportsTable) Exec(conn, tx, HangarService.MigrateComponentPurchasesSql);
+                // (game_log_imports のあるバックアップでは行わない。取り消した印が旧表から戻らないように)
+                else if (table == GameLogImportsTable && SourceTableExists(conn, tx, ComponentPurchasesTable))
+                    Exec(conn, tx, HangarService.MigrateComponentPurchasesSql);
                 continue;
             }
             if (!SourceTableExists(conn, tx, table)) continue;
@@ -564,6 +569,18 @@ public static class DatabaseBackupService
                 Exec(conn, tx, $"INSERT OR REPLACE INTO main.hangar_meta (key, value) SELECT key, value FROM src.hangar_meta WHERE key IN ({netKeys})");
                 Exec(conn, tx, $"INSERT OR IGNORE INTO main.hangar_meta (key, value) SELECT key, value FROM src.hangar_meta WHERE key NOT IN ({netKeys})");
             }
+            else if (table == OreStockTable)
+            {
+                Exec(conn, tx, OreService.TradeTablesDdl);   // a に表が無ければ作る (OreService の DDL)
+                var n = MergeOreStock(conn, tx);
+                onStatus?.Invoke($"{table}: {n} 件追加");
+            }
+            else if (table == "ship_loadouts" && myShipIdMap is { Count: > 0 })
+            {
+                EnsureMainTable(conn, tx, table);
+                var n = MergeShipLoadouts(conn, tx, myShipIdMap);
+                onStatus?.Invoke($"{table}: {n} 件追加");
+            }
             else if (TradePersonalKeyedTables.Contains(table))
             {
                 EnsureMainTable(conn, tx, table);
@@ -574,10 +591,10 @@ public static class DatabaseBackupService
             else if (TradePersonalUnkeyedTables.Contains(table))
             {
                 EnsureMainTable(conn, tx, table);
-                if (Scalar(conn, tx, $"SELECT EXISTS (SELECT 1 FROM main.{Q(table)})") != 0) continue;
-                if (table == "my_components") componentsFromB = true;
-                var colList = string.Join(", ", CommonColumns(conn, tx, table).Select(Q));
-                var n = Exec(conn, tx, $"INSERT INTO main.{Q(table)} ({colList}) SELECT {colList} FROM src.{Q(table)}");
+                int n;
+                if (table == "my_ships") n = MergeMyShips(conn, tx, shipNames, out myShipIdMap);
+                else if (table == "my_components" || table == "my_gear") n = MergeQuantityRows(conn, tx, table);
+                else n = MergeDistinctRows(conn, tx, table);
                 onStatus?.Invoke($"{table}: {n} 件追加");
             }
         }
@@ -585,9 +602,236 @@ public static class DatabaseBackupService
         tx.Commit();
     }
 
+    // a (main) と b (src) の所持船の名前 → 正規化名 (HangarService.NormalizeShipName: a の Ship Matrix と別名表で名寄せ。解決できなければそのまま)。
+    // HangarService は a と同じフォルダの trade_cache.db を開く (a は作業フォルダの trade_cache.db)。表が無ければ空
+    private static Dictionary<string, string> NormalizeMyShipNames(SqliteConnection conn, string aPath)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var schema in new[] { "main", "src" })
+        {
+            if (Scalar(conn, null, $"SELECT COUNT(*) FROM {schema}.sqlite_master WHERE type = 'table' AND name = 'my_ships'") == 0) continue;
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"SELECT DISTINCT name FROM {schema}.my_ships";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) if (!r.IsDBNull(0)) names.Add(r.GetString(0));
+        }
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (names.Count == 0) return result;
+        var hangar = new HangarService();
+        hangar.SetCacheDir(Path.GetDirectoryName(Path.GetFullPath(aPath)) ?? ".");
+        foreach (var n in names) result[n] = hangar.NormalizeShipName(n.Trim());
+        return result;
+    }
+
+    // my_ships: 正規化した船名が a に無い b の船を足す (a にある船はそのまま。b に同じ船が 2 隻あれば 2 隻とも足す)。
+    // b の id が a で空いていればその id のまま、ぶつかれば新しい id で入れる。idMap に b の id → a での id を入れる (足さなかった船は a の同じ船の最初の id)
+    private static int MergeMyShips(SqliteConnection conn, SqliteTransaction tx, Dictionary<string, string> shipNames, out Dictionary<long, long> idMap)
+    {
+        idMap = new Dictionary<long, long>();
+        string Norm(string name) => shipNames.TryGetValue(name, out var n) ? n : name.Trim();
+        var cols = CommonColumns(conn, tx, "my_ships");
+        if (!cols.Contains("name", StringComparer.OrdinalIgnoreCase)) throw new InvalidOperationException("my_ships に name の列がありません");
+        var colsNoId = cols.Where(c => !c.Equals("id", StringComparison.OrdinalIgnoreCase)).ToList();
+        var hasId = cols.Count != colsNoId.Count;
+
+        var aByName = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        var aIds = new HashSet<long>();
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "SELECT rowid, name FROM main.my_ships ORDER BY rowid";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var id = r.GetInt64(0);
+                aIds.Add(id);
+                var key = Norm(r.IsDBNull(1) ? "" : r.GetString(1));
+                if (!aByName.ContainsKey(key)) aByName[key] = id;
+            }
+        }
+        var bRows = new List<(long Id, string Name)>();
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "SELECT rowid, name FROM src.my_ships ORDER BY rowid";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) bRows.Add((r.GetInt64(0), r.IsDBNull(1) ? "" : r.GetString(1)));
+        }
+
+        var added = 0;
+        var withId = string.Join(", ", cols.Select(Q));
+        var withoutId = string.Join(", ", colsNoId.Select(Q));
+        foreach (var (bId, bName) in bRows)
+        {
+            if (aByName.TryGetValue(Norm(bName), out var aId)) { idMap[bId] = aId; continue; }
+            var keepId = hasId && !aIds.Contains(bId);
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = keepId
+                ? $"INSERT INTO main.my_ships ({withId}) SELECT {withId} FROM src.my_ships WHERE rowid = @id; SELECT last_insert_rowid();"
+                : $"INSERT INTO main.my_ships ({withoutId}) SELECT {withoutId} FROM src.my_ships WHERE rowid = @id; SELECT last_insert_rowid();";
+            cmd.Parameters.AddWithValue("@id", bId);
+            var newId = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L);
+            aIds.Add(newId);
+            idMap[bId] = newId;
+            added++;
+        }
+        return added;
+    }
+
+    // ship_loadouts: 主キーで a 優先の和集合。所持船のキー ("my|{my_ships.id}") は MergeMyShips で決めた a での id に付け替える
+    // (b の my_ships に無い id のキーは入れない)。ほかのキーはそのまま
+    private static int MergeShipLoadouts(SqliteConnection conn, SqliteTransaction tx, Dictionary<long, long> idMap)
+    {
+        var cols = CommonColumns(conn, tx, "ship_loadouts");
+        if (!cols.Contains("ship_key", StringComparer.OrdinalIgnoreCase)) throw new InvalidOperationException("ship_loadouts に ship_key の列がありません");
+        var colList = string.Join(", ", cols.Select(Q));
+        var n = Exec(conn, tx, $"INSERT OR IGNORE INTO main.ship_loadouts ({colList}) SELECT {colList} FROM src.ship_loadouts WHERE ship_key NOT LIKE 'my|%'");
+        var selectList = string.Join(", ", cols.Select(c => c.Equals("ship_key", StringComparison.OrdinalIgnoreCase) ? "@newKey" : Q(c)));
+        foreach (var (oldId, newId) in idMap)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = $"INSERT OR IGNORE INTO main.ship_loadouts ({colList}) SELECT {selectList} FROM src.ship_loadouts WHERE ship_key = @oldKey";
+            cmd.Parameters.AddWithValue("@newKey", $"my|{newId}");
+            cmd.Parameters.AddWithValue("@oldKey", $"my|{oldId}");
+            n += cmd.ExecuteNonQuery();
+        }
+        return n;
+    }
+
+    // my_components / my_gear: 同じ品 (item_record と使用可 (usable) が同じ) の行が a にあれば、その行 (id のいちばん小さい行) を残して
+    // quantity を max(a, b)、notes を JoinNotes にする。無ければ b の行を新しい id で足す。足した行数を返す
+    private static int MergeQuantityRows(SqliteConnection conn, SqliteTransaction tx, string table)
+    {
+        var cols = CommonColumns(conn, tx, table);
+        if (!cols.Contains("item_record", StringComparer.OrdinalIgnoreCase)) throw new InvalidOperationException($"{table} に item_record の列がありません");
+        var colsNoId = cols.Where(c => !c.Equals("id", StringComparison.OrdinalIgnoreCase)).ToList();
+        var colList = string.Join(", ", colsNoId.Select(Q));
+        var srcHasUsable = SourceColumnExists(conn, tx, table, "usable");
+        var srcHasQty = SourceColumnExists(conn, tx, table, "quantity");
+        var srcHasNotes = SourceColumnExists(conn, tx, table, "notes");
+
+        var bRows = new List<(long Rowid, string Record, bool Usable, long Qty, string Notes)>();
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = $"SELECT rowid, item_record, {(srcHasUsable ? "(COALESCE(usable, 1) != 0)" : "1")}, {(srcHasQty ? "COALESCE(quantity, 1)" : "1")}, {(srcHasNotes ? "COALESCE(notes, '')" : "''")} FROM src.{Q(table)} ORDER BY rowid";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) bRows.Add((r.GetInt64(0), r.GetString(1), r.GetInt64(2) != 0, r.GetInt64(3), r.GetString(4)));
+        }
+
+        var added = 0;
+        foreach (var b in bRows)
+        {
+            long? aId = null; long aQty = 1; var aNotes = "";
+            using (var find = conn.CreateCommand())
+            {
+                find.Transaction = tx;
+                find.CommandText = $"SELECT id, COALESCE(quantity, 1), COALESCE(notes, '') FROM main.{Q(table)} WHERE item_record = @r AND (COALESCE(usable, 1) != 0) = @u ORDER BY id LIMIT 1";
+                find.Parameters.AddWithValue("@r", b.Record);
+                find.Parameters.AddWithValue("@u", b.Usable ? 1 : 0);
+                using var r = find.ExecuteReader();
+                if (r.Read()) { aId = r.GetInt64(0); aQty = r.GetInt64(1); aNotes = r.GetString(2); }
+            }
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            if (aId is { } id)
+            {
+                var qty = Math.Max(aQty, b.Qty);
+                var notes = JoinNotesIdempotent(aNotes, b.Notes);
+                if (qty == aQty && notes == aNotes) continue;
+                cmd.CommandText = $"UPDATE main.{Q(table)} SET quantity = @q, notes = @o WHERE id = @id";
+                cmd.Parameters.AddWithValue("@q", qty);
+                cmd.Parameters.AddWithValue("@o", notes);
+                cmd.Parameters.AddWithValue("@id", id);
+                cmd.ExecuteNonQuery();
+                continue;
+            }
+            cmd.CommandText = $"INSERT INTO main.{Q(table)} ({colList}) SELECT {colList} FROM src.{Q(table)} WHERE rowid = @rid";
+            cmd.Parameters.AddWithValue("@rid", b.Rowid);
+            cmd.ExecuteNonQuery();
+            added++;
+        }
+        return added;
+    }
+
+    // ore_stock: 同じ組 (resource_uuid × quality (NULL も同じ扱い) × unit) の行が a にあれば、その行を残して quantity を max(a, b)、notes を JoinNotes にする
+    // (変わったときだけ updated_at も今にする。OreService の更新と同じ)。無ければ b の行を新しい id で足す。足した行数を返す
+    private static int MergeOreStock(SqliteConnection conn, SqliteTransaction tx)
+    {
+        if (!SourceTableExists(conn, tx, OreStockTable)) return 0;
+        var cols = CommonColumns(conn, tx, OreStockTable);
+        foreach (var need in new[] { "resource_uuid", "quality", "unit", "quantity" })
+            if (!cols.Contains(need, StringComparer.OrdinalIgnoreCase)) throw new InvalidOperationException($"{OreStockTable} に {need} の列がありません");
+        var colsNoId = cols.Where(c => !c.Equals("id", StringComparison.OrdinalIgnoreCase)).ToList();
+        var colList = string.Join(", ", colsNoId.Select(Q));
+        var srcHasNotes = SourceColumnExists(conn, tx, OreStockTable, "notes");
+
+        var bRows = new List<(long Rowid, string Uuid, long? Quality, string Unit, double Qty, string Notes)>();
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = $"SELECT rowid, resource_uuid, quality, unit, COALESCE(quantity, 0), {(srcHasNotes ? "COALESCE(notes, '')" : "''")} FROM src.ore_stock ORDER BY rowid";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                bRows.Add((r.GetInt64(0), r.GetString(1), r.IsDBNull(2) ? null : Convert.ToInt64(r.GetValue(2)), r.GetString(3), r.GetDouble(4), r.GetString(5)));
+        }
+
+        var added = 0;
+        foreach (var b in bRows)
+        {
+            long? aId = null; double aQty = 0; var aNotes = "";
+            using (var find = conn.CreateCommand())
+            {
+                find.Transaction = tx;
+                find.CommandText = "SELECT id, COALESCE(quantity, 0), COALESCE(notes, '') FROM main.ore_stock WHERE resource_uuid = @u AND quality IS @q AND unit = @unit ORDER BY id LIMIT 1";
+                find.Parameters.AddWithValue("@u", b.Uuid);
+                find.Parameters.AddWithValue("@q", (object?)b.Quality ?? DBNull.Value);
+                find.Parameters.AddWithValue("@unit", b.Unit);
+                using var r = find.ExecuteReader();
+                if (r.Read()) { aId = r.GetInt64(0); aQty = r.GetDouble(1); aNotes = r.GetString(2); }
+            }
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            if (aId is { } id)
+            {
+                var qty = Math.Max(aQty, b.Qty);
+                var notes = JoinNotesIdempotent(aNotes, b.Notes);
+                if (qty == aQty && notes == aNotes) continue;
+                cmd.CommandText = "UPDATE main.ore_stock SET quantity = @n, notes = @o, updated_at = datetime('now','localtime') WHERE id = @id";
+                cmd.Parameters.AddWithValue("@n", qty);
+                cmd.Parameters.AddWithValue("@o", notes);
+                cmd.Parameters.AddWithValue("@id", id);
+                cmd.ExecuteNonQuery();
+                continue;
+            }
+            cmd.CommandText = $"INSERT INTO main.ore_stock ({colList}) SELECT {colList} FROM src.ore_stock WHERE rowid = @rid";
+            cmd.Parameters.AddWithValue("@rid", b.Rowid);
+            cmd.ExecuteNonQuery();
+            added++;
+        }
+        return added;
+    }
+
+    // a と b のメモを HangarService.JoinNotes でつなぐ。同じバックアップを 2 回取り込んでも増えないよう、つないだ形 (" / " 区切り) をほどいてから
+    // 重複を除いてつなぎ直す (JoinNotes は文の単位で重複を除く)
+    private static string JoinNotesIdempotent(string aNotes, string bNotes) =>
+        HangarService.JoinNotes(aNotes.Split(" / ").Concat(bNotes.Split(" / ")));
+
+    // hangar_items / hangar_nameable_ships (主キー無し): 全列 (両方にある列) で重複を除いた和集合。a に同じ行 (全列が同じ。NULL 同士も同じ) が無い b の行を足す
+    private static int MergeDistinctRows(SqliteConnection conn, SqliteTransaction tx, string table)
+    {
+        var cols = CommonColumns(conn, tx, table);
+        var colList = string.Join(", ", cols.Select(Q));
+        var same = string.Join(" AND ", cols.Select(c => $"m.{Q(c)} IS s.{Q(c)}"));
+        return Exec(conn, tx, $"INSERT INTO main.{Q(table)} ({colList}) SELECT DISTINCT {colList} FROM src.{Q(table)} s "
+            + $"WHERE NOT EXISTS (SELECT 1 FROM main.{Q(table)} m WHERE {same})");
+    }
+
     // a に印の表 (ComponentPurchasesTable / GameLogImportsTable。game_log_imports と一緒に my_gear も) が無ければ作る
     // (b に表が無いときも空の表を用意するため。形は EnsureTradeSchema と同じ)
-    private static void EnsureTradeSchemaTable(SqliteConnection conn, SqliteTransaction tx) =>
+    internal static void EnsureTradeSchemaTable(SqliteConnection conn, SqliteTransaction tx) =>
         Exec(conn, tx, """
             CREATE TABLE IF NOT EXISTS main.my_component_purchases (
                 log_time TEXT NOT NULL,
@@ -603,7 +847,7 @@ public static class DatabaseBackupService
             """ + HangarService.GearImportTablesDdl);
 
     // a の DB を開き、b を "src" として読む
-    private static SqliteConnection OpenWithSource(string aPath, string bPath)
+    internal static SqliteConnection OpenWithSource(string aPath, string bPath)
     {
         var conn = new SqliteConnection($"Data Source={aPath};Pooling=False");
         conn.Open();
@@ -625,7 +869,7 @@ public static class DatabaseBackupService
     }
 
     // a に表が無ければ b の CREATE TABLE で作る
-    private static void EnsureMainTable(SqliteConnection conn, SqliteTransaction tx, string table)
+    internal static void EnsureMainTable(SqliteConnection conn, SqliteTransaction tx, string table)
     {
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
@@ -638,7 +882,7 @@ public static class DatabaseBackupService
         Exec(conn, tx, sql);
     }
 
-    private static bool SourceTableExists(SqliteConnection conn, SqliteTransaction tx, string table)
+    internal static bool SourceTableExists(SqliteConnection conn, SqliteTransaction tx, string table)
     {
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
@@ -660,7 +904,7 @@ public static class DatabaseBackupService
     }
 
     // a と b の両方にある列 (a の順)
-    private static List<string> CommonColumns(SqliteConnection conn, SqliteTransaction tx, string table)
+    internal static List<string> CommonColumns(SqliteConnection conn, SqliteTransaction tx, string table)
     {
         List<string> Cols(string schema)
         {
@@ -679,7 +923,7 @@ public static class DatabaseBackupService
     }
 
     // sqlite_sequence (AUTOINCREMENT の表の最後の番号) を、表ごとに 1 行・使った番号の最大以上にする (b の id で入れた表があるため)
-    private static void NormalizeSequences(SqliteConnection conn, SqliteTransaction tx)
+    internal static void NormalizeSequences(SqliteConnection conn, SqliteTransaction tx)
     {
         if (Scalar(conn, tx, "SELECT COUNT(*) FROM main.sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'") == 0) return;
         var names = new List<string>();
@@ -714,7 +958,7 @@ public static class DatabaseBackupService
         }
     }
 
-    private static int Exec(SqliteConnection conn, SqliteTransaction tx, string sql)
+    internal static int Exec(SqliteConnection conn, SqliteTransaction? tx, string sql)
     {
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
@@ -723,7 +967,7 @@ public static class DatabaseBackupService
         return cmd.ExecuteNonQuery();
     }
 
-    private static long Scalar(SqliteConnection conn, SqliteTransaction tx, string sql)
+    internal static long Scalar(SqliteConnection conn, SqliteTransaction? tx, string sql)
     {
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
@@ -731,9 +975,9 @@ public static class DatabaseBackupService
         return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L);
     }
 
-    private static string Q(string name) => "\"" + name.Replace("\"", "\"\"") + "\"";
+    internal static string Q(string name) => "\"" + name.Replace("\"", "\"\"") + "\"";
 
-    private static void EnsureTradeSchema(SqliteConnection conn)
+    internal static void EnsureTradeSchema(SqliteConnection conn)
     {
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
@@ -996,7 +1240,7 @@ public static class DatabaseBackupService
         return (long)(cmd.ExecuteScalar() ?? 0L);
     }
 
-    private static bool TableExists(SqliteConnection conn, string table)
+    internal static bool TableExists(SqliteConnection conn, string table)
     {
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=@n";
