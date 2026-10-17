@@ -95,6 +95,9 @@ public partial class MainWindow : Window
         gameLogPanel.SellProfit = key => orePanel.TryGetSellProfit(key);
         gameLogPanel.DetailOpener = OpenGameLogItemDetail;
         gameLogPanel.ShipDetailOpener = OpenGameLogShipDetail;
+        // ［ゲームログ］の行を trade_cache.db に残す・ほかの PC の行を読む (game_log_entries)
+        gameLogPanel.StoredLoader = LoadGameLogEntries;
+        gameLogPanel.StoredSaver = SaveGameLogEntries;
         // ［鉱石］の作業ディレクトリ (trade_cache.db / gamedata_cache.db / translations.db の所在)
         orePanel.WorkDirProvider = () => WorkDir;
     }
@@ -1569,6 +1572,8 @@ public partial class MainWindow : Window
                 gameLogPanel?.RefreshPurchaseButtons();
                 // trade_cache.db の在庫・記録と gamedata_cache.db の資源の種類が替わったかもしれないので、［鉱石］を読み直す
                 orePanel?.Reload();
+                // trade_cache.db に残した［ゲームログ］の行 (ほかの PC の行) も替わったかもしれないので読み直す
+                gameLogPanel?.ReloadStored();
                 // ほかの取り込みがまだ走っていれば何もしない (最後に終わった取り込みが戻す)
                 if (!lastImport) { }
                 else if (deferred is { } d)
@@ -6241,6 +6246,23 @@ public partial class MainWindow : Window
         if (orePanel == null) return;
         orePanel.UpdateTradeResult(ToOreTrade(t));
         InvalidateImportMarks();
+    }
+
+    // ［ゲームログ］の行の DB (trade_cache.db の game_log_entries。GameLogStore)。
+    // 読み込み (GameLogPanel.StoredLoader) は GameLogPanel が裏のスレッドで呼ぶので、UI のスレッドで使う _hangarService とは別の口を作って読む。
+    // 保存 (GameLogPanel.StoredSaver) は UI のスレッド (表の作り直しの中) から来る。machine は PC 間の同期と同じ Environment.MachineName
+    private (List<StoredGameLogEntry> Rows, int Broken) LoadGameLogEntries()
+    {
+        var hangar = new HangarService();
+        hangar.SetCacheDir(WorkDir);
+        var rows = hangar.LoadGameLogEntries(out var broken);
+        return (rows, broken);
+    }
+
+    private int SaveGameLogEntries(IReadOnlyList<GameLogEntry> entries)
+    {
+        _hangarService.SetCacheDir(WorkDir);
+        return _hangarService.SaveGameLogEntries(entries, Environment.MachineName);
     }
 
     // ［ゲームログ］の内容の欄の船のダブルクリック → ［詳細］。クラス名が分かっていて ships にあればその品目 (ships.record_name)、

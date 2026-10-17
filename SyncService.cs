@@ -15,7 +15,7 @@ namespace StarCitizenJapaneseTextCreater;
 //   取り込みの決まり (通常のインポート (DatabaseBackupService.ImportCore) とは別。相手の書き出しのほうが新しいことが分かっているので置き換えが基本):
 //     - 主キーの無い個人の表 (my_ships, my_components, hangar_items, hangar_nameable_ships, my_gear) と連動の game_log_imports / my_component_purchases / ore_stock:
 //       相手の行で置き換え (DELETE → INSERT。両方にある列だけ)
-//     - 主キーのある個人の表 (hangar_pledges, hangar_ccus, hangar_ship_marks, ship_loadouts, commodity_trades, mining_log、hangar_meta の個人のキー、glossary、
+//     - 主キーのある個人の表 (hangar_pledges, hangar_ccus, hangar_ship_marks, ship_loadouts, commodity_trades, mining_log, game_log_entries、hangar_meta の個人のキー、glossary、
 //       translations の個人行): INSERT OR REPLACE (主キーが同じなら相手の行。translations は key が同じとき japanese / source / translator / modified_at を
 //       相手の値にする。自分の非個人行 (ゲーム由来の訳) は消さない。glossary も english が同じ行は値が違うときだけ相手の値にする)
 //     - knowledge: 同じ本文 (content) の行が無ければ新しい id で足す (通常のインポートと同じ)

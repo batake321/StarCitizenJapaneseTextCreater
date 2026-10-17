@@ -15,7 +15,8 @@ public sealed class GameLogEntry
     public string Kind { get; set; } = "";
     public string Content { get; set; } = "";
     public double? Amount { get; init; }
-    public string Source { get; init; } = "";
+    // DB から復元した行 (GameLogStore.FromJson) は保存した PC の名前にするので set
+    public string Source { get; set; } = "";
     // 同じ時刻の行の並び (読んだ順。全ファイル通しの番号)
     public long Seq { get; init; }
     // ミッション名がまだ分からない契約終了の行の MissionId (内容は MissionId の先頭 8 文字)。名前を入れたら null
@@ -27,7 +28,8 @@ public sealed class GameLogEntry
     // 所持・在庫に入れられる品 (購入・採掘・貨物エレベーターで降ろした品の行)。ほかの行は null。
     // 1 行に複数の品 (降ろした品) があるので一覧。印 (game_log_imports) は品ごとに付ける
     public List<GameLogImportItem>? ImportItems { get; init; }
-    // ［ゲームログ］タブが決める「入れる」「取り消す」ボタンの状態 (UI のスレッドだけで使う)
+    // ［ゲームログ］タブが決める「入れる」「取り消す」ボタンの状態 (UI のスレッドだけで使う。DB の payload_json には入れない)
+    [System.Text.Json.Serialization.JsonIgnore]
     public PurchaseImportState ImportState { get; set; }
     // 商品売買の行 (種類「商品購入」「商品売却」「取引失敗」) の中身 (［鉱石］の commodity_trades に入れる)。ほかの行は null
     public GameLogTrade? Trade { get; init; }

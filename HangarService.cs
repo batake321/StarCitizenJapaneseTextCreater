@@ -704,7 +704,8 @@ public class HangarService
                 PRIMARY KEY (log_time, player_id, shop_id, kiosk_id, item_name, quantity)
             );
             """ + OreService.TradeTablesDdl   // ［鉱石］タブの 3 つの表 (ore_stock / commodity_trades / mining_log。DatabaseBackupService.EnsureTradeSchema と同じ DDL)
-            + GearImportTablesDdl;            // 所持個人装備 (my_gear) と［ゲームログ］の印 (game_log_imports)
+            + GearImportTablesDdl             // 所持個人装備 (my_gear) と［ゲームログ］の印 (game_log_imports)
+            + GameLogEntriesDdl;              // ［ゲームログ］の行 (game_log_entries。別の PC でも見るために残す)
         cmd.ExecuteNonQuery();
         MigratePledgesSchema(db);
         MigrateStoreSchema(db);
@@ -736,6 +737,25 @@ public class HangarService
             quantity REAL NOT NULL DEFAULT 0,
             added_at TEXT DEFAULT (datetime('now','localtime')),
             PRIMARY KEY (kind, log_key)
+        );
+        """;
+
+    // ［ゲームログ］の行 (game_log_entries。GameLogStore)。主キーは (time_utc, kind, content)。machine は保存した PC (Environment.MachineName)、
+    // payload_json は GameLogEntry をそのまま JSON にしたもの (ボタン・ダブルクリックに要る ImportItems / Trade / Mining / ShipClass 等を復元する)。
+    // HangarService.InitDb・DatabaseBackupService.EnsureTradeSchema から使う (同じ形を 1 か所に置く)
+    internal const string GameLogEntriesDdl = """
+
+        CREATE TABLE IF NOT EXISTS game_log_entries (
+            time_utc TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            content TEXT NOT NULL,
+            amount REAL,
+            ship_class TEXT,
+            ship_name TEXT,
+            machine TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '',
+            added_at TEXT DEFAULT (datetime('now','localtime')),
+            PRIMARY KEY (time_utc, kind, content)
         );
         """;
 
@@ -1472,6 +1492,66 @@ public class HangarService
 
     internal static void DeleteMark(SqliteConnection db, SqliteTransaction tx, string kind, string logKey) =>
         Exec(db, tx, "DELETE FROM game_log_imports WHERE kind = @k AND log_key = @l", ("@k", kind), ("@l", logKey));
+
+    // === ［ゲームログ］の行 (game_log_entries) ===
+
+    // 残してある行の全部 (保存した PC の名前と、payload_json から復元した行)。表が無い (DB がまだ無い) なら空。
+    // payload_json を読めなかった行は飛ばし、その数を broken に返す
+    public List<StoredGameLogEntry> LoadGameLogEntries(out int broken)
+    {
+        broken = 0;
+        var list = new List<StoredGameLogEntry>();
+        if (_dbPath == null || !File.Exists(_dbPath)) return list;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT machine, payload_json FROM game_log_entries";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            var machine = r.IsDBNull(0) ? "" : r.GetString(0);
+            var entry = r.IsDBNull(1) ? null : GameLogStore.FromJson(r.GetString(1), machine);
+            if (entry == null) { broken++; continue; }
+            list.Add(new StoredGameLogEntry(machine, entry));
+        }
+        return list;
+    }
+
+    // 行を残す (INSERT OR IGNORE。1 つのトランザクション)。鍵 (time_utc, kind, content) が既にある行は入れない。入れた行数を返す
+    public int SaveGameLogEntries(IReadOnlyList<GameLogEntry> entries, string machine)
+    {
+        if (_dbPath == null || entries.Count == 0) return 0;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var tx = db.BeginTransaction();
+        using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "INSERT OR IGNORE INTO game_log_entries (time_utc, kind, content, amount, ship_class, ship_name, machine, payload_json) "
+                          + "VALUES (@t, @k, @c, @a, @sc, @sn, @m, @p)";
+        var pT = cmd.Parameters.Add("@t", SqliteType.Text);
+        var pK = cmd.Parameters.Add("@k", SqliteType.Text);
+        var pC = cmd.Parameters.Add("@c", SqliteType.Text);
+        var pA = cmd.Parameters.Add("@a", SqliteType.Real);
+        var pSc = cmd.Parameters.Add("@sc", SqliteType.Text);
+        var pSn = cmd.Parameters.Add("@sn", SqliteType.Text);
+        var pM = cmd.Parameters.Add("@m", SqliteType.Text);
+        var pP = cmd.Parameters.Add("@p", SqliteType.Text);
+        pM.Value = machine;
+        var inserted = 0;
+        foreach (var e in entries)
+        {
+            pT.Value = GameLogStore.TimeText(e.TimeUtc);
+            pK.Value = e.Kind;
+            pC.Value = e.Content;
+            pA.Value = e.Amount is { } a ? a : DBNull.Value;
+            pSc.Value = (object?)e.ShipClass ?? DBNull.Value;
+            pSn.Value = (object?)e.ShipName ?? DBNull.Value;
+            pP.Value = GameLogStore.ToJson(e);
+            inserted += cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return inserted;
+    }
 
     // ［ゲームログ］の行の品を所持コンポーネント c として入れる (AddMyComponent と同じく同じ品には数量を足す)。印 (kind, logKey → my_components) を残し、
     // 印が既にあれば何もせず false。印と所持コンポーネントは 1 つのトランザクションで書く (片方だけ残らないように)

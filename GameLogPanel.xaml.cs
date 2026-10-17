@@ -12,7 +12,9 @@ namespace StarCitizenJapaneseTextCreater;
 //   logbackups\*.log: 過去のログ。初回表示時に裏ですべて読む
 // から出来事を拾って (GameLogParser) 1 つの表に新しい順で出す。
 // ミッション名 (MissionId → 名前) はタブ全体で 1 つを共有し (GameLogMissionNames)、ファイルをまたいで引く。名前待ちの行の書き換えは UI のスレッドで行う。
-// 船名・品名は gamedata_cache.db / translations.db (作業フォルダ。読み取り専用) で日本語にする (引けなければ内部名)
+// 船名・品名は gamedata_cache.db / translations.db (作業フォルダ。読み取り専用) で日本語にする (引けなければ内部名)。
+// 確定した行は trade_cache.db (game_log_entries。GameLogStore) に残し (StoredSaver)、ほかの PC で残した行 (StoredLoader) を手元の行と合わせて表に出す
+// (バックアップ・PC 間の同期で DB ごと渡る)。DB の行でも「所持」のボタン・ダブルクリック・利益の添え書きは手元の行と同じように効く
 public partial class GameLogPanel : UserControl
 {
     private const string CurrentSource = "現在";
@@ -44,7 +46,23 @@ public partial class GameLogPanel : UserControl
     private string _logPath = "";
     private bool _logMissing;
     private string? _pollError;
+    private string? _startError;   // 読み込みを始められなかった理由 (ゲームのフォルダが無い)。状態の 1 行目に出す
     private GameLogEntry[] _currentRows = [];
+
+    // trade_cache.db に残した行 (game_log_entries。GameLogStore)。
+    //   StoredLoader: 残してある行の全部 (保存した PC の名前つき) と、読めなかった行の数 (MainWindow → HangarService。裏のスレッドで呼ぶ)
+    //   StoredSaver:  手元の確定済みの行を残す (INSERT OR IGNORE。入れた行数を返す。MainWindow → HangarService。UI のスレッドから呼ぶ)
+    // 表には自分以外の PC の行を手元の行と合わせて出す (手元の Game.log が無ければ自分の行も)。同じ鍵は手元の行を優先 (GameLogStore.Merge)
+    public Func<(List<StoredGameLogEntry> Rows, int Broken)>? StoredLoader { get; set; }
+    public Func<IReadOnlyList<GameLogEntry>, int>? StoredSaver { get; set; }
+    private static readonly string OwnMachine = Environment.MachineName;
+    private StoredGameLogEntry[] _storedRows = [];   // UI のスレッドだけで使う
+    private int _storedShown;                         // 表に合わせて出している DB の行の数 (状態の表示用)
+    private bool _storedLoading;
+    private bool _storedReloadQueued;
+    // 残した行の鍵 (GameLogStore.Key。同じ行は起動のあいだ 1 回だけ渡す) と、まだ確定していない手元の行 (追い読みのたびに確定したものから残す)
+    private readonly HashSet<string> _savedKeys = new(StringComparer.Ordinal);
+    private List<GameLogEntry> _unsettled = new();
 
     // 過去のログ (裏のスレッドで足す。_backupLock で守る)
     private readonly object _backupLock = new();
@@ -107,8 +125,8 @@ public partial class GameLogPanel : UserControl
             }
             EnsureStarted();
             // 読み込みが先に始まっていた (Window_Loaded の EnsureStarted) ときは、列の無いまま入れた行を列つきで作り直す
-            // (SetItems は列が決まってから入れないと空のセルになり、SetColumns は行を作り直さない)
-            if (columnsJustSet && _tail != null) UpdateTable();
+            // (SetItems は列が決まってから入れないと空のセルになり、SetColumns は行を作り直さない)。DB の行だけのとき (ゲームのフォルダが無い PC) も同じ
+            if (columnsJustSet && (_tail != null || _storedRows.Length > 0)) UpdateTable();
         };
         // タイマーを止めるのはアプリの終了時だけ
         Dispatcher.ShutdownStarted += (_, _) => _timer.Stop();
@@ -121,6 +139,8 @@ public partial class GameLogPanel : UserControl
         if (!_started)
         {
             _started = true;
+            // DB に残した行 (ほかの PC の行) は、ゲームのフォルダが無い PC でも出す
+            ReloadStored();
             try
             {
                 if (!Start()) return;
@@ -338,8 +358,94 @@ public partial class GameLogPanel : UserControl
     // 表を作り直す (ボタンの状態も決め直す)。MainWindow から、所持コンポーネントが変わったときなどに呼ぶ
     public void RefreshPurchaseButtons()
     {
-        if (_tail == null) return;
+        if (_tail == null && _storedRows.Length == 0) return;
         UpdateTable();
+    }
+
+    // DB に残した行 (game_log_entries) を読み直す (起動時 (EnsureStarted) と、バックアップの取り込み・PC 間の同期の後に MainWindow から)。
+    // 裏のスレッドで読み、終わったら表を作り直す。読んでいる間に頼まれたら、終わってからもう一度読む
+    public void ReloadStored()
+    {
+        if (StoredLoader is not { } loader) return;
+        if (_storedLoading)
+        {
+            _storedReloadQueued = true;
+            return;
+        }
+        _storedLoading = true;
+        _ = LoadStoredAsync(loader);
+    }
+
+    private async Task LoadStoredAsync(Func<(List<StoredGameLogEntry> Rows, int Broken)> loader)
+    {
+        try
+        {
+            var (rows, broken) = await Task.Run(loader);
+            _storedRows = rows.ToArray();
+            if (broken > 0) ChatService.LogExternal($"[ゲームログ] trade_cache.db に残した行のうち {broken} 件は読めなかったので飛ばしました");
+            UpdateTable();
+        }
+        catch (Exception ex)
+        {
+            ChatService.LogExternal($"[ゲームログ] trade_cache.db に残した行を読めませんでした: {ex.Message}");
+        }
+        finally { _storedLoading = false; }
+        UpdateStatus();
+        if (_storedReloadQueued)
+        {
+            _storedReloadQueued = false;
+            ReloadStored();
+        }
+    }
+
+    // 手元の行 (新しい順) のうち、まだ残していない確定済みの行 (GameLogStore.IsSettled: 名前待ちでなく、今の Game.log の行は時刻から SettleWindow 過ぎたもの) を
+    // DB に残す (古い順)。まだ確定していない行は覚えておき、追い読みのたびに確定したものから残す (FlushUnsettled)
+    private void SaveSettled(IReadOnlyList<GameLogEntry> local)
+    {
+        _unsettled = new List<GameLogEntry>();
+        if (StoredSaver == null) return;
+        var now = DateTime.UtcNow;
+        var list = new List<GameLogEntry>();
+        for (int i = local.Count - 1; i >= 0; i--)
+        {
+            var e = local[i];
+            if (!GameLogStore.IsSettled(e, e.Source == CurrentSource, now)) _unsettled.Add(e);
+            else if (!_savedKeys.Contains(GameLogStore.Key(e))) list.Add(e);
+        }
+        SaveToStore(list);
+    }
+
+    // 表を作り直さなかった追い読みの回でも、時間が経って確定した行を残す
+    private void FlushUnsettled()
+    {
+        if (_unsettled.Count == 0 || StoredSaver == null) return;
+        var now = DateTime.UtcNow;
+        var list = new List<GameLogEntry>();
+        var rest = new List<GameLogEntry>();
+        foreach (var e in _unsettled)
+        {
+            if (!GameLogStore.IsSettled(e, e.Source == CurrentSource, now)) rest.Add(e);
+            else if (!_savedKeys.Contains(GameLogStore.Key(e))) list.Add(e);
+        }
+        if (list.Count == 0 && rest.Count == _unsettled.Count) return;
+        _unsettled = rest;
+        SaveToStore(list);
+    }
+
+    // 行を DB に残す (StoredSaver。INSERT OR IGNORE なので既にある行は入らない)。残した鍵は覚えて、同じ行は起動のあいだ 1 回だけ渡す。
+    // 失敗したら「残した」にせず、次の表の作り直しでもう一度渡す
+    private void SaveToStore(List<GameLogEntry> list)
+    {
+        if (list.Count == 0 || StoredSaver == null) return;
+        try
+        {
+            StoredSaver(list);
+            foreach (var e in list) _savedKeys.Add(GameLogStore.Key(e));
+        }
+        catch (Exception ex)
+        {
+            ChatService.LogExternal($"[ゲームログ] 行を trade_cache.db に残せませんでした (次の表の作り直しでもう一度残します): {ex.Message}");
+        }
     }
 
     // 読み込みを始める。ゲームのフォルダが無ければ案内を出して false
@@ -348,7 +454,8 @@ public partial class GameLogPanel : UserControl
         var gamePath = App.Config.GamePath;
         if (string.IsNullOrEmpty(gamePath) || !Directory.Exists(gamePath))
         {
-            ShowMessage("ゲームのフォルダが見つかりません (設定タブのゲームのフォルダを確認してください)");
+            _startError = "ゲームのフォルダが見つかりません (設定タブのゲームのフォルダを確認してください)";
+            UpdateStatus();
             return false;
         }
         var workDir = WorkDir();
@@ -471,9 +578,12 @@ public partial class GameLogPanel : UserControl
                 return (Found: found, Reset: reset, Changed: changed, Rows: changed ? parser.Entries.ToArray() : null);
             });
             _pollError = null;
+            var missingChanged = _logMissing != !result.Found;
             _logMissing = !result.Found;
             // 再起動で読み直したときは、それまでの「現在」の行を捨てて新しい行だけにし、前回のログを logbackups から読み足す
             var changed = false;
+            // Game.log の有無が変わったら、DB の自分の行を出すかどうかが変わる (GameLogStore.Merge の includeOwn) ので表を作り直す
+            if (missingChanged && _storedRows.Length > 0) changed = true;
             if (result.Changed)
             {
                 _currentRows = result.Rows ?? [];
@@ -517,6 +627,7 @@ public partial class GameLogPanel : UserControl
                 if (_vehicleClasses.Apply(_backupSnapshot.Concat(_currentRows), names.Ship)) changed = true;
             }
             if (changed) UpdateTable();
+            else FlushUnsettled();
         }
         catch (Exception ex) { _pollError = ex.Message; }
         finally { _polling = false; }
@@ -545,13 +656,19 @@ public partial class GameLogPanel : UserControl
         }
     }
 
-    // 表に入れる (新しい順。同じ時刻は読んだ順の逆)。絞り込み・並べ替えは表の部品が残す
+    // 表に入れる (新しい順。同じ時刻は読んだ順の逆)。絞り込み・並べ替えは表の部品が残す。
+    // 手元の行 (過去のログ + 今の Game.log) は［鉱石］などへ渡し (HandOverRecords)、確定済みのものを DB に残す (SaveSettled)。
+    // 表には DB に残したほかの PC の行 (手元の Game.log が無ければ自分の行も) を合わせて出し (GameLogStore.Merge)、ボタンの状態はどちらの行にも決める
     private void UpdateTable()
     {
-        var entries = _backupSnapshot.Concat(_currentRows)
+        var local = _backupSnapshot.Concat(_currentRows)
             .OrderByDescending(e => e.TimeUtc).ThenByDescending(e => e.Seq)
             .ToList();
-        HandOverRecords(entries);
+        HandOverRecords(local);
+        SaveSettled(local);
+        var includeOwn = _tail == null || _logMissing;
+        var entries = GameLogStore.Merge(local, _storedRows, OwnMachine, includeOwn);
+        _storedShown = entries.Count - local.Count;
         ClassifyImports(entries);
         table.SetItems(entries.Cast<object>().ToList());
     }
@@ -559,6 +676,7 @@ public partial class GameLogPanel : UserControl
     private void UpdateStatus()
     {
         var lines = new List<string>();
+        if (_startError != null) lines.Add(_startError);
         if (_pollError != null) lines.Add($"Game.log を読めませんでした: {_pollError}");
         else if (_logMissing) lines.Add($"Game.log が見つかりません: {_logPath} (ゲームを起動すると作られます。設定タブのゲームのフォルダも確認してください)");
         else if (_tail != null) lines.Add($"Game.log: {_currentRows.Length} 件 (1 秒ごとに読み足します)");
@@ -584,6 +702,7 @@ public partial class GameLogPanel : UserControl
             if (_rescanLeft > 0) backup += "。ゲームの再起動で移された前回のログを探しています";
             lines.Add(backup);
         }
+        if (_storedShown > 0) lines.Add($"trade_cache.db に残した行 (ほかの PC の行): {_storedShown} 件を合わせて表示");
         ShowMessage(string.Join("\n", lines));
     }
 

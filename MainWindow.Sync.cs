@@ -216,6 +216,8 @@ public partial class MainWindow
                 RefreshMyGear();
                 gameLogPanel?.RefreshPurchaseButtons();
                 orePanel?.Reload();
+                // ほかの PC が残した［ゲームログ］の行 (game_log_entries) も取り込まれたかもしれないので読み直す
+                gameLogPanel?.ReloadStored();
                 if (!lastImport) { }
                 else if (deferred is { } d)
                 {
