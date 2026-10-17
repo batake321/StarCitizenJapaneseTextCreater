@@ -54,6 +54,8 @@ public sealed class GameLogEntry
     // 音の判定 (GameLogSoundJudge) が到着の音を待つのに使う。DB の payload_json には入れない
     [System.Text.Json.Serialization.JsonIgnore]
     public string? PendingRawPlaceId { get; set; }
+    // BP受信の行 (通知「設計図を受信しました: 品名」) の中身 (品名・同定した BP)。ほかの行は null
+    public GameLogBlueprintReceipt? Blueprint { get; init; }
 }
 
 // ［ゲームログ］の行のボタンの状態。Ready = 「入れる」を押せる、Imported = 入れ済み (「取り消す」を押せる)、None = ボタン無し
@@ -88,6 +90,24 @@ public sealed class GameLogImportItem
     public const char KeySeparator = '\u001f';
 
     public static string MakeKey(params string[] parts) => string.Join(KeySeparator, parts);
+}
+
+// BP受信の行 (GameLogEntry.Blueprint) の中身。
+//   LogKey: 行の鍵 (通知の時刻・品名を U+001F でつないだもの。同じ通知なら今の Game.log と過去のログで同じ)。所持の自動の取り込みの印 (game_log_imports の kind bp_auto) の鍵
+//   Name: 通知の品名 (ゲームの言語の名前)
+//   Matches: 品名から同定した BP (できる品の名前が品名と一致する BP。先頭が行の BP。同じ名前の BP が複数あれば全部)。同定できなければ空
+public sealed class GameLogBlueprintReceipt
+{
+    public string LogKey { get; init; } = "";
+    public string Name { get; init; } = "";
+    public List<GameLogBlueprint> Matches { get; init; } = new();
+}
+
+// 同定した BP 1 つ (blueprints の uuid と、できる品の record (output_record))
+public sealed class GameLogBlueprint
+{
+    public string Uuid { get; init; } = "";
+    public string OutputRecord { get; init; } = "";
 }
 
 // 商品売買の行の中身 (SendCommodityBuyRequest / SendCommoditySellRequest の行)。Kind は "buy" | "sell"。
@@ -341,6 +361,10 @@ public sealed class GameLogParser
     private readonly Func<string, string> _placeName;
     // 店の品目の内部名 → 「日本語 (英語)」(貨物エレベーターで降ろした品の名前。引けなければ内部名のまま)
     private readonly Func<string, string> _itemLabel;
+    // BP受信の通知の品名 → 同定した BP (できる品の名前が一致する BP。先頭が代表)。同定できなければ null か空
+    private readonly Func<string, IReadOnlyList<GameLogBlueprint>?> _blueprintByName;
+    // BP受信の通知の見出し (BlueprintHeadings と、渡された翻訳 DB の文言から作った見出し)
+    private readonly string[] _blueprintHeadings;
 
     // 拾った行 (読んだ順)
     public List<GameLogEntry> Entries { get; } = new();
@@ -358,6 +382,9 @@ public sealed class GameLogParser
     private readonly GameLogMissionNames? _sharedMissionNames;
     // 名前がまだ分からない契約終了の行 (MissionId → 行)。共有の対応が無いときだけ使う (このファイルの中で書き換える)
     private readonly Dictionary<string, List<GameLogEntry>> _missionWaiting = new(StringComparer.OrdinalIgnoreCase);
+    // 直前の契約完了の行の MissionId と時刻 (BP受信の行に契約名を添える。まだ無ければ null)
+    private string? _lastCompleteMissionId;
+    private DateTime _lastCompleteTime;
 
     // 船の ID → クラス名 (末尾の _ID を除いたもの) (このファイルの中で分かったもの)
     private readonly Dictionary<string, string> _vehicleClasses = new(StringComparer.Ordinal);
@@ -476,7 +503,8 @@ public sealed class GameLogParser
     public GameLogParser(string source, Func<string, string>? shipName = null, Func<string, string>? itemName = null,
         GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
         Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null,
-        Func<string, string>? itemLabel = null, GameLogVehicleClasses? sharedVehicleClasses = null, Func<string, string?>? shipClassByName = null)
+        Func<string, string>? itemLabel = null, GameLogVehicleClasses? sharedVehicleClasses = null, Func<string, string?>? shipClassByName = null,
+        Func<string, IReadOnlyList<GameLogBlueprint>?>? blueprintByName = null, IReadOnlyList<string>? blueprintHeadings = null)
     {
         _source = source;
         _shipName = shipName ?? (s => s);
@@ -490,6 +518,8 @@ public sealed class GameLogParser
         _itemLabel = itemLabel ?? _itemName;
         _sharedVehicleClasses = sharedVehicleClasses;
         _shipClassByName = shipClassByName ?? (_ => null);
+        _blueprintByName = blueprintByName ?? (_ => null);
+        _blueprintHeadings = MergeHeadings(BlueprintHeadings, blueprintHeadings);
     }
 
     // ─── 貨物エレベーター ───
@@ -1689,6 +1719,33 @@ public sealed class GameLogParser
     private const string FuelLowHeading = "燃料低下";
     // 区域 (見出しの前方一致)。logbackups での実際の文は「制限区域から離脱中: 」「私有地に進入: 」「私有地を突破: 」(本文は空)
     private static readonly string[] AreaPrefixHeadings = ["制限区域から離脱中", "私有地に進入", "私有地を突破"];
+    // BP受信の通知の見出し: 翻訳キー crafting_hud_notification_received_blueprint,P の日本語「設計図を受信しました: %s」と英語「Received Blueprint: %s」の
+    // %s の前 (区切りの ": " を除く)。2026-10-17 の Game.log の実例は日本語の「設計図を受信しました: Neutrinoレーシングヘルメット WhiteHot: 」(英語の実例は未確認)。
+    // 日本語化ファイルの版で文言が変わることがあるので、翻訳 DB の今の文言から作った見出し (コンストラクタの blueprintHeadings) も受け付ける
+    public static readonly string[] BlueprintHeadings = ["設計図を受信しました", "Received Blueprint"];
+    // BP受信の行に契約名を添える「直前の契約完了」の窓 (契約完了の行の時刻から)。2026-10-17 の実例は契約完了 (EndMission) の 1.4 秒後と 1.9 秒後
+    private static readonly TimeSpan BlueprintContractWindow = TimeSpan.FromSeconds(30);
+
+    // 翻訳 DB の文言 (「設計図を受信しました: %s」の形) → 見出し (%s の前。末尾の区切り (空白・:・：) を除く)。%s が無い・前が空なら null
+    public static string? BlueprintHeadingFromTemplate(string? template)
+    {
+        if (string.IsNullOrWhiteSpace(template)) return null;
+        var at = template.IndexOf("%s", StringComparison.Ordinal);
+        if (at <= 0) return null;
+        var head = template[..at].TrimEnd(' ', '\u00A0', '\u3000', ':', '：').Trim();
+        return head.Length > 0 ? head : null;
+    }
+
+    // 既定の見出しと渡された見出しを合わせる (重なりは 1 つ。空は除く。長いものを先に見る)
+    private static string[] MergeHeadings(string[] builtIn, IReadOnlyList<string>? extra)
+    {
+        var list = new List<string>(builtIn);
+        if (extra != null)
+            foreach (var h in extra)
+                if (!string.IsNullOrWhiteSpace(h) && !list.Contains(h)) list.Add(h);
+        list.Sort((a, b) => b.Length.CompareTo(a.Length));
+        return list.ToArray();
+    }
 
     private void OnNotification(DateTime time, string text, string missionId, string objectiveId)
     {
@@ -1723,6 +1780,12 @@ public sealed class GameLogParser
             return;
         }
 
+        // BP受信: 「設計図を受信しました: 品名: 」(見出しの直後は区切り。本文の後ろの ": " は Body で除く)
+        if (StartsWithAny(text, _blueprintHeadings, out var bpRest) && bpRest.Length > 0 && (bpRest[0] == ':' || bpRest[0] == '：' || bpRest[0] == ' '))
+        {
+            OnBlueprintReceived(time, Body(bpRest));
+            return;
+        }
         if (StartsWithAny(text, AcceptHeadings, out var rest))
         {
             var name = Body(rest);
@@ -1763,6 +1826,31 @@ public sealed class GameLogParser
     // 通知の文に入る書式のタグ (<EM4>…</EM4> 等)。納品の行のミッション名からは外す
     private static readonly Regex MarkupTagRegex = new(@"</?[A-Za-z][^>]*>", RegexOptions.Compiled);
     private static string StripTags(string text) => MarkupTagRegex.Replace(text, "").Trim();
+
+    // BP受信の行: 内容は「<品名>」。直前 (BlueprintContractWindow 以内) に契約完了の行があれば「<品名>（<契約名>）」
+    // (契約名がまだ分からなければ省いて出し、分かったら書き足す。ApplyMissionName)。品名から BP を同定し (_blueprintByName)、行に持たせる
+    private void OnBlueprintReceived(DateTime time, string name)
+    {
+        if (name.Length == 0) return;
+        var matches = new List<GameLogBlueprint>();
+        try
+        {
+            if (_blueprintByName(name) is { } found) matches.AddRange(found);
+        }
+        catch { }   // 同定できなかった (DB を読めない等) ときは同定なしで行を出す
+        var receipt = new GameLogBlueprintReceipt { LogKey = GameLogImportItem.MakeKey(LogTimeText(time), name), Name = name, Matches = matches };
+        string? missionId = null;
+        if (_lastCompleteMissionId is { } id && time >= _lastCompleteTime && time - _lastCompleteTime <= BlueprintContractWindow) missionId = id;
+        string? mission = null;
+        var known = missionId != null
+                    && (_missionNames.TryGetValue(missionId, out mission) || (_sharedMissionNames != null && _sharedMissionNames.TryGet(missionId, out mission)));
+        var e = Add(time, "BP受信", known ? $"{name}（{StripTags(mission!)}）" : name, blueprint: receipt);
+        if (known || missionId == null) return;
+        e.PendingMissionId = missionId;
+        if (_sharedMissionNames != null) return;
+        if (!_missionWaiting.TryGetValue(missionId, out var list)) _missionWaiting[missionId] = list = new();
+        list.Add(e);
+    }
 
     // 納品の行: 「<品名> ×n（<ミッション名>）」。ミッション名がまだ分からなければ省いて出し、分かったら書き足す (ApplyMissionName)。
     // 在庫から引く品 (kind delivered。鍵は 時刻・MissionId・ObjectiveId、品名は通知の日本語のまま) を付ける
@@ -1821,6 +1909,12 @@ public sealed class GameLogParser
         var content = known ? name! : MissionShort(missionId);
         if (kind == "契約終了") content += $" ({completion})";
         var e = Add(time, kind, content);
+        if (kind == "契約完了")
+        {
+            // 直後の BP受信の行に契約名を添えるために覚える (OnBlueprintReceived)
+            _lastCompleteMissionId = missionId;
+            _lastCompleteTime = time;
+        }
         if (known) return;
         // 通知が EndMission の直後や別のファイルで来ることがあるので、名前が分かったら書き換える
         e.PendingMissionId = missionId;
@@ -1844,11 +1938,11 @@ public sealed class GameLogParser
     }
 
     // 名前待ちの契約終了の行に名前を入れる。"契約終了" の行は末尾に " (CompletionType)" が付いているので、先頭の ID だけを置き換える。
-    // 納品の行 (名前を省いて出してある) は末尾に「（名前）」を書き足す
+    // 納品の行・BP受信の行 (名前を省いて出してある) は末尾に「（名前）」を書き足す
     public static void ApplyMissionName(GameLogEntry e, string name)
     {
         if (e.PendingMissionId is not { } id) return;
-        if (e.Kind == "納品")
+        if (e.Kind == "納品" || e.Kind == "BP受信")
         {
             e.Content += $"（{StripTags(name)}）";
             e.PendingMissionId = null;
@@ -2076,13 +2170,13 @@ public sealed class GameLogParser
     // ─── 共通 ───
     private GameLogEntry Add(DateTime time, string kind, string content, double? amount = null, GameLogPurchase? purchase = null,
         List<GameLogImportItem>? importItems = null, GameLogTrade? trade = null, GameLogMining? mining = null,
-        string? shipClass = null, string? shipName = null, bool piloting = false, bool atJumpPointStop = false)
+        string? shipClass = null, string? shipName = null, bool piloting = false, bool atJumpPointStop = false, GameLogBlueprintReceipt? blueprint = null)
     {
         var e = new GameLogEntry
         {
             TimeUtc = time, Kind = kind, Content = content, Amount = amount, Source = _source, Purchase = purchase,
             ImportItems = importItems, Trade = trade, Mining = mining, ShipClass = shipClass, ShipName = shipName,
-            Seq = System.Threading.Interlocked.Increment(ref _seq), Piloting = piloting, AtJumpPointStop = atJumpPointStop,
+            Seq = System.Threading.Interlocked.Increment(ref _seq), Piloting = piloting, AtJumpPointStop = atJumpPointStop, Blueprint = blueprint,
         };
         Entries.Add(e);
         Changed = true;
@@ -2106,9 +2200,11 @@ public sealed class GameLogParser
     public static List<GameLogEntry> ParseFile(string path, string source, Func<string, string>? shipName = null, Func<string, string>? itemName = null,
         GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
         Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null,
-        Func<string, string>? itemLabel = null, GameLogVehicleClasses? sharedVehicleClasses = null, Func<string, string?>? shipClassByName = null)
+        Func<string, string>? itemLabel = null, GameLogVehicleClasses? sharedVehicleClasses = null, Func<string, string?>? shipClassByName = null,
+        Func<string, IReadOnlyList<GameLogBlueprint>?>? blueprintByName = null, IReadOnlyList<string>? blueprintHeadings = null)
     {
-        var parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames, itemLabel, sharedVehicleClasses, shipClassByName);
+        var parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames, itemLabel, sharedVehicleClasses, shipClassByName,
+            blueprintByName, blueprintHeadings);
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var reader = new StreamReader(fs, LogEncoding, detectEncodingFromByteOrderMarks: false);
         string? line;
@@ -2141,6 +2237,8 @@ public sealed class GameLogTail
     private readonly Func<string, string>? _itemLabel;
     private readonly GameLogVehicleClasses? _sharedVehicleClasses;
     private readonly Func<string, string?>? _shipClassByName;
+    private readonly Func<string, IReadOnlyList<GameLogBlueprint>?>? _blueprintByName;
+    private readonly IReadOnlyList<string>? _blueprintHeadings;
     private long _position;
     private long _lastLength;
     private byte[]? _head;                   // 覚えている先頭の 1 行 (改行まで)。まだ分からなければ null
@@ -2152,7 +2250,8 @@ public sealed class GameLogTail
     public GameLogTail(string path, string source, Func<string, string>? shipName = null, Func<string, string>? itemName = null,
         GameLogMissionNames? sharedMissionNames = null, Func<string, string?>? translate = null, Func<string, bool>? isVehicleClass = null,
         Func<string, string?>? resourceName = null, Func<string, string>? placeName = null, GameLogPlaceNames? sharedPlaceNames = null,
-        Func<string, string>? itemLabel = null, GameLogVehicleClasses? sharedVehicleClasses = null, Func<string, string?>? shipClassByName = null)
+        Func<string, string>? itemLabel = null, GameLogVehicleClasses? sharedVehicleClasses = null, Func<string, string?>? shipClassByName = null,
+        Func<string, IReadOnlyList<GameLogBlueprint>?>? blueprintByName = null, IReadOnlyList<string>? blueprintHeadings = null)
     {
         _path = path;
         _source = source;
@@ -2167,7 +2266,10 @@ public sealed class GameLogTail
         _itemLabel = itemLabel;
         _sharedVehicleClasses = sharedVehicleClasses;
         _shipClassByName = shipClassByName;
-        Parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames, itemLabel, sharedVehicleClasses, shipClassByName);
+        _blueprintByName = blueprintByName;
+        _blueprintHeadings = blueprintHeadings;
+        Parser = new GameLogParser(source, shipName, itemName, sharedMissionNames, translate, isVehicleClass, resourceName, placeName, sharedPlaceNames, itemLabel, sharedVehicleClasses, shipClassByName,
+            blueprintByName, blueprintHeadings);
     }
 
     // 増えた分を読む。戻り値: ファイルがあったか。reset = 最初から読み直した (それまでの行は捨てた)
@@ -2184,7 +2286,8 @@ public sealed class GameLogTail
         {
             _position = 0;
             _lastLength = 0;
-            Parser = new GameLogParser(_source, _shipName, _itemName, _sharedMissionNames, _translate, _isVehicleClass, _resourceName, _placeName, _sharedPlaceNames, _itemLabel, _sharedVehicleClasses, _shipClassByName);
+            Parser = new GameLogParser(_source, _shipName, _itemName, _sharedMissionNames, _translate, _isVehicleClass, _resourceName, _placeName, _sharedPlaceNames, _itemLabel, _sharedVehicleClasses, _shipClassByName,
+                _blueprintByName, _blueprintHeadings);
             reset = true;
         }
         if (head != null) _head = head;

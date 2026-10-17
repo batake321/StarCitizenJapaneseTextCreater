@@ -3,8 +3,9 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:StarCitizenJapaneseTextCreater">
     <!-- ［BP］タブ: ブループリントの一覧 (gamedata_cache.db の blueprints / blueprint_materials / blueprint_pools)。
-         上に絞り込み (資源・分類・今の在庫で作れるものだけ)、下に表 (できる品・分類・材料・時間・入手・在庫)。
-         在庫は trade_cache.db の ore_stock (［鉱石］タブ) と照合する。1 列目のダブルクリックで［詳細］タブにできる品を出す -->
+         上に絞り込み (資源・分類・今の在庫で作れるものだけ・所持している BP だけ)、下に表 (できる品・分類・材料・時間・入手・在庫・所持)。
+         在庫は trade_cache.db の ore_stock (［鉱石］タブ) と照合する。所持は trade_cache.db の my_blueprints (「所持」の欄のボタンで入切)。
+         1 列目のダブルクリックで［詳細］タブにできる品を出す -->
     <Grid Margin="8">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -56,6 +57,9 @@
             <CheckBox x:Name="chkCraftable" Content="今の在庫で作れるものだけ" VerticalAlignment="Center" Margin="0,0,12,0"
                       Checked="Filter_Changed" Unchecked="Filter_Changed"
                       ToolTip="［鉱石］タブの在庫 (ore_stock) で全部の枠を満たす BP (在庫の欄が「足りる」) だけを出す。原石は精錬後の資源として 1 SCU = 1 SCU で数える"/>
+            <CheckBox x:Name="chkOwned" Content="所持している BP だけ" VerticalAlignment="Center" Margin="0,0,12,0"
+                      Checked="Filter_Changed" Unchecked="Filter_Changed"
+                      ToolTip="所持の欄が「所持」の BP だけを出す (［ゲームログ］の BP受信の行から自動で入ったものと、所持の欄のボタンで入れたもの)"/>
             <TextBlock x:Name="txtStatus" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
         </WrapPanel>
 

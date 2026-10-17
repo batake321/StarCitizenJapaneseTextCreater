@@ -735,6 +735,9 @@ public class MissionService : IDisposable
         }
     }
 
+    // ミッションの属するカテゴリ名 (GetMissions / GetCategories と同じ分け方)。BP タブからミッションを開くときにカテゴリを選ぶのに使う
+    public static string CategoryOf(MissionEntry m) => Classify(m.NameBase, m.MissionType);
+
     private static string Classify(string recordName, string missionType)
     {
         var rn = recordName ?? "";

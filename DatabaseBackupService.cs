@@ -33,8 +33,9 @@ public static class DatabaseBackupService
     // ore_stock / commodity_trades / mining_log: ［鉱石］タブの在庫・売買の記録・採掘の記録 (個人データ。OreService)
     // my_gear: 所持個人装備、game_log_imports: ［ゲームログ］の行を所持・在庫に入れた印 (個人データ。HangarService)
     // game_log_entries: ［ゲームログ］の行そのもの (別の PC でも見るために残す。個人データ。HangarService / GameLogStore)
+    // my_blueprints: 所持している BP (［BP］タブの「所持」。個人データ。HangarService)
     internal static readonly string[] TradeTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "my_ships", "hangar_pledges", "hangar_items", "hangar_ccus", "hangar_meta", "hangar_nameable_ships", "hangar_ship_marks", "ship_matrix", "ship_loaners", "store_skus", "my_components", "ship_loadouts", "my_component_purchases",
-        "ore_stock", "commodity_trades", "mining_log", "my_gear", "game_log_imports", "game_log_entries"];
+        "ore_stock", "commodity_trades", "mining_log", "my_gear", "game_log_imports", "game_log_entries", "my_blueprints"];
 
     public static string[] GetTables(BackupCategory category) => category switch
     {
@@ -124,6 +125,7 @@ public static class DatabaseBackupService
                                     DELETE FROM my_gear;
                                     DELETE FROM game_log_imports;
                                     DELETE FROM game_log_entries;
+                                    DELETE FROM my_blueprints;
                                     DELETE FROM sync_tombstones;
                                     """;
                                 cmd.ExecuteNonQuery();
@@ -233,8 +235,9 @@ public static class DatabaseBackupService
     // ネット由来 (b で置き換え): UEX の価格・船・端末・取得時刻、RSI の Ship Matrix・ローナー・ストア
     internal static readonly string[] TradeNetTables = ["trade_prices", "trade_ships", "trade_terminals", "trade_meta", "ship_matrix", "ship_loaners", "store_skus"];
     // 個人で、行を見分けるキー (主キー) があるもの: キーで a 優先の和集合
-    // (commodity_trades / mining_log: ［鉱石］タブの売買・採掘の記録。主キーはログの行の組。game_log_entries: ［ゲームログ］の行。主キーは (time_utc, kind, content))
-    internal static readonly string[] TradePersonalKeyedTables = ["hangar_pledges", "hangar_ccus", "hangar_ship_marks", "ship_loadouts", "commodity_trades", "mining_log", "game_log_entries"];
+    // (commodity_trades / mining_log: ［鉱石］タブの売買・採掘の記録。主キーはログの行の組。game_log_entries: ［ゲームログ］の行。主キーは (time_utc, kind, content)。
+    //  my_blueprints: 所持している BP。主キーは bp_uuid)
+    internal static readonly string[] TradePersonalKeyedTables = ["hangar_pledges", "hangar_ccus", "hangar_ship_marks", "ship_loadouts", "commodity_trades", "mining_log", "game_log_entries", "my_blueprints"];
     // 個人で、行を見分ける主キーが無いもの (主キーが無い、または中身と関係の無い連番の id だけのもの): 自然な鍵で a 優先の和集合
     //   my_ships: 正規化した船名 (HangarService.NormalizeShipName。所持船の名前一致の流儀) が a に無い b の船を足す。a にある船はそのまま (数量の概念なし)
     //   my_components / my_gear: item_record と使用可 (usable) が同じなら a の行を残して quantity は max(a, b)、notes は JoinNotes。無い品は b から足す
@@ -1146,6 +1149,7 @@ public static class DatabaseBackupService
             """ + OreService.TradeTablesDdl   // ［鉱石］タブの 3 つの表 (HangarService.InitDb と同じ DDL)
             + HangarService.GearImportTablesDdl   // 所持個人装備 (my_gear) と［ゲームログ］の印 (game_log_imports)
             + HangarService.GameLogEntriesDdl     // ［ゲームログ］の行 (game_log_entries)
+            + HangarService.MyBlueprintsDdl       // 所持している BP (my_blueprints)
             + SyncService.TombstonesDdl;          // PC 間の同期の墓石 (sync_tombstones)
         cmd.ExecuteNonQuery();
 

@@ -13,6 +13,7 @@ namespace StarCitizenJapaneseTextCreater;
 // 在庫は trade_cache.db の ore_stock (［鉱石］タブ) と照合する: 枠ごとに、その資源 (原石は resource_types.refined_uuid で精錬後に寄せる。1 SCU = 1 SCU) の
 // 品質 ≥ min_quality の在庫の合計 ≥ 数量なら満たす。手掘りの鉱物 (CraftingCost_Item の Harvestable_Mineral_1H_<X>) は ResourceType.<X> の '個' の在庫で照合する。
 // 資源の名前は［鉱石］タブと同じ出し方 (OreService.LoadResources)、枠名・ミッション名は translations.db (OreService.LoadTranslations)。
+// 所持は trade_cache.db の my_blueprints (個人データ。［ゲームログ］の BP受信の行から自動で入るものと、「所持」の欄のボタンで手で入切するもの。HangarService)。
 // DB は作業ディレクトリ (WorkDirProvider。MainWindow が渡す)。初めて表示したときに読み、MainWindow が Reload で読み直す。
 // タブを開き直したときは在庫 (ore_stock) だけ読み直す (［鉱石］タブで在庫を書き換えた後に合わせるため)
 public partial class BlueprintPanel : UserControl
@@ -40,7 +41,7 @@ public partial class BlueprintPanel : UserControl
     public BlueprintPanel()
     {
         InitializeComponent();
-        table.SetColumns(Columns());
+        table.SetColumns([.. Columns(), OwnedColumn()]);
         // できる品 (1 列目) のダブルクリック → ［詳細］タブにその品目を出す
         table.NameDoubleClicked += o => { if (o is BlueprintItem r) DetailPanel.Request(r.OutputRecord, r.Name); };
         // 入手 (5 列目) のダブルクリック → ミッションがあればミッションタブにその詳細を出す (2 つ以上なら名前のメニューから選ぶ)
@@ -389,6 +390,16 @@ public partial class BlueprintPanel : UserControl
         res.Stock = stockIndex;
         foreach (var it in bps) it.StockText = StockText(it, stockIndex, res.ResourceUuidByRecord, stock != null);
 
+        // 所持 (trade_cache.db の my_blueprints)。trade_cache.db が無い・読めないときは不明 (null)。読めないときは例外をログに残す
+        HashSet<string>? owned;
+        try { owned = HangarService.LoadMyBlueprintUuidsReadOnly(tcPath); }
+        catch (Exception ex)
+        {
+            owned = null;
+            AppendAppLog(workDir, $"[BP] 所持 (trade_cache.db の my_blueprints) を読めませんでした: {ex.GetType().FullName}: {ex.Message}");
+        }
+        foreach (var it in bps) it.Owned = owned == null ? null : owned.Contains(it.Uuid);
+
         // 絞り込みの候補: 資源 (BP で使われている精錬後の資源。名前の違う原石は「原石名 → 精錬後名」で精錬後に寄せる)、分類
         var choices = new List<ResourceChoice>();
         foreach (var uuid in usedResources)
@@ -553,6 +564,8 @@ public partial class BlueprintPanel : UserControl
             items = items.Where(it => string.Equals(it.Category, cat, StringComparison.Ordinal));
         if (chkCraftable?.IsChecked == true)
             items = items.Where(it => it.StockText == StockEnough);
+        if (chkOwned?.IsChecked == true)
+            items = items.Where(it => it.Owned == true);
         table.SetItems(items.ToList());
     }
 
@@ -609,7 +622,41 @@ public partial class BlueprintPanel : UserControl
         new() { Header = "時間", Numeric = true, Filterable = false, Text = o => ((BlueprintItem)o).TimeText, Key = o => ((BlueprintItem)o).CraftTimeSec },
         new() { Header = "入手", Text = o => ((BlueprintItem)o).SourceText, Key = o => TextKey(((BlueprintItem)o).SourceText), Tooltip = o => ((BlueprintItem)o).SourceTooltip },
         new() { Header = "在庫", Text = o => ((BlueprintItem)o).StockText, Key = o => TextKey(((BlueprintItem)o).StockText) },
+        // 所持: 「所持」/「未所持」のボタン。押すと入切する (ToggleOwned。インスタンスのメソッドなので Columns() の外で付ける)
     ];
+
+    private const string OwnedText = "所持";
+    private const string NotOwnedText = "未所持";
+
+    // 所持の列 (ボタン)。Columns() の後ろに足す
+    private GridColumnSpec OwnedColumn() => new()
+    {
+        Header = "所持",
+        Text = o => ((BlueprintItem)o).Owned == true ? OwnedText : NotOwnedText,
+        Key = o => ((BlueprintItem)o).Owned == true ? OwnedText : NotOwnedText,
+        Button = _ => true,
+        ButtonClick = o => ToggleOwned((BlueprintItem)o),
+    };
+
+    // 所持の欄のボタン: 所持なら外し (行を消して墓石を残す)、未所持なら入れる (source 'manual')。trade_cache.db に書いてから表を絞り直す
+    private void ToggleOwned(BlueprintItem it)
+    {
+        var want = it.Owned != true;
+        try
+        {
+            var hangar = new HangarService();
+            hangar.SetCacheDir(WorkDir());
+            hangar.SetBlueprintOwned(it.Uuid, it.OutputRecord, it.Name, want);
+        }
+        catch (Exception ex)
+        {
+            txtStatus.Text = $"所持を{(want ? "入れ" : "外せ")}ませんでした: {ex.Message}";
+            AppendAppLog(WorkDir(), $"[BP] 所持を{(want ? "入れ" : "外せ")}ませんでした ({it.Name}): {ex.GetType().FullName}: {ex.Message}");
+            return;
+        }
+        it.Owned = want;
+        ApplyFilter();
+    }
 
     private static IComparable? TextKey(string s) => s.Length > 0 ? s : null;
 
@@ -747,6 +794,82 @@ public partial class BlueprintPanel : UserControl
         try { File.AppendAllText(Path.Combine(workDir, "app_log.txt"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}\n", System.Text.Encoding.UTF8); } catch { }
     }
 
+    // === ［ゲームログ］の BP受信の品名 → BP ===
+
+    // 通知の品名 name と、できる品の名前が一致する BP (blueprints の rowid の順。先頭が代表)。無ければ null。
+    // できる品の名前は、output_name_key の訳 (translations の japanese / english。OutputName と同じく JapaneseText / EnglishText で見る) と output_name_en。
+    // 大文字小文字・前後の空白・全角と半角の空白の違いは無視する (NormalizeOutputName)。名前に文字列「\n」(2 文字) があるものは CleanName で空白にした形でも照合する。
+    // 索引は gamedata_cache.db と translations.db が変わっていなければ前のものを使う。DB を読めなければ例外
+    internal static IReadOnlyList<GameLogBlueprint>? BlueprintsByOutputName(string gdPath, string trPath, string name)
+    {
+        var key = NormalizeOutputName(name ?? "");
+        if (key.Length == 0) return null;
+        var index = OutputNameIndex(gdPath, trPath);
+        return index.TryGetValue(key, out var list) && list.Count > 0 ? list : null;
+    }
+
+    // 照合に使う形: 全角の空白・ノーブレークスペースを半角の空白にし、前後の空白を除く (大文字小文字は索引の比較で無視する)
+    internal static string NormalizeOutputName(string s) => s.Replace('\u3000', ' ').Replace('\u00A0', ' ').Trim();
+
+    private static (string Stamp, Dictionary<string, List<GameLogBlueprint>> Index)? _outputNameIndexCache;
+
+    private static Dictionary<string, List<GameLogBlueprint>> OutputNameIndex(string gdPath, string trPath)
+    {
+        var stamp = FileStamp(gdPath) + "\n" + FileStamp(trPath);
+        lock (CacheLock)
+        {
+            if (_outputNameIndexCache is { } c && c.Stamp == stamp) return c.Index;
+        }
+        var index = new Dictionary<string, List<GameLogBlueprint>>(StringComparer.OrdinalIgnoreCase);
+        if (File.Exists(gdPath))
+        {
+            var bps = new List<(string Uuid, string Record, string? NameKey, string? NameEn)>();
+            using (var game = new SqliteConnection($"Data Source={gdPath};Mode=ReadOnly;Pooling=False"))
+            {
+                game.Open();
+                if (TableExists(game, "blueprints"))
+                {
+                    using var cmd = game.CreateCommand();
+                    cmd.CommandText = "SELECT uuid, output_record, output_name_key, output_name_en FROM blueprints ORDER BY rowid";
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read())
+                    {
+                        var uuid = Str(r, 0);
+                        if (uuid.Length == 0) continue;
+                        bps.Add((uuid, Str(r, 1), r.IsDBNull(2) ? null : r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3)));
+                    }
+                }
+            }
+            var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var b in bps) if (b.NameKey is { Length: > 0 } k) keys.Add(k);
+            var loc = CachedTranslations(gdPath, trPath, keys);
+            foreach (var b in bps)
+            {
+                var names = new List<string?>();
+                if (b.NameKey is { Length: > 0 } nk && loc.TryGetValue(nk, out var tr))
+                {
+                    names.Add(OreService.JapaneseText(tr.Ja));
+                    names.Add(OreService.EnglishText(tr.En));
+                }
+                names.Add(b.NameEn != null ? OreService.EnglishText(b.NameEn) : null);
+                foreach (var n in names)
+                {
+                    if (n == null) continue;
+                    foreach (var form in new[] { n, CleanName(n) })
+                    {
+                        var k = NormalizeOutputName(form);
+                        if (k.Length == 0) continue;
+                        if (!index.TryGetValue(k, out var list)) index[k] = list = new List<GameLogBlueprint>();
+                        if (!list.Any(x => string.Equals(x.Uuid, b.Uuid, StringComparison.OrdinalIgnoreCase)))
+                            list.Add(new GameLogBlueprint { Uuid = b.Uuid, OutputRecord = b.Record });
+                    }
+                }
+            }
+        }
+        lock (CacheLock) _outputNameIndexCache = (stamp, index);
+        return index;
+    }
+
     // === OreService.LoadResources / LoadTranslations の結果の使い回し ===
     // どちらも translations.db を全行読むため (1 回 80〜100 ms ほど)、DB ファイルのパス・最終更新時刻・長さが同じあいだは前の結果を使う。
     // 結果は読むだけで書き換えない (複数のスレッドから同じものを使う)
@@ -876,6 +999,8 @@ public sealed class BlueprintItem
     public string SourceText { get; set; } = "";
     public string? SourceTooltip { get; set; }
     public string StockText { get; set; } = "";
+    // 所持 (trade_cache.db の my_blueprints にあるか)。trade_cache.db が無い・読めなければ null
+    public bool? Owned { get; set; }
     // 入手のミッション: 表示名 (ツールチップと同じ並び) と、その名前のミッションの record (並んだ順。派生があれば複数)
     public List<(string Name, List<string> Records)> Missions { get; } = new();
 }

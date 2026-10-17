@@ -110,7 +110,8 @@ public sealed class GameLogSoundJudge
     {
         if (GameLogVoiceScenes.SceneOf(e) is not { } scene || scene == GameLogVoiceScenes.Armistice || scene == GameLogVoiceScenes.Arrival) return null;
         if ((nowUtc - e.TimeUtc).Duration() > LiveWindow || !sceneEnabled(scene)) return null;
-        var continued = _lastScene.TryGetValue(scene, out var prev) && (e.TimeUtc - prev).Duration() <= SceneWindow;
+        // BP受信は 1 行ごとに別の BP なので、続いても全部読む (契約の報酬で 2 つ続けて届くことがある)
+        var continued = scene != "BP受信" && _lastScene.TryGetValue(scene, out var prev) && (e.TimeUtc - prev).Duration() <= SceneWindow;
         _lastScene[scene] = e.TimeUtc;
         return continued ? null : scene;
     }

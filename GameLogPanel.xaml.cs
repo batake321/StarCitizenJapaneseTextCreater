@@ -102,11 +102,17 @@ public partial class GameLogPanel : UserControl
     // false を返したら (所持船の情報がまだ読めていない) 「渡した」にせず、次の表の作り直しでもう一度渡す
     public Func<IReadOnlyList<GameLogEntry>, bool>? ShipImporter { get; set; }
     private readonly HashSet<string> _handedShips = new(StringComparer.Ordinal);
+    // BP受信の行 (BP を同定できたもの) の自動の所持の BP への登録 (MainWindow)。まだ渡していない行だけを渡す (鍵は GameLogBlueprintReceipt.LogKey)。
+    // false を返したら「渡した」にせず、次の表の作り直しでもう一度渡す
+    public Func<IReadOnlyList<GameLogEntry>, bool>? BlueprintImporter { get; set; }
+    private readonly HashSet<string> _handedBlueprints = new(StringComparer.Ordinal);
     public Func<string, (double Profit, double? Rate)?>? SellProfit { get; set; }
     // 内容の欄の品名のダブルクリック → ［詳細］(MainWindow が DetailPanel.Request / RequestSearch に回す)
     public Action<GameLogImportItem>? DetailOpener { get; set; }
     // 内容の欄の船のダブルクリック (品名の無い行の船。クラス名 (分かっていれば) と表示名) → ［詳細］
     public Action<string?, string>? ShipDetailOpener { get; set; }
+    // 内容の欄の BP受信の行 (BP を同定できたもの) のダブルクリック (できる品の record と通知の品名) → ［詳細］
+    public Action<string, string>? BlueprintDetailOpener { get; set; }
 
     // 渡した売買の記録 (鍵 → そのときの結果) と採掘の記録 (鍵)。UI のスレッドだけで使う
     private readonly Dictionary<string, string> _handedTrades = new(StringComparer.Ordinal);
@@ -230,6 +236,12 @@ public partial class GameLogPanel : UserControl
     private void OnCellDoubleClicked(int column, object source, int charIndex)
     {
         if (column != ContentColumn || source is not GameLogEntry e) return;
+        // BP受信の行: 同定した BP (先頭) のできる品を［詳細］に出す (同定できなかった行は何もしない)
+        if (e.Blueprint is { } bp)
+        {
+            if (bp.Matches.Count > 0 && bp.Matches[0].OutputRecord.Length > 0) BlueprintDetailOpener?.Invoke(bp.Matches[0].OutputRecord, bp.Name);
+            return;
+        }
         var items = e.ImportItems is { Count: > 0 } list ? list.Where(i => !i.IsShip).ToList() : [];
         if (items.Count > 0 && DetailOpener != null)
         {
@@ -304,7 +316,6 @@ public partial class GameLogPanel : UserControl
             // 渡せなかった行は「渡した」にしない (次の作り直しでもう一度渡す)。失敗はログに残す
             ChatService.LogExternal($"[ゲームログ] 売買・採掘の記録を［鉱石］へ渡せませんでした (次の表の作り直しでもう一度渡します): {ex.Message}");
         }
-        HandOverDeliveries(entries);
     }
 
     // 納品の行 (kind delivered の品) をまだ渡していないものだけ DeliveryImporter へ (古い順)。失敗したら「渡した」にせず、次の作り直しでもう一度渡す
@@ -328,7 +339,6 @@ public partial class GameLogPanel : UserControl
         {
             ChatService.LogExternal($"[ゲームログ] 納品の在庫への反映に失敗しました (次の表の作り直しでもう一度行います): {ex.Message}");
         }
-        HandOverShips(entries);
     }
 
     // 船の行 (購入した船・呼び出した船。品が船 (IsShip) でクラス名が分かっていて、購入なら成功したもの) をまだ渡していないものだけ ShipImporter へ (古い順)。
@@ -353,6 +363,40 @@ public partial class GameLogPanel : UserControl
         catch (Exception ex)
         {
             ChatService.LogExternal($"[ゲームログ] 船の所持船への登録に失敗しました (次の表の作り直しでもう一度行います): {ex.Message}");
+        }
+    }
+
+    // BP受信の行 (BP を同定できたもの) をまだ渡していないものだけ BlueprintImporter へ (古い順)。
+    // 失敗したら「渡した」にせず、次の作り直しでもう一度渡す
+    private void HandOverBlueprints(IReadOnlyList<GameLogEntry> entries)
+    {
+        if (BlueprintImporter == null) return;
+        var list = new List<GameLogEntry>();
+        for (int i = entries.Count - 1; i >= 0; i--)
+        {
+            var e = entries[i];
+            if (e.Blueprint is not { } bp || _handedBlueprints.Contains(bp.LogKey)) continue;
+            // 解析のときに同定できなかった行 (gamedata_cache.db が無い・作り直し中など) は、渡す前にもう一度品名から同定してみる。
+            // 決まれば行の BP を埋めて渡し、決まらなければ渡さない (次の作り直しでまた試す)
+            if (bp.Matches.Count == 0 && _names is { } names)
+            {
+                try
+                {
+                    if (names.Blueprints(bp.Name) is { Count: > 0 } found) bp.Matches.AddRange(found);
+                }
+                catch { }   // DB を読めない: 次の作り直しでまた試す
+            }
+            if (bp.Matches.Count > 0) list.Add(e);
+        }
+        if (list.Count == 0) return;
+        try
+        {
+            if (!BlueprintImporter(list)) return;
+            foreach (var e in list) _handedBlueprints.Add(e.Blueprint!.LogKey);
+        }
+        catch (Exception ex)
+        {
+            ChatService.LogExternal($"[ゲームログ] BP の所持への登録に失敗しました (次の表の作り直しでもう一度行います): {ex.Message}");
         }
     }
 
@@ -500,7 +544,7 @@ public partial class GameLogPanel : UserControl
         _names = new GameLogNames(Path.Combine(workDir, "gamedata_cache.db"), Path.Combine(workDir, "translations.db"));
         _logPath = Path.Combine(gamePath, "Game.log");
         _tail = new GameLogTail(_logPath, CurrentSource, _names.Ship, _names.Item, _missionNames, _names.Translate, _names.IsVehicleClass, _names.Resource,
-            _names.Place, _placeNames, _names.ItemLabel, _vehicleClasses, _names.ShipClassByName);
+            _names.Place, _placeNames, _names.ItemLabel, _vehicleClasses, _names.ShipClassByName, _names.Blueprints, _names.BlueprintHeadings());
 
         // 過去のログ: 初回の一覧はここで取り (再起動の後に探すときに、新しいファイルと見分けるため)、読むのは裏で行う
         _backupDir = Path.Combine(gamePath, "logbackups");
@@ -538,7 +582,8 @@ public partial class GameLogPanel : UserControl
             try
             {
                 var rows = GameLogParser.ParseFile(f.FullName, Path.GetFileNameWithoutExtension(f.Name), names.Ship, names.Item, _missionNames,
-                    names.Translate, names.IsVehicleClass, names.Resource, names.Place, _placeNames, names.ItemLabel, _vehicleClasses, names.ShipClassByName);
+                    names.Translate, names.IsVehicleClass, names.Resource, names.Place, _placeNames, names.ItemLabel, _vehicleClasses, names.ShipClassByName,
+                    names.Blueprints, names.BlueprintHeadings());
                 lock (_backupLock)
                 {
                     _backupRows.AddRange(rows);
@@ -724,7 +769,11 @@ public partial class GameLogPanel : UserControl
         var local = _backupSnapshot.Concat(_currentRows)
             .OrderByDescending(e => e.TimeUtc).ThenByDescending(e => e.Seq)
             .ToList();
+        // 受け渡しはそれぞれ独立に呼ぶ (前は売買・採掘 → 納品 → 船の順に中から呼んでいて、途中で渡すものが無いと後ろが呼ばれなかった)
         HandOverRecords(local);
+        HandOverDeliveries(local);
+        HandOverShips(local);
+        HandOverBlueprints(local);
         SaveSettled(local);
         var includeOwn = _tail == null || _logMissing;
         var entries = GameLogStore.Merge(local, _storedRows, OwnMachine, includeOwn);
@@ -779,6 +828,8 @@ public partial class GameLogPanel : UserControl
     //   資源: resource_types.uuid = 商品売買の resourceGUID の name_key (@items_commodities_…) を翻訳 DB で日本語にする (無ければ name_en)
     //   訳: "@キー" をそのまま翻訳 DB で引く (鉱石の名前 items_commodities_…)
     //   船かどうか: クラス名が ships にあるか、item_index の Vehicle 系 (item_type に Vehicle を含む) にあるか
+    //   BP: BP受信の通知の品名 → できる品の名前が一致する BP (BlueprintPanel.BlueprintsByOutputName。覚えるのは BlueprintPanel 側 (DB ファイルが変われば作り直す))
+    //   BP受信の見出し: 翻訳 DB の crafting_hud_notification_received_blueprint (,P) の日本語・英語の %s の前 (GameLogParser.BlueprintHeadingFromTemplate)
     // 翻訳 DB の引き方は GameDataQueryService の LocReader.Text / ResolveItemNameJa と同じ
     // (key か key + ",P" の行。"!" で始まる訳・空の訳は英語。プレースホルダは使わない)。引けなければ内部名のまま。
     // DB は名前を引くたびに開いて閉じる (Pooling=False。開いたままだと設定の［DB クリア］で DB を消せない)
@@ -830,8 +881,32 @@ public partial class GameLogPanel : UserControl
                 _translations.Clear();
                 _vehicleClasses.Clear();
                 _places.Clear();
+                _blueprintHeadings = null;
             }
         }
+
+        // BP受信の通知の品名 → 同定した BP (無ければ null)。DB を読めなければ例外 (GameLogParser が同定なしにする)
+        public IReadOnlyList<GameLogBlueprint>? Blueprints(string name) => BlueprintPanel.BlueprintsByOutputName(_gamedataCacheDbPath, _translationsDbPath, name);
+
+        // BP受信の通知の見出し (翻訳 DB の今の文言から作ったもの。日本語・英語のうち作れたもの)。読めなければ空 (覚えず、次の時にもう一度引く)
+        public IReadOnlyList<string> BlueprintHeadings()
+        {
+            lock (_lock)
+            {
+                if (_blueprintHeadings != null) return _blueprintHeadings;
+                var list = new List<string>();
+                try
+                {
+                    var (en, ja) = Lookup("@crafting_hud_notification_received_blueprint");
+                    foreach (var t in new[] { JapaneseText(ja), EnglishText(en) })
+                        if (GameLogParser.BlueprintHeadingFromTemplate(t) is { } h && !list.Contains(h)) list.Add(h);
+                }
+                catch { return list; }
+                if (list.Count > 0) _blueprintHeadings = list;   // 空 (翻訳 DB が無い・キーが無い) なら覚えず、次の時にもう一度引く
+                return list;
+            }
+        }
+        private List<string>? _blueprintHeadings;
 
         public string Ship(string className) => Resolve(className, _ships, ResolveShip);
         public string Item(string itemName) => Resolve(itemName, _items, name => ResolveName("items", name));

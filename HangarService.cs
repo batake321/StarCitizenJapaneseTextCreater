@@ -706,6 +706,7 @@ public class HangarService
             """ + OreService.TradeTablesDdl   // ［鉱石］タブの 3 つの表 (ore_stock / commodity_trades / mining_log。DatabaseBackupService.EnsureTradeSchema と同じ DDL)
             + GearImportTablesDdl             // 所持個人装備 (my_gear) と［ゲームログ］の印 (game_log_imports)
             + GameLogEntriesDdl               // ［ゲームログ］の行 (game_log_entries。別の PC でも見るために残す)
+            + MyBlueprintsDdl                 // 所持している BP (my_blueprints。［BP］タブの「所持」)
             + SyncService.TombstonesDdl;      // PC 間の同期の墓石 (sync_tombstones。消した行の印)
         cmd.ExecuteNonQuery();
         MigratePledgesSchema(db);
@@ -757,6 +758,23 @@ public class HangarService
             payload_json TEXT NOT NULL DEFAULT '',
             added_at TEXT DEFAULT (datetime('now','localtime')),
             PRIMARY KEY (time_utc, kind, content)
+        );
+        """;
+
+    // 所持している BP (my_blueprints。個人データ)。主キーは bp_uuid (blueprints.uuid)。output_record はできる品の record、name は入れたときの名前
+    // (ゲームログから入れたものは通知の品名、手で入れたものは［BP］タブのできる品の名前)、source は 'log' (［ゲームログ］の BP受信の行から自動) か 'manual' (［BP］タブで手で)、
+    // log_key は入れた BP受信の行の鍵 (GameLogBlueprintReceipt.LogKey。手で入れたものは '')。
+    // HangarService.InitDb・DatabaseBackupService.EnsureTradeSchema から使う (同じ形を 1 か所に置く)
+    internal const string MyBlueprintsTable = "my_blueprints";
+    internal const string MyBlueprintsDdl = """
+
+        CREATE TABLE IF NOT EXISTS my_blueprints (
+            bp_uuid TEXT PRIMARY KEY,
+            output_record TEXT,
+            name TEXT,
+            source TEXT,
+            log_key TEXT,
+            added_at TEXT DEFAULT (datetime('now','localtime'))
         );
         """;
 
@@ -1559,6 +1577,111 @@ public class HangarService
         }
         tx.Commit();
         return inserted;
+    }
+
+    // === 所持している BP (my_blueprints) ===
+
+    // ［ゲームログ］の BP受信の行から所持の BP に自動で入れた済の印 (game_log_imports の kind。log_key は GameLogBlueprintReceipt.LogKey、入れた先は my_blueprints)。
+    // ［BP］タブで手で外しても印は消さないので、ログの読み直し (次の起動など) で同じ行から再び自動で入れない (MarkKindShipAuto と同じ考え)
+    public const string MarkKindBlueprintAuto = "bp_auto";
+    public const string MarkTargetMyBlueprints = "my_blueprints";
+    public const string BlueprintSourceLog = "log";
+    public const string BlueprintSourceManual = "manual";
+
+    // ［ゲームログ］の BP受信の行 (同定できたもの) の BP を所持に入れる (全部で 1 つのトランザクション)。行ごとに、済の印 (bp_auto) が既にあれば何もしない。
+    // 無ければ印を書き、同定した BP を INSERT OR IGNORE で入れる (source 'log'、log_key は行の鍵)。
+    // ただし、手で外した墓石 (sync_tombstones の my_blueprints / その bp_uuid) がある BP は入れない。墓石は消さない
+    // (PC 間の同期で game_log_imports が相手の行で置き換わって済の印が消えても、手で外した BP がログの読み直しで戻らないように)。
+    // 新しく所持に入った BP の数を返す
+    public int ImportBlueprintsFromLog(IReadOnlyList<GameLogBlueprintReceipt> receipts)
+    {
+        if (_dbPath == null || receipts.Count == 0) return 0;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var tx = db.BeginTransaction();
+        var added = 0;
+        foreach (var r in receipts)
+        {
+            var matches = r.Matches.Where(m => m.Uuid.Length > 0).ToList();
+            if (matches.Count == 0 || r.LogKey.Length == 0) continue;
+            if (!InsertMark(db, tx, MarkKindBlueprintAuto, r.LogKey, MarkTargetMyBlueprints, matches[0].Uuid, matches.Count)) continue;   // 入れ済み (外した後も)
+            foreach (var m in matches)
+            {
+                if (HasBlueprintTombstone(db, tx, m.Uuid)) continue;   // 手で外した BP
+                if (InsertMyBlueprint(db, tx, m.Uuid, m.OutputRecord, r.Name, BlueprintSourceLog, r.LogKey)) added++;
+            }
+        }
+        tx.Commit();
+        return added;
+    }
+
+    // ［BP］タブの「所持」の手の入切。owned なら INSERT OR IGNORE (source 'manual'、log_key '')、外すなら行を消して墓石 (sync_tombstones) を書く
+    // (PC 間の同期でもう片方から戻らないように)。行が変わったら true
+    public bool SetBlueprintOwned(string bpUuid, string outputRecord, string name, bool owned)
+    {
+        if (_dbPath == null || string.IsNullOrEmpty(bpUuid)) return false;
+        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var tx = db.BeginTransaction();
+        bool changed;
+        if (owned) changed = InsertMyBlueprint(db, tx, bpUuid, outputRecord, name, BlueprintSourceManual, "");
+        else
+        {
+            using (var cmd = db.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = "DELETE FROM my_blueprints WHERE bp_uuid = @u";
+                cmd.Parameters.AddWithValue("@u", bpUuid);
+                changed = cmd.ExecuteNonQuery() > 0;
+            }
+            SyncService.WriteTombstone(db, tx, MyBlueprintsTable, SyncService.TombstoneKey(bpUuid));
+        }
+        tx.Commit();
+        return changed;
+    }
+
+    // my_blueprints / bp_uuid の墓石 (手で外した記録) があるか (sync_tombstones は InitDb で作ってある)
+    private static bool HasBlueprintTombstone(SqliteConnection db, SqliteTransaction tx, string bpUuid)
+    {
+        using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM sync_tombstones WHERE table_name = @t AND row_key = @k)";
+        cmd.Parameters.AddWithValue("@t", MyBlueprintsTable);
+        cmd.Parameters.AddWithValue("@k", SyncService.TombstoneKey(bpUuid));
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
+    }
+
+    // my_blueprints に 1 行入れる (INSERT OR IGNORE)。入ったら true。手で入れたとき (source 'manual') だけ、入ったらその鍵の墓石を消す
+    // (外した後に手で入れ直したので)。ログからの自動 (source 'log') では墓石を消さない
+    private static bool InsertMyBlueprint(SqliteConnection db, SqliteTransaction tx, string bpUuid, string outputRecord, string name, string source, string logKey)
+    {
+        using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "INSERT OR IGNORE INTO my_blueprints (bp_uuid, output_record, name, source, log_key) VALUES (@u, @r, @n, @s, @l)";
+        cmd.Parameters.AddWithValue("@u", bpUuid);
+        cmd.Parameters.AddWithValue("@r", outputRecord ?? "");
+        cmd.Parameters.AddWithValue("@n", name ?? "");
+        cmd.Parameters.AddWithValue("@s", source);
+        cmd.Parameters.AddWithValue("@l", logKey ?? "");
+        var inserted = cmd.ExecuteNonQuery() > 0;
+        if (inserted && source == BlueprintSourceManual) SyncService.ClearTombstone(db, tx, MyBlueprintsTable, SyncService.TombstoneKey(bpUuid));
+        return inserted;
+    }
+
+    // 所持している BP の uuid (読み取り専用で開く。［BP］タブ・［詳細］の BP の節から使う)。trade_cache.db が無ければ null、表がまだ無ければ空。開けなければ例外
+    public static HashSet<string>? LoadMyBlueprintUuidsReadOnly(string tradeDbPath)
+    {
+        if (!File.Exists(tradeDbPath)) return null;
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using var db = new SqliteConnection($"Data Source={tradeDbPath};Mode=ReadOnly;Pooling=False");
+        db.Open();
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'my_blueprints'";
+        if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0) return set;
+        cmd.CommandText = "SELECT bp_uuid FROM my_blueprints";
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) if (!r.IsDBNull(0) && r.GetString(0) is { Length: > 0 } u) set.Add(u);
+        return set;
     }
 
     // ［ゲームログ］の行の品を所持コンポーネント c として入れる (AddMyComponent と同じく同じ品には数量を足す)。印 (kind, logKey → my_components) を残し、

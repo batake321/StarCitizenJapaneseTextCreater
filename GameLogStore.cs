@@ -15,7 +15,8 @@ public sealed record StoredGameLogEntry(string Machine, GameLogEntry Entry);
 //         今の Game.log の行は、続きの行で書き換わるもの (購入の結果で「購入失敗」になる、取引の失敗、衝突のまとめ、採掘の所持数の添え書き、
 //         同じ場所に 5 分 (GameLogParser.ReentryWindow) 以内に戻ったときの出発の取り消し) があるので、行の時刻から SettleWindow 過ぎるまで保存しない。
 //         過去のログの行はファイルを読み終えているので、名前待ちで無ければすぐ保存する
-//   中身: payload_json は GameLogEntry をそのまま System.Text.Json にしたもの (ImportItems / Trade / Mining / Purchase / ShipClass / ShipName / Seq …)。
+//   中身: payload_json は GameLogEntry をそのまま System.Text.Json にしたもの (ImportItems / Trade / Mining / Purchase / ShipClass / ShipName / Seq /
+//         BP受信の行の Blueprint (品名・同定した BP の uuid とできる品の record) …)。
 //         復元した行で「所持」のボタン (ClassifyImports) とダブルクリックと利益の添え書きが手元の行と同じように効く。
 //         売却の行に表示時に添える利益 (GameLogPanel.ContentText) は content に入れない (Content そのもの)
 //   表示: 手元の解析の行 ∪ DB の行のうち自分以外の PC の行 (Merge)。同じ鍵は手元の行を優先。手元の Game.log が無い PC では DB の自分の行も出す

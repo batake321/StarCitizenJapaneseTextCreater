@@ -16,7 +16,7 @@ namespace StarCitizenJapaneseTextCreater;
 //   取り込みの決まり (通常のインポート (DatabaseBackupService.ImportCore) とは別。相手の書き出しのほうが新しいことが分かっているので置き換えが基本):
 //     - 主キーの無い個人の表 (my_ships, my_components, hangar_items, hangar_nameable_ships, my_gear) と連動の game_log_imports / my_component_purchases / ore_stock:
 //       相手の行で置き換え (DELETE → INSERT。両方にある列だけ)
-//     - 主キーのある個人の表 (hangar_pledges, hangar_ccus, hangar_ship_marks, ship_loadouts, commodity_trades, mining_log, game_log_entries、hangar_meta の個人のキー、glossary、
+//     - 主キーのある個人の表 (hangar_pledges, hangar_ccus, hangar_ship_marks, ship_loadouts, commodity_trades, mining_log, game_log_entries, my_blueprints、hangar_meta の個人のキー、glossary、
 //       translations の個人行): INSERT OR REPLACE (主キーが同じなら相手の行。translations は key が同じとき japanese / source / translator / modified_at を
 //       相手の値にする。自分の非個人行 (ゲーム由来の訳) は消さない。glossary も english が同じ行は値が違うときだけ相手の値にする。
 //       ただし translations (modified_at) と glossary (created_at) は、自分の行のほうが新しければ相手の行で上書きしない (NewerThanMineSql))
@@ -34,7 +34,7 @@ namespace StarCitizenJapaneseTextCreater;
 //   (WriteTombstone。row_key は主キーの値を U+001F でつないだもの (TombstoneKey)。glossary は english の小文字、knowledge は content)。
 //   書き出しには 3 つの DB の sync_tombstones を入れる (個人データ扱い。90 日より古い墓石は書き出す前に消す (PurgeOldTombstones))。
 //   取り込み (ApplyTombstones): 相手の墓石のうち deleted_at_utc がその相手の lastImportedUtc より新しいもの (初めてなら全部) を自分の対応する行に当てて消す
-//   (行に時刻の列があり (glossary.created_at / game_log_imports.added_at / knowledge.created_at / translations.modified_at)、それが消した時刻より新しければ消さない)。
+//   (行に時刻の列があり (glossary.created_at / game_log_imports.added_at / my_blueprints.added_at / knowledge.created_at / translations.modified_at)、それが消した時刻より新しければ消さない)。
 //   相手の行を入れるときは、自分に同じ row_key の墓石があって deleted_at_utc が相手の書き出した時刻より新しければ入れない (自分の削除を守る。TombstoneGuardSql)。
 //   machine が自分の墓石は当てない。行を書き直す経路 (装備の保存・印・CCU・用語・記憶・印の登録・個人訳の保存) ではその鍵の墓石を消す (ClearTombstone)。
 //   translations の墓石 (「訳を消す」「原文に戻す」で個人行を非個人にしたもの) は行を消さず、自分の個人行を payload の値に UPDATE する。
@@ -183,6 +183,7 @@ internal static class SyncService
         new("game_log_entries", ["time_utc", "kind", "content"], null),
         new("hangar_meta", ["key"], null),
         new(DatabaseBackupService.GameLogImportsTable, ["kind", "log_key"], "added_at"),
+        new(HangarService.MyBlueprintsTable, ["bp_uuid"], "added_at"),
     ];
     private static readonly TombstoneSpec[] TranslationTombstoneSpecs =
     [
@@ -208,7 +209,7 @@ internal static class SyncService
         return $"NOT EXISTS (SELECT 1 FROM main.sync_tombstones ts WHERE ts.table_name = '{table}' AND ts.row_key = {TombstoneKeySql(spec, alias)} AND ts.deleted_at_utc > @exportedAt)";
     }
 
-    // 行の時刻の列の値を UTC にする。knowledge.created_at は UTC の "o" 形式、glossary.created_at / game_log_imports.added_at / translations.modified_at は
+    // 行の時刻の列の値を UTC にする。knowledge.created_at は UTC の "o" 形式、glossary.created_at / game_log_imports.added_at / my_blueprints.added_at / translations.modified_at は
     // datetime('now', 'localtime') のローカル時刻 (種類の無い文字列はローカル時刻と見る。ParseUtc (json の時刻。種類が無ければ UTC) とは逆)。読めなければ null
     private static DateTime? ParseRowTime(string? s)
     {

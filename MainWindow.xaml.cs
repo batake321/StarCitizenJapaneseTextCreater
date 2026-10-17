@@ -92,9 +92,11 @@ public partial class MainWindow : Window
         gameLogPanel.TradeResultUpdater = UpdateGameLogTradeResult;
         gameLogPanel.DeliveryImporter = ApplyGameLogDeliveries;
         gameLogPanel.ShipImporter = ApplyGameLogShips;
+        gameLogPanel.BlueprintImporter = ApplyGameLogBlueprints;
         gameLogPanel.SellProfit = key => orePanel.TryGetSellProfit(key);
         gameLogPanel.DetailOpener = OpenGameLogItemDetail;
         gameLogPanel.ShipDetailOpener = OpenGameLogShipDetail;
+        gameLogPanel.BlueprintDetailOpener = (record, name) => DetailPanel.Request(record, name);
         // ［ゲームログ］の行を trade_cache.db に残す・ほかの PC の行を読む (game_log_entries)
         gameLogPanel.StoredLoader = LoadGameLogEntries;
         gameLogPanel.StoredSaver = SaveGameLogEntriesAsync;
@@ -1866,6 +1868,8 @@ public partial class MainWindow : Window
     private MissionService? _missionService;
     private List<MissionService.MissionEntry>? _currentMissions;
     private bool _missionUiInitializing;
+    // BP タブからミッションを開くときにカテゴリを選ぶ間は、カテゴリの選択の処理 (一覧の読み直し) を止める (開く側で読み直す)
+    private bool _suppressMissionCategoryChanged;
 
     private void LoadMissions_Click(object sender, RoutedEventArgs e) => LoadMissionsAsync();
 
@@ -1938,7 +1942,7 @@ public partial class MainWindow : Window
 
     private async void MissionCategory_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (_missionService == null) return;
+        if (_missionService == null || _suppressMissionCategoryChanged) return;
         if (lstMissionCategories.SelectedItem is not MissionService.MissionCategory cat) return;
 
         try
@@ -2095,13 +2099,35 @@ public partial class MainWindow : Window
         });
 
     // ミッションの詳細を出す。今の一覧にあればその行を選ぶ (選び直しで詳細が出る)。一覧に無ければ一覧の選択を外して詳細だけを出す
-    private void ShowMissionByRecord(IReadOnlyList<string> records)
+    private async void ShowMissionByRecord(IReadOnlyList<string> records)
     {
         if (_missionService == null) { txtMissionDetail.Text = "ミッションがまだ読み込まれていません (［ミッション読み込み］)。"; return; }
         try
         {
             var m = _missionService.FindByRecord(records);
             if (m == null) { txtMissionDetail.Text = $"ミッションが見つかりませんでした ({string.Join(", ", records)})。"; return; }
+            // そのミッションのカテゴリを左の一覧で選び、一覧をそのカテゴリの中身にする (カテゴリを選んだときと同じ表示)
+            var catName = MissionService.CategoryOf(m);
+            if (lstMissionCategories.ItemsSource is IEnumerable<MissionService.MissionCategory> cats
+                && cats.FirstOrDefault(c => c.Name == catName) is { } cat)
+            {
+                if (!ReferenceEquals(lstMissionCategories.SelectedItem, cat))
+                {
+                    _suppressMissionCategoryChanged = true;
+                    try { lstMissionCategories.SelectedItem = cat; }
+                    finally { _suppressMissionCategoryChanged = false; }
+                    txtMissionSearch.Text = "";
+                    txtMissionSearchStatus.Text = "";
+                    var svc = _missionService;
+                    var list = await Task.Run(() => svc.GetMissions(cat.Name));
+                    if (!ReferenceEquals(svc, _missionService)) return;
+                    _currentMissions = list;
+                    dgMissions.ItemsSource = _currentMissions;
+                    var jaCount = _currentMissions.Count(x => !string.IsNullOrEmpty(x.DisplayNameJa));
+                    txtMissionStatus.Text = $"{cat.Name}: {_currentMissions.Count} 件 (日本語:{jaCount})";
+                }
+                lstMissionCategories.ScrollIntoView(cat);
+            }
             var row = _currentMissions?.FirstOrDefault(x => string.Equals(x.RecordName, m.RecordName, StringComparison.OrdinalIgnoreCase));
             if (row != null && !ReferenceEquals(dgMissions.SelectedItem, row))
             {
@@ -6176,6 +6202,23 @@ public partial class MainWindow : Window
             RefreshMyShips();
         }
         error?.Throw();
+        return true;
+    }
+
+    // BP受信の行の自動の登録 (GameLogPanel.BlueprintImporter。まだ渡していない行だけ来る): 同定できた BP を所持の BP (my_blueprints) に入れる。
+    // 行ごとに一度だけ (済の印 kind bp_auto。［BP］タブで手で外しても印は残るので、ログの読み直しで再び自動で入れない)。過去のログの行も入れる (期限は設けない)。
+    // 新しく入った BP があれば［BP］タブの所持の表示を読み直す。失敗したら例外を投げ直す (GameLogPanel が「渡した」にせずログに残し、次の作り直しでもう一度渡す)
+    private bool ApplyGameLogBlueprints(IReadOnlyList<GameLogEntry> entries)
+    {
+        var receipts = entries.Select(e => e.Blueprint).OfType<GameLogBlueprintReceipt>().Where(r => r.Matches.Count > 0).ToList();
+        if (receipts.Count == 0) return true;
+        _hangarService.SetCacheDir(WorkDir);
+        var added = _hangarService.ImportBlueprintsFromLog(receipts);
+        if (added > 0)
+        {
+            Log($"[BP] ゲームログの BP受信から所持に {added} 件入れました");
+            blueprintPanel?.Reload();
+        }
         return true;
     }
 

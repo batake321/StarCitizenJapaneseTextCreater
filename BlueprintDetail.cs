@@ -32,6 +32,8 @@ internal static class BlueprintDetail
             sb.AppendLine("  入手: " + (sources.Count > 0 ? string.Join(" / ", sources) : "不明（ゲームデータに入手経路が無い）"));
             // 在庫: trade_cache.db を読めたときだけ
             if (haves != null && stockText.Length > 0) sb.AppendLine($"  在庫: {stockText}");
+            // 所持 (trade_cache.db の my_blueprints): trade_cache.db を読めたときだけ
+            if (it.Owned is { } owned) sb.AppendLine($"  所持: {(owned ? "あり" : "なし")}");
 
             if (it.Slots.Count > 0)
             {

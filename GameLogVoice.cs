@@ -60,6 +60,7 @@ public static class GameLogVoiceScenes
         new("衝突", "衝突", "{内容}", false),
         new("出発", "出発", "{内容}", false),
         new(Jurisdiction, "管轄区域に進入", "{内容}", false),
+        new("BP受信", "BP受信", "設計図を受信しました。{内容}", false),
     ];
 
     public static GameLogVoiceScene? Find(string key)
