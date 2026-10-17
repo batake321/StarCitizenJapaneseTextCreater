@@ -132,8 +132,9 @@ public partial class App : Application
         // ExportAsync は内部の await に ConfigureAwait(false) が付いていないので、
         // WPF のディスパッチャ上で Wait() すると継続がブロック中のディスパッチャへ戻ろうとしてデッドロックする
         // (zip は書けるがプロセスが終わらず居座る)。同期コンテキストの無いスレッドプール上で待つ
+        // 配布用なので PC 間の同期の墓石 (sync_tombstones) は入れない (includeTombstones: false)
         Task.Run(() => DatabaseBackupService.ExportAsync(translationDb, indexDb, outPath,
-            s => Console.WriteLine($"  {s}"))).GetAwaiter().GetResult();
+            s => Console.WriteLine($"  {s}"), includeTombstones: false)).GetAwaiter().GetResult();
 
         if (File.Exists(outPath))
             Console.WriteLine($"Backup: {new FileInfo(outPath).Length / 1024.0:N0} KB -> {outPath}");
@@ -183,9 +184,10 @@ public partial class App : Application
         public int Glossary { get; set; }
         public int Knowledge { get; set; }
         public int LocalMeta { get; set; }
+        public int Tombstones { get; set; }   // PC 間の同期の墓石 (sync_tombstones)
 
         public override string ToString() =>
-            $"手動訳など {Translations} 行・用語集 {Glossary} 件・記憶 {Knowledge} 件・この PC の印 {LocalMeta} 件";
+            $"手動訳など {Translations} 行・用語集 {Glossary} 件・記憶 {Knowledge} 件・この PC の印 {LocalMeta} 件・同期の墓石 {Tombstones} 件";
     }
 
     internal static BundledDbStamp GetBundledDbStamp(string path)
@@ -647,6 +649,9 @@ public partial class App : Application
         // 今までの DB が無い・印が無ければ無いまま)
         if (isGamedata && TableExists(tmp, tx, "gamedata_meta"))
             ExecuteNonQuery(tmp, tx, $"DELETE FROM gamedata_meta WHERE key IN ({LocalOnlyMetaKeyList()})");
+        // PC 間の同期の墓石 (sync_tombstones) も個人データ: 同梱側の墓石は捨て、今までの DB の墓石を下で写す (今までの DB が無ければ空のまま)
+        if ((isTranslations || isGamedata) && TableExists(tmp, tx, SyncService.TombstonesTable))
+            ExecuteNonQuery(tmp, tx, $"DELETE FROM {SyncService.TombstonesTable}");
 
         long? oldKnowledgeSeq = null;
         if ((isTranslations || isGamedata) && File.Exists(oldPath))
@@ -678,6 +683,7 @@ public partial class App : Application
                         counts.Glossary = CopyPersonalRows(old, tmp, tx, dbName, "glossary", "用語集",
                             requiredCols: ["english"], where: null,
                             conflictTarget: "english", updateCols: ["japanese", "created_at"], warnings);
+                        counts.Tombstones = CopyTombstones(old, tmp, tx, dbName, warnings);
                     }
                     else
                     {
@@ -687,6 +693,7 @@ public partial class App : Application
                         counts.LocalMeta = CopyPersonalRows(old, tmp, tx, dbName, "gamedata_meta", "この PC だけの印",
                             requiredCols: ["key", "value"], where: $"key IN ({LocalOnlyMetaKeyList()})",
                             conflictTarget: null, updateCols: [], warnings);
+                        counts.Tombstones = CopyTombstones(old, tmp, tx, dbName, warnings);
                         try
                         {
                             if (TableExists(old, null, "sqlite_sequence"))
@@ -711,6 +718,15 @@ public partial class App : Application
         if (isGamedata) NormalizeKnowledgeSequence(tmp, tx, oldKnowledgeSeq);
         tx.Commit();
         return counts;
+    }
+
+    // PC 間の同期の墓石 (sync_tombstones) を今までの DB からそのまま写す (同梱側の墓石は ImportPersonalData の頭で捨ててある)。
+    // 作り直し中の DB に表が無ければ作る (payload 列も)。今までの DB に表が無ければ 0
+    private static int CopyTombstones(SqliteConnection old, SqliteConnection tmp, SqliteTransaction tx, string dbName, List<string> warnings)
+    {
+        SyncService.EnsureTombstonesTable(tmp, tx);
+        return CopyPersonalRows(old, tmp, tx, dbName, SyncService.TombstonesTable, "同期の墓石",
+            requiredCols: ["table_name", "row_key"], where: null, conflictTarget: null, updateCols: [], warnings);
     }
 
     // 記憶 (knowledge) を、今までの DB 優先で合わせる。今までの DB の行は id ごとそのまま入れ、作り直し中の DB (同梱) の行は、

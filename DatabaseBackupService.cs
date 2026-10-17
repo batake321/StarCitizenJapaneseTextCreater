@@ -45,9 +45,11 @@ public static class DatabaseBackupService
         _ => []
     };
 
+    // includeTombstones: false なら PC 間の同期の墓石 (sync_tombstones) を 3 つの DB から消す (配布用。includeMyShips が false のときも消す)
     public static async Task ExportAsync(string translationDbPath, string indexDbPath, string outputPath,
-        Action<string>? onStatus = null, string? tradeDbPath = null, bool includeMyShips = true)
+        Action<string>? onStatus = null, string? tradeDbPath = null, bool includeMyShips = true, bool includeTombstones = true)
     {
+        var dropTombstones = !includeMyShips || !includeTombstones;
         var tempDir = Path.Combine(Path.GetTempPath(), $"sc_export_{Guid.NewGuid():N}");
         try
         {
@@ -57,7 +59,17 @@ public static class DatabaseBackupService
                 if (File.Exists(translationDbPath))
                 {
                     onStatus?.Invoke("translations.db をコピー中...");
-                    File.Copy(translationDbPath, Path.Combine(tempDir, "translations.db"), true);
+                    var tempTransPath = Path.Combine(tempDir, "translations.db");
+                    File.Copy(translationDbPath, tempTransPath, true);
+                    if (dropTombstones)
+                    {
+                        using (var conn = new SqliteConnection($"Data Source={tempTransPath}"))
+                        {
+                            conn.Open();
+                            DropTombstones(conn);
+                        }
+                        SqliteConnection.ClearAllPools();
+                    }
                 }
                 if (File.Exists(indexDbPath))
                 {
@@ -74,6 +86,7 @@ public static class DatabaseBackupService
                             cmd.CommandText = $"DELETE FROM gamedata_meta WHERE key IN ({LocalOnlyMetaKeyList})";
                             cmd.ExecuteNonQuery();
                         }
+                        if (dropTombstones) DropTombstones(conn);
                     }
                     SqliteConnection.ClearAllPools();
                 }
@@ -110,6 +123,7 @@ public static class DatabaseBackupService
                                     DELETE FROM my_gear;
                                     DELETE FROM game_log_imports;
                                     DELETE FROM game_log_entries;
+                                    DELETE FROM sync_tombstones;
                                     """;
                                 cmd.ExecuteNonQuery();
                             }
@@ -131,6 +145,15 @@ public static class DatabaseBackupService
         finally { try { Directory.Delete(tempDir, true); } catch { } }
 
         onStatus?.Invoke("エクスポート完了");
+    }
+
+    // 書き出しの写しから PC 間の同期の墓石 (sync_tombstones) を消す (表が無ければ何もしない)
+    private static void DropTombstones(SqliteConnection conn)
+    {
+        if (!TableExists(conn, SyncService.TombstonesTable)) return;
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"DELETE FROM {SyncService.TombstonesTable}";
+        cmd.ExecuteNonQuery();
     }
 
     public static async Task<Dictionary<BackupCategory, int>> InspectAsync(string backupPath)
@@ -480,7 +503,18 @@ public static class DatabaseBackupService
             var n = Exec(conn, tx, $"INSERT OR IGNORE INTO main.glossary ({colList}) SELECT {colList} FROM src.glossary");
             onStatus?.Invoke($"glossary: {n} 件追加");
         }
+        MergeTombstones(conn, tx, onStatus);
         tx.Commit();
+    }
+
+    // PC 間の同期の墓石 (sync_tombstones): バックアップは復元なので墓石は当てず、表そのものを主キーで a 優先の和集合にする (b に表が無ければ何もしない)
+    private static void MergeTombstones(SqliteConnection conn, SqliteTransaction tx, Action<string>? onStatus)
+    {
+        if (!SourceTableExists(conn, tx, SyncService.TombstonesTable)) return;
+        SyncService.EnsureTombstonesTable(conn, tx);
+        var colList = string.Join(", ", CommonColumns(conn, tx, SyncService.TombstonesTable).Select(Q));
+        var n = Exec(conn, tx, $"INSERT OR IGNORE INTO main.{Q(SyncService.TombstonesTable)} ({colList}) SELECT {colList} FROM src.{Q(SyncService.TombstonesTable)}");
+        onStatus?.Invoke($"{SyncService.TombstonesTable}: {n} 件追加");
     }
 
     // gamedata_cache.db: ゲーム・ネット由来の表 (IndexTables) は b で置き換え。gamedata_meta は、この PC だけの印 (LocalOnlyMetaKeys) を
@@ -524,6 +558,7 @@ public static class DatabaseBackupService
                 onStatus?.Invoke($"knowledge: {n} 件追加");
             }
         }
+        if (cats.Contains(BackupCategory.Knowledge)) MergeTombstones(conn, tx, onStatus);   // gamedata_cache.db の墓石は knowledge のもの
         NormalizeSequences(conn, tx);
         tx.Commit();
     }
@@ -600,6 +635,7 @@ public static class DatabaseBackupService
                 onStatus?.Invoke($"{table}: {n} 件追加");
             }
         }
+        MergeTombstones(conn, tx, onStatus);   // PC 間の同期の墓石 (sync_tombstones) も主キーで a 優先の和集合
         NormalizeSequences(conn, tx);
         tx.Commit();
     }
@@ -1108,7 +1144,8 @@ public static class DatabaseBackupService
             );
             """ + OreService.TradeTablesDdl   // ［鉱石］タブの 3 つの表 (HangarService.InitDb と同じ DDL)
             + HangarService.GearImportTablesDdl   // 所持個人装備 (my_gear) と［ゲームログ］の印 (game_log_imports)
-            + HangarService.GameLogEntriesDdl;    // ［ゲームログ］の行 (game_log_entries)
+            + HangarService.GameLogEntriesDdl     // ［ゲームログ］の行 (game_log_entries)
+            + SyncService.TombstonesDdl;          // PC 間の同期の墓石 (sync_tombstones)
         cmd.ExecuteNonQuery();
 
         // 旧スキーマ (config_value_cents / availability 列なし) の hangar_pledges に列を追加する (HangarService.MigratePledgesSchema と同等)。
@@ -1519,7 +1556,8 @@ public static class DatabaseBackupService
                 created_at TEXT NOT NULL
             );
         """ + ShopPriceStore.TableDdl + GameDataExtractor.AmmoParamsDdl + GameDataQueryService.ItemVariantsDdl + GameDataQueryService.PlayerDamageParamsDdl
-          + GameDataExtractor.ItemPortsDdl + GameDataExtractor.ItemPortLabelsDdl + GameDataExtractor.ResourceTypesDdl;
+          + GameDataExtractor.ItemPortsDdl + GameDataExtractor.ItemPortLabelsDdl + GameDataExtractor.ResourceTypesDdl
+          + SyncService.TombstonesDdl;   // PC 間の同期の墓石 (sync_tombstones)
         cmd.ExecuteNonQuery();
 
         // 既存の ship_ports に min_size / max_size / port_types 列が無ければ足す (バックアップ側にあると INSERT が列不足で失敗するため)

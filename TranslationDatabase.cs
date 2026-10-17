@@ -40,7 +40,7 @@ public class TranslationDatabase : IDisposable
                 japanese TEXT NOT NULL,
                 created_at TEXT DEFAULT (datetime('now', 'localtime'))
             );
-            """;
+            """ + SyncService.TombstonesDdl;   // PC 間の同期の墓石 (sync_tombstones。消した用語集の語の印)
         cmd.ExecuteNonQuery();
 
         // Migration: add translator column if missing
@@ -65,21 +65,18 @@ public class TranslationDatabase : IDisposable
         cmd.Parameters.AddWithValue("$en", english);
         cmd.Parameters.AddWithValue("$ja", japanese);
         cmd.ExecuteNonQuery();
+        SyncService.ClearTombstone(_conn, null, "glossary", SyncService.GlossaryTombstoneKey(english));   // 足し直したので墓石を消す
     }
 
-    public void DeleteGlossary(string english)
-    {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM glossary WHERE english = $en";
-        cmd.Parameters.AddWithValue("$en", english);
-        cmd.ExecuteNonQuery();
-    }
+    // 用語を消す。PC 間の同期でもう片方から戻らないよう墓石 (sync_tombstones。鍵は english の小文字) も書く
+    public void DeleteGlossary(string english) => DeleteGlossaryBulk([english]);
 
     public void DeleteGlossaryBulk(List<string> englishKeys)
     {
         if (englishKeys.Count == 0) return;
         using var tx = _conn.BeginTransaction();
         using var cmd = _conn.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = "DELETE FROM glossary WHERE english = $en";
         var pEn = cmd.Parameters.Add("$en", SqliteType.Text);
         foreach (var en in englishKeys)
@@ -87,6 +84,7 @@ public class TranslationDatabase : IDisposable
             pEn.Value = en;
             cmd.ExecuteNonQuery();
         }
+        SyncService.WriteTombstones(_conn, tx, "glossary", englishKeys.Select(SyncService.GlossaryTombstoneKey));
         tx.Commit();
     }
 
@@ -138,6 +136,7 @@ public class TranslationDatabase : IDisposable
             pJa.Value = newJa;
             updateCmd.ExecuteNonQuery();
         }
+        SyncService.ClearTombstones(_conn, tx, "translations", updates.Select(u => u.key));   // 個人行を書き直したので墓石を消す
 
         tx.Commit();
         return updates.Count;
@@ -225,6 +224,7 @@ public class TranslationDatabase : IDisposable
         var pTr = cmd.Parameters.Add("$tr", SqliteType.Text);
 
         int count = 0;
+        var written = new List<string>();
         foreach (var line in File.ReadLines(jsonlPath))
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
@@ -241,11 +241,14 @@ public class TranslationDatabase : IDisposable
                     pKey.Value = key;
                     pJa.Value = ja;
                     pTr.Value = translator;
-                    count += cmd.ExecuteNonQuery();
+                    var n = cmd.ExecuteNonQuery();
+                    count += n;
+                    if (n > 0) written.Add(key);
                 }
             }
             catch { }
         }
+        SyncService.ClearTombstones(_conn, tx, "translations", written);   // 行を書き直したので墓石を消す
         tx.Commit();
         Console.WriteLine($"  DB updated with AI translations: {count} entries");
     }
@@ -259,12 +262,16 @@ public class TranslationDatabase : IDisposable
         cmd.Parameters.AddWithValue("$src", source);
         cmd.Parameters.AddWithValue("$tr", source);
         cmd.ExecuteNonQuery();
+        SyncService.ClearTombstone(_conn, null, "translations", key);   // 個人行を書き直したので墓石を消す
     }
 
+    // 「訳を消す」。個人行 (App.PersonalTranslationSources) を非個人行 (untranslated) にしたときは、PC 間の同期で相手の個人行が戻らないよう
+    // translations の墓石 (鍵 key、payload = 操作後の値) を書く (取り込む側は行を消さず、自分の個人行をこの値にする)
     public void ClearTranslations(List<string> keys)
     {
         if (keys.Count == 0) return;
         using var tx = _conn.BeginTransaction();
+        var tombstones = PersonalRowsBefore(keys).Select(k => (k.Key, (string?)SyncService.TranslationTombstonePayload(null, "untranslated", ""))).ToList();
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "UPDATE translations SET japanese = NULL, source = 'untranslated', translator = '', modified_at = datetime('now', 'localtime') WHERE key = $key";
         var pKey = cmd.Parameters.Add("$key", SqliteType.Text);
@@ -274,13 +281,16 @@ public class TranslationDatabase : IDisposable
             pKey.Value = key;
             cmd.ExecuteNonQuery();
         }
+        SyncService.WriteTombstones(_conn, tx, "translations", tombstones);
         tx.Commit();
     }
 
+    // 「原文に戻す」。ClearTranslations と同じく、個人行を非個人行 (original) にしたときは墓石 (payload = 英語原文・original) を書く
     public void SetToOriginalEnglish(List<string> keys)
     {
         if (keys.Count == 0) return;
         using var tx = _conn.BeginTransaction();
+        var tombstones = PersonalRowsBefore(keys).Select(k => (k.Key, (string?)SyncService.TranslationTombstonePayload(k.English, "original", "original"))).ToList();
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "UPDATE translations SET japanese = english, source = 'original', translator = 'original', modified_at = datetime('now', 'localtime') WHERE key = $key";
         var pKey = cmd.Parameters.Add("$key", SqliteType.Text);
@@ -290,7 +300,26 @@ public class TranslationDatabase : IDisposable
             pKey.Value = key;
             cmd.ExecuteNonQuery();
         }
+        SyncService.WriteTombstones(_conn, tx, "translations", tombstones);
         tx.Commit();
+    }
+
+    // keys のうち、今 個人行 (source が App.PersonalTranslationSources) のものの key と english (ClearTranslations / SetToOriginalEnglish の墓石用)
+    private List<(string Key, string English)> PersonalRowsBefore(List<string> keys)
+    {
+        var personal = new HashSet<string>(App.PersonalTranslationSources, StringComparer.Ordinal);
+        var list = new List<(string, string)>();
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT english, source FROM translations WHERE key = $key";
+        var pKey = cmd.Parameters.Add("$key", SqliteType.Text);
+        foreach (var key in keys)
+        {
+            pKey.Value = key;
+            using var r = cmd.ExecuteReader();
+            if (r.Read() && !r.IsDBNull(1) && personal.Contains(r.GetString(1)))
+                list.Add((key, r.IsDBNull(0) ? "" : r.GetString(0)));
+        }
+        return list;
     }
 
     public Dictionary<string, string> GetAllTranslations()
@@ -381,6 +410,7 @@ public class TranslationDatabase : IDisposable
             pJa.Value = string.IsNullOrEmpty(fields[2]) ? (object)DBNull.Value : fields[2];
             pSrc.Value = fields.Count > 3 ? fields[3] : "csv";
             cmd.ExecuteNonQuery();
+            SyncService.ClearTombstone(_conn, tx, "translations", fields[0]);   // 個人行を書き直したので墓石を消す
             count++;
         }
 

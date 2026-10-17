@@ -161,8 +161,8 @@ public sealed class OreService
         var db = new SqliteConnection($"Data Source={_dbPath}");
         db.Open();
         using var cmd = db.CreateCommand();
-        // 印の表 (game_log_imports) もここで書くので、HangarService の DDL も通す
-        cmd.CommandText = TradeTablesDdl + HangarService.GearImportTablesDdl;
+        // 印の表 (game_log_imports) もここで書くので、HangarService の DDL も通す (印を消すときに書く墓石 (sync_tombstones) の DDL も)
+        cmd.CommandText = TradeTablesDdl + HangarService.GearImportTablesDdl + SyncService.TombstonesDdl;
         cmd.ExecuteNonQuery();
         return db;
     }

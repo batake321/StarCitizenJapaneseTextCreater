@@ -705,7 +705,8 @@ public class HangarService
             );
             """ + OreService.TradeTablesDdl   // ［鉱石］タブの 3 つの表 (ore_stock / commodity_trades / mining_log。DatabaseBackupService.EnsureTradeSchema と同じ DDL)
             + GearImportTablesDdl             // 所持個人装備 (my_gear) と［ゲームログ］の印 (game_log_imports)
-            + GameLogEntriesDdl;              // ［ゲームログ］の行 (game_log_entries。別の PC でも見るために残す)
+            + GameLogEntriesDdl               // ［ゲームログ］の行 (game_log_entries。別の PC でも見るために残す)
+            + SyncService.TombstonesDdl;      // PC 間の同期の墓石 (sync_tombstones。消した行の印)
         cmd.ExecuteNonQuery();
         MigratePledgesSchema(db);
         MigrateStoreSchema(db);
@@ -1487,11 +1488,17 @@ public class HangarService
         cmd.Parameters.AddWithValue("@t", target);
         cmd.Parameters.AddWithValue("@r", itemRecord);
         cmd.Parameters.AddWithValue("@q", quantity);
-        return cmd.ExecuteNonQuery() > 0;
+        var inserted = cmd.ExecuteNonQuery() > 0;
+        SyncService.ClearTombstone(db, tx, DatabaseBackupService.GameLogImportsTable, SyncService.TombstoneKey(kind, logKey));   // 印を書き直したので墓石を消す
+        return inserted;
     }
 
-    internal static void DeleteMark(SqliteConnection db, SqliteTransaction tx, string kind, string logKey) =>
+    // 印を消す (取り消し)。PC 間の同期でもう片方から戻らないよう墓石 (sync_tombstones) も書く
+    internal static void DeleteMark(SqliteConnection db, SqliteTransaction tx, string kind, string logKey)
+    {
         Exec(db, tx, "DELETE FROM game_log_imports WHERE kind = @k AND log_key = @l", ("@k", kind), ("@l", logKey));
+        SyncService.WriteTombstone(db, tx, DatabaseBackupService.GameLogImportsTable, SyncService.TombstoneKey(kind, logKey));
+    }
 
     // === ［ゲームログ］の行 (game_log_entries) ===
 
@@ -1849,11 +1856,33 @@ public class HangarService
         if (itemRecord == null)
         {
             Exec(db, "DELETE FROM ship_loadouts WHERE ship_key = @k AND port_name = @p", ("@k", shipKey), ("@p", portName));
+            SyncService.WriteTombstone(db, null, "ship_loadouts", SyncService.TombstoneKey(shipKey, portName));
             return;
         }
         Exec(db, "INSERT OR REPLACE INTO ship_loadouts (ship_key, port_name, item_record) VALUES (@k, @p, @r)",
             ("@k", shipKey), ("@p", portName), ("@r", itemRecord));
+        SyncService.ClearTombstone(db, null, "ship_loadouts", SyncService.TombstoneKey(shipKey, portName));   // 付け直したので墓石を消す
     }
+
+    // ship_loadouts の行の port_name (shipKey の船の、prefix で始まるもの。prefix が null なら全部)。消す行の墓石 (sync_tombstones) を書くのに使う
+    private static List<string> LoadoutPortNames(SqliteConnection db, SqliteTransaction? tx, string shipKey, string? prefix)
+    {
+        var list = new List<string>();
+        using var cmd = db.CreateCommand();
+        if (tx != null) cmd.Transaction = tx;
+        cmd.CommandText = prefix == null
+            ? "SELECT port_name FROM ship_loadouts WHERE ship_key = @k"
+            : "SELECT port_name FROM ship_loadouts WHERE ship_key = @k AND substr(port_name, 1, length(@prefix)) = @prefix";
+        cmd.Parameters.AddWithValue("@k", shipKey);
+        if (prefix != null) cmd.Parameters.AddWithValue("@prefix", prefix);
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) if (!r.IsDBNull(0)) list.Add(r.GetString(0));
+        return list;
+    }
+
+    // ship_loadouts の行を消す前に、その行の墓石 (sync_tombstones) を書く (同期でもう片方から戻らないように)
+    private static void WriteLoadoutTombstones(SqliteConnection db, SqliteTransaction? tx, string shipKey, IEnumerable<string> portNames) =>
+        SyncService.WriteTombstones(db, tx, "ship_loadouts", portNames.Select(p => SyncService.TombstoneKey(shipKey, p)));
 
     // ポート 1 つの装備を保存する (itemRecord が null なら上書きを消して既定に戻す)。
     // 武器のハードポイント・タレット (replacesChildren) で、今の品目 (previousRecord) と保存後の品目 (itemRecord、null なら defaultRecord) が別のもの
@@ -1871,12 +1900,14 @@ public class HangarService
         cmd.Parameters.AddWithValue("@p", portKey);
         if (replacesChildren && !SameRecord(previousRecord, itemRecord ?? defaultRecord))
         {
+            WriteLoadoutTombstones(db, tx, shipKey, LoadoutPortNames(db, tx, shipKey, portKey + "/"));
             cmd.Parameters.AddWithValue("@prefix", portKey + "/");
             cmd.CommandText = "DELETE FROM ship_loadouts WHERE ship_key = @k AND substr(port_name, 1, length(@prefix)) = @prefix";
             cmd.ExecuteNonQuery();
         }
         if (itemRecord == null)
         {
+            WriteLoadoutTombstones(db, tx, shipKey, [portKey]);
             cmd.CommandText = "DELETE FROM ship_loadouts WHERE ship_key = @k AND port_name = @p";
         }
         else
@@ -1885,6 +1916,7 @@ public class HangarService
             cmd.CommandText = "INSERT OR REPLACE INTO ship_loadouts (ship_key, port_name, item_record) VALUES (@k, @p, @r)";
         }
         cmd.ExecuteNonQuery();
+        if (itemRecord != null) SyncService.ClearTombstone(db, tx, "ship_loadouts", SyncService.TombstoneKey(shipKey, portKey));   // 付け直したので墓石を消す
         tx.Commit();
     }
 
@@ -1893,7 +1925,10 @@ public class HangarService
         if (_dbPath == null) return;
         using var db = new SqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
-        Exec(db, "DELETE FROM ship_loadouts WHERE ship_key = @k", ("@k", shipKey));
+        using var tx = db.BeginTransaction();
+        WriteLoadoutTombstones(db, tx, shipKey, LoadoutPortNames(db, tx, shipKey, null));
+        Exec(db, tx, "DELETE FROM ship_loadouts WHERE ship_key = @k", ("@k", shipKey));
+        tx.Commit();
     }
 
     // 保有船 1 機の全ポート (item_type が空のものは除く) の装備状態。
@@ -2355,6 +2390,7 @@ public class HangarService
             foreach (var (key, port) in g)
             {
                 if (validKeys.Contains(port)) continue;
+                WriteLoadoutTombstones(db, null, key, [port]);
                 Exec(db, "DELETE FROM ship_loadouts WHERE ship_key = @k AND port_name = @p", ("@k", key), ("@p", port));
                 deleted++;
             }
@@ -2550,6 +2586,7 @@ public class HangarService
             ("@p", ccu.PledgeId), ("@f", ccu.FromShip), ("@t", ccu.ToShip), ("@w", ccu.Warbond ? 1 : 0),
             ("@pr", ccu.PriceCents), ("@sp", ccu.StdPriceCents),
             ("@s", string.IsNullOrEmpty(ccu.Source) ? "sync" : ccu.Source), ("@no", ccu.Notes ?? ""));
+        SyncService.ClearTombstone(db, null, "hangar_ccus", ccu.PledgeId);   // 書き直したので墓石を消す
     }
 
     public void DeleteCcu(string pledgeId)
@@ -2558,6 +2595,7 @@ public class HangarService
         using var db = new SqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         Exec(db, "DELETE FROM hangar_ccus WHERE pledge_id = @p", ("@p", pledgeId));
+        SyncService.WriteTombstone(db, null, "hangar_ccus", pledgeId);   // 同期でもう片方から戻らないように
     }
 
     // 値引き率の分母だけ更新
@@ -2595,10 +2633,12 @@ public class HangarService
         {
             Exec(db, "DELETE FROM hangar_ship_marks WHERE pledge_id = @p AND ship_name = @s",
                 ("@p", pledgeId), ("@s", shipName));
+            SyncService.WriteTombstone(db, null, "hangar_ship_marks", SyncService.TombstoneKey(pledgeId, shipName));   // 同期でもう片方から戻らないように
             return;
         }
         Exec(db, "INSERT OR REPLACE INTO hangar_ship_marks (pledge_id, ship_name, mark) VALUES (@p, @s, @m)",
             ("@p", pledgeId), ("@s", shipName), ("@m", mark.ToString()));
+        SyncService.ClearTombstone(db, null, "hangar_ship_marks", SyncService.TombstoneKey(pledgeId, shipName));   // 付け直したので墓石を消す
     }
 
     public Dictionary<(string PledgeId, string ShipName), HangarShipMark> LoadMarks()

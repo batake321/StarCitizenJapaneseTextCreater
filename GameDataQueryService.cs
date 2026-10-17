@@ -22,6 +22,9 @@ public partial class GameDataQueryService : IDisposable
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "CREATE TABLE IF NOT EXISTS knowledge (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT NOT NULL DEFAULT 'general', content TEXT NOT NULL, created_at TEXT NOT NULL)";
         cmd.ExecuteNonQuery();
+        // PC 間の同期の墓石 (sync_tombstones。記憶を消すときにここから書く)
+        cmd.CommandText = SyncService.TombstonesDdl;
+        cmd.ExecuteNonQuery();
         // 売り場・価格の表 (インデックス構築前の古い DB には無いので、ここでも作っておく)
         cmd.CommandText = ShopPriceStore.TableDdl;
         cmd.ExecuteNonQuery();
@@ -1109,7 +1112,9 @@ public partial class GameDataQueryService : IDisposable
         cmd.ExecuteNonQuery();
 
         cmd.CommandText = "SELECT last_insert_rowid()";
-        return (int)(long)cmd.ExecuteScalar()!;
+        var id = (int)(long)cmd.ExecuteScalar()!;
+        SyncService.ClearTombstone(_conn, null, "knowledge", content);   // 足し直したので墓石を消す (AddKnowledgeSafe もここを通る)
+        return id;
     }
 
     /// <summary>Search knowledge by keywords (OR match). Returns entries where content matches any keyword.</summary>
@@ -1154,12 +1159,22 @@ public partial class GameDataQueryService : IDisposable
         return results;
     }
 
+    // 記憶を消す (本文にキーワードを含む行)。PC 間の同期でもう片方から戻らないよう、消す行の墓石 (sync_tombstones。鍵は content) も書く
     public int DeleteKnowledge(string query)
     {
+        using var tx = _conn.BeginTransaction();
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM knowledge WHERE content LIKE @q";
+        cmd.Transaction = tx;
+        cmd.CommandText = "SELECT content FROM knowledge WHERE content LIKE @q";
         cmd.Parameters.AddWithValue("@q", $"%{query}%");
-        return cmd.ExecuteNonQuery();
+        var contents = new List<string>();
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) contents.Add(r.GetString(0));
+        SyncService.WriteTombstones(_conn, tx, "knowledge", contents);
+        cmd.CommandText = "DELETE FROM knowledge WHERE content LIKE @q";
+        var n = cmd.ExecuteNonQuery();
+        tx.Commit();
+        return n;
     }
 
     public List<(int id, string category, string content, DateTime createdAt)> GetAllKnowledge()
@@ -1177,13 +1192,23 @@ public partial class GameDataQueryService : IDisposable
         return results;
     }
 
+    // 記憶を消す (id で)。DeleteKnowledge と同じく、消す行の墓石 (sync_tombstones) も書く
     public int DeleteKnowledgeByIds(IEnumerable<int> ids)
     {
         var idList = string.Join(",", ids);
         if (string.IsNullOrEmpty(idList)) return 0;
+        using var tx = _conn.BeginTransaction();
         using var cmd = _conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"SELECT content FROM knowledge WHERE id IN ({idList})";
+        var contents = new List<string>();
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) contents.Add(r.GetString(0));
+        SyncService.WriteTombstones(_conn, tx, "knowledge", contents);
         cmd.CommandText = $"DELETE FROM knowledge WHERE id IN ({idList})";
-        return cmd.ExecuteNonQuery();
+        var n = cmd.ExecuteNonQuery();
+        tx.Commit();
+        return n;
     }
 
     // ===== 種類ごとの比較 (チャットの compare_items) =====

@@ -371,7 +371,8 @@ public class GameDataExtractor : IDisposable
                 scope_record TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_mission_reputation_title ON mission_reputation(title_key);
-        """ + ShopPriceStore.TableDdl + AmmoParamsDdl + GameDataQueryService.ItemVariantsDdl + GameDataQueryService.PlayerDamageParamsDdl;
+        """ + ShopPriceStore.TableDdl + AmmoParamsDdl + GameDataQueryService.ItemVariantsDdl + GameDataQueryService.PlayerDamageParamsDdl
+          + SyncService.TombstonesDdl;   // PC 間の同期の墓石 (sync_tombstones。消した記憶 (knowledge) の印)
         cmd.ExecuteNonQuery();
         MigrateShipPortsTable();   // 旧スキーマの ship_ports (CREATE TABLE IF NOT EXISTS では作り直されない) を現行 DDL に移行
         // missions の wiki の列も、初めて開いたときに足す (今までは 2 回目の EnsureDb でだけ足していたので、
