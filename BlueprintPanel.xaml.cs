@@ -1,7 +1,9 @@
+using System.ComponentModel;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using Microsoft.Data.Sqlite;
 
 namespace StarCitizenJapaneseTextCreater;
@@ -21,6 +23,10 @@ public partial class BlueprintPanel : UserControl
     private const string StockShort = "不足";
 
     public Func<string>? WorkDirProvider { get; set; }
+    // 入手の欄のダブルクリックで選んだミッションを開く (MainWindow がミッションタブに切り替えて詳細を出す)。
+    // 引数はその表示名のミッションの record (並んだ順。先頭が代表。先頭がミッションタブに無ければ次を使う)
+    public Action<IReadOnlyList<string>>? MissionOpener { get; set; }
+    private const int SourceColumn = 4;   // 「入手」の列 (Columns() の順)
 
     private bool _loadedOnce;
     private int _loadVersion;
@@ -28,6 +34,8 @@ public partial class BlueprintPanel : UserControl
     // 在庫の照合に使う (読み直しのために持つ): 原石 uuid → 精錬後 uuid、resource_types の record 名 → uuid
     private Dictionary<string, string> _refinedByUuid = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, string> _resourceUuidByRecord = new(StringComparer.OrdinalIgnoreCase);
+    // 資源の絞り込みの選択肢 (先頭は「(すべて)」)。チェックの付いたものが選んだ資源
+    private List<ResourceChoice> _resourceChoices = new();
 
     public BlueprintPanel()
     {
@@ -35,6 +43,8 @@ public partial class BlueprintPanel : UserControl
         table.SetColumns(Columns());
         // できる品 (1 列目) のダブルクリック → ［詳細］タブにその品目を出す
         table.NameDoubleClicked += o => { if (o is BlueprintItem r) DetailPanel.Request(r.OutputRecord, r.Name); };
+        // 入手 (5 列目) のダブルクリック → ミッションがあればミッションタブにその詳細を出す (2 つ以上なら名前のメニューから選ぶ)
+        table.CellDoubleClicked += OnCellDoubleClicked;
         Loaded += async (_, _) =>
         {
             if (!_loadedOnce)
@@ -78,6 +88,7 @@ public partial class BlueprintPanel : UserControl
         public Dictionary<string, string> RefinedByUuid = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, string> ResourceUuidByRecord = new(StringComparer.OrdinalIgnoreCase);
         public bool StockReadable;
+        public StockIndex Stock = new();   // 在庫の索引 (読めなければ空)
         public string? Message;   // 表を出せないときの知らせ (null なら出せた)
     }
 
@@ -117,8 +128,8 @@ public partial class BlueprintPanel : UserControl
         ApplyFilter();
     }
 
-    // DB を読んで表の行を作る (裏のスレッド)
-    private static LoadResult LoadData(string workDir)
+    // DB を読んで表の行を作る (裏のスレッド)。outputRecord を渡すと、できる品がその record (大文字小文字無視) の BP だけを読む (［詳細］の「ブループリント」の節)
+    private static LoadResult LoadData(string workDir, string? outputRecord = null)
     {
         var res = new LoadResult();
         var gdPath = Path.Combine(workDir, "gamedata_cache.db");
@@ -134,7 +145,7 @@ public partial class BlueprintPanel : UserControl
         var byUuid = new Dictionary<string, BlueprintItem>(StringComparer.OrdinalIgnoreCase);
         var poolBps = new Dictionary<string, List<BlueprintItem>>(StringComparer.OrdinalIgnoreCase);   // pool_file → BP
         var itemNames = new Dictionary<string, (string? En, string? Ja)>(StringComparer.OrdinalIgnoreCase);   // item_index の record 名 → (name, name_ja)
-        var missionsByPool = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);   // pool_file → ミッションの title (訳のキー)
+        var missionsByPool = new Dictionary<string, List<(string Title, string Record)>>(StringComparer.OrdinalIgnoreCase);   // pool_file → ミッションの (title (訳のキー), record_name)
         var resourceRecords = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // uuid → record_name
         using (var game = new SqliteConnection($"Data Source={gdPath};Mode=ReadOnly;Pooling=False"))
         {
@@ -146,7 +157,9 @@ public partial class BlueprintPanel : UserControl
             }
             using (var cmd = game.CreateCommand())
             {
-                cmd.CommandText = "SELECT uuid, record_name, category, output_record, output_name_key, output_name_en, craft_time_sec, process, choose_count, starter FROM blueprints";
+                cmd.CommandText = "SELECT uuid, record_name, category, output_record, output_name_key, output_name_en, craft_time_sec, process, choose_count, starter FROM blueprints"
+                    + (outputRecord != null ? " WHERE output_record = @o COLLATE NOCASE" : "");
+                if (outputRecord != null) cmd.Parameters.AddWithValue("@o", outputRecord);
                 using var r = cmd.ExecuteReader();
                 while (r.Read())
                 {
@@ -167,10 +180,17 @@ public partial class BlueprintPanel : UserControl
                 res.Message = "BP がまだありません (起動後の裏の取り出しかインデックス構築の後に入ります)";
                 return res;
             }
+            // 1 つの品 (outputRecord) のときは、その品の BP の行だけを読む (bp_uuid IN (…))
+            string BpFilter(SqliteCommand cmd)
+            {
+                if (outputRecord == null) return "";
+                var ps = bps.Select((b, i) => { cmd.Parameters.AddWithValue($"@b{i}", b.Uuid); return $"@b{i}"; }).ToList();
+                return $" WHERE bp_uuid IN ({string.Join(", ", ps)})";
+            }
             if (TableExists(game, "blueprint_materials"))
             {
                 using var cmd = game.CreateCommand();
-                cmd.CommandText = "SELECT bp_uuid, slot_debug_name, slot_name_key, resource_uuid, item_record, quantity, min_quality FROM blueprint_materials ORDER BY rowid";
+                cmd.CommandText = "SELECT bp_uuid, slot_debug_name, slot_name_key, resource_uuid, item_record, quantity, min_quality FROM blueprint_materials" + BpFilter(cmd) + " ORDER BY rowid";
                 using var r = cmd.ExecuteReader();
                 while (r.Read())
                 {
@@ -186,7 +206,7 @@ public partial class BlueprintPanel : UserControl
             if (TableExists(game, "blueprint_pools"))
             {
                 using var cmd = game.CreateCommand();
-                cmd.CommandText = "SELECT pool_file, bp_uuid FROM blueprint_pools";
+                cmd.CommandText = "SELECT pool_file, bp_uuid FROM blueprint_pools" + BpFilter(cmd);
                 using var r = cmd.ExecuteReader();
                 while (r.Read())
                 {
@@ -214,40 +234,55 @@ public partial class BlueprintPanel : UserControl
                 }
             }
             // できる品・材料の品目の名前 (item_index の name / name_ja)
-            if (TableExists(game, "item_index"))
+            // 1 つの品のときは、できる品と材料の品目の record だけ (同じ record (大文字小文字無視) は全体を読むときと同じく先の行 (rowid の順))
+            var nameRecords = outputRecord == null ? null
+                : bps.Select(b => b.OutputRecord).Concat(bps.SelectMany(b => b.Slots).Select(sl => sl.ItemRecord)).Where(x => x.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (TableExists(game, "item_index") && (nameRecords == null || nameRecords.Count > 0))
             {
                 using var cmd = game.CreateCommand();
                 cmd.CommandText = "SELECT record_name, name, name_ja FROM item_index";
+                if (nameRecords != null)
+                {
+                    var ps = nameRecords.Select((x, i) => { cmd.Parameters.AddWithValue($"@r{i}", x); return $"@r{i}"; }).ToList();
+                    cmd.CommandText += $" WHERE record_name COLLATE NOCASE IN ({string.Join(", ", ps)}) ORDER BY rowid";
+                }
                 using var r = cmd.ExecuteReader();
                 while (r.Read())
                 {
-                    var record = Str(r, 0);
-                    if (record.Length == 0 || itemNames.ContainsKey(record)) continue;
-                    itemNames[record] = (r.IsDBNull(1) ? null : OreService.EnglishText(r.GetString(1)), r.IsDBNull(2) ? null : OreService.JapaneseText(r.GetString(2)));
+                    AddItemName(itemNames, r);
                 }
             }
-            // ミッション → 抽選プール (raw_json の BlueprintRewards の blueprintPool のファイル名)
-            if (TableExists(game, "missions"))
+            // ミッション → 抽選プール (raw_json の BlueprintRewards の blueprintPool のファイル名。MissionModifier_TemporaryBlueprint などの中のものは報酬ではないので数えない)。
+            // 1 つの品のときは、その品の BP を含むプールを参照するミッションだけ (LIKE で候補を絞り、正規表現で確かめる)
+            var poolFilter = outputRecord == null ? null : poolBps.Keys.Select(f => f.ToLowerInvariant()).Distinct(StringComparer.Ordinal).ToList();
+            if (TableExists(game, "missions") && (poolFilter == null || poolFilter.Count > 0))
             {
                 using var cmd = game.CreateCommand();
-                cmd.CommandText = "SELECT title, raw_json FROM missions WHERE raw_json LIKE '%blueprintPool%'";
+                cmd.CommandText = "SELECT title, raw_json, record_name FROM missions WHERE raw_json LIKE '%blueprintPool%'";
+                if (poolFilter != null)
+                {
+                    var ps = poolFilter.Select((f, i) => { cmd.Parameters.AddWithValue($"@p{i}", $"%/{f}.json%"); return $"raw_json LIKE @p{i}"; }).ToList();
+                    cmd.CommandText += $" AND ({string.Join(" OR ", ps)})";
+                }
                 using var r = cmd.ExecuteReader();
                 while (r.Read())
                 {
                     var title = Str(r, 0);
                     var raw = Str(r, 1);
-                    foreach (Match m in PoolFileRegex.Matches(raw))
+                    var record = Str(r, 2);
+                    foreach (var file0 in RewardPoolFiles(raw))
                     {
-                        var file = m.Groups[1].Value.ToLowerInvariant();
-                        if (!missionsByPool.TryGetValue(file, out var list)) missionsByPool[file] = list = new List<string>();
-                        list.Add(title);
+                        var file = file0.ToLowerInvariant();
+                        if (poolFilter != null && !poolFilter.Contains(file)) continue;
+                        if (!missionsByPool.TryGetValue(file, out var list)) missionsByPool[file] = list = new List<(string Title, string Record)>();
+                        list.Add((title, record));
                     }
                 }
             }
         }
 
         // 資源の名前 (［鉱石］タブと同じ出し方)
-        var resources = OreService.LoadResources(gdPath, trPath);
+        var resources = CachedResources(gdPath, trPath);
         var resourceByUuid = new Dictionary<string, OreResource>(StringComparer.OrdinalIgnoreCase);
         foreach (var x in resources) resourceByUuid.TryAdd(x.Uuid, x);
         string ResourceName(string uuid) =>
@@ -262,33 +297,22 @@ public partial class BlueprintPanel : UserControl
             foreach (var s in it.Slots) if (s.NameKey is { Length: > 0 } k) keys.Add(k);
             if (it.OutputNameKey is { Length: > 0 } ok) keys.Add(ok);
         }
-        foreach (var list in missionsByPool.Values) foreach (var t in list) if (t.Length > 0) keys.Add(t);
-        var loc = OreService.LoadTranslations(trPath, keys);
+        foreach (var list in missionsByPool.Values) foreach (var (t, _) in list) if (t.Length > 0) keys.Add(t);
+        var loc = CachedTranslations(gdPath, trPath, keys);
 
         // ミッションの title → 表示名 (日本語 → 英語 → キー)。ミッションタブの一覧と同じく、強調タグを消し ~mission(…) を〔〕にする (MissionDisplayText.ToPlain)
         string MissionName(string title)
         {
             if (loc.TryGetValue(title, out var t))
-                return MissionDisplayText.ToPlain(OreService.JapaneseText(t.Ja) ?? OreService.EnglishText(t.En) ?? title);
-            return title;
+                return CleanName(MissionDisplayText.ToPlain(OreService.JapaneseText(t.Ja) ?? OreService.EnglishText(t.En) ?? title));
+            return CleanName(title);
         }
 
         // 行の文字を作る
         var usedResources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var it in bps)
         {
-            // できる品の名前: 日本語 (英語)。日本語は訳 (name_key) → item_index.name_ja、英語は訳の english → blueprints.output_name_en → item_index.name。
-            // どちらも無ければ record 名 ("EntityClassDefinition." を除く)
-            string? ja = null, en = null;
-            if (it.OutputNameKey is { Length: > 0 } nk && loc.TryGetValue(nk, out var tr))
-            {
-                ja = OreService.JapaneseText(tr.Ja);
-                en = OreService.EnglishText(tr.En);
-            }
-            itemNames.TryGetValue(it.OutputRecord, out var inm);
-            ja ??= inm.Ja;
-            en ??= it.OutputNameEn ?? inm.En;
-            it.Name = OreService.Label(ja, en) ?? (it.OutputRecord.Length > 0 ? OreService.ShortRecord(it.OutputRecord) : it.RecordName);
+            it.Name = OutputName(it, loc, itemNames);
 
             // 材料: 枠ごとに「資源名 数量 単位」(品質の下限があれば「品質 n 以上」)。ツールチップには枠名を添える
             var parts = new List<string>();
@@ -299,7 +323,8 @@ public partial class BlueprintPanel : UserControl
                 if (s.ResourceUuid.Length > 0)
                 {
                     usedResources.Add(s.ResourceUuid);
-                    text = $"{ResourceName(s.ResourceUuid)} {FormatQuantity(s.Quantity)} {OreService.UnitScu}";
+                    s.MaterialName = ResourceName(s.ResourceUuid);
+                    text = $"{s.MaterialName} {FormatQuantity(s.Quantity)} {OreService.UnitScu}";
                 }
                 else
                 {
@@ -307,11 +332,13 @@ public partial class BlueprintPanel : UserControl
                     var name = s.MineralResourceUuid != null ? ResourceName(s.MineralResourceUuid)
                         : itemNames.TryGetValue(s.ItemRecord, out var im) ? (OreService.Label(im.Ja, im.En) ?? OreService.ShortRecord(s.ItemRecord))
                         : OreService.ShortRecord(s.ItemRecord);
+                    s.MaterialName = name;
                     text = $"{name} {FormatQuantity(s.Quantity)} {OreService.UnitPiece}";
                 }
                 if (s.MinQuality > 0) text += $" 品質 {s.MinQuality} 以上";
                 parts.Add(text);
                 var slotName = s.NameKey is { Length: > 0 } sk && loc.TryGetValue(sk, out var st) ? (OreService.JapaneseText(st.Ja) ?? OreService.EnglishText(st.En) ?? s.DebugName) : s.DebugName;
+                s.SlotName = slotName;
                 tips.Add(slotName.Length > 0 ? $"{slotName}: {text}" : text);
             }
             var prefix = it.ChooseCount is { } cc ? $"{cc} 枠選択: " : "";
@@ -322,13 +349,13 @@ public partial class BlueprintPanel : UserControl
         }
 
         // 入手: 初期所持 / ミッション (抽選プール経由) の件数とミッション名
-        var missionsByBp = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var missionsByBp = new Dictionary<string, List<(string Title, string Record)>>(StringComparer.OrdinalIgnoreCase);
         foreach (var (file, list) in poolBps)
         {
             if (!missionsByPool.TryGetValue(file, out var titles)) continue;
             foreach (var it in list)
             {
-                if (!missionsByBp.TryGetValue(it.Uuid, out var acc)) missionsByBp[it.Uuid] = acc = new List<string>();
+                if (!missionsByBp.TryGetValue(it.Uuid, out var acc)) missionsByBp[it.Uuid] = acc = new List<(string Title, string Record)>();
                 acc.AddRange(titles);
             }
         }
@@ -338,7 +365,10 @@ public partial class BlueprintPanel : UserControl
             if (it.Starter) sources.Add("初期");
             if (missionsByBp.TryGetValue(it.Uuid, out var titles) && titles.Count > 0)
             {
-                var names = titles.Select(MissionName).Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+                var names = titles.Select(t => MissionName(t.Title)).Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+                // 名前ごとのミッションの record (同じ名前の派生は並んだ順。入手の欄のダブルクリックで開く)
+                foreach (var n in names)
+                    it.Missions.Add((n, titles.Where(t => MissionName(t.Title) == n && t.Record.Length > 0).Select(t => t.Record).Distinct(StringComparer.Ordinal).ToList()));
                 // 件数はツールチップに並べる名前の数 (同じ名前の派生ミッションは 1 件)
                 sources.Add($"ミッション {names.Count} 件");
                 it.SourceTooltip = string.Join("\n", names);
@@ -346,10 +376,17 @@ public partial class BlueprintPanel : UserControl
             it.SourceText = sources.Count > 0 ? string.Join(" / ", sources) : "不明";
         }
 
-        // 在庫 (ore_stock) との照合
-        var stock = OreService.LoadStockReadOnly(tcPath);
+        // 在庫 (ore_stock) との照合。読み込みが例外になったときは在庫なし (照合しない・在庫の欄は空欄) として続け、例外はログに残す
+        List<OreStock>? stock;
+        try { stock = OreService.LoadStockReadOnly(tcPath); }
+        catch (Exception ex)
+        {
+            stock = null;
+            AppendAppLog(workDir, $"[BP] 在庫 (trade_cache.db の ore_stock) を読めませんでした: {ex.GetType().FullName}: {ex.Message}");
+        }
         res.StockReadable = stock != null;
         var stockIndex = BuildStockIndex(stock, res.RefinedByUuid);
+        res.Stock = stockIndex;
         foreach (var it in bps) it.StockText = StockText(it, stockIndex, res.ResourceUuidByRecord, stock != null);
 
         // 絞り込みの候補: 資源 (BP で使われている精錬後の資源。名前の違う原石は「原石名 → 精錬後名」で精錬後に寄せる)、分類
@@ -433,35 +470,66 @@ public partial class BlueprintPanel : UserControl
         int satisfied = 0;
         foreach (var s in it.Slots)
         {
-            List<(int? Quality, double Quantity)>? rows = null;
-            if (s.ResourceUuid.Length > 0) index.Scu.TryGetValue(s.ResourceUuid, out rows);
-            else
-            {
-                s.MineralResourceUuid ??= MineralResourceUuid(s.ItemRecord, resourceUuidByRecord);
-                if (s.MineralResourceUuid != null) index.Piece.TryGetValue(s.MineralResourceUuid, out rows);
-            }
-            if (rows == null) continue;
-            double have = 0;
-            foreach (var (quality, quantity) in rows)
-                if ((quality ?? 0) >= s.MinQuality) have += quantity;
+            if (SlotHave(s, index, resourceUuidByRecord) is not { } have) continue;
             if (have + 1e-9 >= s.Quantity) satisfied++;
         }
         var required = it.ChooseCount is { } cc && cc > 0 && cc < it.Slots.Count ? cc : it.Slots.Count;
         return satisfied >= required ? StockEnough : satisfied > 0 ? StockPartial : StockShort;
     }
 
+    // 枠の手持ち量: その資源 (原石は精錬後に寄せた SCU の行、手掘りの鉱物は '個' の行) の品質 ≥ min_quality の在庫の合計。品質が不明 (NULL) の在庫は品質 0。
+    // その資源の在庫の行が無い (照合できない品目も) なら null
+    private static double? SlotHave(BlueprintSlot s, StockIndex index, Dictionary<string, string> resourceUuidByRecord)
+    {
+        List<(int? Quality, double Quantity)>? rows = null;
+        if (s.ResourceUuid.Length > 0) index.Scu.TryGetValue(s.ResourceUuid, out rows);
+        else
+        {
+            s.MineralResourceUuid ??= MineralResourceUuid(s.ItemRecord, resourceUuidByRecord);
+            if (s.MineralResourceUuid != null) index.Piece.TryGetValue(s.MineralResourceUuid, out rows);
+        }
+        if (rows == null) return null;
+        double have = 0;
+        foreach (var (quality, quantity) in rows)
+            if ((quality ?? 0) >= s.MinQuality) have += quantity;
+        return have;
+    }
+
     // === 絞り込み ===
 
     private void RefreshResourceCombo(List<ResourceChoice> choices)
     {
-        var prev = (cmbResource.SelectedItem as ResourceChoice)?.Uuid;
-        var prevLabel = (cmbResource.SelectedItem as ResourceChoice)?.Label;
+        // 読み直しても選んでいた資源は残す (同じラベルと uuid のもの、無ければ同じ uuid のもの)
+        var prev = _resourceChoices.Where(c => c.Uuid != null && c.IsSelected).Select(c => (c.Uuid, c.Label)).ToList();
         var list = new List<ResourceChoice> { new() { Label = AllLabel, Uuid = null } };
         list.AddRange(choices);
-        cmbResource.ItemsSource = list;
-        var keep = prev != null ? list.FirstOrDefault(c => string.Equals(c.Uuid, prev, StringComparison.OrdinalIgnoreCase) && c.Label == prevLabel)
-            ?? list.FirstOrDefault(c => string.Equals(c.Uuid, prev, StringComparison.OrdinalIgnoreCase)) : null;
-        cmbResource.SelectedItem = keep ?? list[0];
+        foreach (var (uuid, label) in prev)
+        {
+            var keep = list.FirstOrDefault(c => c.Uuid != null && string.Equals(c.Uuid, uuid, StringComparison.OrdinalIgnoreCase) && c.Label == label)
+                ?? list.FirstOrDefault(c => c.Uuid != null && string.Equals(c.Uuid, uuid, StringComparison.OrdinalIgnoreCase));
+            if (keep != null) keep.IsSelected = true;
+        }
+        _resourceChoices = list;
+        lstResource.ItemsSource = list;
+        UpdateResourceSelection();
+    }
+
+    // 資源のチェックを押したとき。「(すべて)」なら選択を全部外す。すぐ表を絞り直す
+    private void ResourceCheck_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not ResourceChoice c) return;
+        if (c.Uuid == null)
+            foreach (var x in _resourceChoices) x.IsSelected = false;
+        UpdateResourceSelection();
+        ApplyFilter();
+    }
+
+    // 「(すべて)」のチェック (何も選んでいなければ付ける) と、閉じているときの表示 (選んだ資源の名前を「、」でつなぐ。無ければ「(すべて)」) を合わせる
+    private void UpdateResourceSelection()
+    {
+        var selected = _resourceChoices.Where(c => c.Uuid != null && c.IsSelected).ToList();
+        if (_resourceChoices.Count > 0) _resourceChoices[0].IsSelected = selected.Count == 0;
+        txtResource.Text = selected.Count == 0 ? AllLabel : string.Join("、", selected.Select(c => c.Label));
     }
 
     private void RefreshCategoryCombo(List<string> categories)
@@ -479,13 +547,56 @@ public partial class BlueprintPanel : UserControl
     {
         if (table == null) return;
         IEnumerable<BlueprintItem> items = _items;
-        if (cmbResource?.SelectedItem is ResourceChoice { Uuid: { Length: > 0 } uuid })
-            items = items.Where(it => it.Slots.Any(s => string.Equals(s.ResourceUuid, uuid, StringComparison.OrdinalIgnoreCase)));
+        var uuids = _resourceChoices.Where(c => c.IsSelected && c.Uuid is { Length: > 0 }).Select(c => c.Uuid!).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        items = FilterByResources(items, uuids);
         if (cmbCategory?.SelectedItem is string cat && cat != AllLabel)
             items = items.Where(it => string.Equals(it.Category, cat, StringComparison.Ordinal));
         if (chkCraftable?.IsChecked == true)
             items = items.Where(it => it.StockText == StockEnough);
         table.SetItems(items.ToList());
+    }
+
+    // 選んだ資源 (精錬後の uuid。原石と精錬後を両方選んでも同じ uuid で 1 つの条件) を全部材料に使う BP だけにする。何も選んでいなければそのまま
+    internal static IEnumerable<BlueprintItem> FilterByResources(IEnumerable<BlueprintItem> items, IReadOnlyCollection<string> resourceUuids)
+    {
+        if (resourceUuids.Count == 0) return items;
+        return items.Where(it => resourceUuids.All(uuid => it.Slots.Any(s => string.Equals(s.ResourceUuid, uuid, StringComparison.OrdinalIgnoreCase))));
+    }
+
+    // 入手の欄のダブルクリック。ミッションが 1 つならそのまま開き、2 つ以上なら表示名 (ツールチップと同じ並び) のメニューを出して選んだものを開く。
+    // 「初期」だけ・「不明」 (ミッションが無い) なら何もしない
+    private void OnCellDoubleClicked(int column, object source, int charIndex)
+    {
+        if (column != SourceColumn || source is not BlueprintItem it || MissionOpener == null) return;
+        var missions = it.Missions.Where(m => m.Records.Count > 0).ToList();
+        if (missions.Count == 0) return;
+        if (missions.Count == 1) { MissionOpener(missions[0].Records); return; }
+        var menu = new ContextMenu { PlacementTarget = table, Placement = System.Windows.Controls.Primitives.PlacementMode.MousePoint };
+        foreach (var (name, records) in missions)
+        {
+            // 見出しは TextBlock にする (文字のままだと「_」がアクセスキーになる)
+            var item = new MenuItem { Header = new TextBlock { Text = name } };
+            item.Click += (_, _) => MissionOpener?.Invoke(records);
+            menu.Items.Add(item);
+        }
+        // ダブルクリックのボタンを離す前にメニューを出すと、離したときに下の項目が押されることがあるため、離してから出す。
+        // 離すのはウィンドウ (どこで離しても) で 1 回だけ受け、1 秒たっても離さなければ (ウィンドウの外で離したときも) 待ちを外してメニューは出さない
+        var window = Window.GetWindow(this);
+        if (Mouse.LeftButton == MouseButtonState.Pressed && window != null)
+        {
+            var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            MouseButtonEventHandler? up = null;
+            up = (_, _) =>
+            {
+                timer.Stop();
+                window.PreviewMouseLeftButtonUp -= up;
+                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => menu.IsOpen = true);
+            };
+            timer.Tick += (_, _) => { timer.Stop(); window.PreviewMouseLeftButtonUp -= up; };
+            window.PreviewMouseLeftButtonUp += up;
+            timer.Start();
+        }
+        else menu.IsOpen = true;
     }
 
     // === 表の列 ===
@@ -513,6 +624,213 @@ public partial class BlueprintPanel : UserControl
     }
 
     internal static string FormatQuantity(double q) => q.ToString("0.##", CultureInfo.InvariantCulture);
+
+    // === ［詳細］・ミッションの詳細と共有する読み方 ===
+
+    // できる品の名前: 日本語 (英語)。日本語は訳 (name_key) → item_index.name_ja、英語は訳の english → blueprints.output_name_en → item_index.name。
+    // どちらも無ければ record 名 ("EntityClassDefinition." を除く)
+    internal static string OutputName(BlueprintItem it, Dictionary<string, (string? En, string? Ja)> loc, Dictionary<string, (string? En, string? Ja)> itemNames)
+    {
+        string? ja = null, en = null;
+        if (it.OutputNameKey is { Length: > 0 } nk && loc.TryGetValue(nk, out var tr))
+        {
+            ja = OreService.JapaneseText(tr.Ja);
+            en = OreService.EnglishText(tr.En);
+        }
+        itemNames.TryGetValue(it.OutputRecord, out var inm);
+        ja ??= inm.Ja;
+        en ??= it.OutputNameEn ?? inm.En;
+        return CleanName(OreService.Label(ja, en) ?? (it.OutputRecord.Length > 0 ? OreService.ShortRecord(it.OutputRecord) : it.RecordName));
+    }
+
+    // item_index の 1 行 (record_name, name, name_ja) を名前の表に足す (同じ record は先の行を残す)
+    private static void AddItemName(Dictionary<string, (string? En, string? Ja)> itemNames, SqliteDataReader r)
+    {
+        var record = Str(r, 0);
+        if (record.Length == 0 || itemNames.ContainsKey(record)) return;
+        itemNames[record] = (r.IsDBNull(1) ? null : OreService.EnglishText(r.GetString(1)), r.IsDBNull(2) ? null : OreService.JapaneseText(r.GetString(2)));
+    }
+
+    // ［詳細］の「ブループリント」の節: できる品が outputRecord の BP (表の行と同じ作り)・在庫の欄・枠ごとの手持ち量 (SlotHave。在庫を読めなければ Haves は null)。
+    // BP の表が無い・その品の BP が無ければ空
+    internal static List<(BlueprintItem Item, string StockText, List<double?>? Haves)> LoadForOutput(string workDir, string outputRecord)
+    {
+        var list = new List<(BlueprintItem Item, string StockText, List<double?>? Haves)>();
+        if (string.IsNullOrWhiteSpace(outputRecord)) return list;
+        var res = LoadData(workDir, outputRecord.Trim());
+        if (res.Items.Count == 0) return list;
+        foreach (var it in res.Items)
+            list.Add((it, it.StockText, res.StockReadable ? it.Slots.Select(s => SlotHave(s, res.Stock, res.ResourceUuidByRecord)).ToList() : null));
+        return list;
+    }
+
+    // ミッション詳細の「報酬の BP」の節: 抽選プール (blueprint_pools.pool_file。小文字で照合) ごとの BP のできる品の名前 (OutputName と同じ出し方。名前の順、同じ名前は 1 つ)。
+    // BP の表が無ければ空。プールに BP が無ければそのプールは空の一覧
+    internal static Dictionary<string, List<string>> LoadPoolBlueprintNames(string workDir, IReadOnlyCollection<string> poolFiles)
+    {
+        var result = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var gdPath = Path.Combine(workDir, "gamedata_cache.db");
+        if (poolFiles.Count == 0 || !File.Exists(gdPath)) return result;
+        var bpsByPool = new Dictionary<string, List<BlueprintItem>>(StringComparer.OrdinalIgnoreCase);
+        var itemNames = new Dictionary<string, (string? En, string? Ja)>(StringComparer.OrdinalIgnoreCase);
+        var files = poolFiles.Select(f => f.ToLowerInvariant()).Distinct(StringComparer.Ordinal).ToList();
+        using (var game = new SqliteConnection($"Data Source={gdPath};Mode=ReadOnly;Pooling=False"))
+        {
+            game.Open();
+            if (!TableExists(game, "blueprints") || !TableExists(game, "blueprint_pools")) return result;
+            using (var cmd = game.CreateCommand())
+            {
+                var ps = files.Select((f, i) => { cmd.Parameters.AddWithValue($"@f{i}", f); return $"@f{i}"; }).ToList();
+                cmd.CommandText = "SELECT p.pool_file, b.uuid, b.record_name, b.output_record, b.output_name_key, b.output_name_en FROM blueprint_pools p JOIN blueprints b ON b.uuid = p.bp_uuid"
+                    + $" WHERE lower(p.pool_file) IN ({string.Join(", ", ps)})";
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    var it = new BlueprintItem
+                    {
+                        Uuid = Str(r, 1), RecordName = Str(r, 2), OutputRecord = Str(r, 3),
+                        OutputNameKey = r.IsDBNull(4) ? null : r.GetString(4), OutputNameEn = r.IsDBNull(5) ? null : OreService.EnglishText(r.GetString(5)),
+                    };
+                    if (it.Uuid.Length == 0) continue;
+                    var file = Str(r, 0).ToLowerInvariant();
+                    if (!bpsByPool.TryGetValue(file, out var l)) bpsByPool[file] = l = new List<BlueprintItem>();
+                    l.Add(it);
+                }
+            }
+            var records = bpsByPool.Values.SelectMany(l => l).Select(it => it.OutputRecord).Where(x => x.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (records.Count > 0 && TableExists(game, "item_index"))
+            {
+                using var cmd = game.CreateCommand();
+                var ps = records.Select((x, i) => { cmd.Parameters.AddWithValue($"@r{i}", x); return $"@r{i}"; }).ToList();
+                // 表と同じく、同じ record (大文字小文字無視) は先の行 (rowid の順) を使う
+                cmd.CommandText = $"SELECT record_name, name, name_ja FROM item_index WHERE record_name COLLATE NOCASE IN ({string.Join(", ", ps)}) ORDER BY rowid";
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) AddItemName(itemNames, r);
+            }
+        }
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var l in bpsByPool.Values) foreach (var it in l) if (it.OutputNameKey is { Length: > 0 } k) keys.Add(k);
+        var loc = CachedTranslations(gdPath, Path.Combine(workDir, "translations.db"), keys);
+        foreach (var f in files)
+            result[f] = bpsByPool.TryGetValue(f, out var l)
+                ? l.Select(it => CleanName(OutputName(it, loc, itemNames))).Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList()
+                : new List<string>();
+        return result;
+    }
+
+    // missions.raw_json の BlueprintRewards の 1 件 ({"_Type_":"BlueprintRewards", ..., "chance":…, "blueprintPool":"…"})
+    internal static readonly Regex RewardObjectRegex = new("\\{\\s*\"_Type_\"\\s*:\\s*\"BlueprintRewards\"[^{}]*\\}", RegexOptions.Compiled);
+
+    // raw_json の BlueprintRewards の中の blueprintPool のファイル名 (出てきた順。MissionModifier_TemporaryBlueprint などの中のものは含めない)
+    internal static IEnumerable<string> RewardPoolFiles(string rawJson)
+    {
+        foreach (Match obj in RewardObjectRegex.Matches(rawJson ?? ""))
+            foreach (Match m in PoolFileRegex.Matches(obj.Value))
+                yield return m.Groups[1].Value;
+    }
+
+    // ミッションの raw_json の blueprintPool のファイル名の正規表現
+    internal static Regex BlueprintPoolFileRegex => PoolFileRegex;
+
+    // 表示名の中の文字列「\n」(バックスラッシュと n の 2 文字) を空白 1 つにして前後の空白を除く
+    // 「\n」(2 文字) を含む名前だけ、空白にしたあとの重なった空白と閉じかっこの前の空白を詰める (ほかの名前は前後の空白を除くだけ)
+    internal static string CleanName(string s)
+    {
+        if (!s.Contains("\\n", StringComparison.Ordinal)) return s.Trim();
+        var t = System.Text.RegularExpressions.Regex.Replace(s.Replace("\\n", " "), " {2,}", " ");
+        return t.Replace(" )", ")").Replace(" ）", "）").Trim();
+    }
+
+    // 作業ディレクトリの app_log.txt に 1 行追記する (MainWindow.Log と同じファイル・同じ行の形。DetailPanel.AppendAppLog と同じ書き方)
+    private static void AppendAppLog(string workDir, string msg)
+    {
+        try { File.AppendAllText(Path.Combine(workDir, "app_log.txt"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}\n", System.Text.Encoding.UTF8); } catch { }
+    }
+
+    // === OreService.LoadResources / LoadTranslations の結果の使い回し ===
+    // どちらも translations.db を全行読むため (1 回 80〜100 ms ほど)、DB ファイルのパス・最終更新時刻・長さが同じあいだは前の結果を使う。
+    // 結果は読むだけで書き換えない (複数のスレッドから同じものを使う)
+
+    private static readonly object CacheLock = new();
+    private static (string Stamp, List<OreResource> Resources)? _resourcesCache;
+    private static (string Stamp, HashSet<string> Keys, Dictionary<string, (string? En, string? Ja)> Loc)? _translationsCache;
+
+    // DB ファイルの鍵 (パス・最終更新時刻・長さ)。無ければ「無し」
+    private static string FileStamp(string path)
+    {
+        try
+        {
+            var fi = new FileInfo(path);
+            return fi.Exists ? $"{fi.FullName}|{fi.LastWriteTimeUtc.Ticks}|{fi.Length}" : $"{path}|無し";
+        }
+        catch { return $"{path}|?"; }
+    }
+
+    // OreService.LoadResources と同じ結果 (gamedata_cache.db と translations.db が変わっていなければ前の結果)
+    private static List<OreResource> CachedResources(string gdPath, string trPath)
+    {
+        var stamp = FileStamp(gdPath) + "\n" + FileStamp(trPath);
+        lock (CacheLock)
+        {
+            if (_resourcesCache is { } c && c.Stamp == stamp) return c.Resources;
+            var list = OreService.LoadResources(gdPath, trPath);
+            _resourcesCache = (stamp, list);
+            return list;
+        }
+    }
+
+    // OreService.LoadTranslations(trPath, keys) と同じ値を keys について返す (返す表には keys 以外のキーも入っていることがある。引くのは TryGetValue だけにする)。
+    // 覚えておくキーは、BP の表で使いうるキー (できる品の名前・枠名・blueprintPool を含むミッションの title) と今まで頼まれたキーの和。
+    // LoadTranslations はキーごとに独立に値を決めるが、大文字小文字だけ違う別のキーが和に入っていると値が変わりうるので、そのときは使い回さずにそのまま読む
+    private static Dictionary<string, (string? En, string? Ja)> CachedTranslations(string gdPath, string trPath, HashSet<string> keys)
+    {
+        var stamp = FileStamp(gdPath) + "\n" + FileStamp(trPath);
+        lock (CacheLock)
+        {
+            if (_translationsCache is { } c && c.Stamp == stamp && Covers(c.Keys, keys)) return c.Loc;
+            var all = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (_translationsCache is { } old && old.Stamp == stamp) foreach (var k in old.Keys) all.Add(k);
+            else foreach (var k in BlueprintTranslationKeys(gdPath)) all.Add(k);
+            foreach (var k in keys) all.Add(k);
+            if (!Covers(all, keys)) return OreService.LoadTranslations(trPath, keys);
+            var loc = OreService.LoadTranslations(trPath, all);
+            _translationsCache = (stamp, all, loc);
+            return loc;
+        }
+    }
+
+    // keys のどのキーも、同じ綴り (大文字小文字も同じ) で set に入っているか
+    private static bool Covers(HashSet<string> set, HashSet<string> keys)
+    {
+        foreach (var k in keys)
+            if (!set.TryGetValue(k, out var have) || !string.Equals(have, k, StringComparison.Ordinal)) return false;
+        return true;
+    }
+
+    // BP の表で使いうる訳のキー (blueprints.output_name_key・blueprint_materials.slot_name_key・blueprintPool を含むミッションの title)。読めなければ空
+    private static HashSet<string> BlueprintTranslationKeys(string gdPath)
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!File.Exists(gdPath)) return keys;
+        try
+        {
+            using var game = new SqliteConnection($"Data Source={gdPath};Mode=ReadOnly;Pooling=False");
+            game.Open();
+            void Add(string table, string sql)
+            {
+                if (!TableExists(game, table)) return;
+                using var cmd = game.CreateCommand();
+                cmd.CommandText = sql;
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) if (!r.IsDBNull(0) && r.GetString(0) is { Length: > 0 } k) keys.Add(k);
+            }
+            Add("blueprints", "SELECT output_name_key FROM blueprints");
+            Add("blueprint_materials", "SELECT slot_name_key FROM blueprint_materials");
+            Add("missions", "SELECT title FROM missions WHERE raw_json LIKE '%blueprintPool%'");
+        }
+        catch { }
+        return keys;
+    }
 
     // === 共通 ===
 
@@ -558,6 +876,8 @@ public sealed class BlueprintItem
     public string SourceText { get; set; } = "";
     public string? SourceTooltip { get; set; }
     public string StockText { get; set; } = "";
+    // 入手のミッション: 表示名 (ツールチップと同じ並び) と、その名前のミッションの record (並んだ順。派生があれば複数)
+    public List<(string Name, List<string> Records)> Missions { get; } = new();
 }
 
 // 材料の 1 枠 (blueprint_materials の 1 行)。ResourceUuid (資源) か ItemRecord (品目。手掘りの鉱物など) のどちらかが入る
@@ -571,11 +891,29 @@ public sealed class BlueprintSlot
     public int MinQuality { get; set; }
     // 品目が手掘りの鉱物なら、照合する resource_types の uuid (ResourceType.<X>)。鉱物でなければ null
     public string? MineralResourceUuid { get; set; }
+    // 表示の名前 (LoadData が付ける): 枠名 (訳。無ければ debug 名)・材料の名前 (資源は［鉱石］タブと同じ出し方、品目は 日本語 (英語))
+    public string SlotName { get; set; } = "";
+    public string MaterialName { get; set; } = "";
 }
 
-// 資源の絞り込みの選択肢。Uuid は精錬後の資源 (null = すべて)。原石は「原石名 → 精錬後名」のラベルで精錬後の uuid を指す
-public sealed class ResourceChoice
+// 資源の絞り込みの選択肢。Uuid は精錬後の資源 (null = すべて)。原石は「原石名 → 精錬後名」のラベルで精錬後の uuid を指す。
+// IsSelected はドロップダウンのチェック (複数選べる)
+public sealed class ResourceChoice : INotifyPropertyChanged
 {
     public string Label { get; set; } = "";
     public string? Uuid { get; set; }
+
+    private bool _isSelected;
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set
+        {
+            if (_isSelected == value) return;
+            _isSelected = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected)));
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 }

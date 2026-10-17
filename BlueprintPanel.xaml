@@ -13,14 +13,44 @@
 
         <WrapPanel Grid.Row="0" Margin="0,0,0,6" VerticalAlignment="Center">
             <TextBlock Text="資源:" VerticalAlignment="Center" Margin="0,0,4,0"/>
-            <ComboBox x:Name="cmbResource" MinWidth="220" Margin="0,0,12,0" VerticalAlignment="Center" DisplayMemberPath="Label"
-                      SelectionChanged="Filter_Changed" ToolTip="その資源 (精錬後) を材料に使う BP だけを出す。原石は「原石名 → 精錬後名」で選ぶ (精錬後の資源で絞る)">
-                <ComboBox.ItemsPanel>
-                    <ItemsPanelTemplate>
-                        <VirtualizingStackPanel/>
-                    </ItemsPanelTemplate>
-                </ComboBox.ItemsPanel>
-            </ComboBox>
+            <!-- 資源は複数選べる (チェックの付いたドロップダウン)。選んだ資源を全部使う BP だけを出す。「(すべて)」で選択を全部外す -->
+            <Grid Margin="0,0,12,0" VerticalAlignment="Center">
+                <ToggleButton x:Name="btnResource" MinWidth="220" MaxWidth="420" HorizontalContentAlignment="Stretch" Padding="4,2"
+                              ToolTip="選んだ資源 (精錬後) を全部材料に使う BP だけを出す (複数選べる)。原石は「原石名 → 精錬後名」で選ぶ (精錬後の資源で絞る)。「(すべて)」で選択を解除">
+                    <ToggleButton.Style>
+                        <Style TargetType="ToggleButton">
+                            <Style.Triggers>
+                                <!-- 開いている間はボタンを押せなくする (押すと閉じた直後にまた開くのを防ぐ。外を押せば閉じる) -->
+                                <DataTrigger Binding="{Binding IsOpen, ElementName=popResource}" Value="True">
+                                    <Setter Property="IsHitTestVisible" Value="False"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ToggleButton.Style>
+                    <DockPanel>
+                        <Path DockPanel.Dock="Right" Data="M0,0 L8,0 L4,4 Z" Fill="#444" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="txtResource" Text="(すべて)" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                    </DockPanel>
+                </ToggleButton>
+                <Popup x:Name="popResource" PlacementTarget="{Binding ElementName=btnResource}" Placement="Bottom" StaysOpen="False"
+                       IsOpen="{Binding IsChecked, ElementName=btnResource, Mode=TwoWay}">
+                    <Border Background="White" BorderBrush="Gray" BorderThickness="1">
+                        <ListBox x:Name="lstResource" MaxHeight="400" MinWidth="{Binding ActualWidth, ElementName=btnResource}" BorderThickness="0"
+                                 VirtualizingPanel.IsVirtualizing="True" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <CheckBox Content="{Binding Label}" IsChecked="{Binding IsSelected, Mode=TwoWay}" Click="ResourceCheck_Click"/>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </Border>
+                </Popup>
+            </Grid>
             <TextBlock Text="分類:" VerticalAlignment="Center" Margin="0,0,4,0"/>
             <ComboBox x:Name="cmbCategory" MinWidth="160" Margin="0,0,12,0" VerticalAlignment="Center" SelectionChanged="Filter_Changed"/>
             <CheckBox x:Name="chkCraftable" Content="今の在庫で作れるものだけ" VerticalAlignment="Center" Margin="0,0,12,0"

@@ -78,8 +78,12 @@ public class MissionService : IDisposable
 
     public int TransDictCount => _transDict?.Count ?? 0;
 
+    // ゲームデータ DB (gamedata_cache.db) のあるフォルダ。詳細の「報酬の BP」を［BP］タブと同じ読み方で出すのに使う (BlueprintDetail)
+    private readonly string _workDir;
+
     public MissionService(string dbPath, string? translationDbPath = null)
     {
+        _workDir = Path.GetDirectoryName(dbPath) ?? "";
         _conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
         _conn.Open();
 
@@ -199,6 +203,21 @@ public class MissionService : IDisposable
         if (counts["その他"] > 0)
             result.Add(new MissionCategory { Name = "その他", Count = counts["その他"] });
         return result;
+    }
+
+    // record_name (大文字小文字無視) のミッション。records の先頭から探し、最初に見つかったもの (テスト用などで一覧から外したものは見つからない)。
+    // ［BP］タブの入手のダブルクリックからミッションタブに出すのに使う
+    public MissionEntry? FindByRecord(IEnumerable<string> records)
+    {
+        var all = LoadAllMissions();
+        foreach (var rec in records)
+        {
+            var m = all.FirstOrDefault(x => string.Equals(x.RecordName, rec, StringComparison.OrdinalIgnoreCase));
+            if (m == null) continue;
+            ParseRawJson(m);
+            return m;
+        }
+        return null;
     }
 
     public List<MissionEntry> GetMissions(string category)
@@ -878,6 +897,9 @@ public class MissionService : IDisposable
             lines.Add("  レピュテーションボーナスあり");
         if (m.BuyInAmount > 0)
             lines.Add($"  参加費: {m.BuyInAmount:N0} aUEC");
+
+        // raw_json の BlueprintRewards (blueprintPool) があれば、抽選プールごとのもらえる BP (BP の表が無ければ出さない)
+        lines.AddRange(BlueprintDetail.MissionSectionLines(_workDir, m.RawJson));
 
         if (m.RepRequirements.Count > 0)
         {

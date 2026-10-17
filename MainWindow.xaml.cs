@@ -102,6 +102,8 @@ public partial class MainWindow : Window
         orePanel.WorkDirProvider = () => WorkDir;
         // ［BP］の作業ディレクトリ (gamedata_cache.db / trade_cache.db / translations.db の所在)
         blueprintPanel.WorkDirProvider = () => WorkDir;
+        // ［BP］タブの入手のダブルクリック → ミッションタブにそのミッションの詳細を出す
+        blueprintPanel.MissionOpener = OnBlueprintMissionRequested;
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -2081,6 +2083,37 @@ public partial class MainWindow : Window
             if (emphasis) run.Foreground = MissionEmphasisBrush;
             txtMissionDetail.Inlines.Add(run);
         }
+    }
+
+    // ［BP］タブの入手のダブルクリックから: ミッションタブに切り替えて、そのミッションの詳細を出す (records の先頭から、ミッションタブの一覧にあるもの)。
+    // タブの切り替えは SwitchToDetailTabLater と同じく、ダブルクリックのマウスの処理が終わってから行う
+    private void OnBlueprintMissionRequested(IReadOnlyList<string> records) =>
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () =>
+        {
+            tabMain.SelectedItem = tabMission;
+            ShowMissionByRecord(records);
+        });
+
+    // ミッションの詳細を出す。今の一覧にあればその行を選ぶ (選び直しで詳細が出る)。一覧に無ければ一覧の選択を外して詳細だけを出す
+    private void ShowMissionByRecord(IReadOnlyList<string> records)
+    {
+        if (_missionService == null) { txtMissionDetail.Text = "ミッションがまだ読み込まれていません (［ミッション読み込み］)。"; return; }
+        try
+        {
+            var m = _missionService.FindByRecord(records);
+            if (m == null) { txtMissionDetail.Text = $"ミッションが見つかりませんでした ({string.Join(", ", records)})。"; return; }
+            var row = _currentMissions?.FirstOrDefault(x => string.Equals(x.RecordName, m.RecordName, StringComparison.OrdinalIgnoreCase));
+            if (row != null && !ReferenceEquals(dgMissions.SelectedItem, row))
+            {
+                dgMissions.SelectedItem = row;   // Mission_Selected が詳細を出す
+                dgMissions.ScrollIntoView(row);
+                return;
+            }
+            if (row == null) dgMissions.SelectedItem = null;
+            else dgMissions.ScrollIntoView(row);
+            SetMissionDetail(_missionService.FormatDetail(m));
+        }
+        catch (Exception ex) { txtMissionDetail.Text = $"詳細表示エラー: {ex.Message}"; }
     }
 
     private void Mission_Selected(object sender, SelectionChangedEventArgs e)

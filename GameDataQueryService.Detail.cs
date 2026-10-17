@@ -59,6 +59,7 @@ public partial class GameDataQueryService
     //   【距離による減衰】【射程】武器の弾の damageDropParams・説明文の Effective Range・弾速 × 寿命 (WeaponFalloffText)
     //   【装着できるアタッチメント】個人武器の枠ごとに付けられるもの (WeaponAttachmentListText)
     //   【販売場所】保存データ (item_shop_prices) の購入・レンタル、無ければ uexItemPrices (星系 / 場所 / 店名 / 値段 を安い順)
+    //   【ブループリント】その品をできる品とする BP (BlueprintDetail.ItemSectionText。BP が無ければ出さない)
     // 品目が無ければ null
     public string? GetItemDetailText(string recordName, IReadOnlyDictionary<string, List<(string Location, double Price)>>? uexItemPrices = null)
     {
@@ -173,6 +174,13 @@ public partial class GameDataQueryService
 
         sb.AppendLine();
         sb.Append(ShopText(uuids, nameEn, uexItemPrices));
+
+        // その品をできる品とする BP があれば、末尾に【ブループリント】の節 (［BP］タブと同じ読み方。BP の表が無い・BP が無ければ出さない)。
+        // 読み込みが例外になったときは、この節だけを読み込めなかった旨の 1 行にする (【装着できるアタッチメント】と同じ)
+        string bp;
+        try { bp = BlueprintDetail.ItemSectionText(Path.GetDirectoryName(DbPath) ?? "", rec); }
+        catch (Exception ex) { bp = "【ブループリント】" + Environment.NewLine + $"  ブループリントを読み込めなかった ({ex.Message})" + Environment.NewLine; }
+        if (bp.Length > 0) { sb.AppendLine(); sb.Append(bp); }
         return sb.ToString();
     }
 
