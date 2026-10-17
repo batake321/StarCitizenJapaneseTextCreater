@@ -204,6 +204,8 @@ public sealed class OreService
         var list = new List<OreStock>();
         if (!DbExists) return list;
         using var db = Open();
+        // 量が 0 以下の行は在庫に出さない。前の版 (0 で止めて行を残していた) が残した 0 の行をここで消す
+        Exec(db, "DELETE FROM ore_stock WHERE quantity <= 0");
         using var cmd = db.CreateCommand();
         cmd.CommandText = "SELECT id, resource_uuid, resource_record, quality, quantity, unit, notes, updated_at FROM ore_stock ORDER BY resource_record, unit, quality, id";
         using var r = cmd.ExecuteReader();
@@ -315,7 +317,7 @@ public sealed class OreService
     }
 
     // 在庫の増減。delta が正なら足す (行が無ければ作る)。負なら引くが、0 より下には下げない (0 で止める)。
-    // 戻り値は止めた量 (引ききれなかった量。全部引けたら 0)
+    // 引いた結果が 0 になった行は消す (0 の行を在庫に残さない)。戻り値は止めた量 (引ききれなかった量。全部引けたら 0)
     public double AdjustStock(string resourceUuid, string resourceRecord, int? quality, string unit, double delta)
     {
         CheckQuality(quality);
@@ -341,8 +343,10 @@ public sealed class OreService
         if (found is not { } row) return -delta;   // 行が無い: 何も引けない
         var next = row.Quantity + delta;
         var clamped = next < 0 ? -next : 0;
-        if (next < 0) next = 0;
-        Exec(db, tx, "UPDATE ore_stock SET quantity = @q, updated_at = datetime('now','localtime') WHERE id = @id", ("@q", next), ("@id", row.Id));
+        if (next <= 0)
+            Exec(db, tx, "DELETE FROM ore_stock WHERE id = @id", ("@id", row.Id));   // 0 になった行は残さない
+        else
+            Exec(db, tx, "UPDATE ore_stock SET quantity = @q, updated_at = datetime('now','localtime') WHERE id = @id", ("@q", next), ("@id", row.Id));
         return clamped;
     }
 
