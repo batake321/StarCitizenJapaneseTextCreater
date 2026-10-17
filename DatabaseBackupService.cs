@@ -210,12 +210,13 @@ public static class DatabaseBackupService
     // (commodity_trades / mining_log: ［鉱石］タブの売買・採掘の記録。主キーはログの行の組)
     private static readonly string[] TradePersonalKeyedTables = ["hangar_pledges", "hangar_ccus", "hangar_ship_marks", "ship_loadouts", "commodity_trades", "mining_log"];
     // 個人で、行を見分けるキーが無いもの (主キーが無い、または中身と関係の無い連番の id だけのもの):
-    // a にその表の行が 1 行でもあれば a だけ、a が空 (表が無い) なら b の行を使う (ore_stock: ［鉱石］タブの在庫、my_gear: 所持個人装備)
-    private static readonly string[] TradePersonalUnkeyedTables = ["my_ships", "my_components", "hangar_items", "hangar_nameable_ships", "ore_stock", "my_gear"];
-    // ［ゲームログ］の行を所持・在庫に入れた印 (game_log_imports と、旧の my_component_purchases)。my_components と必ず同じ側から取る:
-    // my_components を a のまま残したときは印も a だけ、a が空で b の my_components を使ったときは印も b のものにする
+    // a にその表の行が 1 行でもあれば a だけ、a が空 (表が無い) なら b の行を使う (my_gear: 所持個人装備)
+    private static readonly string[] TradePersonalUnkeyedTables = ["my_ships", "my_components", "hangar_items", "hangar_nameable_ships", "my_gear"];
+    // ［ゲームログ］の行を所持・在庫に入れた印 (game_log_imports と、旧の my_component_purchases) と、［鉱石］タブの在庫 (ore_stock。印が在庫を指す)。
+    // my_components と必ず同じ側から取る: my_components を a のまま残したときは印も在庫も a だけ、a が空で b の my_components を使ったときは印も在庫も b のものにする
     private const string ComponentPurchasesTable = "my_component_purchases";
     private const string GameLogImportsTable = "game_log_imports";
+    private const string OreStockTable = "ore_stock";
     // hangar_meta のうちネット由来のデータ (ship_matrix / ship_loaners / store_skus) の取得時刻のキー (b を使う)。ほかのキー (同期の時刻・残高) は個人
     private static readonly string[] HangarMetaNetKeys = ["ship_matrix_fetched_at", "loaners_fetched_at", "store_fetched_at"];
 
@@ -526,14 +527,15 @@ public static class DatabaseBackupService
     {
         using var conn = OpenWithSource(aPath, bPath);
         using var tx = conn.BeginTransaction();
-        var componentsFromB = false;   // my_components を b から入れたか (ComponentPurchasesTable の扱いに使う)
+        var componentsFromB = false;   // my_components を b から入れたか (ComponentPurchasesTable / GameLogImportsTable / OreStockTable の扱いに使う)
         foreach (var table in TradeTables)
         {
-            if (table == ComponentPurchasesTable || table == GameLogImportsTable)
+            if (table == ComponentPurchasesTable || table == GameLogImportsTable || table == OreStockTable)
             {
                 if (!componentsFromB) continue;
-                // 印も b のものだけにする (b に表が無ければ印は空)
-                EnsureTradeSchemaTable(conn, tx);
+                // 印も在庫も b のものだけにする (b に表が無ければ空)。a に表が無ければ作る (ore_stock は OreService の DDL)
+                if (table == OreStockTable) Exec(conn, tx, OreService.TradeTablesDdl);
+                else EnsureTradeSchemaTable(conn, tx);
                 Exec(conn, tx, $"DELETE FROM main.{Q(table)}");
                 if (SourceTableExists(conn, tx, table))
                 {

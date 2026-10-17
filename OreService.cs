@@ -649,6 +649,22 @@ public sealed class OreService
         return (trades, mining, clamped);
     }
 
+    // まだ在庫に反映していない記録 (ApplyToStock が処理する行: 売買は applied_to_stock = 0 の全部、採掘は applied_to_stock = 0 で資源を引けている行) が
+    // stockCutoffUtc 以降 (log_time の文字の比較。null なら全部) に残っているか。前の ApplyToStock が途中で失敗した (database is locked 等) ときに
+    // 新しい行が無くても反映をやり直すための判定。DB が無ければ false
+    public bool HasUnappliedRecords(DateTime? stockCutoffUtc = null)
+    {
+        if (!DbExists) return false;
+        using var db = Open();
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = """
+            SELECT EXISTS (SELECT 1 FROM commodity_trades WHERE applied_to_stock = 0 AND (@c IS NULL OR log_time >= @c))
+                OR EXISTS (SELECT 1 FROM mining_log WHERE applied_to_stock = 0 AND resource_uuid != '' AND (@c IS NULL OR log_time >= @c))
+            """;
+        cmd.Parameters.AddWithValue("@c", stockCutoffUtc is { } c ? c.ToString("yyyy-MM-ddTHH:mm:ss.fff", CultureInfo.InvariantCulture) : DBNull.Value);
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
+    }
+
     // ［ゲームログ］の「入れる」「減らす」(在庫へ): 印 (kind, logKey → ore_stock) を書いて在庫を quantity だけ変える (負なら引く。0 より下には下げない)。
     // 印の quantity には実際に変えた量 (引ききれなかった分を除く) を書く (「取り消す」で戻す量)。印が既にあれば何もせず (false, 0)。
     // 戻り値は (変えたか, 引ききれなかった量)
@@ -663,17 +679,51 @@ public sealed class OreService
         return result;
     }
 
-    private static (bool Applied, double Shortage) ImportToStockCore(SqliteConnection db, SqliteTransaction tx, string kind, string logKey, string resourceUuid, string resourceRecord, int? quality, string unit, double quantity)
+    // markRecord: 印の item_record に書く値 (null なら資源の uuid。納品は uuid と単位 (MakeStockMarkRecord))
+    private static (bool Applied, double Shortage) ImportToStockCore(SqliteConnection db, SqliteTransaction tx, string kind, string logKey, string resourceUuid, string resourceRecord, int? quality, string unit, double quantity, string? markRecord = null)
     {
-        if (!HangarService.InsertMark(db, tx, kind, logKey, MarkTargetStock, resourceUuid, quantity)) return (false, 0);
+        if (!HangarService.InsertMark(db, tx, kind, logKey, MarkTargetStock, markRecord ?? resourceUuid, quantity)) return (false, 0);
         var clamped = AdjustStockCore(db, tx, resourceUuid, resourceRecord, quality, unit, quantity);
         if (clamped > 0)
             Exec(db, tx, "UPDATE game_log_imports SET quantity = @q WHERE kind = @k AND log_key = @l", ("@q", quantity + clamped), ("@k", kind), ("@l", logKey));
         return (true, clamped);
     }
 
+    // 納品の減算の印 (kind delivered) の item_record: 資源の uuid と引いた行の単位を U+001F でつないだもの (取り消しで同じ単位の行へ戻すため)。
+    // 前の版の印 (uuid だけ) は単位なし
+    private const char StockMarkSeparator = '\u001F';
+    private static string MakeStockMarkRecord(string resourceUuid, string unit) => resourceUuid + StockMarkSeparator + unit;
+    private static (string Uuid, string? Unit) SplitStockMarkRecord(string itemRecord)
+    {
+        var at = itemRecord.IndexOf(StockMarkSeparator);
+        if (at < 0) return (itemRecord, null);
+        var unit = itemRecord[(at + 1)..];
+        return (itemRecord[..at], unit.Length > 0 ? unit : null);
+    }
+
+    // 納品で引く在庫の行の単位: 同じ資源 (品質なし) の行を 個 → SCU の順に見て、ある方。どちらも無ければ 個 (引けず 0 止め)
+    private static string DeliveryStockUnit(SqliteConnection db, SqliteTransaction tx, string resourceUuid)
+    {
+        if (FindStock(db, tx, resourceUuid, null, UnitPiece) != null) return UnitPiece;
+        if (FindStock(db, tx, resourceUuid, null, UnitScu) != null) return UnitScu;
+        return UnitPiece;
+    }
+
+    // ［ゲームログ］の納品の「減らす」(手押し): 印 (kind, logKey → ore_stock。item_record は uuid と単位) を書いて、在庫から quantity を引く
+    // (行の単位は DeliveryStockUnit。品質なし。0 より下には下げない)。印が既にあれば (false, 0)。戻り値は ImportToStock と同じ
+    public (bool Applied, double Shortage) ImportDeliveryToStock(string kind, string logKey, string resourceUuid, string resourceRecord, double quantity)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        var unit = DeliveryStockUnit(db, tx, resourceUuid);
+        var result = ImportToStockCore(db, tx, kind, logKey, resourceUuid, resourceRecord, null, unit, -quantity, MakeStockMarkRecord(resourceUuid, unit));
+        tx.Commit();
+        return result;
+    }
+
     // 納品の自動の減算: 同じ納品について一度だけ (印 kind "delivered_auto" を済の印として残し、取り消しても消さない) 在庫から quantity を引く
-    // (印 kind delivered、単位 個、品質なし)。二度目以降・既に delivered の印があるときは (false, 0)。戻り値は ImportToStock と同じ
+    // (印 kind delivered。行の単位は DeliveryStockUnit (個 → SCU の順にある方)、品質なし)。二度目以降・既に delivered の印があるときは (false, 0)。
+    // 戻り値は ImportToStock と同じ
     public const string MarkKindDelivered = "delivered";
     public const string MarkKindDeliveredAuto = "delivered_auto";
 
@@ -682,13 +732,15 @@ public sealed class OreService
         using var db = Open();
         using var tx = db.BeginTransaction();
         if (!HangarService.InsertMark(db, tx, MarkKindDeliveredAuto, logKey, MarkTargetStock, resourceUuid, -quantity)) return (false, 0);
-        var result = ImportToStockCore(db, tx, MarkKindDelivered, logKey, resourceUuid, resourceRecord, null, UnitPiece, -quantity);
+        var unit = DeliveryStockUnit(db, tx, resourceUuid);
+        var result = ImportToStockCore(db, tx, MarkKindDelivered, logKey, resourceUuid, resourceRecord, null, unit, -quantity, MakeStockMarkRecord(resourceUuid, unit));
         tx.Commit();
         return result;
     }
 
     // ［ゲームログ］の「取り消す」(在庫から): 印 (入れた先が ore_stock) を消し、入れた量を在庫から引く (0 より下には下げない)。
-    // 単位は 採掘 (mined) なら 個、売買 (trade) なら SCU、品質は無し (入れたときと同じ)。戻り値は (印があったか, 引ききれなかった量)
+    // 単位は印の item_record に単位があればそれ (納品。引いた行と同じ行へ戻す)、無ければ 売買 (trade) なら SCU、ほか (mined・前の版の納品) は 個。
+    // 品質は無し (入れたときと同じ)。戻り値は (印があったか, 引ききれなかった量)
     public (bool Found, double Shortage) CancelStockImport(string kind, string logKey)
     {
         using var db = Open();
@@ -704,8 +756,9 @@ public sealed class OreService
             if (r.Read()) mark = new GameLogImportMark(kind, logKey, Str(r, 0), Str(r, 1), Dbl(r, 2) ?? 0);
         }
         if (mark == null || mark.Target != MarkTargetStock) return (false, 0);
-        var unit = kind == MarkKindTrade ? UnitScu : UnitPiece;
-        var clamped = mark.ItemRecord.Length > 0 && mark.Quantity != 0 ? AdjustStockCore(db, tx, mark.ItemRecord, "", null, unit, -mark.Quantity) : 0;
+        var (uuid, markUnit) = SplitStockMarkRecord(mark.ItemRecord);
+        var unit = markUnit ?? (kind == MarkKindTrade ? UnitScu : UnitPiece);
+        var clamped = uuid.Length > 0 && mark.Quantity != 0 ? AdjustStockCore(db, tx, uuid, "", null, unit, -mark.Quantity) : 0;
         HangarService.DeleteMark(db, tx, kind, logKey);
         tx.Commit();
         return (true, clamped);
@@ -817,14 +870,21 @@ public sealed class OreService
         && !nameKey.Contains("_special_", StringComparison.OrdinalIgnoreCase);
 
     // resource_types の全件に名前 (日本語は translations の name_key。大文字小文字を区別しない) とグループ名を付けて返す。
-    // 表が無い・読めないときは空。group_record 列の無い DB (前の版) ではグループは '' (一覧には何も出ない。起動後の裏の取り出しで入る)
+    // 表が無い (インデックス構築前の DB)・読めない (開けない・壊れている) ときは空 (例外は投げない。呼ぶ側はそのまま「資源を引けない」扱い)。
+    // group_record 列の無い DB (前の版) ではグループは '' (一覧には何も出ない。起動後の裏の取り出しで入る)
     public static List<OreResource> LoadResources(string gamedataCacheDbPath, string translationsDbPath)
     {
         var list = new List<OreResource>();
         if (!File.Exists(gamedataCacheDbPath)) return list;
-        using (var game = new SqliteConnection($"Data Source={gamedataCacheDbPath};Mode=ReadOnly;Pooling=False"))
+        try
         {
+            using var game = new SqliteConnection($"Data Source={gamedataCacheDbPath};Mode=ReadOnly;Pooling=False");
             game.Open();
+            using (var exists = game.CreateCommand())
+            {
+                exists.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'resource_types'";
+                if (Convert.ToInt64(exists.ExecuteScalar() ?? 0L) == 0) return list;
+            }
             bool hasGroup = false;
             using (var info = game.CreateCommand())
             {
@@ -849,6 +909,11 @@ public sealed class OreService
                     });
                 }
             }
+        }
+        catch (SqliteException)
+        {
+            list.Clear();
+            return list;
         }
         // 翻訳: 必要なキー (資源の name_key とグループの displayName) だけを translations から引く (キーの大文字小文字は区別しない。",P" の行も同じキー)
         var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

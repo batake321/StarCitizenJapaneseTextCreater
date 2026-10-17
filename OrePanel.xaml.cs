@@ -417,11 +417,13 @@ public partial class OrePanel : UserControl
     // === ログの解析からの取り込み (後半で接続) ===
 
     // 売買の記録と採掘の記録を受け取り、主キーで二重を防いで入れ (InsertIgnore)、新しく入った行があれば利益を計算し直して在庫へ反映し、表を作り直す。
+    // 新しく入った行が無くても、まだ在庫に反映していない行 (HasUnappliedRecords。前の反映が database is locked 等で失敗して残ったもの) があれば同じように反映する。
     // 採掘の ResourceUuid が空なら MineralClass から resource_types を引く。どのスレッドからでも呼べる (DB の書き込みは呼んだスレッドで 1 つずつ行い、
     // 表の作り直しは UI のスレッドへ回す)。戻り値は新しく入った (売買, 採掘) の件数
     public (int Trades, int Mining) ImportLogRecords(IReadOnlyList<OreTradeRecord> trades, IReadOnlyList<OreMiningRecord> mining)
     {
         int t = 0, m = 0;
+        var applied = false;
         lock (_importLock)
         {
             var workDir = WorkDir();
@@ -429,15 +431,16 @@ public partial class OrePanel : UserControl
             var gamedata = Path.Combine(workDir, "gamedata_cache.db");
             if (trades.Count > 0) t = _service.InsertTradesIgnore(trades.Select(ToTrade));
             if (mining.Count > 0) m = _service.InsertMiningIgnore(mining.Select(x => ToMining(x, gamedata)));
-            if (t > 0 || m > 0)
+            if (t > 0 || m > 0 || _service.HasUnappliedRecords(GameLogPurchase.ImportCutoffUtc))
             {
                 _service.RecomputeProfits();
                 // 在庫を変えるのは GameLogPurchase.ImportCutoffUtc 以降の行だけ (それより前の記録は反映済みにするだけ)
                 _service.ApplyToStock(GameLogPurchase.ImportCutoffUtc);
                 ReloadSellProfits();
+                applied = true;
             }
         }
-        if (t > 0 || m > 0)
+        if (applied)
         {
             if (Dispatcher.CheckAccess()) RefreshAfterImport();
             else Dispatcher.BeginInvoke(RefreshAfterImport);

@@ -5730,10 +5730,12 @@ public partial class MainWindow : Window
     }
 
     // 納品の行の自動の減算 (GameLogPanel.DeliveryImporter。まだ渡していない行だけ来る): GameLogPurchase.ImportCutoffUtc 以降で資源を引けた行について、
-    // 一度だけ (OreService.ApplyDeliveryOnce) 在庫から引く。足りなければ 0 で止めて Log に出す
+    // 一度だけ (OreService.ApplyDeliveryOnce) 在庫から引く。足りなければ 0 で止めて Log に出す。
+    // 途中で失敗したら、引けた分の表は作り直したうえで例外を投げ直す (GameLogPanel が「渡した」にせずログに残し、次の作り直しでもう一度渡す)
     private void ApplyGameLogDeliveries(IReadOnlyList<GameLogEntry> entries)
     {
         var changed = false;
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? error = null;
         try
         {
             _oreService.SetCacheDir(WorkDir);
@@ -5751,10 +5753,13 @@ public partial class MainWindow : Window
                 }
             }
         }
-        catch (Exception ex) { Log($"[Ore] 納品の在庫への反映に失敗しました: {ex.Message}"); }
-        if (!changed) return;
-        InvalidateImportMarks();
-        orePanel?.Reload();
+        catch (Exception ex) { error = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+        if (changed)
+        {
+            InvalidateImportMarks();
+            orePanel?.Reload();
+        }
+        error?.Throw();
     }
 
     // ［ゲームログ］の行 (ImportItems あり) の一覧 → それぞれのボタンの状態。
@@ -5859,9 +5864,11 @@ public partial class MainWindow : Window
                     }
                     case ImportTarget.Stock when resource is { } r:
                     {
-                        // 納品 (delivered) は在庫から引く (「減らす」)。採掘 (mined) は足す
+                        // 納品 (delivered) は在庫から引く (「減らす」。行の単位は 個 → SCU の順にある方: OreService.ImportDeliveryToStock)。採掘 (mined) は 個 で足す
                         var delivered = item.Kind == GameLogImportItem.KindDelivered;
-                        var (applied, shortage) = _oreService.ImportToStock(item.Kind, item.LogKey, r.Uuid, r.Record, null, OreService.UnitPiece, delivered ? -item.Quantity : item.Quantity);
+                        var (applied, shortage) = delivered
+                            ? _oreService.ImportDeliveryToStock(item.Kind, item.LogKey, r.Uuid, r.Record, item.Quantity)
+                            : _oreService.ImportToStock(item.Kind, item.LogKey, r.Uuid, r.Record, null, OreService.UnitPiece, item.Quantity);
                         if (applied)
                         {
                             stockChanged = true;

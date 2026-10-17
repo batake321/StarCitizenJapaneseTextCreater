@@ -232,11 +232,15 @@ public partial class GameLogPanel : UserControl
                 }
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // 渡せなかった行は「渡した」にしない (次の作り直しでもう一度渡す)。失敗はログに残す
+            ChatService.LogExternal($"[ゲームログ] 売買・採掘の記録を［鉱石］へ渡せませんでした (次の表の作り直しでもう一度渡します): {ex.Message}");
+        }
         HandOverDeliveries(entries);
     }
 
-    // 納品の行 (kind delivered の品) をまだ渡していないものだけ DeliveryImporter へ (古い順)
+    // 納品の行 (kind delivered の品) をまだ渡していないものだけ DeliveryImporter へ (古い順)。失敗したら「渡した」にせず、次の作り直しでもう一度渡す
     private void HandOverDeliveries(IReadOnlyList<GameLogEntry> entries)
     {
         if (DeliveryImporter == null) return;
@@ -253,7 +257,10 @@ public partial class GameLogPanel : UserControl
             DeliveryImporter(list);
             foreach (var e in list) _handedDeliveries.Add(e.ImportItems![0].LogKey);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            ChatService.LogExternal($"[ゲームログ] 納品の在庫への反映に失敗しました (次の表の作り直しでもう一度行います): {ex.Message}");
+        }
     }
 
     // 船名・品名の覚えた結果を捨てる。MainWindow から、訳・品目名 (item_index.name) が替わったときに呼ぶ。
