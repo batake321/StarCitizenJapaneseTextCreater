@@ -10,3 +10,6 @@ publish/
 tools/
 subPC/
 installer-output/
+
+# 利用者が置いたゲームのログ（個人の ID を含むので commit しない）
+log/

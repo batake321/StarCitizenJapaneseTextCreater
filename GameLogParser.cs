@@ -638,7 +638,8 @@ public sealed class GameLogParser
     private static readonly Regex TrailingIdRegex = new(@"^(.+?)_(\d+)$", RegexOptions.Compiled);
     // 着陸場所の出入り: Player [名前] is changing location. Landing [前の ID] -> [今の ID]. Location [..] -> [..]. Pending [0]
     // (Landing の「前の ID」は着陸場所の外に出た後もその前の ID のまま出るので使わず、今の ID だけを見る)
-    private static readonly Regex UpdateLocationRegex = new(@"<Update Inventory Location> Player \[([^\]]*)\] is changing location\. Landing \[(\d+)\] -> \[(\d+)\]", RegexOptions.Compiled);
+    // 2: Landing の前、3: Landing の今、4: Location の前、5: Location の今 (全ログ 2,990 件すべてに Location の部分がある)
+    private static readonly Regex UpdateLocationRegex = new(@"<Update Inventory Location> Player \[([^\]]*)\] is changing location\. Landing \[(\d+)\] -> \[(\d+)\]\. Location \[(\d+)\] -> \[(\d+)\]", RegexOptions.Compiled);
     // 場所の所持品の要求: Player[名前] requested inventory for Location[Stanton2_Orison] (着陸場所にいる間に出たものを、その着陸場所の名前として覚える)
     private static readonly Regex RequestLocationRegex = new(@"<RequestLocationInventory> Player\[([^\]]*)\] requested inventory for Location\[([^\]]*)\]", RegexOptions.Compiled);
     // ATC との通信: … to track their communication partner ATC_DataManager_Port_Lawful-Orison [id] (AImodule_ATC_… は見ない)
@@ -785,7 +786,7 @@ public sealed class GameLogParser
         {
             if (!(m = UpdateLocationRegex.Match(line)).Success) return;
             LearnPlayerName(m.Groups[1].Value);
-            OnLanding(time, m.Groups[3].Value);
+            OnLanding(time, m.Groups[3].Value, m.Groups[4].Value);
             return;
         }
         if (line.Contains("<RequestLocationInventory>", StringComparison.Ordinal))
@@ -1109,17 +1110,20 @@ public sealed class GameLogParser
     }
 
     // 着陸場所の出入り (Update Inventory Location の Landing の今の ID)。0 以外へ = 到着、0 へ = 出発。
-    // 同じ ID が続くとき (Landing [x] -> [x]) は、外にいた (_landingId が "0") なら到着、いたままなら何もしない
-    private void OnLanding(DateTime time, string to)
+    // 同じ ID が続くとき (Landing [x] -> [x]) は、外にいた (_landingId が "0") なら到着、いたままなら何もしない。
+    // locationFrom は Location の前の ID。0 (ログイン・リスポーン直後: Location [0] -> [X]) なら「到着」ではなく「ログイン」にする
+    // (量子ジャンプで着いたときは Landing の前が 0 でも Location の前は 0 でない)。着陸場所の状態の更新は到着と同じ
+    private void OnLanding(DateTime time, string to, string locationFrom)
     {
         if (to != "0")
         {
-            if (to != _landingId) OnArrive(time, to);
+            if (to != _landingId) OnArrive(time, to, login: locationFrom == "0");
         }
         else if (_landingId != "0") OnDepart(time);
     }
 
-    private void OnArrive(DateTime time, string id)
+    // login = true なら種類「ログイン」(内容は場所名だけ。船は添えない)。それ以外の扱い (場所の状態・再入の取り消し・場所名の遅延解決) は到着と同じ
+    private void OnArrive(DateTime time, string id, bool login)
     {
         _landingId = id;
         _placeId = id;
@@ -1134,7 +1138,10 @@ public sealed class GameLogParser
             return;
         }
         _lastDeparture = null;
-        AttachPlace(Add(time, "到着", PlaceDisplay(id) + ShipSuffix(), shipClass: _lastShipClass, shipName: _lastShipName), id);
+        var e = login
+            ? Add(time, "ログイン", PlaceDisplay(id))
+            : Add(time, "到着", PlaceDisplay(id) + ShipSuffix(), shipClass: _lastShipClass, shipName: _lastShipName);
+        AttachPlace(e, id);
     }
 
     private void OnDepart(DateTime time)
