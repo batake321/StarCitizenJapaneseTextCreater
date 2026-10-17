@@ -28,6 +28,9 @@ public partial class GameLogPanel : UserControl
     private GameLogTail? _tail;
     private readonly GameLogMissionNames _missionNames = new();
     private int _missionVersionApplied = -1;
+    // 着陸場所の ID → 場所の名前 (ミッション名と同じくタブ全体で 1 つを共有し、名前待ちの行の書き換えは UI のスレッドで行う)
+    private readonly GameLogPlaceNames _placeNames = new();
+    private int _placeVersionApplied = -1;
     private string _logPath = "";
     private bool _logMissing;
     private string? _pollError;
@@ -161,7 +164,8 @@ public partial class GameLogPanel : UserControl
         var workDir = WorkDir();
         _names = new GameLogNames(Path.Combine(workDir, "gamedata_cache.db"), Path.Combine(workDir, "translations.db"));
         _logPath = Path.Combine(gamePath, "Game.log");
-        _tail = new GameLogTail(_logPath, CurrentSource, _names.Ship, _names.Item, _missionNames, _names.Translate, _names.IsVehicleClass, _names.Resource);
+        _tail = new GameLogTail(_logPath, CurrentSource, _names.Ship, _names.Item, _missionNames, _names.Translate, _names.IsVehicleClass, _names.Resource,
+            _names.Place, _placeNames);
 
         // 過去のログ: 初回の一覧はここで取り (再起動の後に探すときに、新しいファイルと見分けるため)、読むのは裏で行う
         _backupDir = Path.Combine(gamePath, "logbackups");
@@ -199,7 +203,7 @@ public partial class GameLogPanel : UserControl
             try
             {
                 var rows = GameLogParser.ParseFile(f.FullName, Path.GetFileNameWithoutExtension(f.Name), names.Ship, names.Item, _missionNames,
-                    names.Translate, names.IsVehicleClass, names.Resource);
+                    names.Translate, names.IsVehicleClass, names.Resource, names.Place, _placeNames);
                 lock (_backupLock)
                 {
                     _backupRows.AddRange(rows);
@@ -302,6 +306,13 @@ public partial class GameLogPanel : UserControl
                 _missionVersionApplied = version;
                 if (_missionNames.Apply(_backupSnapshot.Concat(_currentRows))) changed = true;
             }
+            // 場所の名前: 同じく、名前待ちの行 (「場所 ID n」) を書き換える
+            var placeVersion = _placeNames.Version;
+            if (changed || placeVersion != _placeVersionApplied)
+            {
+                _placeVersionApplied = placeVersion;
+                if (_placeNames.Apply(_backupSnapshot.Concat(_currentRows))) changed = true;
+            }
             if (changed) UpdateTable();
         }
         catch (Exception ex) { _pollError = ex.Message; }
@@ -377,6 +388,7 @@ public partial class GameLogPanel : UserControl
         private readonly Dictionary<string, string?> _resources = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, string?> _translations = new(StringComparer.Ordinal);
         private readonly Dictionary<string, bool> _vehicleClasses = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, string> _places = new(StringComparer.Ordinal);
 
         public GameLogNames(string gamedataCacheDbPath, string translationsDbPath)
         {
@@ -411,11 +423,35 @@ public partial class GameLogPanel : UserControl
                 _resources.Clear();
                 _translations.Clear();
                 _vehicleClasses.Clear();
+                _places.Clear();
             }
         }
 
         public string Ship(string className) => Resolve(className, _ships, ResolveShip);
         public string Item(string itemName) => Resolve(itemName, _items, name => ResolveName("items", name));
+        // 場所の名前 (ログの Location[Stanton2_Orison] や ATC 名から取った Orison) → 翻訳 DB に同じキーがあれば日本語 (無ければ英語)。
+        // キーで引けなければ、english が場所の名前と一致する行 (大文字小文字は区別しない) の japanese (ATC から取った Orison → Stanton2_Orison の ORISON)。
+        // それも無ければそのまま。翻訳 DB のキーは場所の名前そのもの (Stanton2_Orison、RR_CRU_L1、Stanton1_Lorville)。
+        // 無いもの (RR_CRU_LEO、Stanton2b_ArcCorpMining_Area141 等。全ログの 104 種のうち 79 種) はそのまま
+        public string Place(string name) => Resolve(name, _places, n => Japanese("@" + n, ignoreCase: true) ?? JapaneseByEnglish(n));
+
+        // english が text と一致する行 (大文字小文字は区別しない) の japanese (空・"!" 始まりなら english)。同じ english の行が複数あるときは
+        // 使える japanese のある行を先に、同じならキーの順 (Orison: Stanton2_Orison の ORISON と ui_pregame_port_Orison_name の Orison → ORISON)。
+        // english には索引が無いので全行を読む (引いた結果は Resolve が覚えるので、名前ごとに一度だけ)。無ければ null (_lock の中で呼ぶ)
+        private string? JapaneseByEnglish(string text)
+        {
+            using var loc = Open(_translationsDbPath);
+            if (loc == null) return null;
+            using var cmd = loc.CreateCommand();
+            cmd.CommandText = "SELECT english, japanese FROM translations WHERE english COLLATE NOCASE = @e " +
+                              "ORDER BY (japanese IS NULL OR japanese = '' OR japanese LIKE '!%'), key LIMIT 1";
+            cmd.Parameters.AddWithValue("@e", text);
+            using var r = cmd.ExecuteReader();
+            if (!r.Read()) return null;
+            var en = r.IsDBNull(0) ? null : r.GetString(0);
+            var ja = r.IsDBNull(1) ? null : r.GetString(1);
+            return JapaneseText(ja) ?? EnglishText(en);
+        }
 
         private string Resolve(string name, Dictionary<string, string> cache, Func<string, string?> lookup)
         {
