@@ -480,7 +480,7 @@ public partial class GameLogPanel : UserControl
             return indexName != null ? Usable(indexName) : null;
         }
 
-        // "@キー" → 翻訳 DB の日本語 (無ければ英語)。訳が無ければ null (鉱石の名前 items_commodities_… に使う)。
+        // "@キー" → 翻訳 DB の「日本語 (英語)」(Label)。訳が無ければ null (鉱石の名前 items_commodities_… に使う)。
         // 鉱石のキーは GameLogParser.MineralKey が小文字で組み立てるが、翻訳 DB のキーは大文字が混じるもの (items_commodities_Astatine 等) が
         // あるので、キーの大文字小文字を区別せずに引く
         public string? Translate(string key)
@@ -490,15 +490,20 @@ public partial class GameLogPanel : UserControl
             {
                 if (_translations.TryGetValue(key, out var v)) return v;
                 string? result;
-                try { result = Japanese(key, ignoreCase: true); }
+                try
+                {
+                    var (en, ja) = Lookup(key, ignoreCase: true);
+                    result = Label(JapaneseText(ja), EnglishText(en));
+                }
                 catch { return null; }   // DB を読めなかったときは覚えず、次の時にもう一度引く
                 _translations[key] = result;
                 return result;
             }
         }
 
-        // 資源の GUID (商品売買の resourceGUID = ResourceType の record の ID) → 名前。resource_types の name_key を翻訳 DB で日本語にし、
-        // 訳が無ければ name_en。表に無ければ null。表そのものが無い (古い DB) ・読めないときは覚えず null (起動後に裏で取り出したら引けるようになる)
+        // 資源の GUID (商品売買の resourceGUID = ResourceType の record の ID) → 「日本語 (英語)」。resource_types の name_key を翻訳 DB で
+        // 日本語にし、英語は name_en (無ければ翻訳 DB の english)。日本語が無ければ英語だけ (Label)。表に無ければ null。
+        // 表そのものが無い (古い DB) ・読めないときは覚えず null (起動後に裏で取り出したら引けるようになる)
         public string? Resource(string guid)
         {
             if (string.IsNullOrEmpty(guid)) return null;
@@ -526,8 +531,8 @@ public partial class GameLogPanel : UserControl
                     }
                     if (found)
                     {
-                        if (key != null) result = Japanese(key);
-                        if (result == null && en != null) result = Usable(en);
+                        var (locEn, locJa) = key != null ? Lookup(key) : default;
+                        result = Label(JapaneseText(locJa), (en != null ? Usable(en) : null) ?? EnglishText(locEn));
                     }
                 }
                 catch { return null; }
@@ -535,6 +540,15 @@ public partial class GameLogPanel : UserControl
                 return result;
             }
         }
+
+        // 「日本語 (英語)」の形。日本語と英語が同じ (大文字小文字は区別しない) か片方が無ければある方だけ。両方無ければ null
+        private static string? Label(string? ja, string? en) =>
+            ja != null && en != null && !string.Equals(ja, en, StringComparison.OrdinalIgnoreCase) ? $"{ja} ({en})" : ja ?? en;
+
+        // 翻訳 DB の japanese → 表示に使う日本語 (空・"!" 始まり・使えない文字なら null)。Japanese と同じ見方
+        private static string? JapaneseText(string? ja) => !string.IsNullOrWhiteSpace(ja) && !ja.StartsWith('!') ? Usable(ja) : null;
+        // 翻訳 DB の english → 表示に使う英語 (空・使えない文字なら null)
+        private static string? EnglishText(string? en) => !string.IsNullOrWhiteSpace(en) ? Usable(en) : null;
 
         // クラス名が船か: ships にあるか、item_index の Vehicle 系 (item_type に Vehicle を含む) にあるか。DB を読めなければ false (覚えない)
         public bool IsVehicleClass(string className)
@@ -564,11 +578,23 @@ public partial class GameLogPanel : UserControl
         // BINARY なので使われず全行を読む (写しの 91,062 行で 15ms ほど)。引いた結果は呼び出し元が覚えるので、キーごとに一度だけ)
         private string? Japanese(string value, bool ignoreCase = false)
         {
-            if (!value.StartsWith('@')) return null;
+            var (en, ja) = Lookup(value, ignoreCase);
+            string text;
+            if (!string.IsNullOrWhiteSpace(ja) && !ja.StartsWith('!')) text = ja;
+            else if (!string.IsNullOrWhiteSpace(en)) text = en;
+            else return null;
+            return Usable(text);
+        }
+
+        // "@キー" → 翻訳 DB の行の (english, japanese) をそのまま返す (無い列は null)。キーでない・行が無い・DB が無ければ (null, null)。
+        // 引き方は Japanese のコメントのとおり
+        private (string? En, string? Ja) Lookup(string value, bool ignoreCase = false)
+        {
+            if (!value.StartsWith('@')) return (null, null);
             string? en = null, ja = null;
             using (var loc = Open(_translationsDbPath))
             {
-                if (loc == null) return null;
+                if (loc == null) return (null, null);
                 bool found = false;
                 using (var cmd = loc.CreateCommand())
                 {
@@ -597,11 +623,7 @@ public partial class GameLogPanel : UserControl
                     }
                 }
             }
-            string text;
-            if (!string.IsNullOrWhiteSpace(ja) && !ja.StartsWith('!')) text = ja;
-            else if (!string.IsNullOrWhiteSpace(en)) text = en;
-            else return null;
-            return Usable(text);
+            return (en, ja);
         }
 
         // 表示に使える文字か。空白を整え、キーのまま・プレースホルダなら null

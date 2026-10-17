@@ -491,16 +491,19 @@ public sealed class GameLogParser
         }
         if ((m = CommodityBuyRegex.Match(line)).Success)
         {
-            // quantity は cSCU (1/100 SCU) なので SCU に直す
-            var scu = ParseNumber(m.Groups[4].Value) is double c ? (c / 100).ToString("#,0.##", CultureInfo.InvariantCulture) : m.Groups[4].Value;
-            var e = Add(time, "商品購入", $"{ResourceDisplay(m.Groups[3].Value)} {scu} SCU / 店: {m.Groups[1].Value}", ParseNumber(m.Groups[2].Value));
+            // quantity は cSCU (1/100 SCU) なので SCU に直す。price は合計金額 (全ログ 53 件すべてで shopPricePerCentiSCU × quantity(cSCU) = price)
+            var price = ParseNumber(m.Groups[2].Value);
+            var scu = ParseNumber(m.Groups[4].Value) is double c ? c / 100 : (double?)null;
+            var e = Add(time, "商品購入", $"{ResourceDisplay(m.Groups[3].Value)} {CommodityAmountText(scu, m.Groups[4].Value, price)} / 店: {m.Groups[1].Value}", price);
             _pendingCommodity["Buying"] = e;
             return;
         }
         if ((m = CommoditySellRegex.Match(line)).Success)
         {
-            // 売りの quantity には単位が付かない (実ログの全行で quantity[数] のみ) ので数値のまま出す
-            var e = Add(time, "商品売却", $"{ResourceDisplay(m.Groups[3].Value)} × {m.Groups[4].Value} / 店: {m.Groups[1].Value}", ParseNumber(m.Groups[2].Value));
+            // 売りの quantity には単位が付かないが SCU (全ログ 238 件: 同じ資源の amount ÷ quantity が購入の price ÷ SCU と同じ桁で、
+            // 行末の Cargo Box Data の boxSize × unitAmount と一致するか、それより大きい (箱の大きさが混ざった分))。amount は合計金額
+            var amount = ParseNumber(m.Groups[2].Value);
+            var e = Add(time, "商品売却", $"{ResourceDisplay(m.Groups[3].Value)} {CommodityAmountText(ParseNumber(m.Groups[4].Value), m.Groups[4].Value, amount)} / 店: {m.Groups[1].Value}", amount);
             _pendingCommodity["Selling"] = e;
             return;
         }
@@ -623,6 +626,16 @@ public sealed class GameLogParser
 
     // 商品売買の資源の GUID → 名前。引けなければ今までどおり「品目 先頭 8 文字」
     private string ResourceDisplay(string guid) => _resourceName(guid) ?? $"品目 {ShortGuid(guid)}";
+
+    // 商品の量と単価: 「1,728 SCU (単価 1,162 aUEC/SCU)」。合計金額は金額の列に出すのでここには入れない。量が数に直せなければログの文字のまま。
+    // 単価は合計 ÷ 量を整数に丸める (四捨五入)。合計が 0 以下 (失敗した取引の amount[0]) か量が 0 以下なら量だけ
+    private static string CommodityAmountText(double? scu, string rawQuantity, double? total)
+    {
+        var text = $"{(scu is double q ? q.ToString("#,0.##", CultureInfo.InvariantCulture) : rawQuantity)} SCU";
+        if (total is double t && t > 0 && scu is double n && n > 0)
+            text += $" (単価 {Math.Round(t / n, MidpointRounding.AwayFromZero).ToString("#,0", CultureInfo.InvariantCulture)} aUEC/SCU)";
+        return text;
+    }
 
     // ─── 衝突 ───
     // 同じ時刻・同じ船の行が部位ごとに複数出るので 1 件にまとめる (相手が違えば並べる)
