@@ -298,10 +298,13 @@ public abstract class TranslationBackend
             }
             else if (lastKey != null && multiLineKeys != null && multiLineKeys.Contains(lastKey))
             {
-                // 続きの行。直前が「\」で終わっていたら「\n」の途中で改行されたものとして扱う
+                // 続きの行。直前が「\」で終わっていたら「\n」の途中で改行されたものとして扱う。
+                // 直前が文字の「\n」で終わっていたら、本当の改行はその「\n」の表記とみなし、「\n」を足さずにつなぐ
                 var prev = result[lastKey];
                 if (prev.EndsWith('\\'))
                     result[lastKey] = prev[..^1] + "\\n" + (trimmed.StartsWith('n') ? trimmed[1..] : trimmed);
+                else if (prev.EndsWith("\\n", StringComparison.Ordinal))
+                    result[lastKey] = prev + trimmed;
                 else
                     result[lastKey] = prev + "\\n" + trimmed;
             }

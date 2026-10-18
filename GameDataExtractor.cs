@@ -5448,8 +5448,11 @@ public class GameDataExtractor : IDisposable
     private static string InferDifficulty(string recordName)
     {
         var parts = recordName.Split('_');
-        foreach (var p in parts)
+        for (var i = 0; i < parts.Length; i++)
         {
+            var p = parts[i];
+            // Vehicle の直後の語 (TheCollector_Vehicle_Medium_Firebird など) は船の大きさの区分なので難易度にしない (MissionService.InferDifficulty と同じ)
+            if (i > 0 && parts[i - 1].Equals("Vehicle", StringComparison.OrdinalIgnoreCase)) continue;
             if (p.Equals("Intro", StringComparison.OrdinalIgnoreCase)) return "Intro";
             if (p.Equals("VeryEasy", StringComparison.OrdinalIgnoreCase)) return "Very Easy";
             if (p.Equals("Easy", StringComparison.OrdinalIgnoreCase)) return "Easy";

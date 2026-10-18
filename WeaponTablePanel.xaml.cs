@@ -4,7 +4,7 @@ using System.Windows.Controls;
 
 namespace StarCitizenJapaneseTextCreater;
 
-// 武器の表 (［船舶戦闘］［個人戦闘］タブ)。武器をすべて 1 つの表に出す (個人: 個人武器の全種類。医療ガンは除く / 船: ミサイル・魚雷以外の船の武器)。
+// 武器の表 (［船舶戦闘］［個人戦闘］タブ)。武器をすべて 1 つの表に出す (個人: 個人武器の全種類。医療ガンは除く / 船: 船の武器とミサイル・魚雷 (ロケット・ロケットポッドを含む))。
 // 値は比べるツールと同じ計算 (GameDataQueryService.GetPersonalWeaponTable / GetShipWeaponTable)。
 // まずローカルの DB (gamedata_cache.db。読み取り専用) の値で出し、店の最安値の UEX の値段は裏で取ってから埋める (チャットと同じ取得・キャッシュ)
 public partial class WeaponTablePanel : UserControl

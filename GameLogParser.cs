@@ -43,7 +43,7 @@ public sealed class GameLogEntry
     // 船名がまだ分からない呼び出し・呼び出し完了・格納の行の船の ID (内容には VehicleToken (「船 ID n」か「X 系（推定）」) で出してある)。分かったら null
     public string? PendingVehicleId { get; set; }
     public string VehicleToken { get; set; } = "";
-    // 区域の行: その時点で船を操縦中 (操縦席に座ってから降りるまで) なら true。ほかの行は false。
+    // 区域の行: その時点で船を操縦中 (操縦席に座ってから降りるまで) か、自分の船に乗っている (自分の船のチャンネルに参加してまだ退出していない) なら true。ほかの行は false。
     // 休戦ゾーンに進入の音を操縦中だけ鳴らす (徒歩では鳴らさない) のに使う (GameLogSoundJudge)
     public bool Piloting { get; init; }
     // 区域の行: その時点の着陸場所がジャンプポイント脇の休憩所 (RequestLocationInventory の Location[…] が "RR_JP_" で始まる) なら true。
@@ -538,7 +538,7 @@ public sealed class GameLogParser
     // 席を立った後も <Failed to get starmap route data!> は出続けるので、_drivingId が null のときその行に出たこの船では「操縦」を出さない (OnPilot)
     private string? _releasedId;
     // 今乗っている船: 最後のチャンネル参加 (自分の船の乗船・他人の船への同乗) の船の表示名・所有者と、表示名から引いたクラス名 (引けなければ null)。
-    // その船のチャンネル退出でだけ null に戻す (ClearDriver・「操縦」では消さない)。
+    // その船のチャンネル退出と切断 (<Channel Disconnected>) で null に戻す (ClearDriver・「操縦」では消さない)。
     // 船の ID は、そのクラスで覚えている ID (_vehicleClasses と共有の対応) がちょうど 1 つならその ID、0 個か複数ならクラス名で照合する (IsBoardedShip)。
     // ID は照合のたびに引くので、後で同じクラスの ID を覚えれば紐づけも変わる
     private (string Ship, string Owner, string? Class)? _boarded;
@@ -724,6 +724,7 @@ public sealed class GameLogParser
         "<RequestLocationInventory>",      // 着陸場所の ID → 場所の名前
         "<Connection Flow>",               // ATC との通信 (ハンガー要求の場所)
         "<Channel Created>",               // nickname="自分の名前"
+        "<Channel Disconnected>",          // 切断 (メニューへ戻る・入り直す・切断)。今乗っている船 (_boarded) を忘れる
         "<CEntity::OnOwnerRemoved - entity attachment>",   // 自分の船の ID → クラス名を覚えるだけ (parent … name = クラス_ID)
         "<ATC_Reset_VehiclesBeingStoredCleared>",          // 呼び出した船の系統の推定 (ATC '系統_ShipATCDataManager_<ID>')
         "<Claim Failed>",                                  // 保険請求の失敗 (理由)
@@ -1082,6 +1083,12 @@ public sealed class GameLogParser
                 Match g;
                 if (_localNodeId == null && m.Groups[1].Value == _playerName && (g = PlayerGeidRegex.Match(line)).Success) _localNodeId = g.Groups[1].Value;
             }
+            return;
+        }
+        // 切断 (メニューへ戻る・ゲームに入り直す・切断): 船のチャンネルの退出の行が出ないまま船を離れるので、今乗っている船 (_boarded) を忘れる
+        if (line.Contains("<Channel Disconnected>", StringComparison.Ordinal))
+        {
+            _boarded = null;
             return;
         }
         if (line.Contains("<CEntity::OnOwnerRemoved - entity attachment>", StringComparison.Ordinal))
@@ -1656,7 +1663,7 @@ public sealed class GameLogParser
     // 所有者が自分なら「乗船」「下船」(内容は船の表示名)、他人なら「同乗」「下船」(内容は「表示名 (所有者: X)」)。
     // 自分の船への乗船で、呼び出し完了した船のクラス名がまだ分からなければ、表示名 (= ships.name_en) から引いたクラス名で確定する (他人の船は使わない)
     // 自分の船のチャンネル退出は格納の判定にも使い、格納した船の退出 (下降の後 StowLeaveWindow 以内) なら「下船」の行にしない (OnOwnLeaveForStow)
-    // チャンネル参加 (乗船・同乗) の船を今乗っている船として覚え、その船のチャンネル退出で忘れる (OnPilot)
+    // チャンネル参加 (乗船・同乗) の船を今乗っている船として覚え、その船のチャンネル退出と切断 (<Channel Disconnected>) で忘れる (OnPilot)
     private void AddChannel(DateTime time, string ship, string owner, bool join)
     {
         if (join) _boarded = (ship, owner, ShipClassByName(ship));
@@ -2157,10 +2164,14 @@ public sealed class GameLogParser
             return;
         }
         // 区域: 見出し (": " の前) そのもの
+        // Piloting: 操縦中 (_drivingId) か、船に乗っている (船のチャンネルに参加してまだ退出していない _boarded。他人の船への同乗も含む) とき true。
+        // 席を立った船に座り直しても航法の行が <Failed to get starmap route data!> だけの間は「操縦」が出ない (_drivingId が null) ため、乗船でも見る。
+        // 他人が操縦する船に同乗しているときも鳴らす (利用者の指示)。船のチャンネルを退出していれば (歩いている) false
         var title = NotificationTitle(text);
         if (title.EndsWith("管轄区域に進入", StringComparison.Ordinal) || Array.IndexOf(AreaHeadings, title) >= 0
             || StartsWithAny(title, AreaPrefixHeadings, out _))
-            Add(time, "区域", title, piloting: _drivingId != null, atJumpPointStop: AtJumpPointStop());
+            Add(time, "区域", title, piloting: _drivingId != null || _boarded != null,
+                atJumpPointStop: AtJumpPointStop());
     }
 
     // 通知の見出し (": " の前。前後の空白と末尾の ":" を除く)

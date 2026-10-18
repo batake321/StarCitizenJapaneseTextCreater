@@ -14,8 +14,8 @@ public sealed record GameLogSoundEvent(GameLogSoundKind Kind, string Scene, Game
 // ［ゲームログ］の追い読みで新しく足された行から、鳴らす音を決める。WPF にも音の再生にも依存しない (コンソールから試せる)。
 // 鳴らすのは、ライブの追い読みで新しく足された行 (起動時の最初の Poll と、ゲームの再起動 (reset) の読み直しの分は除く) のうち、
 // 行の TimeUtc が今から LiveWindow 以内のものだけ:
-//   (a) 種類「区域」で内容が休戦ゾーンへの進入 (GameLogParser.ArmisticeEnterHeadings) で、船を操縦中 (GameLogEntry.Piloting) → 休戦の音
-//       (徒歩 (操縦中でない) の進入は鳴らさない)
+//   (a) 種類「区域」で内容が休戦ゾーンへの進入 (GameLogParser.ArmisticeEnterHeadings) で、船を操縦中か船に乗っている (他人の船への同乗も含む。GameLogEntry.Piloting) → 休戦の音
+//       (徒歩 (操縦中でも船に乗ってもいない) の進入は鳴らさない)
 //   (b) 種類「到着」→ 到着の音 (ただし直前 RepeatWindow 以内に休戦の音を鳴らしていれば鳴らさない)
 // どちらも、着陸場所がジャンプポイント脇の休憩所 RR_JP_… のとき (GameLogEntry.AtJumpPointStop) は鳴らさない。
 // 到着の行は、着いた時点では場所の名前 (RR_JP_… か) がまだ分からないことがある (直後の RequestLocationInventory で分かる。
@@ -92,7 +92,7 @@ public sealed class GameLogSoundJudge
         if ((nowUtc - e.TimeUtc).Duration() > LiveWindow) return null;
         if (e.Kind == "区域" && Array.IndexOf(GameLogParser.ArmisticeEnterHeadings, e.Content) >= 0)
         {
-            // 徒歩 (操縦中でない) の進入と、ジャンプポイント脇の休憩所 (RR_JP_…) にいるあいだの進入は鳴らさない
+            // 徒歩 (操縦中でも船に乗ってもいない) の進入と、ジャンプポイント脇の休憩所 (RR_JP_…) にいるあいだの進入は鳴らさない
             if (!armisticeEnabled || !e.Piloting || e.AtJumpPointStop || Within(_lastArmistice, nowUtc)) return null;
             _lastArmistice = nowUtc;
             return GameLogSoundKind.Armistice;

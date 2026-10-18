@@ -887,11 +887,14 @@ internal static class SyncService
             // 自分の DB に表が無ければ作る (TranslationDatabase.InitSchema と同じ形)
             DatabaseBackupService.Exec(conn, tx, TranslationDatabase.PersonNamesDdl);   // 名前を付けない表は main に作られる
             var cols = DatabaseBackupService.CommonColumns(conn, tx, "person_names");
-            if (!cols.Contains("name", StringComparer.OrdinalIgnoreCase)) throw new InvalidOperationException("相手の person_names に name の列がありません");
-            var colList = string.Join(", ", cols.Select(DatabaseBackupService.Q));
-            var selList = string.Join(", ", cols.Select(c => "s." + DatabaseBackupService.Q(c)));
-            counts["person_names"] = DatabaseBackupService.Exec(conn, tx,
-                $"INSERT OR IGNORE INTO main.person_names ({colList}) SELECT {selList} FROM src.person_names s WHERE s.name IS NOT NULL AND s.name != ''");
+            // 相手の表に name の列が無ければ何もせずに続ける (バックアップの取り込み DatabaseBackupService と同じ)
+            if (cols.Contains("name", StringComparer.OrdinalIgnoreCase))
+            {
+                var colList = string.Join(", ", cols.Select(DatabaseBackupService.Q));
+                var selList = string.Join(", ", cols.Select(c => "s." + DatabaseBackupService.Q(c)));
+                counts["person_names"] = DatabaseBackupService.Exec(conn, tx,
+                    $"INSERT OR IGNORE INTO main.person_names ({colList}) SELECT {selList} FROM src.person_names s WHERE s.name IS NOT NULL AND s.name != ''");
+            }
         }
         tx.Commit();
         return changed;

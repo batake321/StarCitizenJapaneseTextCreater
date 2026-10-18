@@ -655,6 +655,9 @@ public class MissionService : IDisposable
                 || contractDebugName.Contains("ReputationTest", StringComparison.OrdinalIgnoreCase))) continue;
 
             var inferName = isContract ? contractDebugName : rn;
+            // 古い抽出で Vehicle の直後の語 (船の大きさの区分。Vehicle_Medium など) から DB に入った難易度は空として扱う
+            if (IsVehicleSizeDifficulty(entry.Difficulty, inferName))
+                entry.Difficulty = "";
             if (string.IsNullOrEmpty(entry.Difficulty))
                 entry.Difficulty = InferDifficulty(inferName);
             if (string.IsNullOrEmpty(entry.Location))
@@ -1093,11 +1096,45 @@ public class MissionService : IDisposable
         _ => 99,
     };
 
+    // 難易度の画面表示 (内部の値は英語のまま。並べ替え・ランクの決め方・検索の照合は英語の値で行う)。
+    // ゲームの訳に契約の難易度の語が無いので日本語を当てる。Super は「超高難度」。知らない値はそのまま
+    internal static string DifficultyJa(string difficulty) => (difficulty ?? "").ToLowerInvariant() switch
+    {
+        "intro" => "入門",
+        "very easy" => "とても易しい",
+        "easy" => "易しい",
+        "medium" => "普通",
+        "hard" => "難しい",
+        "very hard" => "とても難しい",
+        "super" => "超高難度",
+        _ => difficulty ?? "",
+    };
+
+    // DB の難易度が、内部名の Vehicle の直後の語 (空白を除いて大文字小文字無視で同じ) から来たもの:
+    // 内部名から推測し直すと難易度が空になり、かつ DB の値が Vehicle の直後の語と同じとき
+    private static bool IsVehicleSizeDifficulty(string difficulty, string name)
+    {
+        if (string.IsNullOrEmpty(difficulty) || string.IsNullOrEmpty(name)) return false;
+        if (InferDifficulty(name).Length > 0) return false;
+        var d = difficulty.Replace(" ", "");
+        var parts = name.Split('_');
+        for (var i = 1; i < parts.Length; i++)
+            if (parts[i - 1].Equals("Vehicle", StringComparison.OrdinalIgnoreCase)
+                && parts[i].Equals(d, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
     private static string InferDifficulty(string rn)
     {
-        foreach (var p in rn.Split('_'))
+        var parts = rn.Split('_');
+        for (var i = 0; i < parts.Length; i++)
         {
+            var p = parts[i];
+            // Vehicle の直後の語 (TheCollector_Vehicle_Small_Fortune / _Medium_ / _Large_ / _Ground_ / _Super_ など) は
+            // 船の大きさの区分なので難易度にしない
+            if (i > 0 && parts[i - 1].Equals("Vehicle", StringComparison.OrdinalIgnoreCase)) continue;
             if (p.Equals("Intro", StringComparison.OrdinalIgnoreCase)) return "Intro";
+            if (p.Equals("Super", StringComparison.OrdinalIgnoreCase)) return "Super";
             if (p.Equals("VEasy", StringComparison.OrdinalIgnoreCase) || p.Equals("VeryEasy", StringComparison.OrdinalIgnoreCase)) return "Very Easy";
             if (p.Equals("Easy", StringComparison.OrdinalIgnoreCase)) return "Easy";
             if (p.Equals("Medium", StringComparison.OrdinalIgnoreCase)) return "Medium";
@@ -1145,7 +1182,7 @@ public class MissionService : IDisposable
         if (!IsLocKey(m.TitleHud) && !string.IsNullOrEmpty(m.TitleHud) && m.TitleHud != m.Title)
             lines.Add($"  HUDタイトル: {m.TitleHud}");
         if (!string.IsNullOrEmpty(m.Difficulty))
-            lines.Add($"  難易度: {m.Difficulty}");
+            lines.Add($"  難易度: {DifficultyJa(m.Difficulty)}");
         if (!string.IsNullOrEmpty(m.MissionGiverJa))
             lines.Add($"  依頼者: {m.MissionGiverJa}" + (!IsLocKey(m.MissionGiver) && m.MissionGiver != m.MissionGiverJa ? $" ({m.MissionGiver})" : ""));
         else if (!IsLocKey(m.MissionGiver) && !string.IsNullOrEmpty(m.MissionGiver))
@@ -1164,8 +1201,8 @@ public class MissionService : IDisposable
             var factionDisplay = !string.IsNullOrEmpty(m.WikiFactionJa) ? $"{m.WikiFactionJa} ({m.WikiFaction})" : m.WikiFaction;
             lines.Add($"  ファクション: {factionDisplay}");
         }
-        if (!string.IsNullOrEmpty(m.WikiRank))
-            lines.Add($"  ランク: {m.WikiRank}");
+        // ランクが決まらない契約は「不明」(ランクで絞っても一覧に残る)
+        lines.Add($"  ランク: {(string.IsNullOrEmpty(m.WikiRank) ? "不明" : m.WikiRank)}");
         if (!string.IsNullOrEmpty(m.WikiLegality))
             lines.Add($"  合法性 (Wiki): {m.WikiLegality}");
         if (m.WikiEnemyMin > 0 || m.WikiEnemyMax > 0)
@@ -1917,6 +1954,10 @@ public class MissionService : IDisposable
             StarSystem = JoinStarSystems();
             SuccessRepSummary = JoinReputation();
             Difficulty = Join(m => m.Difficulty);
+            DifficultyJa = Join(m => MissionService.DifficultyJa(m.Difficulty));
+            RankText = JoinRank();
+            RankSortValue = members.Min(m => RankOrder(m.WikiRank));
+            _difficultySortValue = members.Min(m => string.Equals(m.Difficulty, "Super", StringComparison.OrdinalIgnoreCase) ? 6 : m.DifficultyOrder);
             DisplayReward = Join(m => m.DisplayReward);
             Location = Join(m => m.Location);
             RewardSortValue = members.Min(m => m.RewardSortValue);
@@ -1932,6 +1973,21 @@ public class MissionService : IDisposable
                 .SelectMany(v => string.IsNullOrEmpty(v) ? new[] { "なし" } : v.Split(" / "))
                 .Distinct(StringComparer.Ordinal);
             return string.Join(" / ", parts);
+        }
+
+        // ランクの列: Join と同じく、全部同じならその値、違えば重複を除いて出てきた順に「 / 」でつなぐ。
+        // ランクが決まらない契約 (空) は「不明」と出す (1 件の行でも、まとめた行に混ざるときも)
+        private string JoinRank()
+        {
+            var parts = Members.Select(m => string.IsNullOrEmpty(m.WikiRank) ? "不明" : m.WikiRank).Distinct(StringComparer.Ordinal);
+            return string.Join(" / ", parts);
+        }
+
+        // ランクの列の並べ替えに使う数 (契約者ランクの順。不明は最後)
+        private static int RankOrder(string rank)
+        {
+            var i = Array.IndexOf(RankNames, rank ?? "");
+            return i >= 0 ? i : 99;
         }
 
         // 評判の列: 値が違うときは、各値を「, 」で区切った部分ごとに重複を除いて、出てきた順に「, 」でつなぐ (空の値は「なし」)
@@ -1967,7 +2023,17 @@ public class MissionService : IDisposable
         public string Category { get; }
         public string StarSystem { get; }
         public string SuccessRepSummary { get; }
+        // 難易度 (英語の値。難易度の列の並べ替えに使う)
         public string Difficulty { get; }
+        // 難易度の列に出す日本語 (DifficultyJa)
+        public string DifficultyJa { get; }
+        // 難易度の列の並べ替え (易しい順。まとめた中でいちばん易しいもの。DiffOrder と同じ順で、不明・Super は後ろ)
+        public int DifficultySortValue => _difficultySortValue;
+        private readonly int _difficultySortValue;
+        // ランクの列に出す文 (JoinRank)
+        public string RankText { get; }
+        // ランクの列の並べ替え (まとめた中でいちばん低いランク。全部不明なら 99)
+        public int RankSortValue { get; }
         public string DisplayReward { get; }
         public string Location { get; }
         // 報酬の列の並べ替え (まとめた中の最小の値)

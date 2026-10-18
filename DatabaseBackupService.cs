@@ -93,7 +93,8 @@ public static class DatabaseBackupService
                     }
                     SqliteConnection.ClearAllPools();
                 }
-                if (!string.IsNullOrEmpty(tradeDbPath) && File.Exists(tradeDbPath))
+                // 個人データを除いた書き出し (includeMyShips が false。配布用) には trade_cache.db を入れない
+                if (includeMyShips && !string.IsNullOrEmpty(tradeDbPath) && File.Exists(tradeDbPath))
                 {
                     onStatus?.Invoke("trade_cache.db をコピー中...");
                     var tempTradePath = Path.Combine(tempDir, "trade_cache.db");

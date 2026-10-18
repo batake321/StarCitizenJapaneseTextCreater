@@ -1942,6 +1942,14 @@ public partial class MainWindow : Window
     private string MissionCountText() =>
         $"{_currentMissionRows?.Count ?? 0} 行（契約 {_currentMissions?.Count ?? 0} 件）";
 
+    // ランクで絞っているときの注意: ランクが決まらない契約は絞っても一覧に残すので、その件数を状態欄に添える (無ければ "")
+    private string MissionRankUnknownNote(string? rank)
+    {
+        if (string.IsNullOrEmpty(rank) || rank == "(すべて)" || _currentMissions == null) return "";
+        var n = _currentMissions.Count(m => string.IsNullOrEmpty(m.WikiRank));
+        return n > 0 ? $"　※ランク不明の契約 {n} 件を含む" : "";
+    }
+
     private void LoadMissions_Click(object sender, RoutedEventArgs e) => LoadMissionsAsync();
 
     private async void LoadMissionsAsync()
@@ -2065,7 +2073,7 @@ public partial class MainWindow : Window
             });
             if (req != _missionListRequest) return;
             SetMissionList(filtered);
-            txtMissionSearchStatus.Text = MissionCountText();
+            txtMissionSearchStatus.Text = MissionCountText() + MissionRankUnknownNote(rank);
             txtMissionDetail.Text = "契約を選択すると詳細が表示されます。";
         }
         catch (Exception ex)
@@ -2122,7 +2130,7 @@ public partial class MainWindow : Window
                 });
                 if (req != _missionListRequest) return;
                 SetMissionList(filtered);
-                txtMissionSearchStatus.Text = MissionCountText();
+                txtMissionSearchStatus.Text = MissionCountText() + MissionRankUnknownNote(rank);
                 txtMissionDetail.Text = "契約を選択すると詳細が表示されます。";
             }
             catch (Exception ex)
@@ -2158,7 +2166,7 @@ public partial class MainWindow : Window
             });
             if (req != _missionListRequest) return;
             SetMissionList(filtered);
-            txtMissionSearchStatus.Text = MissionCountText();
+            txtMissionSearchStatus.Text = MissionCountText() + MissionRankUnknownNote(rank);
 
             if (filtered.Count == 0 && foundCount > 0)
             {
@@ -2451,7 +2459,11 @@ public partial class MainWindow : Window
                             using var tdb = new TranslationDatabase(transPath);
                             var (places, ships, items) = tdb.RevertNamesToEnglish(gamePath);
                             if (places + ships + items > 0)
+                            {
                                 Log($"[名前] AI 訳の名前を英語に書き戻しました (地名 {places} 件、船名 {ships} 件、武器・装備 {items} 件)");
+                                // 訳が変わったので、品目名 (item_index の name / name_ja) を今の訳で作り直し、覚えた名前を捨てる (ゲームとアプリの名前を揃える)
+                                Dispatcher.Invoke(() => RequestItemNameRefresh());
+                            }
                         }
                     }
                     catch (Exception ex) { Log($"[名前] AI 訳の名前の英語への書き戻しに失敗しました: {ex.Message}"); }
@@ -2793,6 +2805,8 @@ public partial class MainWindow : Window
             return;
         }
         _itemNameRefreshRunning = true;
+        // ゲームログの船を所持船に登録するときの名前の覚えも捨てる (item_index の名前が変わると古い名前のまま残るため)
+        _logShips.Clear();
         try
         {
             while (true)

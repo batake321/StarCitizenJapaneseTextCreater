@@ -1779,9 +1779,19 @@
                                         </Style>
                                     </DataGridTextColumn.ElementStyle>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Header="難易度" Binding="{Binding Difficulty}" Width="80">
+                                <!-- 難易度は日本語で出し、並べ替えは前と同じく英語の値で行う -->
+                                <DataGridTextColumn Header="難易度" Binding="{Binding DifficultyJa}" SortMemberPath="DifficultySortValue" Width="90">
                                     <DataGridTextColumn.ElementStyle>
                                         <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <!-- ランクが決まらない契約は「不明」(ランクで絞っても一覧に残る)。並べ替えは契約者ランクの順 -->
+                                <DataGridTextColumn Header="ランク" Binding="{Binding RankText}" SortMemberPath="RankSortValue" Width="150">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="VerticalAlignment" Value="Center"/>
+                                            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                        </Style>
                                     </DataGridTextColumn.ElementStyle>
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Header="報酬 (aUEC)" Binding="{Binding DisplayReward}" SortMemberPath="RewardSortValue" Width="100">
@@ -1817,7 +1827,7 @@
                 </Grid>
             </TabItem>
 
-            <!-- 船舶戦闘タブ (船の武器を 1 つの表に。ミサイル・魚雷・ロケットポッドは除く) -->
+            <!-- 船舶戦闘タブ (船の武器とミサイル・魚雷 (ロケット・ロケットポッドを含む) を 1 つの表に) -->
             <TabItem x:Name="tabShipCombat" Header="船舶戦闘">
                 <local:WeaponTablePanel IsShip="True"/>
             </TabItem>
@@ -2322,7 +2332,7 @@
                                     <Button Content="インポート (復元)" Click="ImportDb_Click"
                                             Padding="14,6" FontWeight="Bold" Background="#4CAF50" Foreground="White"/>
                                 </StackPanel>
-                                <CheckBox x:Name="chkExportMyShips" Content="所持船舶データを含める" IsChecked="True" Margin="0,0,0,8"/>
+                                <CheckBox x:Name="chkExportMyShips" Content="個人データを含める" IsChecked="True" Margin="0,0,0,8"/>
                                 <TextBlock x:Name="txtBackupStatus" TextWrapping="Wrap" Foreground="#666" Margin="0,0,0,8"/>
                                 <StackPanel Orientation="Horizontal">
                                     <Button Content="翻訳DBクリア (全翻訳データ削除)" Click="ClearDb_Click"
