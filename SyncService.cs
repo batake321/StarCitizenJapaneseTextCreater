@@ -446,7 +446,7 @@ internal static class SyncService
                 var personal = string.Join(", ", App.PersonalTranslationSources.Select(s => $"'{s}'"));
                 if (File.Exists(transPath))
                     ExportPersonalTables(transPath, Path.Combine(tempDir, "translations.db"), counts,
-                        ("translations", $"COALESCE(source, '') IN ({personal})"), ("glossary", null), (TombstonesTable, null));
+                        ("translations", $"COALESCE(source, '') IN ({personal})"), ("glossary", null), ("person_names", null), (TombstonesTable, null));
                 if (File.Exists(indexPath))
                     ExportPersonalTables(indexPath, Path.Combine(tempDir, "gamedata_cache.db"), counts, ("knowledge", null), (TombstonesTable, null));
                 SqliteConnection.ClearAllPools();
@@ -880,6 +880,18 @@ internal static class SyncService
                 $"INSERT INTO main.glossary ({colList}) SELECT {selList} FROM src.glossary s WHERE {TombstoneGuardSql("glossary", "s")} ON CONFLICT(english) {onConflict}",
                 exportedAtUtc);
             counts["glossary"] = glossaryChanged;
+        }
+        // AI 翻訳で貯めた人名 (person_names。NameMasker.AddPersonNames)。消すことは無いので墓石は使わず、自分に無い人名だけ足す (同じ name は自分の行のまま)
+        if (DatabaseBackupService.SourceTableExists(conn, tx, "person_names"))
+        {
+            // 自分の DB に表が無ければ作る (TranslationDatabase.InitSchema と同じ形)
+            DatabaseBackupService.Exec(conn, tx, TranslationDatabase.PersonNamesDdl);   // 名前を付けない表は main に作られる
+            var cols = DatabaseBackupService.CommonColumns(conn, tx, "person_names");
+            if (!cols.Contains("name", StringComparer.OrdinalIgnoreCase)) throw new InvalidOperationException("相手の person_names に name の列がありません");
+            var colList = string.Join(", ", cols.Select(DatabaseBackupService.Q));
+            var selList = string.Join(", ", cols.Select(c => "s." + DatabaseBackupService.Q(c)));
+            counts["person_names"] = DatabaseBackupService.Exec(conn, tx,
+                $"INSERT OR IGNORE INTO main.person_names ({colList}) SELECT {selList} FROM src.person_names s WHERE s.name IS NOT NULL AND s.name != ''");
         }
         tx.Commit();
         return changed;

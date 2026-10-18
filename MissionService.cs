@@ -52,30 +52,60 @@ public class MissionService : IDisposable
         "Intro_",
     };
 
-    private static readonly (string Category, Func<string, string, bool> Match)[] CategoryDefs =
+    // カテゴリはゲームのコントラクトマネージャーの区分と同じにする。ゲームは契約の MissionType レコード
+    // (MBE 行の type、CG 行の missionType / missionTypeOverride。抽出時に missions.mission_type へ入れたもの) の
+    // LocalisedTypeName で区分を出すので、mission_type → その語 (global.ini の日本語) で分ける。
+    // 語は Game2.dcb の MissionType レコードの LocalisedTypeName を japanese_(japan)/global.ini で引いたもの (キーは各行の注記)。
+    // 同じ語のレコード (Investigation と Research) は 1 つのカテゴリにまとめる。一覧の並びはこの順
+    // (RSI ディスカバリーイベントを先頭に、次にコントラクトマネージャーの案内 Journal_General_ContractManagerTutorial_Content の 7 区分の順)。
+    // Wiki だけの行 (WikiMission.*) の種類は Wiki の分類でゲームのデータではないので、Escort (語が @LOC_UNINITIALIZED) と同じく「その他」
+    private static readonly (string Category, string[] Types)[] CategoryDefs =
     {
-        // RSI Disc. Month (ContractGenerator.VisitingIasi の契約 31 件。mission_type はすべて iasi)。他のカテゴリより先に判定し、一覧の先頭に出す
-        ("RSIディスカバリー月間", (rn, t) => t == "iasi"),
-        ("バウンティハンター", (rn, t) => t.Contains("bountyhunter") && !rn.Contains("PVP")),
-        ("PVPミッション",     (rn, t) => rn.Contains("PVP") || rn.Contains("CertificationMission_PVP")),
-        ("暗殺",             (rn, t) => rn.Contains("Assassination")),
-        ("窃盗・強奪",        (rn, t) => rn.Contains("Steal") || rn.Contains("Theft") || rn.Contains("TripMines")),
-        ("ハッキング",        (rn, t) => rn.Contains("CommArrayHack") || rn.Contains("HackPrevention")),
-        ("麻薬",             (rn, t) => rn.Contains("Drug") || rn.Contains("Narcotics") || rn.Contains("DestroyNarcotics")),
-        ("傭兵",             (rn, t) => t.Contains("mercenary")),
-        ("回収",             (rn, t) => rn.Contains("Recover") || rn.Contains("Recovery") || rn.Contains("RetrieveConsignment") || rn.Contains("Collect_")),
-        ("調査",             (rn, t) => t.Contains("investigation") || rn.Contains("MissingPerson") || t.Contains("search") || t.Contains("research")),
-        ("サルベージ",        (rn, t) => t.Contains("salvage") || rn.Contains("Salvage") || rn.Contains("Scavenge")),
-        ("配達",             (rn, t) => rn.Contains("Delivery_Local")),
-        ("輸送ー惑星間",      (rn, t) => rn.Contains("Delivery_DC") || rn.Contains("Delivery_DistributionCentr")),
-        ("デリバリー",        (rn, t) => t.Contains("delivery")),
-        ("輸送ー恒星系内",    (rn, t) => rn.Contains("Escort") || rn.Contains("BlockadeRunner") || t.Contains("priority")),
-        ("輸送",             (rn, t) => rn.Contains("TowShip") || rn.Contains("NTLockdown_Delivery")),
-        ("ハンドマイニング",   (rn, t) => t.Contains("mining") || rn.Contains("Mining_")),
-        ("燃料補給",          (rn, t) => t.Contains("servicebeacon") || rn.Contains("ServiceBeacon") || t.Contains("maintenance")),
-        ("ECN・緊急通信",     (rn, t) => t.Contains("ecn") || rn.Contains("ECN_")),
-        ("レース",           (rn, t) => t.Contains("race") || rn.Contains("Race")),
+        ("RSIディスカバリーイベント", new[] { "iasi" }),                      // iasi_Journal_Title
+        ("アポイントメント", new[] { "appointment" }),                         // mobiglas_ui_Appointment
+        ("バウンティハンター", new[] { "bountyhunter" }),                       // mobiglas_ui_BountyHunter
+        ("ECN警報", new[] { "ecn" }),                                          // mobiglas_ui_ECN
+        ("配達", new[] { "courier" }),                                         // mobiGlas_ui_MissionType_Courier
+        ("調査", new[] { "investigation", "research" }),                       // mobiglas_ui_Investigation / mobiGlas_ui_MissionType_Research
+        ("メンテナンス", new[] { "maintenance" }),                             // mobiglas_ui_Maintenance
+        ("傭兵", new[] { "mercenary" }),                                       // mobiglas_ui_Mercenary
+        ("デリバリー", new[] { "delivery" }),                                  // mobiGlas_ui_MissionType_Delivery
+        ("輸送", new[] { "hauling" }),                                         // mobiGlas_ui_MissionType_Hauling
+        ("輸送 - ローカル", new[] { "hauling_local" }),                        // mobiGlas_ui_MissionType_Hauling_Local
+        ("輸送 - 惑星間", new[] { "hauling_planetary" }),                      // mobiGlas_ui_MissionType_Hauling_Planetary
+        ("輸送 - 恒星系内", new[] { "hauling_solar" }),                        // mobiGlas_ui_MissionType_Hauling_Solar
+        ("輸送 - 星間", new[] { "hauling_interstellar" }),                     // mobiGlas_ui_MissionType_Hauling_Interstellar
+        ("優先", new[] { "priority" }),                                        // mobiglas_ui_Priority
+        ("リソースドライブ - Crusader", new[] { "priority_crusader" }),        // mobiglas_ui_Priority_Crusader
+        ("リソースドライブ - MicroTech", new[] { "priority_microtech" }),      // mobiglas_ui_Priority_MicroTech
+        ("リソースドライブ - ArcCorp", new[] { "priority_arccorp" }),          // mobiglas_ui_Priority_ArcCorp
+        ("リソースドライブ - Hurston", new[] { "priority_hurston" }),          // mobiglas_ui_Priority_Hurston
+        ("優先 - CFP", new[] { "priority_cfp" }),                              // FFFinale_mobiglas_ui_Priority_CFP
+        ("優先 - HH", new[] { "priority_hh" }),                                // FFFinale_mobiglas_ui_Priority_HH
+        ("サルベージ", new[] { "salvage" }),                                   // mobiglas_ui_Salvage
+        ("採掘", new[] { "mining" }),                                          // mobiglas_ui_Mining
+        ("船舶採掘", new[] { "shipmining" }),                                  // mobiglas_ui_ShipMining
+        ("地上車両マイニング", new[] { "groundmining" }),                      // mobiglas_ui_GroundMining
+        ("ハンドマイニング", new[] { "fpsmining" }),                           // mobiglas_ui_FPSMining
+        ("回収", new[] { "collection" }),                                      // mobiGlas_ui_MissionType_Collection
+        ("捜索", new[] { "search" }),                                          // mobiGlas_ui_MissionType_Search
+        ("救助", new[] { "rescue" }),                                          // mobiGlas_ui_MissionType_Rescue
+        ("燃料補給中", new[] { "refueling" }),                                 // refueling_ui_Login_Refuel
+        ("サービスビーコン", new[] { "servicebeacon" }),                       // mobiGlas_ui_MissionType_ServiceBeacon
+        ("レース", new[] { "race" }),                                          // mobiglas_ui_Race
+        ("PvPミッション", new[] { "pvpmission" }),                             // mobiglas_ui_PVPMissions
+        ("Battaglia", new[] { "battaglia" }),                                  // mobiGlas_ui_MissionType_Battaglia
+        ("Wikelo - 乗り物", new[] { "wikelo_ships" }),                         // ContractManager_TempTab_Vehicles
+        ("Wikelo - その他のアイテム", new[] { "wikelo_smallitems" }),          // ContractManager_TempTab_Small_Items
+        ("サバイバル", new[] { "survival" }),                                  // mobiGlas_ui_MissionType_Survival
+        ("キル獲得", new[] { "collector" }),                                   // ea_ui_scoring_KillCollected
+        ("ローカル", new[] { "local" }),                                       // chat_command_local
+        ("ジョブ", new[] { "job" }),                                           // mobiGlas_ui_MissionType_Job
     };
+
+    // mission_type (CleanType 後) → カテゴリ名
+    private static readonly Dictionary<string, string> CategoryByType =
+        CategoryDefs.SelectMany(d => d.Types.Select(t => (t, d.Category))).ToDictionary(x => x.t, x => x.Category, StringComparer.Ordinal);
 
     public int TransDictCount => _transDict?.Count ?? 0;
 
@@ -131,7 +161,64 @@ public class MissionService : IDisposable
         }
         catch { /* faction_reputation が無い古い DB では引かず、今までどおり ID をそのまま出す */ }
         _factionNames = map;
+
+        // 評判の範囲の表示名: 範囲のレコード (SReputationScopeParams) の displayName の語を翻訳で引く (日本語 → 英語)
+        var scopes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (rec, key) in ScopeDisplayKeys)
+        {
+            if (_transDict != null && _transDict.TryGetValue(key, out var ja) && !string.IsNullOrEmpty(ja)) scopes[rec] = ja;
+            else if (_enDict != null && _enDict.TryGetValue(key, out var en) && !string.IsNullOrEmpty(en)) scopes[rec] = en;
+        }
+        _scopeNames = scopes;
     }
+
+    // 評判の範囲の表示名 (レコード名 → 名前)。FormatScope の手書きの対応より先に使う
+    private static Dictionary<string, string>? _scopeNames;
+
+    // 範囲のレコード名 → displayName の語。Data.p4k の dcb query "SReputationScopeParams" の displayName を写したもの
+    // (displayName が @LOC_PLACEHOLDER のものは入れない。FormatScope の手書きの対応かレコード名で出す)
+    private static readonly (string Record, string Key)[] ScopeDisplayKeys =
+    {
+        ("reputationscope_emergency", "RepScope_Emergency_Name"),
+        ("reputationscope_hauling", "RepScope_TransportGuild_Name"),
+        ("reputationscope_wikelo", "RepScope_Barter_Name"),
+        ("reputationscope_courier", "RepScope_Courier_Name"),
+        ("reputationscope_affinity", "RepScope_MissionGiver_Default_Name"),
+        ("reputationscope_technician", "RepScope_Technician_Name"),
+        ("reputationscope_hiredmuscle", "RepScope_HiredMuscle_Name"),
+        ("reputationscope_bounty", "RepScope_Bounty_Name"),
+        ("missionproviderreputationscope_battaglia", "mobiGlas_Reputation_Standing"),
+        ("factionreputationscope", "mobiGlas_Reputation_Standing"),
+        ("reputationscope_worker", "RepScope_Worker_Name"),
+        ("reputationscope_npc_reliability", "mobiGlas_Reputation_ScopeTitle_Reliability"),
+        ("reputationscope_assassination", "RepScope_Assassination_Name"),
+        ("reputationscope_handyman", "mobiglas_ui_Salvage"),
+        ("reputationscope_security", "RepScope_Security_Name"),
+        ("reputationscope_salvage", "RepScope_Salvaging_Name"),
+        ("reputationscope_theft", "RepScope_Theft_Name"),
+        ("reputationscope_maintenance", "RepScope_Maintenance_Name"),
+        ("reputationscope_smuggling", "RepScope_HiredMuscle_Name"),
+        ("reputationscope_shipcombat", "RepScope_ShipCombat_Name"),
+        ("reputationscope_fpscombat", "RepScope_FPSCombat_Name"),
+        ("reputationscope_racing_wheeledtimetrial", "Racing_Wheeled_DisplayName"),
+        ("reputationscope_racing_gravlevtimetrial", "Racing_Hover_DisplayName"),
+        ("reputationscope_racing_shiptimetrial", "Racing_Ship_DisplayName"),
+        ("reputationscope_racing_headhunter", "RepScope_Racing_HeadHunters_Name"),
+        ("reputationscope_delivery_citizensforpyro", "RepScope_Courier_Name"),
+        ("reputationscope_delivery_roughandready", "RepScope_Courier_Name"),
+        ("reputationscope_courier_transportguild", "RepScope_Courier_Name"),
+        ("reputationscope_bounty_bountyhuntersguild", "RepScope_Bounty_Name"),
+        ("reputationscope_worker_roughandready", "RepScope_HiredMuscle_Name"),
+        ("reputationscope_handyman_citizensforpyro", "RepScope_HiredMuscle_Name"),
+        ("reputationscope_security_mercenaryguild", "RepScope_Security_Name"),
+        ("reputationscope_shipcombat_roughandready", "RepScope_ShipCombat_RoughAndReady_Name"),
+        ("reputationscope_shipcombat_headhunters", "RepScope_ShipCombat_HeadHunters_Name"),
+        ("reputationscope_shipcombat_xenothreat", "RepScope_ShipCombat_XenoThreat_Name"),
+        ("reputationscope_fpscombat_citizensforpyro", "mobiglas_ui_Mercenary"),
+        ("reputationscope_fpscombat_xenothreat", "mobiglas_ui_Mercenary"),
+        ("reputationscope_fpscombat_roughandready", "mobiglas_ui_Mercenary"),
+        ("reputationscope_fpscombat_headhunter", "mobiglas_ui_Mercenary"),
+    };
 
     public string? TransLoadError { get; private set; }
 
@@ -167,9 +254,12 @@ public class MissionService : IDisposable
         }
     }
 
+    // 組合の欄の「勢力指定なし」: 評判の勢力が元データで指定されていない (factionReputation が null) 項目を持つ契約に絞る
+    public const string NoFactionFilter = "勢力指定なし";
+
     public List<string> GetFactions()
     {
-        var factions = new List<string> { "(すべて)" };
+        var factions = new List<string> { "(すべて)", NoFactionFilter };
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = _hasWikiColumns
             ? "SELECT DISTINCT wiki_faction FROM missions WHERE wiki_faction IS NOT NULL AND wiki_faction != '' ORDER BY wiki_faction"
@@ -195,7 +285,17 @@ public class MissionService : IDisposable
     public List<MissionEntry> FilterByFactionAndRank(List<MissionEntry> missions, string? factionFilter, string? rankFilter)
     {
         var result = missions;
-        if (!string.IsNullOrEmpty(factionFilter) && factionFilter != "(すべて)")
+        if (factionFilter == NoFactionFilter)
+        {
+            // 評判の列・詳細で「(勢力指定なし)」と出る項目 (成功・放棄・失敗の評判で勢力が空) を 1 つでも持つ契約
+            result = result.Where(m =>
+            {
+                ParseRawJson(m);
+                return m.SuccessRepRewards.Concat(m.AbandonRepRewards).Concat(m.FailRepRewards)
+                    .Any(r => string.IsNullOrEmpty(r.Faction));
+            }).ToList();
+        }
+        else if (!string.IsNullOrEmpty(factionFilter) && factionFilter != "(すべて)")
         {
             var factionEn = factionFilter;
             var parenIdx = factionFilter.IndexOf('(');
@@ -225,7 +325,7 @@ public class MissionService : IDisposable
 
         foreach (var m in all)
         {
-            var cat = Classify(m.NameBase, m.MissionType);
+            var cat = CategoryOf(m);
             if (counts.ContainsKey(cat)) counts[cat]++;
             else counts["その他"]++;
         }
@@ -257,7 +357,7 @@ public class MissionService : IDisposable
     public List<MissionEntry> GetMissions(string category)
     {
         var all = LoadAllMissions();
-        var filtered = all.Where(m => Classify(m.NameBase, m.MissionType) == category).ToList();
+        var filtered = all.Where(m => CategoryOf(m) == category).ToList();
 
         foreach (var m in filtered)
             ParseRawJson(m);
@@ -936,18 +1036,13 @@ public class MissionService : IDisposable
     }
 
     // ミッションの属するカテゴリ名 (GetMissions / GetCategories と同じ分け方)。BP タブからミッションを開くときにカテゴリを選ぶのに使う
-    public static string CategoryOf(MissionEntry m) => Classify(m.NameBase, m.MissionType);
+    public static string CategoryOf(MissionEntry m) => Classify(m.RecordName, m.MissionType);
 
     private static string Classify(string recordName, string missionType)
     {
-        var rn = recordName ?? "";
-        var t = CleanType(missionType ?? "");
-        foreach (var (cat, match) in CategoryDefs)
-        {
-            if (match(rn, t))
-                return cat;
-        }
-        return "その他";
+        // Wiki だけの行の種類は Wiki の分類 (ゲームのデータではない) なので区分を決めない
+        if ((recordName ?? "").StartsWith("WikiMission.", StringComparison.Ordinal)) return "その他";
+        return CategoryByType.TryGetValue(CleanType(missionType ?? ""), out var cat) ? cat : "その他";
     }
 
     private static string CleanType(string raw)
@@ -1036,7 +1131,7 @@ public class MissionService : IDisposable
     {
         var lines = new List<string>();
 
-        lines.Add("══════ ミッション詳細 ══════\n");
+        lines.Add("══════ 契約詳細 ══════\n");
 
         lines.Add("■ 基本情報");
         lines.Add($"  レコード名: {m.FriendlyName}");
@@ -1136,7 +1231,7 @@ public class MissionService : IDisposable
         if (m.RequiredMissions.Count > 0)
         {
             lines.Add("");
-            lines.Add("■ 解放条件 (前提ミッション)");
+            lines.Add("■ 解放条件 (前提契約)");
             foreach (var rm in m.RequiredMissions)
                 lines.Add($"  - {FormatMissionName(rm)}");
         }
@@ -1190,7 +1285,7 @@ public class MissionService : IDisposable
         }
 
         lines.Add("");
-        lines.Add("■ ミッション設定");
+        lines.Add("■ 契約設定");
         if (m.CompletionTimeMinutes > 0)
             lines.Add($"  制限時間: {m.CompletionTimeMinutes:0}分");
         if (m.MaxPlayers > 0)
@@ -1236,6 +1331,178 @@ public class MissionService : IDisposable
         return string.Join("\n", lines);
     }
 
+    // 名前 (一覧の名前の列の日本語名と英語名の組) とカテゴリが同じ契約を 1 行にまとめる。行の順は各行の 1 件目が出てきた順、行の中も元の順
+    public static List<MissionGroup> GroupByName(IEnumerable<MissionEntry> missions)
+    {
+        var rows = new List<MissionGroup>();
+        var byKey = new Dictionary<(string, string, string), List<MissionEntry>>();
+        var order = new List<List<MissionEntry>>();
+        foreach (var m in missions)
+        {
+            var key = (m.ListNameJa, m.ListNameEn, m.Category);
+            if (!byKey.TryGetValue(key, out var list))
+            {
+                list = new List<MissionEntry>();
+                byKey[key] = list;
+                order.Add(list);
+            }
+            list.Add(m);
+        }
+        foreach (var list in order) rows.Add(new MissionGroup(list));
+        return rows;
+    }
+
+    // まとめた行の「■ 違い（n 件）」の節。契約ごとに 1 行で、詳細 (FormatDetail) の項目のうち契約の間で値が違うものだけを出す。
+    // 1 件の行・全部同じなら ""。レコード名は全件に共通の前後 ('.' '_' の区切りまで) を除いた違いの部分だけを出す
+    // representative: 詳細欄の上に全文を出している契約 (BP タブから開いたときなど)。その契約を 1 件目 (代表) にして比べる
+    public string FormatGroupDifferences(MissionGroup group, MissionEntry? representative = null)
+    {
+        if (group.Members.Count < 2) return "";
+        var members = representative != null && group.Members.Contains(representative)
+            ? new List<MissionEntry> { representative }.Concat(group.Members.Where(m => !ReferenceEquals(m, representative))).ToList()
+            : group.Members.ToList();
+        var itemsPer = members.Select(m => ParseDetailItems(FormatDetail(m))).ToList();
+
+        // 項目の順: 1 件目から順に初めて出てきた順
+        var keys = new List<(string Section, string Label)>();
+        var keySet = new HashSet<(string, string)>();
+        foreach (var items in itemsPer)
+            foreach (var it in items)
+                if (keySet.Add((it.Section, it.Label))) keys.Add((it.Section, it.Label));
+
+        var diffKeys = new List<(string Section, string Label, bool Whole)>();
+        foreach (var k in keys)
+        {
+            // 契約 ID は契約ごとに必ず違うので一覧に出さない (契約ごとの詳細では見られる)
+            if (k.Section == "■ 基本情報" && k.Label == "契約 ID") continue;
+            var values = itemsPer.Select(items => items.FirstOrDefault(i => i.Section == k.Section && i.Label == k.Label)).ToList();
+            var distinct = values.Select(v => v.Value).Distinct(StringComparer.Ordinal).Count();
+            if (distinct > 1)
+            {
+                var whole = values.First(v => v.Value != null).Whole;
+                diffKeys.Add((k.Section, k.Label, whole));
+            }
+        }
+        if (diffKeys.Count == 0) return "";
+
+        // 同じ見出しが別の節にもあるときは節の名前を前に付ける
+        var labelCount = diffKeys.GroupBy(k => k.Label).ToDictionary(g => g.Key, g => g.Count());
+        string DisplayLabel((string Section, string Label, bool Whole) k) =>
+            k.Whole ? k.Section.TrimStart('■', ' ')
+            : labelCount[k.Label] > 1 ? $"{k.Section.TrimStart('■', ' ')} {k.Label}" : k.Label;
+
+        // 項目ごとに各契約の表示の値 (null はその契約ではこの項目を出さない)
+        var display = new List<string?[]>();
+        foreach (var k in diffKeys)
+        {
+            var raw = itemsPer.Select(items => items.FirstOrDefault(i => i.Section == k.Section && i.Label == k.Label).Value).ToArray();
+            string?[] shown;
+            if (k.Section == "■ 基本情報" && k.Label == "レコード名")
+                shown = RecordNameDifferences(raw).Select(v => string.IsNullOrEmpty(v) ? "なし" : v).ToArray();
+            else if (k.Whole)
+            {
+                // 節まるごとの項目は 1 段目の行だけ (BP の節ならプール名) を使う。1 段目だけでは違いが消えるときは全部の行。
+                // 詳細欄の上に全文が出ている代表の契約 (1 件目) と比べ、各契約で代表に無い行だけを「 / 」でつないで出す。
+                // 代表と行が全部同じ契約 (代表自身も) はこの項目を出さない。代表にある節が無い契約は「なし」。
+                // 代表に無い行は無いが、代表の行が欠けている契約は「代表の文のうち n 行が無い」
+                var top = raw.Select(v => v == null ? null : SplitWhole(v, topOnly: true).ToList()).ToArray();
+                var full = raw.Select(v => v == null ? null : SplitWhole(v, topOnly: false).ToList()).ToArray();
+                int DistinctCount(List<string>?[] a) => a.Select(l => l == null ? null : string.Join("\n", l)).Distinct(StringComparer.Ordinal).Count();
+                var use = DistinctCount(top) == DistinctCount(full) ? top : full;
+                var rep = new HashSet<string>(use[0] ?? new List<string>(), StringComparer.Ordinal);
+                shown = use.Select(l =>
+                {
+                    if (l == null) return use[0] == null ? null : "なし";
+                    var mine = new HashSet<string>(l, StringComparer.Ordinal);
+                    var extra = l.Where(s => !rep.Contains(s)).Distinct(StringComparer.Ordinal).ToList();
+                    if (extra.Count > 0) return string.Join(" / ", extra);
+                    var missing = rep.Count(s => !mine.Contains(s));
+                    return missing > 0 ? $"代表の文のうち {missing} 行が無い" : null;
+                }).ToArray();
+            }
+            else shown = raw.Select(v => string.IsNullOrEmpty(v) ? "なし" : v).ToArray();
+            display.Add(shown);
+        }
+
+        var lines = new List<string> { "", $"■ 違い（{members.Count} 件）" };
+        for (int i = 0; i < members.Count; i++)
+        {
+            var parts = diffKeys.Select((k, j) => display[j][i] == null ? null : $"{DisplayLabel(k)}: {display[j][i]}")
+                                .Where(p => p != null).ToList();
+            // 1 件目は詳細欄の上に全文が出ている代表の契約
+            var head = i == 0 ? "(代表) " : "";
+            var body = parts.Count > 0 ? string.Join("、", parts) : i == 0 ? "上の詳細の契約" : "代表と同じ";
+            lines.Add($"  {i + 1}. {head}{body}");
+        }
+        return "\n" + string.Join("\n", lines);
+    }
+
+    // FormatDetail の文を項目に分ける。「■ 」の行が節の見出し。
+    // 説明・タイトルバリアント・解放条件・報酬の BP の節と、字下げの深い行がある節は節まるごとで 1 項目 (Label は "")。
+    // それ以外の節は 1 行 1 項目で、「見出し: 値」の行は最初の ": " で分け、": " の無い行は行そのものを見出しにして値を "あり" にする
+    private static List<(string Section, string Label, string? Value, bool Whole)> ParseDetailItems(string detail)
+    {
+        var result = new List<(string, string, string?, bool)>();
+        var sections = new List<(string Head, List<string> Lines)>();
+        foreach (var line in detail.Split('\n'))
+        {
+            if (line.StartsWith("■ ")) { sections.Add((line.TrimEnd(), new List<string>())); continue; }
+            if (sections.Count == 0) continue;   // 「══════ 契約詳細 ══════」
+            sections[^1].Lines.Add(line);
+        }
+        foreach (var (head, rawLines) in sections)
+        {
+            // 節と節の間の空行 (最後の空行) は節の中身に入れない
+            var lines = rawLines.ToList();
+            while (lines.Count > 0 && lines[^1].Trim().Length == 0) lines.RemoveAt(lines.Count - 1);
+            if (lines.Count == 0) continue;
+            var whole = head.StartsWith("■ 説明") || head.StartsWith("■ タイトルバリアント") || head.StartsWith("■ 解放条件")
+                     || head.StartsWith("■ 報酬の BP") || lines.Any(l => l.StartsWith("    "));
+            if (whole) { result.Add((head, "", string.Join("\n", lines), true)); continue; }
+            // 同じ節に同じ見出しが 2 回以上出たら、2 回目からは「見出し (2)」のように番号を付けて別の項目にする
+            var seen = new Dictionary<string, int>();
+            foreach (var l in lines)
+            {
+                var t = l.Trim();
+                if (t.Length == 0) continue;
+                var idx = t.IndexOf(": ", StringComparison.Ordinal);
+                var (label, value) = idx > 0 ? (t[..idx], t[(idx + 2)..]) : (t, "あり");
+                var n = seen.TryGetValue(label, out var c) ? c + 1 : 1;
+                seen[label] = n;
+                result.Add((head, n > 1 ? $"{label} ({n})" : label, value, false));
+            }
+        }
+        return result;
+    }
+
+    // 節まるごとの項目の行 (前後の空白を除き、空の行は除く)。topOnly なら 1 段目 (字下げ 2) の行だけ
+    private static IEnumerable<string> SplitWhole(string value, bool topOnly) =>
+        value.Split('\n')
+             .Where(l => !topOnly || !l.StartsWith("    "))
+             .Select(l => l.Trim())
+             .Where(l => l.Length > 0);
+
+    // レコード名の違いの部分: 全件 (値のあるもの) に共通の先頭と末尾を、'.' '_' の区切りの位置まで戻して除いたもの
+    private static string?[] RecordNameDifferences(string?[] names)
+    {
+        var present = names.Where(n => !string.IsNullOrEmpty(n)).Select(n => n!).ToList();
+        if (present.Count < 2) return names;
+        var minLen = present.Min(n => n.Length);
+        int pre = 0;
+        while (pre < minLen && present.All(n => n[pre] == present[0][pre])) pre++;
+        // 共通の先頭は区切りの直後まで戻す (全部が区切りで終わっていればそのまま)
+        while (pre > 0 && present[0][pre - 1] != '.' && present[0][pre - 1] != '_') pre--;
+        int suf = 0;
+        while (suf < minLen - pre && present.All(n => n[n.Length - 1 - suf] == present[0][present[0].Length - 1 - suf])) suf++;
+        while (suf > 0 && present[0][present[0].Length - suf] != '.' && present[0][present[0].Length - suf] != '_') suf--;
+        return names.Select(n =>
+        {
+            if (string.IsNullOrEmpty(n)) return n;
+            var mid = n.Substring(pre, n.Length - pre - suf);
+            return mid.Length > 0 ? mid : n;
+        }).ToArray();
+    }
+
     private static bool IsLocKey(string s) =>
         string.IsNullOrEmpty(s) || s.StartsWith("@") || s.StartsWith("LOC_") ||
         s.Contains("LOC_UNINITIALIZED") || s.Contains("LOC_EMPTY") || s.Contains("procedural_text_null") ||
@@ -1247,6 +1514,8 @@ public class MissionService : IDisposable
 
     private static string FormatFaction(string f)
     {
+        // 元データの factionReputation が null (組合のファイル名も無い) のもの。例 PU_Space_Escort_Surveyor_Battaglia_Intro
+        if (string.IsNullOrEmpty(f)) return "(勢力指定なし)";
         var original = f;
         if (f.StartsWith("factionreputation_")) f = f["factionreputation_".Length..];
         string FromDb()
@@ -1276,6 +1545,7 @@ public class MissionService : IDisposable
 
     private static string FormatScope(string s)
     {
+        if (_scopeNames != null && !string.IsNullOrEmpty(s) && _scopeNames.TryGetValue(s, out var gameName)) return gameName;
         if (s.StartsWith("reputationscope_")) s = s["reputationscope_".Length..];
         return s switch
         {
@@ -1602,8 +1872,18 @@ public class MissionService : IDisposable
         // 一覧の「カテゴリ」列
         public string Category => CategoryOf(this);
         // 一覧の「評判」列: 成功時の評判 ("組織 量" を ", " でつなぐ。無ければ "")
-        public string SuccessRepSummary =>
-            string.Join(", ", SuccessRepRewards.Select(r => $"{FormatFaction(r.Faction)} {FormatRepAmount(r.Amount)}".TrimEnd()));
+        // 成功時の評判の一覧の文。範囲が 2 種類以上ある契約だけ各項目に「 (範囲)」を付ける。
+        // 組合・範囲・量が全部同じ項目は 1 つにまとめる
+        public string SuccessRepSummary
+        {
+            get
+            {
+                var withScope = SuccessRepRewards.Select(r => r.Scope).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1;
+                return string.Join(", ", SuccessRepRewards
+                    .Select(r => $"{FormatFaction(r.Faction)} {FormatRepAmount(r.Amount)}".TrimEnd() + (withScope ? $" ({FormatScope(r.Scope)})" : ""))
+                    .Distinct(StringComparer.Ordinal));
+            }
+        }
         // 成功時に評判が上がる (量が + のものが 1 つでもある)。一覧の行を薄い緑にする
         public bool GivesReputation => SuccessRepRewards.Any(r => FormatRepAmount(r.Amount).StartsWith("+"));
 
@@ -1612,6 +1892,88 @@ public class MissionService : IDisposable
             : RewardMax > 0 ? $"{RewardMax:N0}"
             : RewardMin > 0 ? $"{RewardMin:N0}"
             : "-";
+        // 一覧の「報酬」列の並べ替えに使う数 (DisplayReward と同じ値。"-" は 0)
+        public double RewardSortValue =>
+            RewardBase > 0 ? RewardBase
+            : RewardMax > 0 ? RewardMax
+            : RewardMin > 0 ? RewardMin
+            : 0;
+    }
+
+    // 契約タブの一覧の 1 行: 名前 (日本語名と英語名の組) とカテゴリが同じ契約をまとめたもの (GroupByName)。
+    // 各列は、まとめた契約で値が全部同じならその値、違えば違う値を重複を除いて「 / 」でつないだもの (空の値は「なし」)
+    public class MissionGroup
+    {
+        public MissionGroup(List<MissionEntry> members)
+        {
+            Members = members;
+            var rep = members[0];
+            var suffix = members.Count > 1 ? $" ×{members.Count}" : "";
+            // 件数は一覧で上に出る名前に付ける (日本語名があれば日本語名、無ければ英語名)
+            ListNameJa = rep.ListNameJa.Length > 0 ? rep.ListNameJa + suffix : "";
+            ListNameEn = rep.ListNameJa.Length > 0 ? rep.ListNameEn : rep.ListNameEn + suffix;
+            CleanedName = rep.CleanedName;
+            Category = rep.Category;
+            StarSystem = JoinStarSystems();
+            SuccessRepSummary = JoinReputation();
+            Difficulty = Join(m => m.Difficulty);
+            DisplayReward = Join(m => m.DisplayReward);
+            Location = Join(m => m.Location);
+            RewardSortValue = members.Min(m => m.RewardSortValue);
+            GivesReputation = members.Any(m => m.GivesReputation);
+        }
+
+        // 値が違うときは、各値を「 / 」で区切った部分ごとに重複を除いて、出てきた順につなぐ (空の値は「なし」)
+        private string Join(Func<MissionEntry, string> get)
+        {
+            var values = Members.Select(get).Distinct(StringComparer.Ordinal).ToList();
+            if (values.Count == 1) return values[0];
+            var parts = values
+                .SelectMany(v => string.IsNullOrEmpty(v) ? new[] { "なし" } : v.Split(" / "))
+                .Distinct(StringComparer.Ordinal);
+            return string.Join(" / ", parts);
+        }
+
+        // 評判の列: 値が違うときは、各値を「, 」で区切った部分ごとに重複を除いて、出てきた順に「, 」でつなぐ (空の値は「なし」)
+        private string JoinReputation()
+        {
+            var values = Members.Select(m => m.SuccessRepSummary).Distinct(StringComparer.Ordinal).ToList();
+            if (values.Count == 1) return values[0];
+            var parts = values
+                .SelectMany(v => string.IsNullOrEmpty(v) ? new[] { "なし" } : v.Split(", "))
+                .Distinct(StringComparer.Ordinal);
+            return string.Join(", ", parts);
+        }
+
+        // 星系の列: まとめた契約の星系を合わせて、1 件の行と同じ Stanton, Pyro, Nyx の順 (FormatStarSystems) で出す。
+        // 星系の分からない契約 (空) が混ざるときは最後に「なし」を付ける
+        private string JoinStarSystems()
+        {
+            var values = Members.Select(m => m.StarSystem).Distinct(StringComparer.Ordinal).ToList();
+            if (values.Count == 1) return values[0];
+            var bits = values.Aggregate(0, (b, v) => b | StarSystemBitsOf(v));
+            var text = FormatStarSystems(bits);
+            if (values.Any(string.IsNullOrEmpty)) text = text.Length > 0 ? text + " / なし" : "なし";
+            return text;
+        }
+
+        public List<MissionEntry> Members { get; }
+        // 代表の契約 (まとめた中の 1 件目)
+        public MissionEntry Representative => Members[0];
+        public string ListNameJa { get; }
+        public string ListNameEn { get; }
+        // 名前の列の並べ替え (代表の契約の CleanedName)
+        public string CleanedName { get; }
+        public string Category { get; }
+        public string StarSystem { get; }
+        public string SuccessRepSummary { get; }
+        public string Difficulty { get; }
+        public string DisplayReward { get; }
+        public string Location { get; }
+        // 報酬の列の並べ替え (まとめた中の最小の値)
+        public double RewardSortValue { get; }
+        // まとめた契約のどれか 1 件でも成功時に評判が上がれば薄い緑
+        public bool GivesReputation { get; }
     }
 
     public class ReputationRequirement

@@ -17,12 +17,12 @@
                    FontWeight="Bold" FontSize="14" Margin="0,0,0,8"/>
 
         <TextBlock Grid.Row="1" TextWrapping="Wrap" Foreground="#666" Margin="0,0,0,12"
-                   Text="ワイプで消えるかはパッチによって違います。消す船を選んでください。既定ではゲーム内購入とミッション (Wikelo など) の船だけを一覧に出し、全部にチェックが入っています。「すべての船を表示」で pledge・手入力の船も出せます。"/>
+                   Text="ワイプで消えるかはパッチによって違います。消す船を選んでください。既定ではゲーム内購入と契約 (Wikelo など) の船だけを一覧に出し、全部にチェックが入っています。「すべての船を表示」で pledge・手入力の船も出せます。"/>
 
         <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
             <Button Content="すべて選択" Click="SelectAll_Click" Padding="12,4" Margin="0,0,4,0"/>
             <Button Content="すべて解除" Click="SelectNone_Click" Padding="12,4" Margin="0,0,4,0"/>
-            <Button Content="ゲーム内購入とミッションを選択" Click="SelectInGame_Click" Padding="12,4" Margin="0,0,12,0"/>
+            <Button Content="ゲーム内購入と契約を選択" Click="SelectInGame_Click" Padding="12,4" Margin="0,0,12,0"/>
             <CheckBox x:Name="chkShowAll" Content="すべての船を表示" VerticalAlignment="Center"
                       Checked="ShowAll_Changed" Unchecked="ShowAll_Changed"
                       ToolTip="pledge・手入力の船も一覧に出します (チェックは付きません)"/>

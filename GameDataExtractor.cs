@@ -2848,10 +2848,10 @@ public class GameDataExtractor : IDisposable
 
         // Step 4: ミッション・契約
         step++;
-        ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] ミッション・契約を抽出中...");
+        ProgressChanged?.Invoke(step * 100 / totalSteps, $"[{step}/{totalSteps}] 契約を抽出中...");
         int missionCount = await ExtractMissionsAsync(dataP4kPath, now, ct);
         var wikiRestored = RestoreWikiColumns(_db!);
-        StatusChanged?.Invoke($"[{step}/{totalSteps}] wiki のミッション情報を {wikiRestored} 件引き継ぎました");
+        StatusChanged?.Invoke($"[{step}/{totalSteps}] wiki の契約情報を {wikiRestored} 件引き継ぎました");
 
         // Step 5: コモディティ
         step++;
@@ -3851,7 +3851,7 @@ public class GameDataExtractor : IDisposable
 
             // ミッションの評判報酬 (MissionBrokerEntry)
             ct.ThrowIfCancellationRequested();
-            StatusChanged?.Invoke("ミッションの評判報酬を取得中...");
+            StatusChanged?.Invoke("契約の評判報酬を取得中...");
 
             // title は ExtractMissionsAsync が missions.title に入れるのと同じ取り方 (英語ロケールで解決、無ければ @ を外したキー) にする
             var locDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -3974,7 +3974,7 @@ public class GameDataExtractor : IDisposable
 
             sw.Stop();
             int factionCount = factions.Count, amountCount = amounts.Count, missionCount = missionRecords.Count, rowCount = rows.Count;
-            StatusChanged?.Invoke($"評判報酬を取り込みました - 派閥: {factionCount}, 段階: {amountCount}, ミッション: {missionCount} (行 {rowCount})");
+            StatusChanged?.Invoke($"評判報酬を取り込みました - 派閥: {factionCount}, 段階: {amountCount}, 契約: {missionCount} (行 {rowCount})");
             return rowCount;
         }
         finally
@@ -4921,10 +4921,10 @@ public class GameDataExtractor : IDisposable
             var filterLabel = filters[fi];
 
             var rawJson = await RunDcbQueryWithTimerAsync(p4kPath, "MissionBrokerEntry", filterLabel,
-                $"[4/6] ミッション ({filterIdx + 1}/{filters.Length}): {filterLabel}", ct);
+                $"[4/6] 契約 ({filterIdx + 1}/{filters.Length}): {filterLabel}", ct);
             if (string.IsNullOrEmpty(rawJson)) continue;
 
-            StatusChanged?.Invoke($"[4/6] ミッション解析中 ({filterIdx + 1}/{filters.Length}): {filterLabel} — DB登録中...");
+            StatusChanged?.Invoke($"[4/6] 契約解析中 ({filterIdx + 1}/{filters.Length}): {filterLabel} — DB登録中...");
             int blockCount = 0;
             foreach (var block in SplitJsonBlocks(rawJson))
             {
@@ -4940,9 +4940,9 @@ public class GameDataExtractor : IDisposable
 
                 blockCount++;
                 if (blockCount % 200 == 0)
-                    StatusChanged?.Invoke($"[4/6] ミッション解析中 ({filterIdx + 1}/{filters.Length}): {filterLabel} — {count}件登録 ({blockCount}ブロック処理済み)");
+                    StatusChanged?.Invoke($"[4/6] 契約解析中 ({filterIdx + 1}/{filters.Length}): {filterLabel} — {count}件登録 ({blockCount}ブロック処理済み)");
             }
-            ProgressChanged?.Invoke(66 + (filterIdx + 1) * 10 / filters.Length, $"[4/6] ミッション・契約: {count}件抽出済み");
+            ProgressChanged?.Invoke(66 + (filterIdx + 1) * 10 / filters.Length, $"[4/6] 契約: {count}件抽出済み");
         }
 
         // ContractGenerator の親契約 (contracts / introContracts / serviceBeaconContracts / PVPBountyContract) を 1 契約 1 行で登録する。
@@ -4967,7 +4967,7 @@ public class GameDataExtractor : IDisposable
                 catch { }
             }
             StatusChanged?.Invoke($"[4/6] 契約解析中 (ContractGenerator) — {contractCount}件登録");
-            ProgressChanged?.Invoke(79, $"[4/6] ミッション・契約: {count}件抽出済み");
+            ProgressChanged?.Invoke(79, $"[4/6] 契約: {count}件抽出済み");
 
             // legacyContracts[] が参照する MissionBrokerEntry のうち、6 フィルタで入らなかったものを同じ処理で登録する。
             // 参照先だけをフィルタで指定できないため、MissionBrokerEntry を全件 ("*") 取得して参照名で拾う
@@ -4977,10 +4977,10 @@ public class GameDataExtractor : IDisposable
             {
                 ct.ThrowIfCancellationRequested();
                 var mbeAllJson = await RunDcbQueryWithTimerAsync(p4kPath, "MissionBrokerEntry", "*",
-                    "[4/6] ミッション (レガシー契約の参照先): *", ct);
+                    "[4/6] 契約 (レガシー契約の参照先): *", ct);
                 if (!string.IsNullOrEmpty(mbeAllJson))
                 {
-                    StatusChanged?.Invoke("[4/6] ミッション解析中 (レガシー契約の参照先) — DB登録中...");
+                    StatusChanged?.Invoke("[4/6] 契約解析中 (レガシー契約の参照先) — DB登録中...");
                     int legacyCount = 0;
                     foreach (var block in SplitJsonBlocks(mbeAllJson))
                     {
@@ -4997,10 +4997,10 @@ public class GameDataExtractor : IDisposable
                         }
                         catch { }
                     }
-                    StatusChanged?.Invoke($"[4/6] ミッション解析中 (レガシー契約の参照先) — {legacyCount}件登録");
+                    StatusChanged?.Invoke($"[4/6] 契約解析中 (レガシー契約の参照先) — {legacyCount}件登録");
                 }
             }
-            ProgressChanged?.Invoke(82, $"[4/6] ミッション・契約: {count}件抽出済み");
+            ProgressChanged?.Invoke(82, $"[4/6] 契約: {count}件抽出済み");
         }
 
         tx.Commit();
@@ -6686,7 +6686,7 @@ public class GameDataExtractor : IDisposable
     {
         EnsureDb();
         MigrateWikiColumns();
-        StatusChanged?.Invoke("Wiki API からミッションデータを取得中...");
+        StatusChanged?.Invoke("Wiki API から契約データを取得中...");
 
         int page = 1, totalFetched = 0, linked = 0, added = 0;
         var now = DateTime.UtcNow.ToString("o");
@@ -6694,7 +6694,7 @@ public class GameDataExtractor : IDisposable
         while (true)
         {
             ct.ThrowIfCancellationRequested();
-            StatusChanged?.Invoke($"Wiki API ミッション取得中... ページ {page} ({totalFetched} 件取得済み)");
+            StatusChanged?.Invoke($"Wiki API 契約取得中... ページ {page} ({totalFetched} 件取得済み)");
 
             string json;
             try
@@ -6829,7 +6829,7 @@ public class GameDataExtractor : IDisposable
 
         SetMeta("wiki_missions_fetched_at", DateTime.UtcNow.ToString("o"));
         SetMeta("wiki_missions_count", totalFetched.ToString());
-        StatusChanged?.Invoke($"Wiki API ミッション取得完了: {totalFetched} 件取得, {linked} 件リンク, {added} 件新規追加");
-        ProgressChanged?.Invoke(100, $"Wiki ミッション: {totalFetched} 件 (リンク: {linked}, 新規: {added})");
+        StatusChanged?.Invoke($"Wiki API 契約取得完了: {totalFetched} 件取得, {linked} 件リンク, {added} 件新規追加");
+        ProgressChanged?.Invoke(100, $"Wiki 契約: {totalFetched} 件 (リンク: {linked}, 新規: {added})");
     }
 }

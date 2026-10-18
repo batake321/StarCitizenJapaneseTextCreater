@@ -508,6 +508,19 @@ public static class DatabaseBackupService
             var n = Exec(conn, tx, $"INSERT OR IGNORE INTO main.glossary ({colList}) SELECT {colList} FROM src.glossary");
             onStatus?.Invoke($"glossary: {n} 件追加");
         }
+        // AI 翻訳で貯めた人名 (person_names。NameMasker.AddPersonNames)。訳 (Translations) を選んだときに、glossary と同じく a 優先の和集合にする。
+        // 古いバックアップに表が無ければ何もしない
+        if (cats.Contains(BackupCategory.Translations) && SourceTableExists(conn, tx, "person_names"))
+        {
+            Exec(conn, tx, TranslationDatabase.PersonNamesDdl);   // 名前を付けない表は main に作られる
+            var cols = CommonColumns(conn, tx, "person_names");
+            if (cols.Contains("name", StringComparer.OrdinalIgnoreCase))
+            {
+                var colList = string.Join(", ", cols.Select(Q));
+                var n = Exec(conn, tx, $"INSERT OR IGNORE INTO main.person_names ({colList}) SELECT {colList} FROM src.person_names");
+                onStatus?.Invoke($"person_names: {n} 件追加");
+            }
+        }
         MergeTombstones(conn, tx, onStatus);
         tx.Commit();
     }

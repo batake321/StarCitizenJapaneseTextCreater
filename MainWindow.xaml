@@ -783,7 +783,7 @@
                             <!-- Row 2: 期限 (ミッションの報酬など期限のある船。空なら期限なし) -->
                             <TextBlock Text="期限:" Grid.Row="2" Grid.Column="8" VerticalAlignment="Center" Margin="0,4,4,0"/>
                             <TextBox x:Name="txtAddShipExpires" Grid.Row="2" Grid.Column="9" Margin="0,4,8,0" VerticalAlignment="Center"
-                                     ToolTip="船が無くなる日時 (ミッションの報酬やレンタルの船)。「2026/10/18 22:24」や「10/18 22:24」の形。空なら期限なし。期限を過ぎた船は一覧で薄字になります (自動では消しません)"/>
+                                     ToolTip="船が無くなる日時 (契約の報酬やレンタルの船)。「2026/10/18 22:24」や「10/18 22:24」の形。空なら期限なし。期限を過ぎた船は一覧で薄字になります (自動では消しません)"/>
                         </Grid>
                     </GroupBox>
 
@@ -1645,7 +1645,7 @@
             </TabItem>
 
             <!-- ミッションタブ -->
-            <TabItem x:Name="tabMission" Header="ミッション">
+            <TabItem x:Name="tabMission" Header="契約">
                 <Grid Margin="8">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="200"/>
@@ -1661,7 +1661,7 @@
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
                         <TextBlock Text="カテゴリ" FontWeight="Bold" FontSize="13" Margin="0,0,0,6"/>
-                        <Button Grid.Row="1" x:Name="btnLoadMissions" Content="ミッション読み込み"
+                        <Button Grid.Row="1" x:Name="btnLoadMissions" Content="契約読み込み"
                                 Click="LoadMissions_Click" Padding="10,6" Margin="0,0,0,8"
                                 FontWeight="Bold" Background="#4CAF50" Foreground="White"/>
                         <ListBox Grid.Row="2" x:Name="lstMissionCategories"
@@ -1784,7 +1784,7 @@
                                         <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
                                     </DataGridTextColumn.ElementStyle>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Header="報酬 (aUEC)" Binding="{Binding DisplayReward}" Width="100">
+                                <DataGridTextColumn Header="報酬 (aUEC)" Binding="{Binding DisplayReward}" SortMemberPath="RewardSortValue" Width="100">
                                     <DataGridTextColumn.ElementStyle>
                                         <Style TargetType="TextBlock">
                                             <Setter Property="VerticalAlignment" Value="Center"/>
@@ -1810,7 +1810,7 @@
                                 <TextBlock x:Name="txtMissionDetail" TextWrapping="Wrap"
                                            FontFamily="Consolas" FontSize="14"
                                            Foreground="#DCDCDC" Padding="8"
-                                           Text="カテゴリを選択し、ミッションをクリックすると詳細が表示されます。"/>
+                                           Text="カテゴリを選択し、契約をクリックすると詳細が表示されます。"/>
                             </ScrollViewer>
                         </Border>
                     </Grid>
@@ -2124,10 +2124,10 @@
                                             Click="BuildVectorIndex_Click" Padding="14,6" Margin="8,0,0,0"
                                             FontWeight="Bold" Background="#9C27B0" Foreground="White"
                                             ToolTip="Ollama/OpenAI/Gemini のエンベディングモデルでセマンティック検索を有効化（バックグラウンド実行）"/>
-                                    <Button x:Name="btnFetchWikiMissions" Content="Wiki ミッション取得"
+                                    <Button x:Name="btnFetchWikiMissions" Content="Wiki 契約取得"
                                             Click="FetchWikiMissions_Click" Padding="14,6" Margin="8,0,0,0"
                                             FontWeight="Bold" Background="#FF9800" Foreground="White"
-                                            ToolTip="Star Citizen Wiki API からミッションデータを取得し、既存データと統合"/>
+                                            ToolTip="Star Citizen Wiki API から契約データを取得し、既存データと統合"/>
                                     <Button x:Name="btnStopShopPrice" Content="価格の取得を中止"
                                             Click="StopShopPrice_Click" Padding="8,4" Margin="8,0,0,0"
                                             Visibility="Collapsed"
@@ -2307,7 +2307,7 @@
 
                         <GroupBox Header="表示設定" Margin="0,0,0,8" Padding="8">
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="ミッション詳細フォントサイズ:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBlock Text="契約詳細フォントサイズ:" VerticalAlignment="Center" Margin="0,0,8,0"/>
                                 <TextBox x:Name="txtMissionFontSize" Width="50" VerticalAlignment="Center" Margin="0,0,8,0"/>
                                 <TextBlock Text="pt (既定: 14)" VerticalAlignment="Center" Foreground="#666"/>
                             </StackPanel>

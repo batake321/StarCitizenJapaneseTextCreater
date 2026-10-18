@@ -1514,7 +1514,7 @@ public class MyShipEntry
     {
         OriginPledge => "pledge",
         OriginInGame => "ゲーム内購入",
-        OriginMission => "ミッション (Wikelo など)",
+        OriginMission => "契約 (Wikelo など)",
         _ => "",
     };
     public string OriginDisplay => OriginLabel(Origin);

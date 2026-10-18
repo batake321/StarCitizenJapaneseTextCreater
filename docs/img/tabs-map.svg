@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 470" width="900" height="470" role="img" aria-labelledby="t d">
   <title id="t">アプリ画面のタブ構成</title>
-  <desc id="d">上部の GamePath バーと、翻訳・翻訳エディタ・用語集・プロファイル・コモディティ・船舶管理・価格キャプチャ・ミッション・チャット・設定の 10 タブ。船舶管理の中にさらに所持船・アップグレード管理・装備の 3 タブがあります。</desc>
+  <desc id="d">上部の GamePath バーと、翻訳・翻訳エディタ・用語集・プロファイル・コモディティ・船舶管理・価格キャプチャ・契約・チャット・設定の 10 タブ。船舶管理の中にさらに所持船・アップグレード管理・装備の 3 タブがあります。</desc>
   <style>
     .f { font-family: "Segoe UI","Yu Gothic UI",Meiryo,sans-serif; }
     .lbl { font-size: 15px; fill: #dbe4ee; }
@@ -42,7 +42,7 @@
 
     <rect x="50" y="190" width="148" height="38" rx="6" fill="#123146" stroke="#38bdf8" stroke-width="2"/><text x="124" y="214" text-anchor="middle" fill="#bfe6ff">船舶管理</text>
     <rect x="213" y="190" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="287" y="214" text-anchor="middle">価格キャプチャ</text>
-    <rect x="376" y="190" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="450" y="214" text-anchor="middle">ミッション</text>
+    <rect x="376" y="190" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="450" y="214" text-anchor="middle">契約</text>
     <rect x="539" y="190" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="613" y="214" text-anchor="middle">チャット</text>
     <rect x="702" y="190" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="776" y="214" text-anchor="middle">設定</text>
   </g>

@@ -371,7 +371,7 @@ public partial class BlueprintPanel : UserControl
                 foreach (var n in names)
                     it.Missions.Add((n, titles.Where(t => MissionName(t.Title) == n && t.Record.Length > 0).Select(t => t.Record).Distinct(StringComparer.Ordinal).ToList()));
                 // 件数はツールチップに並べる名前の数 (同じ名前の派生ミッションは 1 件)
-                sources.Add($"ミッション {names.Count} 件");
+                sources.Add($"契約 {names.Count} 件");
                 it.SourceTooltip = string.Join("\n", names);
             }
             it.SourceText = sources.Count > 0 ? string.Join(" / ", sources) : "不明";

@@ -14,6 +14,7 @@ public class TranslationOrchestrator
     private int _successTotal;
     private int _fallbackTotal;
     private int _totalEntries;
+    private int _retryDone, _retryTotal;   // 送り直しの済んだ数・全体の数 (進み具合の表示用。_progress には足さない)
     private int _nameBrokenTotal;   // 名前の置き換え記号 {nameN} が合わず保存しなかった訳の数 (リトライ分も数える)
     private readonly ConcurrentBag<TranslationEntry> _failedEntries = new();
     private readonly ConcurrentBag<string> _keptEnglishKeys = new();
@@ -90,11 +91,12 @@ public class TranslationOrchestrator
         if (!isRetry)
             Console.WriteLine($"[{Now}] バッチ数: {totalBatches} ({string.Join(", ", _backends.Select(b => $"{b.Name}:{perBackend[b.Name].Count}"))})");
 
-        var tasks = _backends.Select(backend => ProcessBackendQueue(backend, perBackend[backend.Name], outFile, ct));
+        if (isRetry) { _retryDone = 0; _retryTotal = entries.Count; }
+        var tasks = _backends.Select(backend => ProcessBackendQueue(backend, perBackend[backend.Name], outFile, ct, isRetry));
         await Task.WhenAll(tasks);
     }
 
-    private async Task ProcessBackendQueue(TranslationBackend backend, List<List<TranslationEntry>> batches, StreamWriter outFile, CancellationToken ct)
+    private async Task ProcessBackendQueue(TranslationBackend backend, List<List<TranslationEntry>> batches, StreamWriter outFile, CancellationToken ct, bool isRetry)
     {
         int consecutiveFailures = 0;
         var lastRequestTime = DateTime.MinValue;
@@ -115,7 +117,7 @@ public class TranslationOrchestrator
             }
 
             lastRequestTime = DateTime.UtcNow;
-            bool success = await ProcessBatch(backend, batches[i], outFile);
+            bool success = await ProcessBatch(backend, batches[i], outFile, isRetry);
             if (success)
             {
                 consecutiveFailures = 0;
@@ -132,7 +134,7 @@ public class TranslationOrchestrator
         }
     }
 
-    private async Task<bool> ProcessBatch(TranslationBackend backend, List<TranslationEntry> batch, StreamWriter outFile)
+    private async Task<bool> ProcessBatch(TranslationBackend backend, List<TranslationEntry> batch, StreamWriter outFile, bool isRetry)
     {
         Dictionary<string, string>? resultMap = null;
 
@@ -189,6 +191,11 @@ public class TranslationOrchestrator
             }
         }
 
+        // AI が訳と一緒に返した人名 (キー → 人名の一覧。TranslationBackend.ParseResponse が読んだもの)
+        var persons = (resultMap as TranslationBackend.TranslationResult)?.PersonNames;
+        var personsToStore = new List<(string Name, string SourceKey)>();
+        int personMissing = 0;
+
         var lines = new List<string>();
         var translatedItems = new List<(string Key, string Japanese, string Translator)>();
         int ok = 0, fail = 0, sameAsEnglish = 0;
@@ -225,8 +232,21 @@ public class TranslationOrchestrator
                 _failedEntries.Add(entry);
                 Console.WriteLine($"[{Now}] [{backend.Name}] 訳が短すぎるため保存しません: {entry.Key} (英語 {entry.English.Length} 字 / 訳 {translated.Length} 字)");
             }
+            else if (resultMap != null && resultMap.TryGetValue(entry.Key, out translated) && !string.IsNullOrWhiteSpace(translated)
+                && MissingPersonName(persons, entry.Key, translated) is string missingName)
+            {
+                // AI が返した人名が訳の中に原語のまま入っていない (音訳・訳された) ものは保存せず失敗扱いにする (別の AI で訳し直される)
+                fail++;
+                personMissing++;
+                _failedEntries.Add(entry);
+                Console.WriteLine($"[{Now}] [{backend.Name}] 人名「{missingName}」が訳の中に原語のまま無いため保存しません: {entry.Key}");
+            }
             else if (resultMap != null && resultMap.TryGetValue(entry.Key, out translated) && !string.IsNullOrWhiteSpace(translated))
             {
+                // 保存する訳に付いていた人名のうち、貯めてよいもの (NameMasker.IsStorablePersonName) を名前の一覧に貯める
+                if (persons != null && persons.TryGetValue(entry.Key, out var names))
+                    foreach (var n in names)
+                        if (NameMasker.IsStorablePersonName(n, entry.English)) personsToStore.Add((n, entry.Key));
                 ok++;
                 translatedItems.Add((entry.Key, translated, backend.TranslatorLabel));
                 lines.Add(JsonSerializer.Serialize(
@@ -249,15 +269,33 @@ public class TranslationOrchestrator
             _successTotal += ok;
             _fallbackTotal += fail;
             _nameBrokenTotal += nameBroken.Count;
-            _progress.Update(batch.Count);
+            // 送り直し (isRetry) の分は全体の進み具合 (_progress。続きから再開するときの位置にも使う) に足さず、送り直しの中の数で表示する
+            if (!isRetry) _progress.Update(batch.Count);
+            else _retryDone += batch.Count;
 
             var done = _progress.Done;
             var pct = (double)done / _totalEntries * 100;
-            Console.WriteLine($"[{Now}] [{backend.Name}] {done:N0}/{_totalEntries:N0} ({pct:F1}%) OK:{ok} FAIL:{fail}"
+            var progressText = isRetry
+                ? $"リトライ {_retryDone:N0}/{_retryTotal:N0} ({(double)_retryDone / _retryTotal * 100:F1}%)"
+                : $"{done:N0}/{_totalEntries:N0} ({pct:F1}%)";
+            Console.WriteLine($"[{Now}] [{backend.Name}] {progressText} OK:{ok} FAIL:{fail}"
                 + (sameAsEnglish > 0 ? $" 原文のまま(未保存):{sameAsEnglish}" : "")
                 + (masks.Count > 0 ? $" 名前の置き換え:{masks.Count}件" : "")
-                + (nameBroken.Count > 0 ? $" 置き換え記号の不一致(未保存):{nameBroken.Count}" : ""));
+                + (nameBroken.Count > 0 ? $" 置き換え記号の不一致(未保存):{nameBroken.Count}" : "")
+                + (personMissing > 0 ? $" 人名が原語のまま無い(未保存):{personMissing}" : ""));
             ProgressChanged?.Invoke(done, _totalEntries, _successTotal, _fallbackTotal);
+        }
+
+        // 人名を名前の一覧と翻訳 DB の person_names に貯める (次の Mask から {nameN} に置き換えて守る)
+        if (personsToStore.Count > 0)
+        {
+            try
+            {
+                var added = NameMasker.AddPersonNames(personsToStore);
+                if (added > 0)
+                    Console.WriteLine($"[{Now}] [{backend.Name}] 人名を名前の一覧に足しました: {added} 件 ({string.Join(", ", personsToStore.Select(p => p.Name).Distinct().Take(10))})");
+            }
+            catch (Exception ex) { Console.WriteLine($"[{Now}] [{backend.Name}] 人名を貯められませんでした: {ex.Message}"); }
         }
 
         if (translatedItems.Count > 0)
@@ -267,6 +305,16 @@ public class TranslationOrchestrator
     }
 
     private static string Now => DateTime.Now.ToString("HH:mm:ss");
+
+    // AI がそのキーに返した人名のうち、訳 (名前を戻した後) の中に原語のまま (大文字小文字を区別) 入っていない最初のものを返す。
+    // 全部入っていれば (人名が無ければ) null。{ を含むもの ({nameN} を人名として返したもの) は確かめない
+    internal static string? MissingPersonName(Dictionary<string, List<string>>? persons, string key, string translated)
+    {
+        if (persons == null || !persons.TryGetValue(key, out var names)) return null;
+        foreach (var n in names)
+            if (!n.Contains('{') && !translated.Contains(n, StringComparison.Ordinal)) return n;
+        return null;
+    }
 
     private List<TranslationEntry> LoadEntries()
     {
@@ -286,6 +334,30 @@ public class TranslationOrchestrator
     // ~mission(…) ~action(…) 等のトークン (英語の global.ini のトークンの中には空白・タブが無い)
     private static readonly System.Text.RegularExpressions.Regex TokenRegex = new(@"~\w+\([^)]*\)");
     private static readonly System.Text.RegularExpressions.Regex WhitespaceRegex = new(@"\s");
+    // %s %ls %d %i %u %f %S %02i %.2f 等の書式の記号 (英語の global.ini にある形。「%Is」は %ls の書き間違いとみられる形で原文にある)。
+    // 「50% 」「%\n」のような割合の % には合わない
+    private static readonly System.Text.RegularExpressions.Regex FormatSpecRegex = new(@"%\d*(?:\.\d+)?(?:ls|lS|Is|[sSdiuf])");
+    // @xxx の記号 (例 "@General Navigation Light" の "@General")。訳で後ろに日本語が直接続いても記号だけを取るよう、英字・数字・_ に限る
+    private static readonly System.Text.RegularExpressions.Regex AtTokenRegex = new(@"@[A-Za-z0-9_]+");
+
+    // 文字列としての「\n」(「\」と「n」の 2 文字) の数
+    private static int CountEscapedNewlines(string s)
+    {
+        int n = 0;
+        for (int i = s.IndexOf("\\n", StringComparison.Ordinal); i >= 0; i = s.IndexOf("\\n", i + 2, StringComparison.Ordinal)) n++;
+        return n;
+    }
+
+    // 文字列ごとの出てくる数
+    private static Dictionary<string, int> CountByValue(IEnumerable<string> values)
+    {
+        var d = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var v in values) d[v] = d.TryGetValue(v, out var c) ? c + 1 : 1;
+        return d;
+    }
+
+    private static bool SameCounts(Dictionary<string, int> a, Dictionary<string, int> b)
+        => a.Count == b.Count && a.All(kv => b.TryGetValue(kv.Key, out var c) && c == kv.Value);
 
     // 保存してはいけない訳なら理由を返す。問題なければ null
     // ・原文に無い韓国語の文字が混じっている (AI の誤り)
@@ -296,6 +368,9 @@ public class TranslationOrchestrator
     //   その訳がタブを写すのは正しいので、原文のタブの数までは通す
     // ・強調タグの名前が壊れている (</EMCA> など)、または開きと閉じの数が合わない
     //   (原文の閉じ忘れを AI が補ったものは、名前が正しく数が合っているので通す)
+    // ・原文にある ~mission( ) 等のトークン・%s 等の書式の記号・@xxx の記号・強調タグが欠けている、または数が違う
+    //   (強調タグが閉じていない原文は、訳のタグの総数が原文より少ないときだけ)
+    // ・文字列としての「\n」の数が原文と違う
     internal static string? BrokenTranslationReason(string english, string translated)
     {
         if (HangulRegex.IsMatch(translated) && !HangulRegex.IsMatch(english))
@@ -320,6 +395,32 @@ public class TranslationOrchestrator
             if (opens != tags.Count - opens && srcOpens == srcTags.Count - srcOpens)
                 return "強調タグの開きと閉じの数が合わない";
         }
+        // ~mission(…) 等のトークンが欠けている・数が違う (トークンごとに原文と同じ数だけあるか)
+        if (!SameCounts(CountByValue(TokenRegex.Matches(english).Select(m => m.Value)),
+                        CountByValue(TokenRegex.Matches(translated).Select(m => m.Value))))
+            return "~mission( ) 等のトークンが欠けている・数が違う";
+        // %s %ls %d 等の書式の記号、@xxx の記号が欠けている・数が違う (記号ごとに原文と同じ数だけあるか)
+        if (!SameCounts(CountByValue(FormatSpecRegex.Matches(english).Select(m => m.Value)),
+                        CountByValue(FormatSpecRegex.Matches(translated).Select(m => m.Value))))
+            return "%s 等の書式の記号が欠けている・数が違う";
+        if (!SameCounts(CountByValue(AtTokenRegex.Matches(english).Select(m => m.Value)),
+                        CountByValue(AtTokenRegex.Matches(translated).Select(m => m.Value))))
+            return "@ の記号が欠けている・数が違う";
+        // 強調タグが欠けている・数が違う (タグごとに原文と同じ数だけあるか。大文字小文字は区別しない (上の検査と同じ))。
+        // 原文のタグがもともと閉じていないものは、AI が閉じ忘れを補うと数が変わるので同じ数かは比べず、
+        // 訳のタグの総数が原文より少ないときだけ弾く (閉じ忘れを補うと総数は同じか多くなる)
+        {
+            var srcTags = EmphasisTagRegex.Matches(english).Select(m => m.Value.ToUpperInvariant()).ToList();
+            var srcOpens = srcTags.Count(t => !t.StartsWith("</"));
+            var trTags = EmphasisTagRegex.Matches(translated).Select(m => m.Value.ToUpperInvariant()).ToList();
+            if (srcOpens == srcTags.Count - srcOpens
+                ? !SameCounts(CountByValue(srcTags), CountByValue(trTags))
+                : trTags.Count < srcTags.Count)
+                return "強調タグが欠けている・数が違う";
+        }
+        // 文字列としての「\n」の数が原文と違う
+        if (CountEscapedNewlines(english) != CountEscapedNewlines(translated))
+            return "\\n の数が原文と違う";
         return null;
     }
 
@@ -336,11 +437,28 @@ public class TranslationOrchestrator
 
         // DB from previous translations — skip already translated keys
         var dbTranslated = new HashSet<string>();
+        // 名前 (地名・船名・武器・装備) のキー (TranslationDatabase.ReadNameKeys。大文字小文字を区別しない) と、行の source・japanese
+        var nameKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var rowOf = new Dictionary<string, (string? Source, string? Japanese)>(StringComparer.Ordinal);
         if (dbPath != null && File.Exists(dbPath))
         {
             try
             {
                 using var db = new TranslationDatabase(dbPath);
+                // gamedata_cache.db は翻訳 DB と同じフォルダ (RevertNamesToEnglish と同じ)
+                var gamedataPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(dbPath)) ?? "", "gamedata_cache.db");
+                try
+                {
+                    if (db.ReadNameKeys(gamedataPath) is { } nk)
+                        foreach (var k in nk.Places.Concat(nk.Ships).Concat(nk.Items)) nameKeys.Add(k);
+                }
+                catch (Exception ex) { Console.WriteLine($"  名前のキーを読めませんでした (名前の行も AI に送ります): {ex.Message}"); }
+                using (var sc = db.Connection.CreateCommand())
+                {
+                    sc.CommandText = "SELECT key, source, japanese FROM translations";
+                    using var sr = sc.ExecuteReader();
+                    while (sr.Read()) rowOf[sr.GetString(0)] = (sr.IsDBNull(1) ? null : sr.GetString(1), sr.IsDBNull(2) ? null : sr.GetString(2));
+                }
                 // AI が英語原文をそのまま返して保存された行 (source='ai' かつ japanese と english が前後の空白を除いて一致) は
                 // 翻訳済みとして扱わず、翻訳対象に入れる (DB の行は書き換えない。訳が返れば通常どおり上書きされる)
                 using var cmd = db.Connection.CreateCommand();
@@ -361,9 +479,10 @@ public class TranslationOrchestrator
             catch { }
         }
 
-        using var writer = new StreamWriter(outputPath, false, System.Text.Encoding.UTF8);
         int count = 0;
-
+        int nameSkipped = 0;
+        var keepEnglish = new List<string>();
+        using (var writer = new StreamWriter(outputPath, false, System.Text.Encoding.UTF8))
         foreach (var (key, enVal) in english)
         {
             if (forceEnglishRegex.Any(r => r.IsMatch(key)))
@@ -379,6 +498,15 @@ public class TranslationOrchestrator
             if (string.IsNullOrWhiteSpace(enVal))
                 continue;
 
+            // 名前のキーは AI に送らず、英語の原文のままにする (SetToOriginalEnglish。戻すのは TranslationDatabase.IsRevertibleNameRow の行だけ)
+            if (nameKeys.Contains(key))
+            {
+                if (rowOf.TryGetValue(key, out var row) && TranslationDatabase.IsRevertibleNameRow(row.Source, row.Japanese))
+                    keepEnglish.Add(key);
+                nameSkipped++;
+                continue;
+            }
+
             var entry = new TranslationEntry { Key = key, English = enVal };
             writer.WriteLine(JsonSerializer.Serialize(entry,
                 new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
@@ -386,5 +514,19 @@ public class TranslationOrchestrator
         }
 
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 未翻訳エントリ: {count}");
+
+        if (nameSkipped > 0)
+        {
+            Console.WriteLine($"  名前のキーを AI に送らない: {nameSkipped:N0} 件 (原文のままにする {keepEnglish.Count:N0} 件)");
+            if (keepEnglish.Count > 0)
+            {
+                try
+                {
+                    using var db = new TranslationDatabase(dbPath!);
+                    db.SetToOriginalEnglish(keepEnglish);
+                }
+                catch (Exception ex) { Console.WriteLine($"  名前の行を原文のままにできませんでした: {ex.Message}"); }
+            }
+        }
     }
 }

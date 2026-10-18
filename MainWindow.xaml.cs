@@ -1923,6 +1923,24 @@ public partial class MainWindow : Window
     // ミッション一覧を作る操作の番号。後から始めた操作の結果を、先に始めた操作の遅れて返った結果で上書きしないように、
     // await のあとで番号が最新でなければ結果を画面に入れない
     private int _missionListRequest;
+    // 一覧に出している行 (名前とカテゴリが同じ契約をまとめたもの。_currentMissions をまとめたもの)
+    private List<MissionService.MissionGroup>? _currentMissionRows;
+    // BP タブから開くときに、選ぶ行の詳細で代表として出す契約 (Mission_Selected で使って消す)
+    private MissionService.MissionEntry? _missionRepOverride;
+    // 詳細欄の「違い」の節を作る操作の番号 (遅れて返った古い結果を詳細欄に入れない)
+    private int _missionDetailRequest;
+
+    // 一覧に契約を出す: 同じ名前・カテゴリの契約を 1 行にまとめて DataGrid に入れる (list が null なら一覧を空にする)
+    private void SetMissionList(List<MissionService.MissionEntry>? list)
+    {
+        _currentMissions = list;
+        _currentMissionRows = list == null ? null : MissionService.GroupByName(list);
+        dgMissions.ItemsSource = _currentMissionRows;
+    }
+
+    // 状態欄の件数: まとめた行の数と契約の数
+    private string MissionCountText() =>
+        $"{_currentMissionRows?.Count ?? 0} 行（契約 {_currentMissions?.Count ?? 0} 件）";
 
     private void LoadMissions_Click(object sender, RoutedEventArgs e) => LoadMissionsAsync();
 
@@ -1940,7 +1958,7 @@ public partial class MainWindow : Window
             Dispatcher.Invoke(() =>
             {
                 btnLoadMissions.IsEnabled = false;
-                txtMissionStatus.Text = "ミッション読み込み中...";
+                txtMissionStatus.Text = "契約読み込み中...";
             });
 
             var transDbPath = DbPath;
@@ -1951,7 +1969,7 @@ public partial class MainWindow : Window
             });
             if (svc == null)
             {
-                Dispatcher.Invoke(() => txtMissionStatus.Text = "ミッションDB読み込み失敗");
+                Dispatcher.Invoke(() => txtMissionStatus.Text = "契約DB読み込み失敗");
                 return;
             }
 
@@ -1975,15 +1993,14 @@ public partial class MainWindow : Window
                 var transInfo = _missionService.TransLoadError != null
                     ? $"翻訳DBエラー:{_missionService.TransLoadError}"
                     : $"翻訳DB:{_missionService.TransDictCount}";
-                txtMissionStatus.Text = $"{categories.Sum(c => c.Count)} 件 ({transInfo})";
                 // 読み込みの結果は必ず入れる。番号を進めて、読み込み中に始まっていた一覧の操作の遅れた結果を捨てさせる
                 ++_missionListRequest;
                 // 読み込み直後は検索していない状態にそろえる (捨てた検索の「検索中...」や検索語を残さない)
                 txtMissionSearch.Text = "";
                 txtMissionSearchStatus.Text = "";
-                _currentMissions = allMissions;
-                dgMissions.ItemsSource = _currentMissions;
-                txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
+                SetMissionList(allMissions);
+                txtMissionStatus.Text = $"{MissionCountText()} ({transInfo})";
+                txtMissionDetail.Text = "契約を選択すると詳細が表示されます。";
                 btnLoadMissions.IsEnabled = true;
             });
         }
@@ -2012,11 +2029,10 @@ public partial class MainWindow : Window
             var svc = _missionService;
             var list = await Task.Run(() => svc.GetMissions(cat.Name));
             if (req != _missionListRequest) return;
-            _currentMissions = list;
-            dgMissions.ItemsSource = _currentMissions;
-            var jaCount = _currentMissions.Count(m => !string.IsNullOrEmpty(m.DisplayNameJa));
-            txtMissionStatus.Text = $"{cat.Name}: {_currentMissions.Count} 件 (日本語:{jaCount})";
-            txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
+            SetMissionList(list);
+            var jaCount = list.Count(m => !string.IsNullOrEmpty(m.DisplayNameJa));
+            txtMissionStatus.Text = $"{cat.Name}: {MissionCountText()} (日本語:{jaCount})";
+            txtMissionDetail.Text = "契約を選択すると詳細が表示されます。";
         }
         catch (Exception ex)
         {
@@ -2048,10 +2064,9 @@ public partial class MainWindow : Window
                 return svc.FilterByFactionAndRank(all, faction, rank);
             });
             if (req != _missionListRequest) return;
-            _currentMissions = filtered;
-            dgMissions.ItemsSource = _currentMissions;
-            txtMissionSearchStatus.Text = $"{_currentMissions.Count} 件";
-            txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
+            SetMissionList(filtered);
+            txtMissionSearchStatus.Text = MissionCountText();
+            txtMissionDetail.Text = "契約を選択すると詳細が表示されます。";
         }
         catch (Exception ex)
         {
@@ -2079,8 +2094,7 @@ public partial class MainWindow : Window
             {
                 var list = svc == null ? null : await Task.Run(() => svc.GetMissions(cat.Name));
                 if (req != _missionListRequest) return;
-                _currentMissions = list;
-                dgMissions.ItemsSource = _currentMissions;
+                SetMissionList(list);
             }
             catch (Exception ex)
             {
@@ -2094,7 +2108,7 @@ public partial class MainWindow : Window
             var svc = _missionService;
             if (svc == null)
             {
-                dgMissions.ItemsSource = null;
+                SetMissionList(null);
                 return;
             }
             var faction = cmbMissionFaction.SelectedItem as string;
@@ -2107,10 +2121,9 @@ public partial class MainWindow : Window
                     return svc.FilterByFactionAndRank(all, faction, rank);
                 });
                 if (req != _missionListRequest) return;
-                _currentMissions = filtered;
-                dgMissions.ItemsSource = _currentMissions;
-                txtMissionSearchStatus.Text = $"{_currentMissions.Count} 件";
-                txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
+                SetMissionList(filtered);
+                txtMissionSearchStatus.Text = MissionCountText();
+                txtMissionDetail.Text = "契約を選択すると詳細が表示されます。";
             }
             catch (Exception ex)
             {
@@ -2124,7 +2137,7 @@ public partial class MainWindow : Window
     {
         if (_missionService == null)
         {
-            txtMissionSearchStatus.Text = "先にミッション読み込みを実行してください";
+            txtMissionSearchStatus.Text = "先に契約読み込みを実行してください";
             return;
         }
         var query = txtMissionSearch.Text.Trim();
@@ -2144,11 +2157,10 @@ public partial class MainWindow : Window
                 return (found.Count, svc.FilterByFactionAndRank(found, faction, rank));
             });
             if (req != _missionListRequest) return;
-            _currentMissions = filtered;
-            dgMissions.ItemsSource = _currentMissions;
-            txtMissionSearchStatus.Text = $"{_currentMissions.Count} 件";
+            SetMissionList(filtered);
+            txtMissionSearchStatus.Text = MissionCountText();
 
-            if (_currentMissions.Count == 0 && foundCount > 0)
+            if (filtered.Count == 0 && foundCount > 0)
             {
                 // 検索語では当たったが、組合・ランクの絞り込みで 0 件になった
                 var transHits = await Task.Run(() => svc.SearchTranslations(query));
@@ -2170,15 +2182,15 @@ public partial class MainWindow : Window
                 SetMissionDetail(sb.ToString());
                 txtMissionSearchStatus.Text = $"0 件 (検索では {foundCount} 件。組合・ランクの絞り込みで 0 件)";
             }
-            else if (_currentMissions.Count == 0)
+            else if (filtered.Count == 0)
             {
                 var transHits = await Task.Run(() => svc.SearchTranslations(query));
                 if (req != _missionListRequest) return;
                 if (transHits.Count > 0)
                 {
                     var sb = new System.Text.StringBuilder();
-                    sb.AppendLine("ミッションデータに直接の一致はありませんが、翻訳データベースに以下のタイトルが見つかりました。");
-                    sb.AppendLine("（ゲーム内でランタイム生成されるミッションの可能性があります）\n");
+                    sb.AppendLine("契約データに直接の一致はありませんが、翻訳データベースに以下のタイトルが見つかりました。");
+                    sb.AppendLine("（ゲーム内でランタイム生成される契約の可能性があります）\n");
                     foreach (var (key, en, ja) in transHits.Take(20))
                     {
                         var display = !string.IsNullOrEmpty(ja) ? $"{ja} ({en})" : en;
@@ -2191,10 +2203,10 @@ public partial class MainWindow : Window
                     txtMissionSearchStatus.Text = $"0 件 (翻訳DB: {transHits.Count} 件)";
                 }
                 else
-                    txtMissionDetail.Text = "該当するミッションが見つかりませんでした。";
+                    txtMissionDetail.Text = "該当する契約が見つかりませんでした。";
             }
             else
-                txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
+                txtMissionDetail.Text = "契約を選択すると詳細が表示されます。";
         }
         catch (Exception ex)
         {
@@ -2236,7 +2248,7 @@ public partial class MainWindow : Window
     // ミッションの詳細を出す。今の一覧にあればその行を選ぶ (選び直しで詳細が出る)。一覧に無ければ一覧の選択を外して詳細だけを出す
     private async void ShowMissionByRecord(IReadOnlyList<string> records)
     {
-        if (_missionService == null) { txtMissionDetail.Text = "ミッションがまだ読み込まれていません (［ミッション読み込み］)。"; return; }
+        if (_missionService == null) { txtMissionDetail.Text = "契約がまだ読み込まれていません (［契約読み込み］)。"; return; }
         // 一覧を出す・行を選ぶ経路に入ったときの操作の番号 (それより前の例外は番号の判定をせずに出す)
         int? req = null;
         try
@@ -2244,7 +2256,7 @@ public partial class MainWindow : Window
             var m = _missionService.FindByRecord(records);
             // 見つからなかったときも番号を進めて、待っている古い一覧の操作の結果が「見つかりませんでした」を上書きしないようにする
             // 番号を進めると待っている操作の結果は捨てられるので、その操作が出した「検索中...」も消す
-            if (m == null) { ++_missionListRequest; txtMissionSearchStatus.Text = ""; txtMissionDetail.Text = $"ミッションが見つかりませんでした ({string.Join(", ", records)})。"; return; }
+            if (m == null) { ++_missionListRequest; ++_missionDetailRequest; txtMissionSearchStatus.Text = ""; txtMissionDetail.Text = $"契約が見つかりませんでした ({string.Join(", ", records)})。"; return; }
             // 一覧を出す・行を選ぶ経路はすべて番号を進めて、待っている古い一覧の操作の結果を捨てさせる (await の無い分岐も)
             req = ++_missionListRequest;
             txtMissionSearchStatus.Text = "";
@@ -2264,27 +2276,38 @@ public partial class MainWindow : Window
                     var list = await Task.Run(() => svc.GetMissions(cat.Name));
                     if (!ReferenceEquals(svc, _missionService)) return;
                     if (req != _missionListRequest) return;
-                    _currentMissions = list;
-                    dgMissions.ItemsSource = _currentMissions;
-                    var jaCount = _currentMissions.Count(x => !string.IsNullOrEmpty(x.DisplayNameJa));
-                    txtMissionStatus.Text = $"{cat.Name}: {_currentMissions.Count} 件 (日本語:{jaCount})";
+                    SetMissionList(list);
+                    var jaCount = list.Count(x => !string.IsNullOrEmpty(x.DisplayNameJa));
+                    txtMissionStatus.Text = $"{cat.Name}: {MissionCountText()} (日本語:{jaCount})";
                 }
                 lstMissionCategories.ScrollIntoView(cat);
             }
-            var row = _currentMissions?.FirstOrDefault(x => string.Equals(x.RecordName, m.RecordName, StringComparison.OrdinalIgnoreCase));
-            if (row != null && !ReferenceEquals(dgMissions.SelectedItem, row))
+            // その契約を含むまとめた行を選び、詳細欄ではその契約を代表として出す
+            MissionService.MissionEntry? member = null;
+            var row = _currentMissionRows?.FirstOrDefault(r =>
+                (member = r.Members.FirstOrDefault(x => string.Equals(x.RecordName, m.RecordName, StringComparison.OrdinalIgnoreCase))) != null);
+            if (row != null && member != null && !ReferenceEquals(dgMissions.SelectedItem, row))
             {
-                dgMissions.SelectedItem = row;   // Mission_Selected が詳細を出す
+                _missionRepOverride = member;
+                try { dgMissions.SelectedItem = row; }   // Mission_Selected が詳細を出す
+                finally { _missionRepOverride = null; }
                 dgMissions.ScrollIntoView(row);
                 return;
             }
-            if (row == null) dgMissions.SelectedItem = null;
-            else dgMissions.ScrollIntoView(row);
-            SetMissionDetail(_missionService.FormatDetail(m));
+            if (row == null || member == null)
+            {
+                dgMissions.SelectedItem = null;
+                ++_missionDetailRequest;   // 待っている「違い」の節を捨てる
+                SetMissionDetail(_missionService.FormatDetail(m));
+                return;
+            }
+            dgMissions.ScrollIntoView(row);
+            ShowMissionRowDetail(row, member);
         }
         catch (Exception ex)
         {
             if (req != null && req != _missionListRequest) return;
+            ++_missionDetailRequest;   // 待っている「違い」の節でこのエラーを上書きしない
             txtMissionDetail.Text = $"詳細表示エラー: {ex.Message}";
         }
     }
@@ -2310,16 +2333,43 @@ public partial class MainWindow : Window
     private void Mission_Selected(object sender, SelectionChangedEventArgs e)
     {
         if (_missionService == null) return;
-        if (dgMissions.SelectedItem is not MissionService.MissionEntry mission) { HighlightMissionCategory(null); return; }
-        HighlightMissionCategory(mission);
+        if (dgMissions.SelectedItem is not MissionService.MissionGroup row) { HighlightMissionCategory(null); return; }
+        // BP タブから開いたときはその契約を代表にする (その行に含まれるときだけ)
+        var rep = _missionRepOverride != null && row.Members.Contains(_missionRepOverride) ? _missionRepOverride : row.Representative;
+        _missionRepOverride = null;
+        ShowMissionRowDetail(row, rep);
+    }
 
+    // まとめた行の詳細: 代表の契約の詳細を出し、2 件以上なら「■ 違い（n 件）」の節を後ろで作って付け足す
+    // (件数の多い行では詳細を件数分作るので時間がかかる。作っている間に別の行を選んだら結果は捨てる)
+    private async void ShowMissionRowDetail(MissionService.MissionGroup row, MissionService.MissionEntry rep)
+    {
+        var svc = _missionService;
+        if (svc == null) return;
+        var req = ++_missionDetailRequest;
+        HighlightMissionCategory(rep);
+        string detail;
         try
         {
-            SetMissionDetail(_missionService.FormatDetail(mission));
+            detail = svc.FormatDetail(rep);
+            SetMissionDetail(detail);
         }
         catch (Exception ex)
         {
             txtMissionDetail.Text = $"詳細表示エラー: {ex.Message}";
+            return;
+        }
+        if (row.Members.Count < 2) return;
+        try
+        {
+            var diff = await Task.Run(() => svc.FormatGroupDifferences(row, rep));
+            if (req != _missionDetailRequest || !ReferenceEquals(dgMissions.SelectedItem, row)) return;
+            if (diff.Length > 0) SetMissionDetail(detail + diff);
+        }
+        catch (Exception ex)
+        {
+            if (req != _missionDetailRequest || !ReferenceEquals(dgMissions.SelectedItem, row)) return;
+            SetMissionDetail(detail + $"\n\n■ 違い\n  違いの一覧を作れなかった ({ex.Message})");
         }
     }
 
@@ -2354,7 +2404,7 @@ public partial class MainWindow : Window
         try { hasStructuredData = _gameDataExtractor == null || _gameDataExtractor.HasStructuredData(); }
         catch { hasStructuredData = true; }
         if (!hasStructuredData)
-            welcomeLines.Add("\n💡 ミッション・契約の検索には、設定タブの「インデックス構築」の実行が必要です（約2分半）。");
+            welcomeLines.Add("\n💡 契約の検索には、設定タブの「インデックス構築」の実行が必要です（約2分半）。");
 
         _chatBubbles.Add(new ChatBubble { Text = string.Join("", welcomeLines), IsUser = false });
     }
@@ -3188,12 +3238,12 @@ public partial class MainWindow : Window
         try
         {
             await _gameDataExtractor.FetchWikiMissionsAsync();
-            MessageBox.Show("Wiki ミッションデータの取得が完了しました。", "完了", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show("Wiki 契約データの取得が完了しました。", "完了", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)
         {
-            txtGameDataStatus.Text = "Wiki ミッション取得失敗";
-            MessageBox.Show($"Wiki ミッション取得エラー:\n{ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+            txtGameDataStatus.Text = "Wiki 契約取得失敗";
+            MessageBox.Show($"Wiki 契約取得エラー:\n{ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {

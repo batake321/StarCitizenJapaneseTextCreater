@@ -226,9 +226,10 @@ public partial class App : Application
         public int Knowledge { get; set; }
         public int LocalMeta { get; set; }
         public int Tombstones { get; set; }   // PC 間の同期の墓石 (sync_tombstones)
+        public int PersonNames { get; set; }   // AI 翻訳で貯めた人名 (person_names)
 
         public override string ToString() =>
-            $"手動訳など {Translations} 行・用語集 {Glossary} 件・記憶 {Knowledge} 件・この PC の印 {LocalMeta} 件・同期の墓石 {Tombstones} 件";
+            $"手動訳など {Translations} 行・用語集 {Glossary} 件・人名 {PersonNames} 件・記憶 {Knowledge} 件・この PC の印 {LocalMeta} 件・同期の墓石 {Tombstones} 件";
     }
 
     internal static BundledDbStamp GetBundledDbStamp(string path)
@@ -724,6 +725,11 @@ public partial class App : Application
                         counts.Glossary = CopyPersonalRows(old, tmp, tx, dbName, "glossary", "用語集",
                             requiredCols: ["english"], where: null,
                             conflictTarget: "english", updateCols: ["japanese", "created_at"], warnings);
+                        // AI 翻訳で貯めた人名 (NameMasker.AddPersonNames)。同梱 DB に表が無ければ作ってから写す
+                        ExecuteNonQuery(tmp, tx, TranslationDatabase.PersonNamesDdl);
+                        counts.PersonNames = CopyPersonalRows(old, tmp, tx, dbName, "person_names", "AI 翻訳で貯めた人名",
+                            requiredCols: ["name"], where: null,
+                            conflictTarget: "name", updateCols: ["source_key", "created_at"], warnings);
                         counts.Tombstones = CopyTombstones(old, tmp, tx, dbName, warnings);
                     }
                     else

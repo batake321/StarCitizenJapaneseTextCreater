@@ -12,10 +12,10 @@
             <TextBlock Text="装備名の後ろに分類を付ける　例：Bracer [軍1C]"/>
         </CheckBox>
         <CheckBox x:Name="chkMissionRepMarks" Margin="0,4">
-            <TextBlock Text="ミッション名に派閥と貢献度を付ける　例：トラッカーライセンス認定資格 [バウンティーハンターズ・ギルド +50]"/>
+            <TextBlock Text="契約名に派閥と貢献度を付ける　例：トラッカーライセンス認定資格 [バウンティーハンターズ・ギルド +50]"/>
         </CheckBox>
         <CheckBox x:Name="chkBlueprintMarks" Margin="0,4">
-            <TextBlock Text="ミッション名に設計図を付ける　例：Orison救援：小規模製造依頼 [BP]"/>
+            <TextBlock Text="契約名に設計図を付ける　例：Orison救援：小規模製造依頼 [BP]"/>
         </CheckBox>
 
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">

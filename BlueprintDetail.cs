@@ -28,7 +28,7 @@ internal static class BlueprintDetail
             // 入手: 初期所持・ミッションの報酬 (表示名の数)。どちらも無ければ不明
             var sources = new List<string>();
             if (it.Starter) sources.Add("初期所持");
-            if (it.Missions.Count > 0) sources.Add($"ミッションの報酬 {it.Missions.Count} 件");
+            if (it.Missions.Count > 0) sources.Add($"契約の報酬 {it.Missions.Count} 件");
             sb.AppendLine("  入手: " + (sources.Count > 0 ? string.Join(" / ", sources) : "不明（ゲームデータに入手経路が無い）"));
             // 在庫: trade_cache.db を読めたときだけ
             if (haves != null && stockText.Length > 0) sb.AppendLine($"  在庫: {stockText}");
@@ -57,7 +57,7 @@ internal static class BlueprintDetail
             if (it.Missions.Count > 0)
             {
                 sb.AppendLine();
-                sb.AppendLine("  | 報酬でもらえるミッション |");
+                sb.AppendLine("  | 報酬でもらえる契約 |");
                 sb.AppendLine("  |---|");
                 foreach (var (name, _) in it.Missions) sb.AppendLine($"  | {Cell(name)} |");
             }

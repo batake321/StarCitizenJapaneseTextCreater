@@ -19,16 +19,18 @@ public abstract class TranslationBackend
         "ルール：\n" +
         "1. 地名（惑星名、星系名、都市名、ステーション名）は英語のまま。カタカナに音訳しない（地名リストが別途付与されます）\n" +
         "2. 船の名前・メーカー名は英語のまま。カタカナに音訳しない\n" +
-        "3. 人物名・企業名の固有名詞は英語のまま。カタカナに音訳しない\n" +
+        "3. 人物名・企業名の固有名詞は英語のまま。カタカナに音訳しない。愛称（あだ名・ニックネーム）も原文のままで訳さない\n" +
         "4. 船の装備・武器・部品の製品名・型名は英語のまま。カタカナに音訳しない（種類を表す一般名詞は訳してよい）\n" +
         "5. UIラベル、説明文、ミッションテキストは自然な日本語に\n" +
         "6. %ls %s ~action(xxx) @xxx ~mission(xxx) <EM4> </EM4> 等のタグやプレースホルダーはそのまま保持\n" +
         "7. 空文字・数字のみ・記号のみはそのまま返す\n" +
         "8. 原文中の \\n は実際の改行にせず「\\」と「n」の2文字のまま出力する（1エントリは必ず1行に収める）\n" +
-        "9. {name1} {name2} 等の {nameN} は名前の置き換え記号。訳さず番号も変えずにそのまま保持\n\n" +
+        "9. {name1} {name2} 等の {nameN} は名前の置き換え記号。訳さず番号も変えずにそのまま保持\n" +
+        "10. 英語テキストに人名（登場人物の名前）があるエントリは、そのエントリの訳の行の次に「人名<TAB>キー<TAB>人名1<TAB>人名2…」の行を1行出力する。" +
+        "人名は英語テキストに書かれている綴りのまま（訳さない・音訳しない）。{nameN} は人名に含めない。人名が無いエントリはこの行を出さない\n\n" +
         "入力: 1行1エントリ、タブ区切り「キー<TAB>英語テキスト」\n" +
-        "出力: 1行1エントリ、タブ区切り「キー<TAB>日本語テキスト」\n" +
-        "入力と同じ行数・同じキーで、タブ区切りの翻訳結果のみ出力。説明や装飾は不要。";
+        "出力: 1行1エントリ、タブ区切り「キー<TAB>日本語テキスト」（と、ルール10の「人名<TAB>キー<TAB>人名…」の行）\n" +
+        "訳の行は入力と同じ行数・同じキーで、タブ区切りの翻訳結果と人名の行のみ出力。説明や装飾は不要。";
 
     private static List<(string English, string Japanese)>? _glossary;
     private static List<string>? _locationNames;
@@ -232,9 +234,22 @@ public abstract class TranslationBackend
 
     public abstract Task<Dictionary<string, string>?> TranslateAsync(List<TranslationEntry> batch);
 
+    // 応答の人名の行の先頭の欄 (「人名<TAB>キー<TAB>人名1<TAB>人名2…」。BaseSystemPrompt のルール10)
+    public const string PersonNamesLineLabel = "人名";
+
+    // ParseResponse の結果。キー → 訳 (Dictionary そのもの) と、キー → AI が返した人名の一覧 (原語のまま。人名の行が無いキーは入らない)。
+    // 各バックエンドは ParseResponse の結果をそのまま返すので、TranslateAsync の結果をこの型として読めば人名も取れる
+    public class TranslationResult : Dictionary<string, string>
+    {
+        public Dictionary<string, List<string>> PersonNames { get; } = new(StringComparer.Ordinal);
+    }
+
+    // AI が訳に付ける「<0x0D>」のような文字列 (<0x と 16 進 2 桁と >)
+    private static readonly System.Text.RegularExpressions.Regex ByteLiteralRegex = new(@"<0x[0-9A-Fa-f]{2}>");
+
     protected static Dictionary<string, string>? ParseResponse(string text, string backendName = "", List<TranslationEntry>? batch = null)
     {
-        var result = new Dictionary<string, string>();
+        var result = new TranslationResult();
         var expectedKeys = batch?.Select(e => e.Key).ToHashSet();
         // 原文に「\n」がある (複数行の) 項目だけ、続きの行をつなげる。1 行の項目に余計な説明がくっつかないようにする
         var multiLineKeys = batch?.Where(e => e.English.Contains("\\n")).Select(e => e.Key).ToHashSet();
@@ -248,9 +263,27 @@ public abstract class TranslationBackend
         foreach (var line in text.Split('\n'))
         {
             var trimmed = line.TrimEnd('\r').Trim();
+            // 空行は無視する。訳の中の改行は文字の「\n」で表すので、本当の空行が訳の中身になることはない
+            // (つなぐと、空行ごとに余分な「\n」が付く)
+            if (trimmed.Length == 0) continue;
 
             var tabIdx = trimmed.IndexOf('\t');
             var candidateKey = tabIdx > 0 ? trimmed[..tabIdx].Trim() : null;
+
+            // 人名の行「人名<TAB>キー<TAB>人名1<TAB>人名2…」。キーが送ったキーでないもの (batch があるとき) は捨てる。
+            // 直前の項目の続きの行としては扱わない (lastKey はそのまま。人名の行の後にその項目の続きの行が来てもつなぐ)
+            if (candidateKey == PersonNamesLineLabel)
+            {
+                var cols = trimmed[(tabIdx + 1)..].Split('\t').Select(c => c.Trim()).ToList();
+                var nameKey = cols[0];
+                if (nameKey.Length > 0 && (expectedKeys == null || expectedKeys.Contains(nameKey)))
+                {
+                    if (!result.PersonNames.TryGetValue(nameKey, out var list)) result.PersonNames[nameKey] = list = [];
+                    foreach (var n in cols.Skip(1))
+                        if (n.Length > 0 && !list.Contains(n)) list.Add(n);
+                }
+                continue;
+            }
             bool isNewEntry = candidateKey != null && (expectedKeys == null || expectedKeys.Contains(candidateKey));
 
             if (isNewEntry)
@@ -273,10 +306,20 @@ public abstract class TranslationBackend
                     result[lastKey] = prev + "\\n" + trimmed;
             }
         }
+        // 訳の中の「<0x0D>」のような <0x..> の文字列 (AI が付けるもの。本当の改行コードではない) のうち、原文に無いものを取り除き、
+        // 取り除いた訳は前後の空白を除く (上で訳の前後の空白を除くのと同じ)。末尾の「\n」を整える前に行う
+        var englishOf = batch?.GroupBy(e => e.Key).ToDictionary(g => g.Key, g => g.First().English);
+        foreach (var k in result.Keys.ToList())
+        {
+            var en = englishOf != null && englishOf.TryGetValue(k, out var e0) ? e0 : "";
+            var v = result[k];
+            var cleaned = ByteLiteralRegex.Replace(v, m => en.Contains(m.Value, StringComparison.Ordinal) ? m.Value : "");
+            if (cleaned != v) result[k] = cleaned.Trim();
+        }
         // 続きの行をつないだ結果、末尾に付いた余分な「\n」を取り除く (原文が「\n」で終わっているものはそのまま)
         if (batch != null)
         {
-            var english = batch.GroupBy(e => e.Key).ToDictionary(g => g.Key, g => g.First().English);
+            var english = englishOf!;
             foreach (var k in result.Keys.ToList())
             {
                 if (english.TryGetValue(k, out var en) && en.EndsWith("\\n")) continue;
