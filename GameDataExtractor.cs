@@ -420,7 +420,7 @@ public class GameDataExtractor : IDisposable
         try
         {
             using var cmd = _db.CreateCommand();
-            cmd.CommandText = ItemPortsDdl + ItemPortLabelsDdl + ResourceTypesDdl + BlueprintsDdl;
+            cmd.CommandText = ItemPortsDdl + ItemPortLabelsDdl + ResourceTypesDdl + BlueprintsDdl + StarmapNamesDdl;
             cmd.ExecuteNonQuery();
             AddMissingResourceTypesColumns(_db);
         }
@@ -464,6 +464,18 @@ public class GameDataExtractor : IDisposable
             extracted_at TEXT NOT NULL,
             group_record TEXT,
             refined_uuid TEXT
+        );
+        """;
+
+    // 星図の場所 (StarMapObject) のレコード名 → 表示名の翻訳キー。record_name は "StarMapObject." を除いた名前 (ゲームログの
+    // <RequestLocationInventory> の Location[…] と同じ綴り。RR_CRU_LEO 等)、name_key は name の値 ("@Stanton2_Transfer_Seraphim" 等。先頭の @ 付き)。
+    // name が @LOC_UNINITIALIZED・空のものは入れない。［ゲームログ］の場所名 (GameLogPanel の Place) で、今までの引き方で引けなかったときに使う。
+    // インデックス構築で作る (無い・空なら起動後に裏で一度だけ取り出す: RebuildStarmapNamesAsync。NeedsStarmapNames)
+    internal const string StarmapNamesDdl = """
+
+        CREATE TABLE IF NOT EXISTS starmap_names (
+            record_name TEXT PRIMARY KEY,
+            name_key TEXT
         );
         """;
 
@@ -1186,6 +1198,103 @@ public class GameDataExtractor : IDisposable
         }
         if (group.TryGetProperty("groups", out var groups) && groups.ValueKind == JsonValueKind.Array)
             foreach (var g in groups.EnumerateArray()) WalkResourceGroups(g, groupRecord, rows, seen);
+    }
+
+    // === 星図の場所の名前 (starmap_names) ===
+
+    // starmap_names が空か (前の版で構築した DB・前の版のバックアップを取り込んだ DB)。起動後の RebuildStarmapNamesAsync を走らせるか決めるため。表は EnsureDb が作る
+    public bool NeedsStarmapNames()
+    {
+        EnsureDb();
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "SELECT NOT EXISTS (SELECT 1 FROM starmap_names)";
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
+    }
+
+    // 星図の場所の名前だけを取り出し直す (インデックス構築をせずに starmap_names を埋める)。入れた行数を返す。
+    // 起動後に裏で一度だけ呼ばれる (MainWindow: NeedsStarmapNames のとき)。RebuildResourceTypesAsync と同じく dcb query 1 回なので
+    // Game2.dcb は取り出さず Data.p4k から直接読む。途中で構築が始まったら (IsIndexBuildRunning)、構築が作り直すので書き込まずに 0 を返す
+    public async Task<int> RebuildStarmapNamesAsync(IProgress<string>? progress = null, CancellationToken ct = default)
+    {
+        var p4kPath = FindDataP4k()
+            ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
+
+        await EnsureStarBreakerAsync();
+        EnsureDb();
+
+        Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
+        if (relay != null) StatusChanged += relay;
+        try
+        {
+            return await ExtractStarmapNamesAsync(p4kPath, ct, skipWriteIfIndexBuildStarts: true);
+        }
+        finally
+        {
+            if (relay != null) StatusChanged -= relay;
+        }
+    }
+
+    // 星図の場所 (StarMapObject) の name を starmap_names に入れる。取得できなければ前の行を残して 0 を返す。入れた行数を返す
+    private async Task<int> ExtractStarmapNamesAsync(string p4kPath, CancellationToken ct, bool skipWriteIfIndexBuildStarts = false)
+    {
+        StatusChanged?.Invoke("星図の場所の名前 (StarMapObject) を取り出し中...");
+        var output = await RunDcbQueryRawAsync(p4kPath, "StarMapObject.name", "*", ct);
+        var rows = ParseStarmapNames(output);
+        if (rows.Count == 0)
+        {
+            StatusChanged?.Invoke("星図の場所の名前 (StarMapObject) を取得できませんでした (前のデータを残します)");
+            return 0;
+        }
+        if (skipWriteIfIndexBuildStarts && IsIndexBuildRunning)
+        {
+            StatusChanged?.Invoke("星図の場所の名前 (StarMapObject): インデックス構築・装備データの再抽出が始まったので、取り出した値は書き込みませんでした");
+            return 0;
+        }
+        ct.ThrowIfCancellationRequested();
+        using var tx = _db!.BeginTransaction();
+        using (var del = _db.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM starmap_names";
+            del.ExecuteNonQuery();
+        }
+        using (var ins = _db.CreateCommand())
+        {
+            ins.Transaction = tx;
+            ins.CommandText = "INSERT OR REPLACE INTO starmap_names(record_name,name_key) VALUES(@r,@k)";
+            var pR = ins.Parameters.Add("@r", SqliteType.Text);
+            var pK = ins.Parameters.Add("@k", SqliteType.Text);
+            foreach (var (recordName, nameKey) in rows)
+            {
+                pR.Value = recordName;
+                pK.Value = nameKey;
+                ins.ExecuteNonQuery();
+            }
+        }
+        tx.Commit();
+        StatusChanged?.Invoke($"星図の場所の名前 (StarMapObject): {rows.Count} 件");
+        return rows.Count;
+    }
+
+    // dcb query "StarMapObject.name" の出力 (1 行が「StarMapObject.レコード名<TAB>値」) から (レコード名 ("StarMapObject." を除く), 値) を集める。
+    // 値は翻訳キーのまま ("@…")。値が空・@LOC_UNINITIALIZED の行、"StarMapObject." で始まらない行は入れない。同じレコード名は最初のもの
+    internal static List<(string RecordName, string NameKey)> ParseStarmapNames(string output)
+    {
+        const string prefix = "StarMapObject.";
+        var rows = new List<(string, string)>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var raw in output.Split('\n'))
+        {
+            var line = raw.TrimEnd('\r');
+            var tab = line.IndexOf('\t');
+            if (tab <= 0 || !line.StartsWith(prefix, StringComparison.Ordinal)) continue;
+            var record = line[prefix.Length..tab].Trim();
+            var key = line[(tab + 1)..].Trim();
+            if (record.Length == 0 || key.Length == 0 || string.Equals(key, "@LOC_UNINITIALIZED", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!seen.Add(record)) continue;
+            rows.Add((record, key));
+        }
+        return rows;
     }
 
     // === BP (ブループリント) ===
@@ -2753,6 +2862,11 @@ public class GameDataExtractor : IDisposable
         try { resourceCount = await ExtractResourceTypesAsync(dataP4kPath, now, ct); }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { StatusChanged?.Invoke($"資源の種類 (ResourceType) の取り出しに失敗しました: {ex.Message}"); }
+        // 星図の場所の名前 (StarMapObject。［ゲームログ］の場所名に使う)。失敗しても構築は続ける (starmap_names は前のまま。無い・空なら起動後に裏で取り出す)
+        int starmapCount = 0;
+        try { starmapCount = await ExtractStarmapNamesAsync(dataP4kPath, ct); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { StatusChanged?.Invoke($"星図の場所の名前 (StarMapObject) の取り出しに失敗しました: {ex.Message}"); }
 
         // Step 6: BP (ブループリント。［BP］タブ)。失敗しても構築は続ける (3 表は前のまま。無い・空なら起動後に裏で取り出す: RebuildBlueprintsAsync)
         step++;
@@ -2790,7 +2904,7 @@ public class GameDataExtractor : IDisposable
 
         sw.Stop();
         ProgressChanged?.Invoke(100, $"完了！ ({sw.Elapsed.TotalSeconds:F1}秒)");
-        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}, 装備: {itemCount}, 弾: {ammoCount}, 契約: {missionCount}, 商品: {commodityCount}, 資源: {resourceCount}, BP: {blueprintCount}");
+        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}, 装備: {itemCount}, 弾: {ammoCount}, 契約: {missionCount}, 商品: {commodityCount}, 資源: {resourceCount}, 場所名: {starmapCount}, BP: {blueprintCount}");
 
         // 新しい品目の売り場・価格は、構築とは別に裏で取得する (MainWindow が受けて FetchNewShopPricesAsync を走らせる)
         if (requestShopPriceFetch) ShopPriceFetchRequested?.Invoke(DbPath);
@@ -4195,6 +4309,9 @@ public class GameDataExtractor : IDisposable
         var ppSz = portCmd.Parameters.Add("@sz", SqliteType.Integer);
         var ppEi = portCmd.Parameters.Add("@ei", SqliteType.Text);
 
+        // 名前で種類が決まらない最上位ポートを、付いている物の種類で装備と判定するための表 (呼び出し元で item_index を先に作っている)
+        var itemTypeByRecord = LoadItemTypeByRecord(_db);
+
         for (int pi = 0; pi < VehicleManufacturerPrefixes.Length; pi++)
         {
             var prefix = VehicleManufacturerPrefixes[pi];
@@ -4204,14 +4321,15 @@ public class GameDataExtractor : IDisposable
             if (string.IsNullOrEmpty(rawJson)) continue;
 
             count += ParseAndInsertShips(rawJson, now, shipCmd, pRn, pNm, pMf, pCa, pRo, pCr, pSz, pRj, pEa,
-                portCmd, ppSrn, ppPn, ppIt, ppSz, ppEi);
+                portCmd, ppSrn, ppPn, ppIt, ppSz, ppEi, itemTypeByRecord);
         }
 
         tx.Commit();
         return count;
     }
 
-    private static readonly HashSet<string> EquipmentPortPrefixes = new(StringComparer.OrdinalIgnoreCase)
+    // 前からある名前の規則 (この規則と InferLegacyPortType で拾う行は、種類に関係なく今までどおり保存する)
+    private static readonly HashSet<string> LegacyEquipmentPortPrefixes = new(StringComparer.OrdinalIgnoreCase)
     {
         "hardpoint_gun", "hardpoint_weapon", "hardpoint_turret",
         "hardpoint_shield", "hardpoint_power_plant", "hardpoint_quantum_drive",
@@ -4221,7 +4339,27 @@ public class GameDataExtractor : IDisposable
         "hardpoint_countermeasure",
     };
 
+    // 名前の規則 = 前からある規則 + 綴り違い (hardpoint_powerplant = Vanguard 等、hardpoint_lifesupport、hardpoint_cm_launcher / hardpoint_CML_* = 対抗手段の発射機)
+    private static readonly HashSet<string> EquipmentPortPrefixes = new(
+        LegacyEquipmentPortPrefixes.Concat(["hardpoint_powerplant", "hardpoint_lifesupport", "hardpoint_cm_launcher", "hardpoint_cml"]),
+        StringComparer.OrdinalIgnoreCase);
+
     private static string InferPortType(string portName)
+    {
+        var legacy = InferLegacyPortType(portName);
+        if (legacy.Length > 0) return legacy;
+        var lower = portName.ToLowerInvariant();
+        // 綴り違い (前からある語に当たらなかったものだけ。今まで種類が決まっていた名前の結果は変わらない)
+        if (lower.Contains("powerplant")) return "PowerPlant";
+        if (lower.Contains("lifesupport")) return "LifeSupport";
+        if (lower.Contains("cm_launcher") || lower.StartsWith("hardpoint_cml", StringComparison.Ordinal)) return "CounterMeasure";
+        // ミサイルラックの綴り違い (hardpoint_missile_left / hardpoint_missiles_wing_left / hardpoint_missilelauncher_* 等)
+        if (lower.Contains("missile")) return "MissileLauncher";
+        return "";
+    }
+
+    // 前からある名前からの種類の推定
+    private static string InferLegacyPortType(string portName)
     {
         var lower = portName.ToLowerInvariant();
         if (lower.Contains("gun") || (lower.Contains("weapon") && !lower.Contains("rack"))) return "WeaponGun";
@@ -4236,6 +4374,83 @@ public class GameDataExtractor : IDisposable
         if (lower.Contains("life_support")) return "LifeSupport";
         if (lower.Contains("countermeasure")) return "CounterMeasure";
         return "";
+    }
+
+    // 名前で種類が決まらない最上位ポートを、付いている物の item_index の種類 (item_type) で装備と判定するときの装備の種類。
+    // LifeSupportGenerator → LifeSupport、WeaponDefensive → CounterMeasure、TurretBase → Turret
+    // (名前で決めたときの種類にそろえる。hardpoint_turret_* に付いた TurretBase は Turret で入っている)。それ以外はそのまま
+    private static readonly HashSet<string> ShipEquipmentItemTypes = new(StringComparer.Ordinal)
+    {
+        "WeaponGun", "Turret", "TurretBase", "MissileLauncher", "Missile", "PowerPlant", "Cooler", "Shield", "QuantumDrive",
+        "JumpDrive", "Radar", "LifeSupportGenerator", "WeaponDefensive", "WeaponMining", "TractorBeam", "SalvageHead",
+        "UtilityTurret", "WeaponMount", "BombLauncher", "Bomb", "EMP", "QuantumInterdictionGenerator", "ToolArm",
+        "MiningModifier", "SalvageModifier",
+    };
+
+    // 付いている物の種類 (item_index.item_type) が装備なら ship_ports の種類、装備でない・item_index に無い・空なら null
+    private static string? ShipEquipmentPortType(string? itemType)
+    {
+        if (string.IsNullOrEmpty(itemType) || !ShipEquipmentItemTypes.Contains(itemType)) return null;
+        return itemType switch
+        {
+            "LifeSupportGenerator" => "LifeSupport",
+            "WeaponDefensive" => "CounterMeasure",
+            "TurretBase" => "Turret",
+            _ => itemType,
+        };
+    }
+
+    // item_index に無い物 (地上車両のミサイルラック GMRCK_* 等) の種類を、直下に付いている装備から決める。
+    // Missile → MissileLauncher、Bomb → BombLauncher、WeaponGun → Turret。直下に該当が無い、または食い違うときは null
+    private static string? PortTypeFromChildren(JsonElement entry, IReadOnlyDictionary<string, string> itemTypeByRecord)
+    {
+        if (!entry.TryGetProperty("loadout", out var sub) || sub.ValueKind != JsonValueKind.Object
+            || !sub.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array) return null;
+        string? result = null;
+        foreach (var child in entries.EnumerateArray())
+        {
+            if (child.ValueKind != JsonValueKind.Object) continue;
+            var t = LookupItemType(itemTypeByRecord, ResolveLoadoutEntityName(child)) switch
+            {
+                "Missile" => "MissileLauncher",
+                "Bomb" => "BombLauncher",
+                "WeaponGun" => "Turret",
+                _ => null,
+            };
+            if (t == null) continue;
+            if (result != null && result != t) return null;
+            result = t;
+        }
+        return result;
+    }
+
+    // item_index の record_name ("EntityClassDefinition." を除く) → item_type。大文字小文字は区別しない
+    private static Dictionary<string, string> LoadItemTypeByRecord(SqliteConnection db)
+    {
+        const string prefix = "EntityClassDefinition.";
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT record_name, item_type FROM item_index WHERE item_type IS NOT NULL AND item_type <> ''";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(0)) continue;
+            var record = reader.GetString(0);
+            if (record.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) record = record[prefix.Length..];
+            map.TryAdd(record, reader.GetString(1));
+        }
+        return map;
+    }
+
+    // ロードアウトのエンティティ名 (basename) の item_type。そのまま → "_SCItem" の有無を反転したもの の順に引く
+    // (EquipmentService.RecordCandidates と同じ照合)。引けなければ null
+    private static string? LookupItemType(IReadOnlyDictionary<string, string> itemTypeByRecord, string entityName)
+    {
+        if (string.IsNullOrEmpty(entityName)) return null;
+        if (itemTypeByRecord.TryGetValue(entityName, out var t)) return t;
+        const string suffix = "_SCItem";
+        var toggled = entityName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) ? entityName[..^suffix.Length] : entityName + suffix;
+        return itemTypeByRecord.TryGetValue(toggled, out t) ? t : null;
     }
 
     // エンティティ名の "_S{n}" (末尾または "_" の前。大文字小文字無視) から Size を推定する。
@@ -4303,7 +4518,8 @@ public class GameDataExtractor : IDisposable
         SqliteCommand shipCmd, SqliteParameter pRn, SqliteParameter pNm, SqliteParameter pMf,
         SqliteParameter pCa, SqliteParameter pRo, SqliteParameter pCr, SqliteParameter pSz,
         SqliteParameter pRj, SqliteParameter pEa,
-        SqliteCommand portCmd, SqliteParameter ppSrn, SqliteParameter ppPn, SqliteParameter ppIt, SqliteParameter ppSz, SqliteParameter ppEi)
+        SqliteCommand portCmd, SqliteParameter ppSrn, SqliteParameter ppPn, SqliteParameter ppIt, SqliteParameter ppSz, SqliteParameter ppEi,
+        IReadOnlyDictionary<string, string> itemTypeByRecord)
     {
         int count = 0;
         foreach (var block in SplitJsonBlocks(rawJson))
@@ -4350,7 +4566,7 @@ public class GameDataExtractor : IDisposable
                 shipCmd.ExecuteNonQuery();
 
                 var loadoutEntries = new List<(string portName, string itemType, string entityName)>();
-                CollectLoadoutEntries(components, loadoutEntries);
+                CollectLoadoutEntries(components, itemTypeByRecord, loadoutEntries);
 
                 foreach (var (portName, portType, entityName) in loadoutEntries)
                 {
@@ -4367,14 +4583,15 @@ public class GameDataExtractor : IDisposable
         return count;
     }
 
-    private static void CollectLoadoutEntries(JsonElement components, List<(string portName, string itemType, string entityName)> results)
+    private static void CollectLoadoutEntries(JsonElement components, IReadOnlyDictionary<string, string> itemTypeByRecord,
+        List<(string portName, string itemType, string entityName)> results)
     {
         foreach (var comp in components.EnumerateArray())
         {
             if (!comp.TryGetProperty("_Type_", out var t)) continue;
             if (t.GetString() != "SEntityComponentDefaultLoadoutParams") continue;
             if (!comp.TryGetProperty("loadout", out var loadout)) continue;
-            CollectEntriesFromLoadout(loadout, "", "", results);
+            CollectEntriesFromLoadout(loadout, "", "", null, false, itemTypeByRecord, results);
             break;
         }
     }
@@ -4386,9 +4603,20 @@ public class GameDataExtractor : IDisposable
     //   mount_gimbal/weaponmount → WeaponMount、missile/misl_ → Missile、jdrv_ → JumpDrive、weapon_rack_ → WeaponRack、
     //   "_turret" を含む → Turret に上書き (OverridePortTypeByEntity)。
     // - 画面・HUD・コントローラ・座席アクセス (IsNonEquipmentEntry) は装備ではないので最上位・子行とも保存しない。
-    // parentPath = 親までの port_name (最上位は "")、ancestorType = 最上位祖先ポート名から推定した型 (最上位は "")
-    private static void CollectEntriesFromLoadout(JsonElement loadout, string parentPath, string ancestorType,
-        List<(string portName, string itemType, string entityName)> results)
+    // - 名前が EquipmentPortPrefixes に一致しない、または一致しても InferPortType で種類が決まらない最上位ポートは、
+    //   付いている物の item_index の種類が装備 (ShipEquipmentItemTypes) なら対象にし、その種類 (ShipEquipmentPortType) を子孫に継承する。
+    //   付いている物がジンバル (OverridePortTypeByEntity が WeaponMount) なら、下の武器の行は hardpoint_weapon_* の下と同じ WeaponGun にする。
+    // - 前からある規則 (LegacyEquipmentPortPrefixes + InferLegacyPortType) で保存していた行は、種類に関係なく今までどおり保存する。
+    //   それ以外の行 (綴り違い・付いている物の種類で増えた行) は、付いている物の item_index の種類が装備でない (Misc・Room・AttachedPart・Door 等) なら
+    //   保存しない (前からある規則の最上位の下なら、前からの行を残すため配下は辿る。それ以外は配下も辿らない)。空のポートは保存する。
+    // - 名前が一致しない最上位ポートを付いている物の種類で拾ったときは、その下で item_index に無い物 (GMRCK_* 等) は
+    //   直下の装備から種類を決めて (PortTypeFromChildren) 保存し配下も辿る。決まらなければ保存せず配下も辿らない。
+    //   名前の規則で拾った最上位の下の item_index に無い物は、名前から決めた種類で保存する。
+    // parentPath = 親までの port_name (最上位は "")、ancestorType = 最上位祖先から決めた型 (最上位は "")、
+    // legacyType = 前からある規則で最上位祖先ポート名から推定した型 (前からある規則に当たらない最上位の下は null)、
+    // equipmentOnly = 名前が一致せず付いている物の種類で拾った最上位の下か (最上位は false)
+    private static void CollectEntriesFromLoadout(JsonElement loadout, string parentPath, string ancestorType, string? ancestorLegacyType,
+        bool equipmentOnly, IReadOnlyDictionary<string, string> itemTypeByRecord, List<(string portName, string itemType, string entityName)> results)
     {
         if (!loadout.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array) return;
         foreach (var entry in entries.EnumerateArray())
@@ -4396,27 +4624,76 @@ public class GameDataExtractor : IDisposable
             var portName = entry.TryGetProperty("itemPortName", out var pn) && pn.ValueKind == JsonValueKind.String ? pn.GetString() ?? "" : "";
             if (string.IsNullOrEmpty(portName)) continue;
 
-            string path, baseType;
+            var entityName = ResolveLoadoutEntityName(entry);
+            string path, baseType, childType;
+            string? legacyType;
+            bool onlyEquipment;
             if (parentPath.Length == 0)
             {
-                if (!EquipmentPortPrefixes.Any(p => portName.StartsWith(p, StringComparison.OrdinalIgnoreCase))) continue;
+                var byName = EquipmentPortPrefixes.Any(p => portName.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+                legacyType = LegacyEquipmentPortPrefixes.Any(p => portName.StartsWith(p, StringComparison.OrdinalIgnoreCase))
+                    ? InferLegacyPortType(portName) : null;
+                baseType = byName ? InferPortType(portName) : "";
+                var byItemType = false;
+                if (baseType.Length == 0)
+                {
+                    var equipType = ShipEquipmentPortType(LookupItemType(itemTypeByRecord, entityName));
+                    if (equipType != null) { baseType = equipType; byItemType = true; }
+                    else if (!byName) continue;
+                }
                 path = portName;
-                baseType = InferPortType(portName);
+                onlyEquipment = byItemType && !byName;
+                childType = byItemType && OverridePortTypeByEntity(entityName, baseType) == "WeaponMount" ? "WeaponGun" : baseType;
             }
             else
             {
                 path = parentPath + "/" + portName;
                 baseType = ancestorType;
+                childType = ancestorType;
+                legacyType = ancestorLegacyType;
+                onlyEquipment = equipmentOnly;
             }
 
-            var entityName = ResolveLoadoutEntityName(entry);
             // 画面・HUD・コントローラ・座席アクセス (装備ではない) は最上位・子行とも保存しない (配下の loadout も辿らない)
             if (IsNonEquipmentEntry(portName, entityName)) continue;
+
             var itemType = OverridePortTypeByEntity(entityName, baseType);
+            // 前からある規則で保存していた行か
+            var legacyKept = legacyType != null && OverridePortTypeByEntity(entityName, legacyType).Length > 0;
+            if (!legacyKept && entityName.Length > 0)
+            {
+                var entityItemType = LookupItemType(itemTypeByRecord, entityName);
+                if (entityItemType != null && ShipEquipmentPortType(entityItemType) == null)
+                {
+                    // 増えた行で付いている物が装備でない: 保存しない (前からある規則の最上位の下なら、前からの行を残すため配下は辿る)
+                    if (legacyType != null && entry.TryGetProperty("loadout", out var keepLoadout) && keepLoadout.ValueKind == JsonValueKind.Object)
+                        CollectEntriesFromLoadout(keepLoadout, path, childType, legacyType, onlyEquipment, itemTypeByRecord, results);
+                    continue;
+                }
+                if (entityItemType == null && onlyEquipment)
+                {
+                    // 付いている物の種類で拾った最上位の下の item_index に無い物: 直下の装備から種類を決める。決まらなければ保存せず配下も辿らない
+                    var fromChildren = PortTypeFromChildren(entry, itemTypeByRecord);
+                    if (fromChildren == null) continue;
+                    itemType = fromChildren;
+                }
+                // 増えた子の行: 付いている物がミサイル・爆弾なら、受け継いだ種類 (Turret / BombLauncher / MissileLauncher 等) より
+                // 付いている物の種類を優先する (地上車両のミサイル GMISL_* や爆弾は OverridePortTypeByEntity の名前の判定に当たらない)。
+                // 受け継いだ種類がミサイルラック・爆弾ランチャーで付いている物が武器なら武器にする (タレット・ジンバルの下の武器は今の決まりのまま)
+                if (parentPath.Length > 0)
+                {
+                    if (entityItemType is "Missile" or "Bomb") itemType = entityItemType;
+                    else if (entityItemType == "WeaponGun" && (baseType is "MissileLauncher" or "BombLauncher")) itemType = "WeaponGun";
+                    // タレットの下のミサイルラック (MRCK_* 等。下のミサイルは上の決まりで Missile)
+                    else if (entityItemType == "MissileLauncher" && baseType == "Turret") itemType = "MissileLauncher";
+                }
+                // 名前の規則 (綴り違いの "missile") でミサイルラックとした増えた最上位の行に、EMP が付いている (ANVL_Hawk の hardpoint_missile_emp)
+                else if (entityItemType == "EMP" && itemType == "MissileLauncher") itemType = "EMP";
+            }
             results.Add((path, itemType, entityName));
 
             if (entry.TryGetProperty("loadout", out var subLoadout) && subLoadout.ValueKind == JsonValueKind.Object)
-                CollectEntriesFromLoadout(subLoadout, path, baseType, results);
+                CollectEntriesFromLoadout(subLoadout, path, childType, legacyType, onlyEquipment, itemTypeByRecord, results);
         }
     }
 

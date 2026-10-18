@@ -519,7 +519,7 @@ public partial class DetailPanel : UserControl
 //   「【見出し】」の行 → 見出し (### )。見出しの後ろに文が続けば、その文は見出しの下の段落
 //   「  項目: 値」の行の並び → 2 列の表 (項目 | 内容)
 //   「  項目: A / B / C」の行の後に「A / B / C」と同じ数に分かれる行が続くもの (販売場所) → 項目の段落と、A / B / C を見出しにした表
-//   「|」で始まる行 → そのまま Markdown の表 (距離による減衰)
+//   「|」で始まる行 → そのまま Markdown の表 (距離による減衰・船の既定の装備。全角空白だけ文字参照にする)
 //   ほかの行 → 段落 (続く行は改行でつなぐ)
 //   文字はすべてミッションタブと同じ変換 (MissionDisplayText.Parse。<EM4> の中は強調の色、~mission(…) は〔〕) をしてから入れる
 internal static class DetailHtml
@@ -574,7 +574,9 @@ internal static class DetailHtml
             if (t.StartsWith('|'))
             {
                 FlushKv(); FlushPara();
-                md.AppendLine(t);   // 元から Markdown の表 (中身は数値と単位)
+                // 元から Markdown の表 (中身は数値と単位、船の既定の装備)。全角空白は文字参照にする
+                // (Markdig は表のセルの前後の全角空白を消すので、既定の装備の入れ子の字下げ「　└」が消えないように。見た目は同じ全角空白)
+                md.AppendLine(t.Replace("\u3000", "&#12288;"));
                 inTable = true;
                 continue;
             }

@@ -54,7 +54,7 @@ public partial class GameDataQueryService
     // ［詳細］タブの本文。record 1 件 (item_index / items) について:
     //   【基本】名前 (日本語名 (英語名)。日本語が無ければ英語名)・種類・メーカー・サイズ・record 名
     //   【説明文】翻訳 DB の日本語 (無ければ英語)
-    //   【船・車両】船の情報 (SearchShips。船・車両のとき)
+    //   【船・車両】船の情報 (SearchShips。船・車両のとき。「装備の取り付け口」の行は出さない) と既定の装備の表 (ShipDefaultLoadoutText)
     //   【性能】lookup と同じ (GetItemStatsText。色違いは基本品目の性能、武器は 1発・DPS・射撃モード・ダウンまでの発数など)
     //   【距離による減衰】【射程】武器の弾の damageDropParams・説明文の Effective Range・弾速 × 寿命 (WeaponFalloffText)
     //   【装着できるアタッチメント】個人武器の枠ごとに付けられるもの (WeaponAttachmentListText)
@@ -146,8 +146,14 @@ public partial class GameDataQueryService
 
         if (itemType.StartsWith("NOITEM_Vehicle", StringComparison.OrdinalIgnoreCase))
         {
-            var ship = SearchShips(nameEn, rec);
-            if (ship.Trim().Length > 0) { sb.AppendLine(); sb.AppendLine("【船・車両】"); sb.AppendLine(ship.TrimEnd()); }
+            // 「装備の取り付け口」の行は出さず (AI チャットの SearchShips は従来どおり出す)、代わりに既定の装備の表 (ShipDefaultLoadoutText)
+            var ship = SearchShips(nameEn, rec, includePortSummary: false);
+            if (ship.Trim().Length > 0)
+            {
+                sb.AppendLine(); sb.AppendLine("【船・車両】"); sb.AppendLine(ship.TrimEnd());
+                var loadout = ShipDefaultLoadoutText(rec, loc);
+                if (loadout.Length > 0) { sb.AppendLine(); sb.Append(loadout); }
+            }
         }
 
         var stats = GetItemStatsText(rec, japaneseNames: true);
@@ -182,6 +188,271 @@ public partial class GameDataQueryService
         catch (Exception ex) { bp = "【ブループリント】" + Environment.NewLine + $"  ブループリントを読み込めなかった ({ex.Message})" + Environment.NewLine; }
         if (bp.Length > 0) { sb.AppendLine(); sb.Append(bp); }
         return sb.ToString();
+    }
+
+    // ［詳細］タブの【船・車両】の既定の装備の表 (「搭載枠 | 種類・サイズ | 既定の装備」の Markdown の表の行。DetailHtml が「|」の行をそのまま表にする)。
+    // 中身は ships.raw_json の _RecordValue_.Components の SEntityComponentDefaultLoadoutParams.loadout.entries (入れ子の loadout も)。
+    //   ・装備の record 名は entityClassName、空なら entityClassReference のファイル名 (GameDataExtractor.ResolveLoadoutEntityName と同じ)
+    //   ・item_index と EquipmentService.RecordCandidates と同じ候補順・大文字小文字無視で照合し、引けたものだけ載せる (引けないもの・空のポートは載せない)。
+    //     引けない装備の下の入れ子は、載せた一番近い祖先の下に置く (祖先が無ければ最上位)
+    //   ・並びは raw_json の順。入れ子は搭載枠の頭に「└」(深さ 2 以降は前に全角空白を深さ - 1 個)
+    //   ・同じ親の下で同じ装備 (record) が続き、下に載せる行が無いものは 1 行にまとめて「×数」。最上位の行はまとめない
+    //   ・搭載枠: PortNameJa.TranslatePath。種類: LoadoutTypeLabel。サイズ: item_index.size (S2 の形。0 なら出さない)。名前: LoadoutItemName
+    // 船の行が無ければ ""。既定のロードアウトを読めない (部品が無い・entries が空・JSON を読めない) ときは「既定の装備: 元データから読めません」の 1 行
+    private string ShipDefaultLoadoutText(string shipRecord, LocReader loc)
+    {
+        // 船の行はまず大文字小文字の一致で引き (索引が効く)、無ければ大文字小文字無視で引く (全件をなめるので後回し)
+        object? v = null;
+        foreach (var sql in new[] { "SELECT raw_json FROM ships WHERE record_name = @rn LIMIT 1", "SELECT raw_json FROM ships WHERE record_name = @rn COLLATE NOCASE LIMIT 1" })
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("@rn", shipRecord);
+            v = cmd.ExecuteScalar();
+            if (v != null) break;
+        }
+        if (v == null) return "";
+        var raw = v as string;
+        const string unreadable = "既定の装備: 元データから読めません";
+        if (string.IsNullOrEmpty(raw)) return unreadable + Environment.NewLine;
+
+        var rows = new List<LoadoutRow>();
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            JsonElement? entries = null;
+            if (doc.RootElement.TryGetProperty("_RecordValue_", out var rv) && rv.TryGetProperty("Components", out var cs) && cs.ValueKind == JsonValueKind.Array)
+                foreach (var c in cs.EnumerateArray())
+                {
+                    if (c.ValueKind != JsonValueKind.Object || !c.TryGetProperty("_Type_", out var t) || t.GetString() != "SEntityComponentDefaultLoadoutParams") continue;
+                    if (c.TryGetProperty("loadout", out var lo) && lo.ValueKind == JsonValueKind.Object
+                        && lo.TryGetProperty("entries", out var es) && es.ValueKind == JsonValueKind.Array && es.GetArrayLength() > 0)
+                        entries = es;
+                    break;
+                }
+            if (entries == null) return unreadable + Environment.NewLine;
+
+            var (index, itemsNames) = LoadLoadoutTables();
+            var lookupCache = new Dictionary<string, LoadoutItemInfo?>(StringComparer.OrdinalIgnoreCase);
+            void Walk(JsonElement list, int depth, int parentRow)
+            {
+                foreach (var e in list.EnumerateArray())
+                {
+                    if (e.ValueKind != JsonValueKind.Object) continue;
+                    var port = e.TryGetProperty("itemPortName", out var pn) && pn.ValueKind == JsonValueKind.String ? pn.GetString() ?? "" : "";
+                    var entity = LoadoutEntityName(e);
+                    LoadoutItemInfo? info = null;
+                    if (entity.Length > 0 && !lookupCache.TryGetValue(entity, out info))
+                    {
+                        info = LookupLoadoutItem(entity, index, itemsNames, loc);
+                        lookupCache[entity] = info;
+                    }
+                    int childDepth = depth, childParent = parentRow;
+                    if (info != null)
+                    {
+                        if (parentRow >= 0) rows[parentRow].HasChildren = true;
+                        rows.Add(new LoadoutRow { Depth = depth, ParentRow = parentRow, PortLabel = PortNameJa.TranslatePath(port), Item = info });
+                        childDepth = depth + 1;
+                        childParent = rows.Count - 1;
+                    }
+                    if (e.TryGetProperty("loadout", out var sub) && sub.ValueKind == JsonValueKind.Object
+                        && sub.TryGetProperty("entries", out var subEntries) && subEntries.ValueKind == JsonValueKind.Array)
+                        Walk(subEntries, childDepth, childParent);
+                }
+            }
+            Walk(entries.Value, 0, -1);
+        }
+        catch (JsonException) { return unreadable + Environment.NewLine; }
+        // 装備はあるが名前の分かる装備が 1 つも無い (テンプレート用の船など): 空の表ではなく 1 行で出す
+        if (rows.Count == 0) return "既定の装備: 名前の分かる装備がありません" + Environment.NewLine;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("| 搭載枠 | 種類・サイズ | 既定の装備 |");
+        sb.AppendLine("|---|---|---|");
+        for (int i = 0; i < rows.Count; i++)
+        {
+            var r = rows[i];
+            var ports = new List<string> { r.PortLabel };
+            // 同じ親の下で同じ装備が続く行 (下に載せる行が無いもの) は 1 行にまとめる。最上位の行はまとめない
+            if (r.Depth > 0 && !r.HasChildren)
+                while (i + 1 < rows.Count && rows[i + 1].Depth == r.Depth && rows[i + 1].ParentRow == r.ParentRow && !rows[i + 1].HasChildren
+                       && string.Equals(rows[i + 1].Item.Record, r.Item.Record, StringComparison.OrdinalIgnoreCase))
+                {
+                    i++;
+                    ports.Add(rows[i].PortLabel);
+                }
+            var portCell = MergedPortLabel(ports);
+            if (r.Depth > 0) portCell = new string('\u3000', r.Depth - 1) + "└ " + portCell;
+            var typeCell = r.Item.TypeLabel + (r.Item.Size > 0 ? $" S{r.Item.Size}" : "");
+            var nameCell = r.Item.Name + (ports.Count > 1 ? $" ×{ports.Count}" : "");
+            sb.AppendLine($"| {Cell(MdEscape(portCell))} | {Cell(MdEscape(typeCell))} | {Cell(MdEscape(nameCell))} |");
+        }
+        return sb.ToString();
+    }
+
+    // 既定の装備の表のセルの Markdown の記号を打ち消す (名前の「*」などが斜体の記号として読まれて消えないように。例: Stor*All)
+    private static string MdEscape(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        foreach (var c in s)
+        {
+            if (c is '\\' or '*' or '_' or '`' or '[' or ']' or '<' or '>' or '~' or '#') sb.Append('\\');
+            sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    private sealed class LoadoutRow
+    {
+        public int Depth;
+        public int ParentRow;          // 載せた親の行の番号 (rows の添字)。最上位は -1
+        public string PortLabel = "";
+        public LoadoutItemInfo Item = null!;
+        public bool HasChildren;       // 下に載せる行があるか
+    }
+
+    private sealed record LoadoutItemInfo(string Record, string TypeLabel, int Size, string Name);
+
+    // まとめた行の搭載枠: 1 つならそのまま。どれも「同じ語 + 空白 + 番号」で番号が 1 ずつ増えるなら「語 先頭〜末尾」、そうでなければ「、」でつなぐ
+    private static string MergedPortLabel(List<string> labels)
+    {
+        if (labels.Count == 1) return labels[0];
+        var m = labels.Select(l => System.Text.RegularExpressions.Regex.Match(l, @"^(.*\S) (\d+)$")).ToList();
+        if (m.All(x => x.Success) && m.All(x => x.Groups[1].Value == m[0].Groups[1].Value))
+        {
+            var nums = m.Select(x => int.Parse(x.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture)).ToList();
+            if (nums.Zip(nums.Skip(1), (a, b) => b == a + 1).All(ok => ok))
+                return $"{m[0].Groups[1].Value} {nums[0]}〜{nums[^1]}";
+        }
+        return string.Join("、", labels);
+    }
+
+    // ロードアウトの 1 項目の装備の record 名: entityClassName、空なら entityClassReference のファイル名 (.json を外す)。
+    // GameDataExtractor.ResolveLoadoutEntityName と同じ
+    private static string LoadoutEntityName(JsonElement entry)
+    {
+        var entityName = entry.TryGetProperty("entityClassName", out var en) && en.ValueKind == JsonValueKind.String ? en.GetString() ?? "" : "";
+        if (!string.IsNullOrEmpty(entityName)) return entityName;
+        var reference = entry.TryGetProperty("entityClassReference", out var er) && er.ValueKind == JsonValueKind.String ? er.GetString() ?? "" : "";
+        if (string.IsNullOrEmpty(reference)) return "";
+        var slash = reference.LastIndexOf('/');
+        var basename = slash >= 0 ? reference[(slash + 1)..] : reference;
+        if (basename.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) basename = basename[..^5];
+        return basename;
+    }
+
+    // record の照合の候補 (EquipmentService.RecordCandidates と同じ順: そのまま → EntityClassDefinition. 付き →
+    // _SCItem を外した / 付けた形 → その EntityClassDefinition. 付き)
+    private static IEnumerable<string> LoadoutRecordCandidates(string record)
+    {
+        const string prefix = "EntityClassDefinition.";
+        const string suffix = "_SCItem";
+        var bases = new List<string> { record };
+        if (record.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            bases.Add(record[..^suffix.Length]);
+        else
+            bases.Add(record + suffix);
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var b in bases)
+        {
+            if (seen.Add(b)) yield return b;
+            if (!b.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var withPrefix = prefix + b;
+                if (seen.Add(withPrefix)) yield return withPrefix;
+            }
+        }
+    }
+
+    // item_index の 1 行 (既定の装備の照合用)
+    private sealed record LoadoutIndexRow(string Record, string Name, string ItemType, int Size, string NameKey);
+
+    // 既定の装備の照合に使う item_index (record_name → 行) と items (record_name → name) を 1 回ずつ全部読む (大文字小文字無視)。
+    // record_name の索引は大文字小文字を区別する形なので、COLLATE NOCASE で 1 項目ずつ引くと毎回全件をなめて遅い (船 1 隻で数百回) ため。
+    // 同じ record_name (大文字小文字無視) が複数あれば先に読んだ行 (1 項目ずつ LIMIT 1 で引いていたときの最初の行と同じ並び)
+    private (Dictionary<string, LoadoutIndexRow> Index, Dictionary<string, string> ItemsName) LoadLoadoutTables()
+    {
+        var index = new Dictionary<string, LoadoutIndexRow>(StringComparer.OrdinalIgnoreCase);
+        var itemsName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var hasSize = ItemIndexHasSize();
+        var hasNameKey = ItemIndexHasNameKey();
+        using (var cmd = _conn.CreateCommand())
+        {
+            cmd.CommandText = $"SELECT record_name, COALESCE(name, ''), COALESCE(item_type, ''), {(hasSize ? "COALESCE(size, 0)" : "0")}, {(hasNameKey ? "COALESCE(name_key, '')" : "''")} FROM item_index";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                if (r.IsDBNull(0)) continue;
+                var rn = r.GetString(0);
+                index.TryAdd(rn, new LoadoutIndexRow(rn, r.GetString(1), r.GetString(2), r.GetInt32(3), r.GetString(4)));
+            }
+        }
+        using (var cmd = _conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT record_name, COALESCE(name, '') FROM items";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                if (!r.IsDBNull(0)) itemsName.TryAdd(r.GetString(0), r.GetString(1));
+        }
+        return (index, itemsName);
+    }
+
+    // ロードアウトの装備を item_index で引く (候補順・大文字小文字無視)。引けなければ null
+    private static LoadoutItemInfo? LookupLoadoutItem(string entity, Dictionary<string, LoadoutIndexRow> index, Dictionary<string, string> itemsNames, LocReader loc)
+    {
+        foreach (var cand in LoadoutRecordCandidates(entity))
+        {
+            if (!index.TryGetValue(cand, out var x)) continue;
+            var itemsName = itemsNames.TryGetValue(x.Record, out var s) ? s : "";
+            return new LoadoutItemInfo(x.Record, LoadoutTypeLabel(x.ItemType, loc), x.Size, LoadoutItemName(x.Record, x.Name, itemsName, x.NameKey, loc));
+        }
+        return null;
+    }
+
+    // 既定の装備の名前: 日本語名 (item_index.name)。英語名が引けて日本語名と違えば「日本語 (英語)」(比べるときは DetailNameKey の形。等級の印は同じものとして扱う)。
+    // 英語名は items.name の翻訳 (キーでなければ items.name)、無ければ item_index.name_key の翻訳の英語。
+    // 日本語名が仮の文字 (<= PLACEHOLDER => など)・空なら record 名 (EntityClassDefinition. を外したもの)。英語名が仮の文字なら出さない
+    private static string LoadoutItemName(string record, string indexName, string itemsName, string nameKey, LocReader loc)
+    {
+        static string? Usable(string? s)
+        {
+            var t = (s ?? "").Replace(' ', ' ').Trim();
+            if (t.Length == 0 || t.StartsWith('@') || t.StartsWith("<=", StringComparison.Ordinal)
+                || t.Contains("PLACEHOLDER", StringComparison.OrdinalIgnoreCase) || t.Contains("プレースホルダ")) return null;
+            return t;
+        }
+        string? en = itemsName.StartsWith('@') ? Usable(loc.English(itemsName[1..])) : Usable(itemsName);
+        if (en == null && nameKey.Length > 0) en = Usable(loc.English(nameKey));
+        var ja = Usable(indexName) ?? (record.StartsWith("EntityClassDefinition.", StringComparison.Ordinal) ? record["EntityClassDefinition.".Length..] : record);
+        return en != null && !string.Equals(DetailNameKey(ja), DetailNameKey(en), StringComparison.OrdinalIgnoreCase) ? $"{ja} ({en})" : ja;
+    }
+
+    // 既定の装備の種類: ［詳細］の種類の名前 (DetailTypeLabel。ShipPortInfo.TypeDisplay ほか) に日本語があればそれ。
+    // 無ければゲームの日本語訳の種類の名前 (翻訳 DB の item_Type + item_type のキーの日本語)。どちらも無ければ item_type (英語) のまま
+    private static string LoadoutTypeLabel(string itemType, LocReader loc)
+    {
+        var label = DetailTypeLabel(itemType);
+        if (label != itemType || itemType.Length == 0) return label;
+        var key = "item_Type" + itemType;
+        var text = loc.Text("@" + key);
+        // Text は日本語が無ければ英語を返すので、英語と同じなら日本語は無いものとする
+        return !text.StartsWith('@') && text != loc.English(key) ? text : itemType;
+    }
+
+    // item_index に name_key 列があるか (列を足す前の古い DB には無い)
+    private bool ItemIndexHasNameKey()
+    {
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "PRAGMA table_info(item_index)";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                if (string.Equals(r.GetString(1), "name_key", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        catch { }
+        return false;
     }
 
     // 説明文 (raw_json の SAttachableComponentParams.AttachDef.Localization.Description のキーの日本語。無ければ英語)。

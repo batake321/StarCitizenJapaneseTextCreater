@@ -45,8 +45,9 @@ public partial class GameDataQueryService : IDisposable
         catch { return false; }
     }
 
-    // exactRecordName を渡すと、その record_name の船だけを返す (lookup で見つかった item_index の船を引くとき用)
-    public string SearchShips(string query, string? exactRecordName = null)
+    // exactRecordName を渡すと、その record_name の船だけを返す (lookup で見つかった item_index の船を引くとき用)。
+    // includePortSummary: 「装備の取り付け口」の行を出すか (AI チャットに渡す情報は従来どおり出す。［詳細］タブは既定の装備の表を出すので false)
+    public string SearchShips(string query, string? exactRecordName = null, bool includePortSummary = true)
     {
         using var cmd = _conn.CreateCommand();
         // name_en (英語 ini で解決した船名) がある DB ではそれも検索・表示する。列の無い古い DB では従来どおり
@@ -104,8 +105,11 @@ public partial class GameDataQueryService : IDisposable
                 sb.AppendLine("    説明: " + desc.Replace("\\n", " ").Trim());
 
             // ハードポイントは種類とサイズごとの数にまとめる (一覧のままだと長く、肝心の情報が埋もれる)
-            var ports = GetShipPortSummary(rn);
-            if (!string.IsNullOrEmpty(ports)) sb.AppendLine("    装備の取り付け口: " + ports);
+            if (includePortSummary)
+            {
+                var ports = GetShipPortSummary(rn);
+                if (!string.IsNullOrEmpty(ports)) sb.AppendLine("    装備の取り付け口: " + ports);
+            }
             count++;
         }
 

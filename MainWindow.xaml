@@ -362,11 +362,14 @@
                     <DataGrid x:Name="dgTradeRoutes" Grid.Row="2" AutoGenerateColumns="False"
                               CanUserAddRows="False" CanUserDeleteRows="False" IsReadOnly="True"
                               SelectionMode="Single" GridLinesVisibility="Horizontal"
-                              AlternatingRowBackground="#FAFAFA" FontSize="13" RowHeight="52"
+                              AlternationCount="2" FontSize="13" RowHeight="52"
                               MouseLeftButtonUp="TradeRoutes_CellClick">
                         <DataGrid.RowStyle>
                             <Style TargetType="DataGridRow">
                                 <Style.Triggers>
+                                    <Trigger Property="ItemsControl.AlternationIndex" Value="1">
+                                        <Setter Property="Background" Value="#FAFAFA"/>
+                                    </Trigger>
                                     <DataTrigger Binding="{Binding IsLowBuyStock}" Value="True">
                                         <Setter Property="Background" Value="#FFF8E1"/>
                                     </DataTrigger>
@@ -1572,11 +1575,14 @@
                             <DataGrid x:Name="dgCapturedCommodities" Grid.Row="1"
                                       AutoGenerateColumns="False" CanUserAddRows="False"
                                       CanUserDeleteRows="True" IsReadOnly="False"
-                                      GridLinesVisibility="Horizontal" AlternatingRowBackground="#FAFAFA"
+                                      GridLinesVisibility="Horizontal" AlternationCount="2"
                                       FontSize="13" RowHeight="30">
                                 <DataGrid.RowStyle>
                                     <Style TargetType="DataGridRow">
                                         <Style.Triggers>
+                                            <Trigger Property="ItemsControl.AlternationIndex" Value="1">
+                                                <Setter Property="Background" Value="#FAFAFA"/>
+                                            </Trigger>
                                             <DataTrigger Binding="{Binding IsMatched}" Value="False">
                                                 <Setter Property="Background" Value="#FFF3E0"/>
                                             </DataTrigger>
@@ -1661,9 +1667,29 @@
                         <ListBox Grid.Row="2" x:Name="lstMissionCategories"
                                  SelectionChanged="MissionCategory_Changed"
                                  FontSize="13" Padding="2">
+                            <ListBox.ItemContainerStyle>
+                                <!-- 水色は項目の中の Border で塗る (ListBoxItem の Background は選択中・マウスが乗ったとき既定の色で上書きされるため)。
+                                     余白は既定の ListBoxItem の Padding (4,1) を Border に移して見た目を揃える -->
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="Padding" Value="0"/>
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
                             <ListBox.ItemTemplate>
                                 <DataTemplate>
-                                    <TextBlock Text="{Binding}" Padding="4,3"/>
+                                    <!-- ミッション一覧で選んだ契約のカテゴリは水色 (選択中の項目でも水色) -->
+                                    <Border Padding="4,1">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsHighlighted}" Value="True">
+                                                        <Setter Property="Background" Value="#B3E5FC"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
+                                        <TextBlock Text="{Binding}" Padding="4,3"/>
+                                    </Border>
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
                         </ListBox>
@@ -1704,8 +1730,23 @@
                         <DataGrid Grid.Row="1" x:Name="dgMissions" AutoGenerateColumns="False"
                                   IsReadOnly="True" SelectionChanged="Mission_Selected"
                                   CanUserSortColumns="True" HeadersVisibility="Column"
-                                  GridLinesVisibility="Horizontal" AlternatingRowBackground="#F8F8F8"
+                                  GridLinesVisibility="Horizontal" AlternationCount="2"
                                   FontSize="12">
+                            <DataGrid.RowStyle>
+                                <!-- 1 行おきの色は AlternatingRowBackground ではなくここで付ける
+                                     (DataGrid の AlternatingRowBackground は行のスタイルのトリガーより優先されるため、評判の緑が消える)。
+                                     成功時に評判が上がる行は薄い緑 (1 行おきの色より後ろに置いて優先) -->
+                                <Style TargetType="DataGridRow">
+                                    <Style.Triggers>
+                                        <Trigger Property="ItemsControl.AlternationIndex" Value="1">
+                                            <Setter Property="Background" Value="#F8F8F8"/>
+                                        </Trigger>
+                                        <DataTrigger Binding="{Binding GivesReputation}" Value="True">
+                                            <Setter Property="Background" Value="#E8F5E9"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </DataGrid.RowStyle>
                             <DataGrid.Columns>
                                 <DataGridTemplateColumn Header="名前" Width="320" SortMemberPath="CleanedName">
                                     <DataGridTemplateColumn.CellTemplate>
@@ -1720,6 +1761,24 @@
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
+                                <DataGridTextColumn Header="カテゴリ" Binding="{Binding Category}" Width="110">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="星系" Binding="{Binding StarSystem}" Width="90">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Header="評判" Binding="{Binding SuccessRepSummary}" Width="180">
+                                    <DataGridTextColumn.ElementStyle>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="VerticalAlignment" Value="Center"/>
+                                            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                        </Style>
+                                    </DataGridTextColumn.ElementStyle>
+                                </DataGridTextColumn>
                                 <DataGridTextColumn Header="難易度" Binding="{Binding Difficulty}" Width="80">
                                     <DataGridTextColumn.ElementStyle>
                                         <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
@@ -2106,6 +2165,7 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="140"/>
@@ -2130,7 +2190,15 @@
                                 <TextBox x:Name="txtVoiceVoxSpeaker" Grid.Row="2" Grid.Column="1" Width="60"
                                          HorizontalAlignment="Left" Margin="0,4"/>
 
-                                <TextBlock x:Name="txtWebServerInfo" Grid.Row="3" Grid.ColumnSpan="2"
+                                <TextBlock Text="VoiceVox 速度:" Grid.Row="3" VerticalAlignment="Center" Margin="0,4"/>
+                                <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,4">
+                                    <Slider x:Name="sldVoiceVoxSpeed" Width="200" Minimum="0.5" Maximum="2.0" Value="1.0"
+                                            TickFrequency="0.1" IsSnapToTickEnabled="True" VerticalAlignment="Center"/>
+                                    <TextBlock Text="{Binding Value, ElementName=sldVoiceVoxSpeed, StringFormat={}{0:0.0} 倍}"
+                                               VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                </StackPanel>
+
+                                <TextBlock x:Name="txtWebServerInfo" Grid.Row="4" Grid.ColumnSpan="2"
                                            TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontFamily="Consolas" FontSize="12"/>
                             </Grid>
                         </GroupBox>
@@ -2165,7 +2233,7 @@
 
                                 <TextBlock x:Name="txtGameLogVoiceStatus" Grid.Row="2" Grid.ColumnSpan="4" TextWrapping="Wrap" Margin="0,0,0,4"
                                            Foreground="#666" FontSize="12"
-                                           Text="URL は Web チャットの VoiceVox URL を使います。"/>
+                                           Text="URL と速度は Web チャットの VoiceVox の設定を使います。"/>
 
                                 <Border Grid.Row="3" Grid.ColumnSpan="4" BorderBrush="#DDD" BorderThickness="1" Margin="0,4">
                                     <StackPanel>

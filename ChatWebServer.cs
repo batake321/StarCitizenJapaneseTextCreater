@@ -382,7 +382,8 @@ public class ChatWebServer : IDisposable
             .Select(b => new { b.Name, b.Model, b.Type, b.SupportsSkills })
             .ToArray();
         var voicevoxSpeakerId = App.Config.VoiceVoxSpeakerId;
-        var json = JsonSerializer.Serialize(new { backends, voicevoxSpeakerId });
+        var voicevoxSpeedScale = App.Config.VoiceVoxSpeedScale;
+        var json = JsonSerializer.Serialize(new { backends, voicevoxSpeakerId, voicevoxSpeedScale });
         var bytes = Encoding.UTF8.GetBytes(json);
         response.ContentType = "application/json; charset=utf-8";
         AddCorsHeaders(response);

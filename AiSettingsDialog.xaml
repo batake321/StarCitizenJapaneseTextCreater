@@ -13,6 +13,8 @@
             <StackPanel x:Name="pnlBackends"/>
         </ScrollViewer>
 
+        <CheckBox x:Name="chkUseSmallModels" Grid.Row="1" Content="E2B / E4B を翻訳に使う" VerticalAlignment="Center" Margin="0,12,0,0"
+                  ToolTip="モデル名に gemma4:e2b / gemma4:e4b を含むバックエンドを AI 翻訳に使います"/>
         <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
             <Button Content="バックエンド追加" Click="AddBackend_Click" Padding="16,6" Margin="0,0,8,0"/>
             <Button Content="保存" Click="Save_Click" Padding="24,6" FontWeight="Bold" IsDefault="True"/>

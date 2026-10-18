@@ -134,6 +134,9 @@ public partial class MainWindow : Window
         txtWebHttpsPort.Text = config.WebServerHttpsPort.ToString();
         txtVoiceVoxUrl.Text = config.VoiceVoxUrl;
         txtVoiceVoxSpeaker.Text = config.VoiceVoxSpeakerId.ToString();
+        // 設定ファイルを手で書き換えた範囲外・刻み外の値は、画面と同じ 0.5〜2.0・0.1 刻みにそろえる (0 以下だとエンジンが受け付けない)
+        config.VoiceVoxSpeedScale = Math.Round(Math.Clamp(config.VoiceVoxSpeedScale, 0.5, 2.0), 1);
+        sldVoiceVoxSpeed.Value = config.VoiceVoxSpeedScale;
         chkWebAutoStart.IsChecked = config.WebServerAutoStart;
         // ［ゲームログ］の音: 表 (場面ごとの読み上げ) と既定の声。休戦ゾーン・到着のチェックは表の行の「読む」に結び付ける (XAML の Binding)
         _gameLogVoice.Load(config);
@@ -348,10 +351,11 @@ public partial class MainWindow : Window
 
     private void AiSettings_Click(object sender, RoutedEventArgs e)
     {
-        var dlg = new AiSettingsDialog(App.Config.Translation.Backends) { Owner = this };
+        var dlg = new AiSettingsDialog(App.Config.Translation.Backends, App.Config.Translation.UseSmallModelsForTranslation) { Owner = this };
         if (dlg.ShowDialog() == true && dlg.Result != null)
         {
             App.Config.Translation.Backends = dlg.Result;
+            App.Config.Translation.UseSmallModelsForTranslation = dlg.UseSmallModelsForTranslation;
             SaveConfigToFile();
             UpdateBackendSummary();
             RefreshChatBackends();
@@ -541,20 +545,61 @@ public partial class MainWindow : Window
                     TranslationOrchestrator.BuildUntranslatedList(
                         english, japanese, UntranslatedPath, App.Config.ForceEnglishPatterns, DbPath);
 
-                    var enabledBackends = App.Config.Translation.Backends
-                        .Where(b => b.Enabled)
+                    var enabledConfigs = App.Config.Translation.Backends.Where(b => b.Enabled).ToList();
+
+                    // E2B / E4B (モデル名に gemma4:e2b / gemma4:e4b を含むもの) を使うか。
+                    // 「使う」設定のとき、または使えるのが E2B / E4B だけのときは聞く。「使わない」設定で他があれば聞かずに除く
+                    static bool IsSmallModel(BackendConfig b) =>
+                        b.Model.Contains("gemma4:e2b", StringComparison.OrdinalIgnoreCase)
+                        || b.Model.Contains("gemma4:e4b", StringComparison.OrdinalIgnoreCase);
+                    bool smallOnlyExcluded = false;
+                    if (enabledConfigs.Any(IsSmallModel))
+                    {
+                        var others = enabledConfigs.Where(b => !IsSmallModel(b)).ToList();
+                        bool useSmall = false;
+                        if (App.Config.Translation.UseSmallModelsForTranslation || others.Count == 0)
+                        {
+                            var smallNames = string.Join(", ", enabledConfigs.Where(IsSmallModel).Select(b => $"{b.Name} ({b.Model})"));
+                            useSmall = Dispatcher.Invoke(() => MessageBox.Show(this,
+                                $"E2B / E4B を翻訳に使いますか？\n\n{smallNames}\n\n［いいえ］なら E2B / E4B を除いて翻訳します"
+                                + (others.Count == 0 ? "（E2B / E4B のほかに使えるバックエンドが無いので、翻訳しません）。" : "。"),
+                                "E2B / E4B の使用", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes);
+                        }
+                        if (!useSmall)
+                        {
+                            Log("  E2B / E4B を除いて翻訳します");
+                            smallOnlyExcluded = others.Count == 0;
+                            enabledConfigs = others;
+                        }
+                    }
+
+                    var enabledBackends = enabledConfigs
                         .Select(TranslationBackend.Create)
                         .ToList();
 
                     if (enabledBackends.Count == 0)
                     {
-                        Log("翻訳バックエンドが有効になっていません。[AI 設定]ボタンで設定してください。");
+                        Log(smallOnlyExcluded
+                            ? "E2B / E4B のほかに使える翻訳バックエンドが無いため、翻訳しません。"
+                            : "翻訳バックエンドが有効になっていません。[AI 設定]ボタンで設定してください。");
                     }
                     else
                     {
                         _translationStartTime = DateTime.Now;
                         if (glossary?.Count > 0)
                             Log($"  用語集: {glossary.Count} 件の用語をプロンプトに含めます");
+
+                        // 文の中の名前 (地名・船名・品名) を {nameN} に置き換えて送るための名前の一覧
+                        try
+                        {
+                            var nameCount = NameMasker.Load(DbPath, Path.Combine(WorkDir, "gamedata_cache.db"));
+                            Log($"  名前の置き換え: {nameCount:N0} 件の名前");
+                        }
+                        catch (Exception ex)
+                        {
+                            NameMasker.Load("", "");   // 一覧を空にして置き換えをしない
+                            Log($"  名前の一覧を作れませんでした (置き換えなしで翻訳します): {ex.Message}");
+                        }
 
                         var progress = new ProgressTracker(ProgressPath);
                         var orchestrator = new TranslationOrchestrator(
@@ -1683,6 +1728,7 @@ public partial class MainWindow : Window
         if (int.TryParse(txtWebHttpsPort.Text.Trim(), out var hp)) App.Config.WebServerHttpsPort = hp;
         App.Config.VoiceVoxUrl = txtVoiceVoxUrl.Text.Trim();
         if (int.TryParse(txtVoiceVoxSpeaker.Text.Trim(), out var spk)) App.Config.VoiceVoxSpeakerId = spk;
+        App.Config.VoiceVoxSpeedScale = Math.Round(sldVoiceVoxSpeed.Value, 1);
         App.Config.WebServerAutoStart = chkWebAutoStart.IsChecked == true;
         // ［ゲームログ］の音: 表の「読む」(休戦ゾーン・到着は ArmisticeSoundEnabled / ArrivalSoundEnabled にも)・文・声と既定の声。覚えた読み上げの wav は捨てる
         App.Config.GameLogVoiceVoxEnabled = chkGameLogVoiceVox.IsChecked == true;
@@ -1718,7 +1764,8 @@ public partial class MainWindow : Window
                 Translation = new
                 {
                     App.Config.Translation.MaxRetries,
-                    App.Config.Translation.Backends
+                    App.Config.Translation.Backends,
+                    App.Config.Translation.UseSmallModelsForTranslation
                 },
                 App.Config.ForceEnglishPatterns,
                 App.Config.ScApiKey,
@@ -1728,6 +1775,7 @@ public partial class MainWindow : Window
                 App.Config.WebServerAutoStart,
                 App.Config.VoiceVoxUrl,
                 App.Config.VoiceVoxSpeakerId,
+                App.Config.VoiceVoxSpeedScale,
                 App.Config.WindowLeft,
                 App.Config.WindowTop,
                 App.Config.WindowWidth,
@@ -1797,23 +1845,23 @@ public partial class MainWindow : Window
         if (_gameLogVoiceSpeakersLoading) return;
         _gameLogVoiceSpeakersLoading = true;
         var url = GameLogVoiceVox.NormalizeUrl(txtVoiceVoxUrl.Text);
-        txtGameLogVoiceStatus.Text = $"URL は Web チャットの VoiceVox URL を使います。話者の一覧を取得しています ({url})…";
+        txtGameLogVoiceStatus.Text = $"URL と速度は Web チャットの VoiceVox の設定を使います。話者の一覧を取得しています ({url})…";
         try
         {
             var speakers = await GameLogVoiceVox.GetSpeakersAsync(url, CancellationToken.None);
             _gameLogVoice.SetSpeakers(speakers);
-            txtGameLogVoiceStatus.Text = $"URL は Web チャットの VoiceVox URL を使います。話者 {speakers.Count} 件 ({url})";
+            txtGameLogVoiceStatus.Text = $"URL と速度は Web チャットの VoiceVox の設定を使います。話者 {speakers.Count} 件 ({url})";
         }
         catch (Exception ex)
         {
             var reason = GameLogVoiceVox.Reason(ex);
-            txtGameLogVoiceStatus.Text = $"URL は Web チャットの VoiceVox URL を使います。話者の一覧を取得できませんでした: {reason} ({url})";
+            txtGameLogVoiceStatus.Text = $"URL と速度は Web チャットの VoiceVox の設定を使います。話者の一覧を取得できませんでした: {reason} ({url})";
             if (showError) MessageBox.Show($"VOICEVOX の話者の一覧を取得できませんでした: {reason}\n(URL: {url})", "ゲームログの音");
         }
         finally { _gameLogVoiceSpeakersLoading = false; }
     }
 
-    // 表の行の「試聴」: その行の文 (保存前の値) を、その行の声 (既定なら既定の声) で VOICEVOX に読ませる。
+    // 表の行の「試聴」: その行の文 (保存前の値) を、その行の声 (既定なら既定の声) と速度の欄 (保存前の値) で VOICEVOX に読ませる。
     // 置き換えは見本の値 ({場所} = Levski、{船} = Cutlass Black、{内容} = 見本の文、{金額} = 1000 aUEC)
     private async void GameLogVoiceTest_Click(object sender, RoutedEventArgs e)
     {
@@ -1823,7 +1871,7 @@ public partial class MainWindow : Window
         var text = GameLogVoiceScenes.BuildText(template, sample, "Levski");
         var speaker = int.TryParse(row.SpeakerKey, out var s) ? s : int.TryParse(_gameLogVoice.DefaultSpeakerKey, out var d) ? d : 16;
         var url = GameLogVoiceVox.NormalizeUrl(txtVoiceVoxUrl.Text);
-        try { await GameLogVoicePlayer.TestAsync(url, speaker, text); }
+        try { await GameLogVoicePlayer.TestAsync(url, speaker, text, Math.Round(sldVoiceVoxSpeed.Value, 1)); }
         catch (Exception ex)
         {
             MessageBox.Show($"VOICEVOX で読み上げられませんでした: {GameLogVoiceVox.Reason(ex)}\n(URL: {url}、話者 ID {speaker})", "試聴");
@@ -1870,6 +1918,11 @@ public partial class MainWindow : Window
     private bool _missionUiInitializing;
     // BP タブからミッションを開くときにカテゴリを選ぶ間は、カテゴリの選択の処理 (一覧の読み直し) を止める (開く側で読み直す)
     private bool _suppressMissionCategoryChanged;
+    // ミッション一覧で選んだ契約のカテゴリとして水色にしている項目 (HighlightMissionCategory)
+    private MissionService.MissionCategory? _highlightedMissionCategory;
+    // ミッション一覧を作る操作の番号。後から始めた操作の結果を、先に始めた操作の遅れて返った結果で上書きしないように、
+    // await のあとで番号が最新でなければ結果を画面に入れない
+    private int _missionListRequest;
 
     private void LoadMissions_Click(object sender, RoutedEventArgs e) => LoadMissionsAsync();
 
@@ -1911,6 +1964,7 @@ public partial class MainWindow : Window
                 _missionService?.Dispose();
                 _missionService = svc;
                 _missionUiInitializing = true;
+                HighlightMissionCategory(null);   // カテゴリ一覧を読み直すので水色を消す
                 lstMissionCategories.ItemsSource = categories;
                 cmbMissionFaction.ItemsSource = factions;
                 cmbMissionFaction.SelectedIndex = 0;
@@ -1922,6 +1976,11 @@ public partial class MainWindow : Window
                     ? $"翻訳DBエラー:{_missionService.TransLoadError}"
                     : $"翻訳DB:{_missionService.TransDictCount}";
                 txtMissionStatus.Text = $"{categories.Sum(c => c.Count)} 件 ({transInfo})";
+                // 読み込みの結果は必ず入れる。番号を進めて、読み込み中に始まっていた一覧の操作の遅れた結果を捨てさせる
+                ++_missionListRequest;
+                // 読み込み直後は検索していない状態にそろえる (捨てた検索の「検索中...」や検索語を残さない)
+                txtMissionSearch.Text = "";
+                txtMissionSearchStatus.Text = "";
                 _currentMissions = allMissions;
                 dgMissions.ItemsSource = _currentMissions;
                 txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
@@ -1945,12 +2004,15 @@ public partial class MainWindow : Window
         if (_missionService == null || _suppressMissionCategoryChanged) return;
         if (lstMissionCategories.SelectedItem is not MissionService.MissionCategory cat) return;
 
+        var req = ++_missionListRequest;
         try
         {
             txtMissionSearch.Text = "";
             txtMissionSearchStatus.Text = "";
             var svc = _missionService;
-            _currentMissions = await Task.Run(() => svc.GetMissions(cat.Name));
+            var list = await Task.Run(() => svc.GetMissions(cat.Name));
+            if (req != _missionListRequest) return;
+            _currentMissions = list;
             dgMissions.ItemsSource = _currentMissions;
             var jaCount = _currentMissions.Count(m => !string.IsNullOrEmpty(m.DisplayNameJa));
             txtMissionStatus.Text = $"{cat.Name}: {_currentMissions.Count} 件 (日本語:{jaCount})";
@@ -1958,6 +2020,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            if (req != _missionListRequest) return;
             txtMissionStatus.Text = $"エラー: {ex.Message}";
         }
     }
@@ -1968,8 +2031,11 @@ public partial class MainWindow : Window
         if (_missionUiInitializing) return;
         var faction = cmbMissionFaction.SelectedItem as string;
         var rank = cmbMissionRank.SelectedItem as string;
-        if (faction == "(すべて)" && rank == "(すべて)") return;
+        // 両方「(すべて)」でカテゴリ選択中はそのカテゴリの一覧のまま。カテゴリ未選択なら下で全件を出す
+        if (faction == "(すべて)" && rank == "(すべて)"
+            && lstMissionCategories.SelectedItem is MissionService.MissionCategory) return;
 
+        var req = ++_missionListRequest;
         txtMissionSearchStatus.Text = "検索中...";
         try
         {
@@ -1981,12 +2047,17 @@ public partial class MainWindow : Window
                 var all = svc.Search("");
                 return svc.FilterByFactionAndRank(all, faction, rank);
             });
+            if (req != _missionListRequest) return;
             _currentMissions = filtered;
             dgMissions.ItemsSource = _currentMissions;
             txtMissionSearchStatus.Text = $"{_currentMissions.Count} 件";
             txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
         }
-        catch (Exception ex) { txtMissionSearchStatus.Text = $"エラー: {ex.Message}"; }
+        catch (Exception ex)
+        {
+            if (req != _missionListRequest) return;
+            txtMissionSearchStatus.Text = $"エラー: {ex.Message}";
+        }
     }
 
     private void MissionSearch_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
@@ -1998,17 +2069,54 @@ public partial class MainWindow : Window
 
     private async Task MissionSearchClear_Execute()
     {
+        var req = ++_missionListRequest;
         txtMissionSearch.Text = "";
         txtMissionSearchStatus.Text = "";
         if (lstMissionCategories.SelectedItem is MissionService.MissionCategory cat)
         {
             var svc = _missionService;
-            _currentMissions = svc == null ? null : await Task.Run(() => svc.GetMissions(cat.Name));
-            dgMissions.ItemsSource = _currentMissions;
+            try
+            {
+                var list = svc == null ? null : await Task.Run(() => svc.GetMissions(cat.Name));
+                if (req != _missionListRequest) return;
+                _currentMissions = list;
+                dgMissions.ItemsSource = _currentMissions;
+            }
+            catch (Exception ex)
+            {
+                if (req != _missionListRequest) return;
+                txtMissionSearchStatus.Text = $"エラー: {ex.Message}";
+            }
         }
         else
         {
-            dgMissions.ItemsSource = null;
+            // カテゴリ未選択なら全件に今の組合・ランクの絞り込みを掛けて出す (一覧を空にしない)
+            var svc = _missionService;
+            if (svc == null)
+            {
+                dgMissions.ItemsSource = null;
+                return;
+            }
+            var faction = cmbMissionFaction.SelectedItem as string;
+            var rank = cmbMissionRank.SelectedItem as string;
+            try
+            {
+                var filtered = await Task.Run(() =>
+                {
+                    var all = svc.Search("");
+                    return svc.FilterByFactionAndRank(all, faction, rank);
+                });
+                if (req != _missionListRequest) return;
+                _currentMissions = filtered;
+                dgMissions.ItemsSource = _currentMissions;
+                txtMissionSearchStatus.Text = $"{_currentMissions.Count} 件";
+                txtMissionDetail.Text = "ミッションを選択すると詳細が表示されます。";
+            }
+            catch (Exception ex)
+            {
+                if (req != _missionListRequest) return;
+                txtMissionSearchStatus.Text = $"エラー: {ex.Message}";
+            }
         }
     }
 
@@ -2022,6 +2130,7 @@ public partial class MainWindow : Window
         var query = txtMissionSearch.Text.Trim();
         if (string.IsNullOrEmpty(query)) { await MissionSearchClear_Execute(); return; }
 
+        var req = ++_missionListRequest;
         txtMissionSearchStatus.Text = "検索中...";
         try
         {
@@ -2029,17 +2138,42 @@ public partial class MainWindow : Window
             var svc = _missionService;
             var faction = cmbMissionFaction.SelectedItem as string;
             var rank = cmbMissionRank.SelectedItem as string;
-            _currentMissions = await Task.Run(() =>
+            var (foundCount, filtered) = await Task.Run(() =>
             {
                 var found = svc.Search(query);
-                return svc.FilterByFactionAndRank(found, faction, rank);
+                return (found.Count, svc.FilterByFactionAndRank(found, faction, rank));
             });
+            if (req != _missionListRequest) return;
+            _currentMissions = filtered;
             dgMissions.ItemsSource = _currentMissions;
             txtMissionSearchStatus.Text = $"{_currentMissions.Count} 件";
 
-            if (_currentMissions.Count == 0)
+            if (_currentMissions.Count == 0 && foundCount > 0)
+            {
+                // 検索語では当たったが、組合・ランクの絞り込みで 0 件になった
+                var transHits = await Task.Run(() => svc.SearchTranslations(query));
+                if (req != _missionListRequest) return;
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"検索語に当たる契約は {foundCount} 件ありますが、組合・ランクの絞り込みで 0 件になりました。");
+                if (transHits.Count > 0)
+                {
+                    sb.AppendLine("\n翻訳データベースに以下のタイトルが見つかりました。\n");
+                    foreach (var (key, en, ja) in transHits.Take(20))
+                    {
+                        var display = !string.IsNullOrEmpty(ja) ? $"{ja} ({en})" : en;
+                        sb.AppendLine($"  ● {display}");
+                        sb.AppendLine($"    キー: {key}");
+                    }
+                    if (transHits.Count > 20)
+                        sb.AppendLine($"\n  ...他 {transHits.Count - 20} 件");
+                }
+                SetMissionDetail(sb.ToString());
+                txtMissionSearchStatus.Text = $"0 件 (検索では {foundCount} 件。組合・ランクの絞り込みで 0 件)";
+            }
+            else if (_currentMissions.Count == 0)
             {
                 var transHits = await Task.Run(() => svc.SearchTranslations(query));
+                if (req != _missionListRequest) return;
                 if (transHits.Count > 0)
                 {
                     var sb = new System.Text.StringBuilder();
@@ -2064,6 +2198,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            if (req != _missionListRequest) return;
             txtMissionSearchStatus.Text = $"エラー: {ex.Message}";
         }
     }
@@ -2102,10 +2237,17 @@ public partial class MainWindow : Window
     private async void ShowMissionByRecord(IReadOnlyList<string> records)
     {
         if (_missionService == null) { txtMissionDetail.Text = "ミッションがまだ読み込まれていません (［ミッション読み込み］)。"; return; }
+        // 一覧を出す・行を選ぶ経路に入ったときの操作の番号 (それより前の例外は番号の判定をせずに出す)
+        int? req = null;
         try
         {
             var m = _missionService.FindByRecord(records);
-            if (m == null) { txtMissionDetail.Text = $"ミッションが見つかりませんでした ({string.Join(", ", records)})。"; return; }
+            // 見つからなかったときも番号を進めて、待っている古い一覧の操作の結果が「見つかりませんでした」を上書きしないようにする
+            // 番号を進めると待っている操作の結果は捨てられるので、その操作が出した「検索中...」も消す
+            if (m == null) { ++_missionListRequest; txtMissionSearchStatus.Text = ""; txtMissionDetail.Text = $"ミッションが見つかりませんでした ({string.Join(", ", records)})。"; return; }
+            // 一覧を出す・行を選ぶ経路はすべて番号を進めて、待っている古い一覧の操作の結果を捨てさせる (await の無い分岐も)
+            req = ++_missionListRequest;
+            txtMissionSearchStatus.Text = "";
             // そのミッションのカテゴリを左の一覧で選び、一覧をそのカテゴリの中身にする (カテゴリを選んだときと同じ表示)
             var catName = MissionService.CategoryOf(m);
             if (lstMissionCategories.ItemsSource is IEnumerable<MissionService.MissionCategory> cats
@@ -2121,6 +2263,7 @@ public partial class MainWindow : Window
                     var svc = _missionService;
                     var list = await Task.Run(() => svc.GetMissions(cat.Name));
                     if (!ReferenceEquals(svc, _missionService)) return;
+                    if (req != _missionListRequest) return;
                     _currentMissions = list;
                     dgMissions.ItemsSource = _currentMissions;
                     var jaCount = _currentMissions.Count(x => !string.IsNullOrEmpty(x.DisplayNameJa));
@@ -2139,13 +2282,36 @@ public partial class MainWindow : Window
             else dgMissions.ScrollIntoView(row);
             SetMissionDetail(_missionService.FormatDetail(m));
         }
-        catch (Exception ex) { txtMissionDetail.Text = $"詳細表示エラー: {ex.Message}"; }
+        catch (Exception ex)
+        {
+            if (req != null && req != _missionListRequest) return;
+            txtMissionDetail.Text = $"詳細表示エラー: {ex.Message}";
+        }
+    }
+
+    // 一覧で選んだミッションのカテゴリを左のカテゴリ一覧で水色にして見える位置に出す (ListBox の選択・一覧の中身は変えない)。
+    // mission が null なら水色を消す。前に水色だった項目は戻す
+    private void HighlightMissionCategory(MissionService.MissionEntry? mission)
+    {
+        MissionService.MissionCategory? cat = null;
+        if (mission != null && lstMissionCategories.ItemsSource is IEnumerable<MissionService.MissionCategory> cats)
+        {
+            var catName = MissionService.CategoryOf(mission);
+            cat = cats.FirstOrDefault(c => c.Name == catName);
+        }
+        if (!ReferenceEquals(_highlightedMissionCategory, cat) && _highlightedMissionCategory != null)
+            _highlightedMissionCategory.IsHighlighted = false;
+        _highlightedMissionCategory = cat;
+        if (cat == null) return;
+        cat.IsHighlighted = true;
+        lstMissionCategories.ScrollIntoView(cat);
     }
 
     private void Mission_Selected(object sender, SelectionChangedEventArgs e)
     {
         if (_missionService == null) return;
-        if (dgMissions.SelectedItem is not MissionService.MissionEntry mission) return;
+        if (dgMissions.SelectedItem is not MissionService.MissionEntry mission) { HighlightMissionCategory(null); return; }
+        HighlightMissionCategory(mission);
 
         try
         {
@@ -2200,6 +2366,7 @@ public partial class MainWindow : Window
     //     (GameDataExtractor.RebuildCharacterPortsAsync。チャットが装備の互換性を口のデータで答えるのに使う)
     //  4. BP (ブループリント) の表 (blueprints) が無い・空か、resource_types に原石の精錬後 (refined_uuid) が無ければ、それだけを取り出す
     //     (GameDataExtractor.RebuildBlueprintsAsync。［BP］タブが使う)
+    //  5. 星図の場所の名前 (starmap_names。［ゲームログ］の場所名) が無い・空なら、それだけを取り出す (GameDataExtractor.RebuildStarmapNamesAsync)
     // 同時には走らせない (同じ Data.p4k を 2 本同時に読まないように。前が終わってから次を始める)。1 つが失敗しても次は行う。
     // インデックス構築・装備データの再抽出の最中は走らせない。starbreaker が入っていない・Data.p4k が見つからないときは走らせない (starbreaker を自動でダウンロードしない)。
     // 失敗はログに残す (cargo_scu は NULL・resource_types / item_ports は空のままなので、次の起動でまた試す)。終わったら積載量の覚えを捨てて一覧を描き直し、
@@ -2213,7 +2380,7 @@ public partial class MainWindow : Window
         {
             var workDir = App.Config.WorkingDirectory;
             if (string.IsNullOrEmpty(workDir)) workDir = AppDomain.CurrentDomain.BaseDirectory;
-            Task<(int Cargo, int Resources, int Blueprints, string? Skipped)> task;
+            Task<(int Cargo, int Resources, int Blueprints, int Starmap, string? Skipped)> task;
             // 構築・再抽出・インポートの印の確認と、取り消し用の登録は _priceRefreshTasks のロックの中で行う
             // (印は取得を止める依頼より前に立つので、依頼が登録より先に来たときは、ここで印を見て始めない)
             lock (_priceRefreshTasks)
@@ -2223,16 +2390,33 @@ public partial class MainWindow : Window
                 var ct = cts.Token;
                 task = Task.Run(async () =>
                 {
+                    // 名前 (地名・船名・武器・装備) の AI 訳を英語に書き戻す (TranslationDatabase.RevertNamesToEnglish)。
+                    // starbreaker・Data.p4k が無くても行う。失敗はログに残して下の処理へ進む
+                    try
+                    {
+                        var transPath = Path.Combine(workDir, "translations.db");
+                        var gamePath = Path.Combine(workDir, "gamedata_cache.db");
+                        if (File.Exists(transPath) && File.Exists(gamePath))
+                        {
+                            using var tdb = new TranslationDatabase(transPath);
+                            var (places, ships, items) = tdb.RevertNamesToEnglish(gamePath);
+                            if (places + ships + items > 0)
+                                Log($"[名前] AI 訳の名前を英語に書き戻しました (地名 {places} 件、船名 {ships} 件、武器・装備 {items} 件)");
+                        }
+                    }
+                    catch (Exception ex) { Log($"[名前] AI 訳の名前の英語への書き戻しに失敗しました: {ex.Message}"); }
+
                     using var extractor = new GameDataExtractor(workDir);
-                    if (!extractor.IsReady) return (0, 0, 0, "starbreaker か Data.p4k が見つからない");
+                    if (!extractor.IsReady) return (0, 0, 0, 0, "starbreaker か Data.p4k が見つからない");
                     var needsCargo = extractor.NeedsShipCargo();
                     var needsResources = extractor.NeedsResourceTypes();
                     var needsPorts = extractor.NeedsCharacterPorts();
                     var needsBlueprints = extractor.NeedsBlueprints();
-                    if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints) return (0, 0, 0, (string?)null);
-                    if (GameDataExtractor.IsIndexBuildRunning) return (0, 0, 0, "インデックス構築・装備データの再抽出が走っている");
+                    var needsStarmap = extractor.NeedsStarmapNames();
+                    if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints && !needsStarmap) return (0, 0, 0, 0, (string?)null);
+                    if (GameDataExtractor.IsIndexBuildRunning) return (0, 0, 0, 0, "インデックス構築・装備データの再抽出が走っている");
                     ct.ThrowIfCancellationRequested();
-                    int cargo = 0, resources = 0, blueprints = 0;
+                    int cargo = 0, resources = 0, blueprints = 0, starmap = 0;
                     // 積載量・資源の種類 (失敗はここでログに残し、口の定義へ進む。取り消しはそのまま上げる)
                     try
                     {
@@ -2280,17 +2464,32 @@ public partial class MainWindow : Window
                             Log($"[BP] ブループリントの取り出しに失敗しました (次の起動でまた試します): {ex.Message}");
                         }
                     }
-                    return (cargo, resources, blueprints, (string?)null);
+                    // 星図の場所の名前 (前が終わってから)
+                    if (needsStarmap)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        try
+                        {
+                            Log("[場所名] 星図の場所の名前 (starmap_names) が無い・空なので、裏で取り出します");
+                            starmap = await extractor.RebuildStarmapNamesAsync(new Progress<string>(m => Log($"[場所名] {m}")), ct);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            Log($"[場所名] 星図の場所の名前の取り出しに失敗しました (次の起動でまた試します): {ex.Message}");
+                        }
+                    }
+                    return (cargo, resources, blueprints, starmap, (string?)null);
                 });
                 _startupBackfillCts = cts;
                 _startupBackfillTask = task;
             }
-            var (count, resourceCount, blueprintCount, skipped) = await task;
+            var (count, resourceCount, blueprintCount, starmapCount, skipped) = await task;
             if (skipped != null)
             {
                 Log($"[積載量] 船の積載量 (SCU) の計算・資源の種類の取り出しをしませんでした ({skipped})");
                 Log($"[装備の口] 口の定義の取り出しをしませんでした ({skipped})");
                 Log($"[BP] ブループリントの取り出しをしませんでした ({skipped})");
+                Log($"[場所名] 星図の場所の名前の取り出しをしませんでした ({skipped})");
             }
             if (count > 0) ShipCargo.Invalidate();   // 計算した値を使うよう、覚えた結果を捨てて一覧を描き直す
             if (resourceCount > 0)
@@ -2299,6 +2498,7 @@ public partial class MainWindow : Window
                 orePanel?.Reload();               // ［鉱石］の資源の一覧 (グループ) も読み直す
             }
             if (resourceCount > 0 || blueprintCount > 0) blueprintPanel?.Reload();   // ［BP］(資源名・原石の精錬後・blueprints) を読み直す
+            if (starmapCount > 0) gameLogPanel?.ClearNameCache();   // 取り出した場所名を使うよう、［ゲームログ］の名前の覚えを捨てる
         }
         catch (OperationCanceledException) when (cts?.IsCancellationRequested == true)
         {

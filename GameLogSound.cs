@@ -33,6 +33,8 @@ public sealed class GameLogSoundJudge
     public static readonly TimeSpan ArrivalNameWait = TimeSpan.FromSeconds(3);
     // ほかの読み上げの場面で、同じ場面が続いたとみなす間隔
     public static readonly TimeSpan SceneWindow = TimeSpan.FromSeconds(10);
+    // 格納の行は昇降台が下がった時刻で、船が決まるまで (最大 60 秒) 遅れて足されるので、読む範囲を広げる
+    public static readonly TimeSpan StowLiveWindow = TimeSpan.FromSeconds(75);
 
     // 基準 (この番号までの行は鳴らさない) が決まったか。最初に Game.log が見つかった Poll で決める
     private bool _armed;
@@ -109,7 +111,7 @@ public sealed class GameLogSoundJudge
     private string? JudgeScene(GameLogEntry e, DateTime nowUtc, Func<string, bool> sceneEnabled)
     {
         if (GameLogVoiceScenes.SceneOf(e) is not { } scene || scene == GameLogVoiceScenes.Armistice || scene == GameLogVoiceScenes.Arrival) return null;
-        if ((nowUtc - e.TimeUtc).Duration() > LiveWindow || !sceneEnabled(scene)) return null;
+        if ((nowUtc - e.TimeUtc).Duration() > (scene == "格納" ? StowLiveWindow : LiveWindow) || !sceneEnabled(scene)) return null;
         // BP受信は 1 行ごとに別の BP なので、続いても全部読む (契約の報酬で 2 つ続けて届くことがある)
         var continued = scene != "BP受信" && _lastScene.TryGetValue(scene, out var prev) && (e.TimeUtc - prev).Duration() <= SceneWindow;
         _lastScene[scene] = e.TimeUtc;

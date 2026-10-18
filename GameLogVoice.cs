@@ -33,6 +33,14 @@ public static class GameLogVoiceScenes
     public const string Jurisdiction = "管轄区域に進入";
     // 復活 (種類「復活」。{場所} は到着と同じ規則で埋める: PlaceOf)
     public const string Respawn = "復活";
+    // 量子ジャンプの到着 (種類「量子ジャンプ」。表の場面の欄は「量子ジャンプ離脱」。鍵は保存済みの設定のため「量子ジャンプ」のまま)
+    public const string QuantumArrived = "量子ジャンプ";
+    // 既定の文を変えた場面の前の既定の文。保存された文がこれと同じなら、今の既定の文として扱う (ItemOf)
+    private static readonly Dictionary<string, string> OldDefaultTexts = new()
+    {
+        [QuantumArrived] = "量子ジャンプします。",
+        ["降りた"] = "{船}から降りました。",
+    };
 
     public static readonly GameLogVoiceScene[] All =
     [
@@ -40,11 +48,14 @@ public static class GameLogVoiceScenes
         new(Arrival, "到着", "{場所}に到着しました。ハンガーリクエスト可能です。", true),
         new("乗船", "乗船（自分の船）", "{船}に乗船しました。", false),
         new("下船", "下船", "{船}から降りました。", false),
-        new("降りた", "降りた（操縦席を降りた）", "{船}から降りました。", false),
+        new("降りた", "操縦席を離れた", "操縦席を離れました。", false),
         new("操縦", "操縦（操縦席に座った）", "{船}を操縦します。", false),
         new("呼び出し完了", "呼び出し完了", "{船}の準備ができました。", false),
         new("格納", "格納", "{船}を格納しました。", false),
-        new("量子ジャンプ", "量子ジャンプ", "量子ジャンプします。", false),
+        // 「ハンガーリクエスト完了」の通知 (離陸前と着陸時の両方に同じ文面で出る)
+        new("ハンガー要求", "ハンガーリクエスト完了", "ハンガーが許可されました。", false),
+        new("量子ジャンプ開始", "量子ジャンプ開始", "量子ジャンプします。", false),
+        new(QuantumArrived, "量子ジャンプ離脱", "量子ジャンプから離脱します。", false),
         new("契約受注", "契約受注", "{内容}", false),
         new("契約完了", "契約完了", "{内容}", false),
         new("契約失敗", "契約失敗", "{内容}", false),
@@ -85,11 +96,14 @@ public static class GameLogVoiceScenes
         return Find(e.Kind) != null ? e.Kind : null;
     }
 
-    // 保存された場面の設定 (無ければ既定)
+    // 保存された場面の設定 (無ければ既定)。文が前の既定の文のままなら、文を空 (= 今の既定の文) にした写しを返す
     public static GameLogVoiceItem ItemOf(AppConfig config, string key)
     {
         foreach (var it in config.GameLogVoiceItems)
-            if (it.Kind == key) return it;
+            if (it.Kind == key)
+                return OldDefaultTexts.TryGetValue(it.Kind, out var old) && it.Text == old
+                    ? new GameLogVoiceItem { Kind = it.Kind, Enabled = it.Enabled, Text = "", SpeakerId = it.SpeakerId }
+                    : it;
         var s = Find(key);
         return new GameLogVoiceItem { Kind = key, Enabled = s?.DefaultEnabled ?? false, Text = "" };
     }
@@ -170,7 +184,7 @@ public static class GameLogVoiceScenes
 // VOICEVOX の話者のスタイル 1 つ (GET /speakers の styles の 1 件)。Label は「キャラクター名（スタイル名）」
 public sealed record GameLogVoiceSpeaker(int Id, string Label);
 
-// VOICEVOX で wav を作る (POST /audio_query → POST /synthesis)。作った wav は URL・話者・文を鍵にメモリに覚えて使い回す
+// VOICEVOX で wav を作る (POST /audio_query → POST /synthesis)。作った wav は URL・話者・速度・文を鍵にメモリに覚えて使い回す
 public static class GameLogVoiceVox
 {
     // 1 回の読み上げ (audio_query と synthesis の合計) の待ち時間
@@ -180,8 +194,8 @@ public static class GameLogVoiceVox
 
     private static readonly HttpClient Http = new() { Timeout = System.Threading.Timeout.InfiniteTimeSpan };
     private static readonly object CacheLock = new();
-    private static readonly Dictionary<(string Url, int Speaker, string Text), byte[]> Cache = new();
-    private static readonly LinkedList<(string Url, int Speaker, string Text)> CacheOrder = new();
+    private static readonly Dictionary<(string Url, int Speaker, double Speed, string Text), byte[]> Cache = new();
+    private static readonly LinkedList<(string Url, int Speaker, double Speed, string Text)> CacheOrder = new();
 
     public static string NormalizeUrl(string url) => url.Trim().TrimEnd('/');
 
@@ -196,10 +210,12 @@ public static class GameLogVoiceVox
     }
 
     // wav を返す (覚えていればそれ、無ければ VOICEVOX で作る)。失敗は例外 (理由は Reason で文にする)
-    public static async Task<byte[]> GetWavAsync(string url, int speaker, string text, CancellationToken ct)
+    // speedScale: 読み上げ速度 (audio_query の speedScale に入れる)。null なら設定 (App.Config.VoiceVoxSpeedScale)
+    public static async Task<byte[]> GetWavAsync(string url, int speaker, string text, CancellationToken ct, double? speedScale = null)
     {
         url = NormalizeUrl(url);
-        var key = (url, speaker, text);
+        var speed = speedScale ?? App.Config.VoiceVoxSpeedScale;
+        var key = (url, speaker, speed, text);
         lock (CacheLock)
         {
             if (Cache.TryGetValue(key, out var hit)) return hit;
@@ -210,6 +226,11 @@ public static class GameLogVoiceVox
         using var queryRes = await Http.PostAsync($"{url}/audio_query?text={Uri.EscapeDataString(text)}&speaker={spk}", null, cts.Token);
         if (!queryRes.IsSuccessStatusCode) throw new VoiceVoxException($"audio_query が HTTP {(int)queryRes.StatusCode} を返しました");
         var query = await queryRes.Content.ReadAsStringAsync(cts.Token);
+        // 速度だけ書き換える (ほかの値は audio_query の応答のまま)
+        if (System.Text.Json.Nodes.JsonNode.Parse(query) is not System.Text.Json.Nodes.JsonObject queryNode)
+            throw new VoiceVoxException("audio_query の応答の形が違います");
+        queryNode["speedScale"] = speed;
+        query = queryNode.ToJsonString();
         using var body = new StringContent(query, Encoding.UTF8, "application/json");
         using var synthRes = await Http.PostAsync($"{url}/synthesis?speaker={spk}", body, cts.Token);
         if (!synthRes.IsSuccessStatusCode) throw new VoiceVoxException($"synthesis が HTTP {(int)synthRes.StatusCode} を返しました");
@@ -366,9 +387,9 @@ public static class GameLogVoicePlayer
 
     // 試聴: wav を作ってすぐ鳴らす (順番待ちを通さない)。失敗したら例外 (理由は GameLogVoiceVox.Reason)
     private static System.Media.SoundPlayer? _testPlayer;
-    public static async Task TestAsync(string url, int speaker, string text)
+    public static async Task TestAsync(string url, int speaker, string text, double? speedScale = null)
     {
-        var wav = await GameLogVoiceVox.GetWavAsync(url, speaker, text, CancellationToken.None);
+        var wav = await GameLogVoiceVox.GetWavAsync(url, speaker, text, CancellationToken.None, speedScale);
         _testPlayer?.Stop();
         _testPlayer?.Dispose();
         var player = new System.Media.SoundPlayer(new MemoryStream(wav));

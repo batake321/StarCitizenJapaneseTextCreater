@@ -1631,6 +1631,15 @@ public class ShipPortInfo
         "FuelTank" => "燃料タンク",
         "QuantumFuelTank" => "量子燃料タンク",
         "FuelIntake" => "燃料インテーク",
+        // 付いている物の種類で拾ったポートの種類 (ゲームの global.ini の item_Type* の語。ToolArm・UtilityTurret・SalvageModifier は語が無いので英語のまま)
+        "BombLauncher" => "爆弾ランチャー",
+        "Bomb" => "爆弾",
+        "TractorBeam" => "トラクタービーム",
+        "EMP" => "EMP",
+        "QuantumInterdictionGenerator" => "量子妨害ジェネレーター",
+        "WeaponMining" => "採掘レーザーヘッド",
+        "MiningModifier" => "採掘モジュール (MiningModifier)",
+        "SalvageHead" => "サルベージビーム (SalvageHead)",
         _ => ItemType
     };
 }

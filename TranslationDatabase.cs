@@ -6,6 +6,7 @@ namespace StarCitizenJapaneseTextCreater;
 public class TranslationDatabase : IDisposable
 {
     private readonly SqliteConnection _conn;
+    private readonly string _dbPath;   // gamedata_cache.db (同じフォルダ) を引くため (RevertNamesToEnglish)
     public SqliteConnection Connection => _conn;
 
     // 公式の日本語 ini で、訳の代わりに入っている「訳が無い」印 (例: "! JAPANESE_(JAPAN) TRANSLATION NOT FOUND FOR LOCID: <key> !")。
@@ -17,6 +18,7 @@ public class TranslationDatabase : IDisposable
 
     public TranslationDatabase(string dbPath)
     {
+        _dbPath = dbPath;
         _conn = new SqliteConnection($"Data Source={dbPath}");
         _conn.Open();
         InitSchema();
@@ -251,6 +253,101 @@ public class TranslationDatabase : IDisposable
         SyncService.ClearTombstones(_conn, tx, "translations", written);   // 行を書き直したので墓石を消す
         tx.Commit();
         Console.WriteLine($"  DB updated with AI translations: {count} entries");
+
+        // 名前 (地名・船名・武器・装備) の AI 訳を英語に書き戻す (ゲーム中の文字とアプリの文字を揃える)。gamedata_cache.db は翻訳 DB と同じフォルダ
+        try
+        {
+            var gamedataPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(_dbPath)) ?? "", "gamedata_cache.db");
+            var (places, ships, items) = RevertNamesToEnglish(gamedataPath);
+            Console.WriteLine($"  Names reverted to English: places {places}, ships {ships}, items {items}");
+        }
+        catch (Exception ex) { Console.WriteLine($"  Names revert failed: {ex.Message}"); }
+    }
+
+    // 名前の AI 訳を英語に書き戻す。source が 'ai' の行だけ (manual・official などは変えない)、「原文に戻す」(SetToOriginalEnglish) と同じく japanese を english にし、source を 'original' にする (同期用の墓石も書く)。
+    // 対象のキー (gamedata_cache.db から。先頭の "@" を除き、大文字小文字を区別せずに translations.key と照合):
+    //   地名: starmap_names.name_key のうち本物の場所の名前 (NameMasker.ReadPlaceNameKeys。表が無ければ飛ばす)
+    //   船名: ships.name
+    //   武器・装備: items.name と item_index.name_key のうち船の設備・飾り・器の類でない品目の名前 (NameMasker.ReadProductNameKeys。列が無ければ飛ばす)
+    // キーに "desc" を含むもの (説明文。items.name に説明文のキーが入っている品目がある) は対象外。
+    // 1 つのキーが複数の種類に入るときは、上の順で先の種類に数える。gamedata_cache.db が無ければ何もしない。返り値: 書き戻した件数 (地名, 船名, 武器・装備)
+    public (int Places, int Ships, int Items) RevertNamesToEnglish(string gamedataDbPath)
+    {
+        if (!File.Exists(gamedataDbPath)) return (0, 0, 0);
+        var places = new List<string>();
+        var ships = new List<string>();
+        var items = new List<string>();
+        using (var game = new SqliteConnection($"Data Source={gamedataDbPath};Mode=ReadOnly"))
+        {
+            game.Open();
+            bool HasColumn(string table, string column)
+            {
+                using var c = game.CreateCommand();
+                c.CommandText = $"SELECT 1 FROM pragma_table_info('{table}') WHERE name = @c";
+                c.Parameters.AddWithValue("@c", column);
+                return c.ExecuteScalar() != null;
+            }
+            void Read(string table, string column, List<string> into)
+            {
+                if (!HasColumn(table, column)) return;
+                using var c = game.CreateCommand();
+                c.CommandText = $"SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL AND {column} != ''";
+                using var r = c.ExecuteReader();
+                while (r.Read()) into.Add(r.GetString(0));
+            }
+            Read("ships", "name", ships);
+            // 武器・装備は設備の類でない品目の名前だけ (座席・エレベーターなど船の部品の名前は書き戻さない。判定は NameMasker.ReadProductNameKeys)
+            var english = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT key, english FROM translations WHERE english IS NOT NULL";
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) english[r.GetString(0)] = r.GetString(1);
+            }
+            string? EnglishOf(string k) => english.TryGetValue(k.Trim().TrimStart('@'), out var v) ? v : null;
+            // 地名は本物の場所だけ (雛形・ビーコン・ミッション用・取り付け口・種類の名前そのものは除く。判定は NameMasker.ReadPlaceNameKeys)
+            places.AddRange(NameMasker.ReadPlaceNameKeys(game, EnglishOf));
+            items.AddRange(NameMasker.ReadProductNameKeys(game, EnglishOf));
+        }
+
+        // AI 訳の行を、キーの大文字小文字を区別せずに引けるようにする。
+        // 英語のまま返ってきた行も含める (source が 'ai' のままだと AI 翻訳のたびに送り直されるため、原文の扱いにする)
+        var aiRows = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        using (var cmd = _conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT key FROM translations WHERE source = 'ai'";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var k = r.GetString(0);
+                if (!aiRows.TryGetValue(k, out var list)) aiRows[k] = list = [];
+                list.Add(k);
+            }
+        }
+
+        var done = new HashSet<string>(StringComparer.Ordinal);
+        List<string> Targets(List<string> nameKeys)
+        {
+            var result = new List<string>();
+            foreach (var raw in nameKeys)
+            {
+                var k = raw.Trim();
+                if (k.StartsWith('@')) k = k[1..];
+                if (k.Length == 0 || k.Contains("desc", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!aiRows.TryGetValue(k, out var rows)) continue;
+                foreach (var row in rows)
+                    if (done.Add(row)) result.Add(row);
+            }
+            return result;
+        }
+        var placeKeys = Targets(places);
+        var shipKeys = Targets(ships);
+        var itemKeys = Targets(items);
+        if (done.Count == 0) return (0, 0, 0);
+
+        // 「原文に戻す」と同じ扱い (source・translator を 'original' にし、同期用の墓石も書く)。次の AI 翻訳の対象にならない
+        SetToOriginalEnglish(done.ToList());
+        return (placeKeys.Count, shipKeys.Count, itemKeys.Count);
     }
 
     public void UpdateTranslation(string key, string japanese, string source = "manual")

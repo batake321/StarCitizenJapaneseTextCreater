@@ -103,12 +103,15 @@
                         <DataGrid x:Name="dgActions" Grid.Column="1" AutoGenerateColumns="False"
                                   CanUserAddRows="False" CanUserDeleteRows="False" IsReadOnly="True"
                                   SelectionMode="Single" GridLinesVisibility="Horizontal"
-                                  AlternatingRowBackground="#FAFAFA" FontSize="13"
+                                  AlternationCount="2" FontSize="13"
                                   MouseDoubleClick="DgActions_DoubleClick"
                                   RowHeight="32">
                             <DataGrid.RowStyle>
                                 <Style TargetType="DataGridRow">
                                     <Style.Triggers>
+                                        <Trigger Property="ItemsControl.AlternationIndex" Value="1">
+                                            <Setter Property="Background" Value="#FAFAFA"/>
+                                        </Trigger>
                                         <DataTrigger Binding="{Binding IsModified}" Value="True">
                                             <Setter Property="Background" Value="#FFF8E1"/>
                                             <Setter Property="FontWeight" Value="SemiBold"/>

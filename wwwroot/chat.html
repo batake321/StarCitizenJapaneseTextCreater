@@ -341,6 +341,11 @@ fetch('/api/backends').then(r=>r.json()).then(data => {
     localStorage.setItem('voicevoxSpeaker', voicevoxSpeaker);
     console.log(`[VoiceVox] speaker from server: ${voicevoxSpeaker}`);
   }
+  if (data.voicevoxSpeedScale != null) {
+    voicevoxSpeedScale = data.voicevoxSpeedScale;
+    localStorage.setItem('voicevoxSpeedScale', voicevoxSpeedScale);
+    console.log(`[VoiceVox] speedScale from server: ${voicevoxSpeedScale}`);
+  }
   updateConsultPanel();
   updateVerifyPanel();
 }).catch(()=>{});
@@ -464,6 +469,8 @@ btnMic.addEventListener('contextmenu', e => e.preventDefault());
 // --- VoiceVox TTS ---
 const voicevoxProxy = `${location.origin}/api/voicevox`;
 let voicevoxSpeaker = parseInt(localStorage.getItem('voicevoxSpeaker') || '0');
+// 読み上げ速度 (アプリの設定タブの値を /api/backends で受け取る)
+let voicevoxSpeedScale = parseFloat(localStorage.getItem('voicevoxSpeedScale') || '1.0');
 let audioQueue = [], audioPlaying = false;
 let audioCtx = null;
 
@@ -558,6 +565,7 @@ async function processAudioQueue() {
       const qr = await fetch(`${voicevoxProxy}/audio_query?text=${encodeURIComponent(text)}&speaker=${voicevoxSpeaker}`, { method: 'POST' });
       if (!qr.ok) { console.error(`[VoiceVox] audio_query failed: ${qr.status} ${await qr.text()}`); continue; }
       const query = await qr.json();
+      query.speedScale = voicevoxSpeedScale;
       console.log(`[VoiceVox] synthesis: speaker=${voicevoxSpeaker}`);
       const sr = await fetch(`${voicevoxProxy}/synthesis?speaker=${voicevoxSpeaker}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(query)

@@ -995,9 +995,38 @@ public partial class GameLogPanel : UserControl
         }
         // 場所の名前 (ログの Location[Stanton2_Orison] や ATC 名から取った Orison) → 翻訳 DB に同じキーがあれば日本語 (無ければ英語)。
         // キーで引けなければ、english が場所の名前と一致する行 (大文字小文字は区別しない) の japanese (ATC から取った Orison → Stanton2_Orison の ORISON)。
-        // それも無ければそのまま。翻訳 DB のキーは場所の名前そのもの (Stanton2_Orison、RR_CRU_L1、Stanton1_Lorville)。
-        // 無いもの (RR_CRU_LEO、Stanton2b_ArcCorpMining_Area141 等。全ログの 104 種のうち 79 種) はそのまま
-        public string Place(string name) => Resolve(name, _places, n => Japanese("@" + n, ignoreCase: true) ?? JapaneseByEnglish(n));
+        // 翻訳 DB のキーは場所の名前そのもの (Stanton2_Orison、RR_CRU_L1、Stanton1_Lorville)。
+        // 名前そのもののキーが無いもの (RR_CRU_LEO、Stanton2b_ArcCorpMining_Area141 等) もある。
+        // どれでも引けず、名前の末尾が _LEO (大文字小文字は区別しない) なら、それを外した名前で同じ引き方をもう一度する
+        // (RR_P3_LEO → RR_P3 の Orbituary。global.ini に _LEO で終わるキーは無い)。
+        // それでも引けなければ、gamedata_cache.db の starmap_names (星図の場所のレコード名 → name の翻訳キー) で名前そのもののキーを引き、
+        // そのキーを翻訳 DB で引く (RR_CRU_LEO → @Stanton2_Transfer_Seraphim)。それでも無ければそのまま
+        public string Place(string name) => Resolve(name, _places, n =>
+            PlaceLookup(n) ?? (n.Length > 4 && n.EndsWith("_LEO", StringComparison.OrdinalIgnoreCase) ? PlaceLookup(n[..^4]) : null)
+            ?? StarmapPlace(n));
+
+        private string? PlaceLookup(string n) => Japanese("@" + n, ignoreCase: true) ?? JapaneseByEnglish(n);
+
+        // starmap_names の record_name = 名前 の name_key ("@…") を翻訳 DB で日本語にする (無ければ英語。引き方は PlaceLookup と同じ)。
+        // gamedata_cache.db が無い・starmap_names の表が無い (前の版の DB)・行が無ければ null (_lock の中で呼ぶ)
+        private string? StarmapPlace(string n)
+        {
+            string? key;
+            using (var game = Open(_gamedataCacheDbPath))
+            {
+                if (game == null) return null;
+                using (var chk = game.CreateCommand())
+                {
+                    chk.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'starmap_names'";
+                    if (chk.ExecuteScalar() == null) return null;
+                }
+                using var cmd = game.CreateCommand();
+                cmd.CommandText = "SELECT name_key FROM starmap_names WHERE record_name = @r LIMIT 1";
+                cmd.Parameters.AddWithValue("@r", n);
+                key = cmd.ExecuteScalar() as string;
+            }
+            return key != null ? Japanese(key, ignoreCase: true) : null;
+        }
 
         // english が text と一致する行 (大文字小文字は区別しない) の japanese (空・"!" 始まりなら english)。同じ english の行が複数あるときは
         // 使える japanese のある行を先に、同じならキーの順 (Orison: Stanton2_Orison の ORISON と ui_pregame_port_Orison_name の Orison → ORISON)。

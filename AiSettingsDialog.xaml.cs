@@ -40,10 +40,13 @@ public partial class AiSettingsDialog : Window
     private readonly List<BackendPanel> _panels = new();
 
     public List<BackendConfig>? Result { get; private set; }
+    public bool UseSmallModelsForTranslation { get; private set; }
 
-    public AiSettingsDialog(List<BackendConfig> backends)
+    public AiSettingsDialog(List<BackendConfig> backends, bool useSmallModelsForTranslation)
     {
         InitializeComponent();
+        chkUseSmallModels.IsChecked = useSmallModelsForTranslation;
+        UseSmallModelsForTranslation = useSmallModelsForTranslation;
         foreach (var b in backends)
             AddPanel(b);
     }
@@ -75,6 +78,7 @@ public partial class AiSettingsDialog : Window
     private void Save_Click(object sender, RoutedEventArgs e)
     {
         Result = _panels.Select(p => p.ToConfig()).ToList();
+        UseSmallModelsForTranslation = chkUseSmallModels.IsChecked == true;
         DialogResult = true;
     }
 

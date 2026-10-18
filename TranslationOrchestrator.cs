@@ -14,6 +14,7 @@ public class TranslationOrchestrator
     private int _successTotal;
     private int _fallbackTotal;
     private int _totalEntries;
+    private int _nameBrokenTotal;   // 名前の置き換え記号 {nameN} が合わず保存しなかった訳の数 (リトライ分も数える)
     private readonly ConcurrentBag<TranslationEntry> _failedEntries = new();
     private readonly ConcurrentBag<string> _keptEnglishKeys = new();
 
@@ -68,6 +69,8 @@ public class TranslationOrchestrator
 
         var stillFailed = _failedEntries.Count;
         Console.WriteLine($"[{Now}] 完了! 翻訳成功: {_successTotal}, 失敗: {stillFailed}");
+        if (_nameBrokenTotal > 0)
+            Console.WriteLine($"[{Now}] 名前の置き換え記号が合わず保存しなかった訳: {_nameBrokenTotal} 件 (未翻訳のまま。次の翻訳で送り直します)");
     }
 
     private async Task RunBatches(List<TranslationEntry> entries, StreamWriter outFile, CancellationToken ct, bool isRetry = false)
@@ -133,11 +136,25 @@ public class TranslationOrchestrator
     {
         Dictionary<string, string>? resultMap = null;
 
+        // 文の中の名前を {nameN} に置き換えて送る (NameMasker)。返ってきた訳で元の名前に戻す
+        var masks = new Dictionary<string, (string Masked, Dictionary<string, string> Map)>();
+        var sendBatch = new List<TranslationEntry>(batch.Count);
+        foreach (var entry in batch)
+        {
+            var (masked, map) = NameMasker.Mask(entry.English);
+            if (map.Count > 0)
+            {
+                masks[entry.Key] = (masked, map);
+                sendBatch.Add(new TranslationEntry { Key = entry.Key, English = masked });
+            }
+            else sendBatch.Add(entry);
+        }
+
         for (int attempt = 0; attempt < _maxRetries; attempt++)
         {
             try
             {
-                resultMap = await backend.TranslateAsync(batch);
+                resultMap = await backend.TranslateAsync(sendBatch);
                 break;
             }
             catch (HttpRequestException ex) when (ex.Message.Contains("429"))
@@ -159,13 +176,33 @@ public class TranslationOrchestrator
             }
         }
 
+        // 訳の中の {nameN} を元の名前に戻す。欠けている・余計にある・番号が壊れている訳は保存しない
+        var nameBroken = new HashSet<string>();
+        if (resultMap != null)
+        {
+            foreach (var (key, (masked, map)) in masks)
+            {
+                if (!resultMap.TryGetValue(key, out var tr) || string.IsNullOrWhiteSpace(tr)) continue;
+                var restored = NameMasker.Unmask(masked, tr, map);
+                if (restored == null) { nameBroken.Add(key); resultMap.Remove(key); }
+                else resultMap[key] = restored;
+            }
+        }
+
         var lines = new List<string>();
         var translatedItems = new List<(string Key, string Japanese, string Translator)>();
         int ok = 0, fail = 0, sameAsEnglish = 0;
 
         foreach (var entry in batch)
         {
-            if (resultMap != null && resultMap.TryGetValue(entry.Key, out var translated) && !string.IsNullOrWhiteSpace(translated)
+            if (nameBroken.Contains(entry.Key))
+            {
+                // 名前の置き換え記号 {nameN} が欠けた・余計にある・番号が壊れた訳は保存せず失敗扱いにする
+                fail++;
+                _failedEntries.Add(entry);
+                Console.WriteLine($"[{Now}] [{backend.Name}] 名前の置き換え記号が合わないため保存しません: {entry.Key}");
+            }
+            else if (resultMap != null && resultMap.TryGetValue(entry.Key, out var translated) && !string.IsNullOrWhiteSpace(translated)
                 && translated.Trim() == entry.English.Trim())
             {
                 // AI が英語原文をそのまま返したものは AI の訳としては保存せず、「原文維持」にする (翻訳後に DB へ記録。リトライもしない)
@@ -211,12 +248,15 @@ public class TranslationOrchestrator
 
             _successTotal += ok;
             _fallbackTotal += fail;
+            _nameBrokenTotal += nameBroken.Count;
             _progress.Update(batch.Count);
 
             var done = _progress.Done;
             var pct = (double)done / _totalEntries * 100;
             Console.WriteLine($"[{Now}] [{backend.Name}] {done:N0}/{_totalEntries:N0} ({pct:F1}%) OK:{ok} FAIL:{fail}"
-                + (sameAsEnglish > 0 ? $" 原文のまま(未保存):{sameAsEnglish}" : ""));
+                + (sameAsEnglish > 0 ? $" 原文のまま(未保存):{sameAsEnglish}" : "")
+                + (masks.Count > 0 ? $" 名前の置き換え:{masks.Count}件" : "")
+                + (nameBroken.Count > 0 ? $" 置き換え記号の不一致(未保存):{nameBroken.Count}" : ""));
             ProgressChanged?.Invoke(done, _totalEntries, _successTotal, _fallbackTotal);
         }
 

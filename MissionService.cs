@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
@@ -98,6 +99,38 @@ public class MissionService : IDisposable
 
         if (!string.IsNullOrEmpty(translationDbPath) && File.Exists(translationDbPath))
             LoadTranslations(translationDbPath);
+
+        LoadFactionNames();
+    }
+
+    // 勢力の表示名 (record_name → 日本語名、無ければ英語名)。FormatFaction の手書きの対応表に無い勢力に使う。
+    // FormatFaction は static (MissionEntry.SuccessRepSummary からも呼ばれる) なので static に持つ
+    private static Dictionary<string, string>? _factionNames;
+
+    // gamedata_cache.db の faction_reputation(record_name, display_key) を読み、display_key を
+    // 読み込み済みの翻訳 (_transDict → _enDict) で引いて辞書にする。ミッションの読み込み時に1回だけ
+    private void LoadFactionNames()
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT record_name, display_key FROM faction_reputation";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                if (r.IsDBNull(0) || r.IsDBNull(1)) continue;
+                var rec = r.GetString(0);
+                var key = r.GetString(1);
+                if (string.IsNullOrEmpty(rec) || string.IsNullOrEmpty(key)) continue;
+                string? name = null;
+                if (_transDict != null && _transDict.TryGetValue(key, out var ja) && !string.IsNullOrEmpty(ja)) name = ja;
+                else if (_enDict != null && _enDict.TryGetValue(key, out var en) && !string.IsNullOrEmpty(en)) name = en;
+                if (name != null) map[rec] = name;
+            }
+        }
+        catch { /* faction_reputation が無い古い DB では引かず、今までどおり ID をそのまま出す */ }
+        _factionNames = map;
     }
 
     public string? TransLoadError { get; private set; }
@@ -176,7 +209,8 @@ public class MissionService : IDisposable
         }
         if (!string.IsNullOrEmpty(rankFilter) && rankFilter != "(すべて)")
         {
-            result = result.Where(m => m.WikiRank == rankFilter).ToList();
+            // ランクが不明 ("") の契約は、どのランクを選んでも残す
+            result = result.Where(m => m.WikiRank == rankFilter || string.IsNullOrEmpty(m.WikiRank)).ToList();
         }
         return result;
     }
@@ -254,10 +288,87 @@ public class MissionService : IDisposable
         {"Foxwell Enforcement", "フォックスウェル"},
     };
 
-    private static readonly string[] RankNames = { "中立", "ジュニア・コントラクター", "コントラクター", "シニア・コントラクター", "エキスパート", "エリート・コントラクター" };
+    // ゲームの契約者ランク (global.ini の RepScope_Contractor_Rank0〜6)
+    private static readonly string[] RankNames = { "見習い", "ジュニア・コントラクター", "コントラクター", "シニア・コントラクター", "ベテラン・コントラクター", "チーフ・コントラクター", "エリート・コントラクター" };
 
     private static string GetRankName(int rankIndex) =>
         rankIndex >= 0 && rankIndex < RankNames.Length ? RankNames[rankIndex] : "";
+
+    // ランクの決め方 (前にあるものを優先。どれでも決まらなければ "" = 不明):
+    //   (1) ゲームの必要ランク: CG 行は _Contract_.minStanding、MBE 行は reputationRequirements.expression[] の standing
+    //   (2) 内部名 (debugName / record_name) を '_' で区切った語の Rank0〜Rank6
+    //   (3) 難易度 (Intro / Very Easy → 見習い … Very Hard → ベテラン、Super → チーフ)
+    private static int DecideRank(string rawJson, bool isContract, string name, string difficulty)
+    {
+        var r = RequiredRankFromJson(rawJson, isContract);
+        if (r < 0) r = RankFromName(name);
+        if (r < 0) r = RankFromDifficulty(difficulty);
+        return r;
+    }
+
+    // standing のファイル名の末尾が _rankN (N=0〜6) のものだけを見る。比較の向きは問わず、rank 以外の条件 (好感度など) は無視し、
+    // rank 条件が複数あればいちばん低い N。無ければ -1
+    private static readonly System.Text.RegularExpressions.Regex StandingRankRegex =
+        new(@"_rank([0-6])$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    private static int StandingRank(string standing)
+    {
+        var m = StandingRankRegex.Match(ExtractFileName(standing ?? ""));
+        return m.Success ? m.Groups[1].Value[0] - '0' : -1;
+    }
+
+    private static int RequiredRankFromJson(string rawJson, bool isContract)
+    {
+        if (string.IsNullOrEmpty(rawJson)) return -1;
+        try
+        {
+            using var doc = JsonDocument.Parse(rawJson);
+            var root = doc.RootElement;
+            if (isContract)
+            {
+                if (root.TryGetProperty("_Contract_", out var contract) && contract.ValueKind == JsonValueKind.Object)
+                    return StandingRank(GetString(contract, "minStanding"));
+                return -1;
+            }
+            if (!root.TryGetProperty("_RecordValue_", out var rv) || rv.ValueKind != JsonValueKind.Object) return -1;
+            if (!rv.TryGetProperty("reputationRequirements", out var repReq) || repReq.ValueKind != JsonValueKind.Object) return -1;
+            if (!repReq.TryGetProperty("expression", out var expr) || expr.ValueKind != JsonValueKind.Array) return -1;
+            int best = -1;
+            foreach (var req in expr.EnumerateArray())
+            {
+                if (req.ValueKind != JsonValueKind.Object) continue;
+                var n = StandingRank(GetString(req, "standing"));
+                if (n >= 0 && (best < 0 || n < best)) best = n;
+            }
+            return best;
+        }
+        catch { return -1; }
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex NameRankRegex =
+        new(@"^Rank([0-6])$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    private static int RankFromName(string name)
+    {
+        foreach (var p in (name ?? "").Split('_'))
+        {
+            var m = NameRankRegex.Match(p);
+            if (m.Success) return m.Groups[1].Value[0] - '0';
+        }
+        return -1;
+    }
+
+    private static int RankFromDifficulty(string difficulty) => (difficulty ?? "").ToLowerInvariant() switch
+    {
+        "intro" => 0,
+        "very easy" => 0,
+        "easy" => 1,
+        "medium" => 2,
+        "hard" => 3,
+        "very hard" => 4,
+        "super" => 5,
+        _ => -1,
+    };
 
     private static readonly Dictionary<string, string> DifficultyCodeMap = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -456,8 +567,7 @@ public class MissionService : IDisposable
             // WikiFactionJa / WikiRank を設定
             if (!string.IsNullOrEmpty(entry.WikiFaction) && FactionJaMap.TryGetValue(entry.WikiFaction, out var fja))
                 entry.WikiFactionJa = fja;
-            if (!string.IsNullOrEmpty(entry.Difficulty))
-                entry.WikiRank = GetRankName(DiffOrder(entry.Difficulty) switch { 0 => 0, 1 => 0, 2 => 1, 3 => 2, 4 => 3, 5 => 4, _ => -1 });
+            entry.WikiRank = GetRankName(DecideRank(entry.RawJson, isContract, inferName, entry.Difficulty));
 
             // Wiki ミッション: タイトル・説明から日本語を解決
             if (rn.StartsWith("WikiMission.") && !string.IsNullOrEmpty(entry.Title))
@@ -489,16 +599,22 @@ public class MissionService : IDisposable
     {
         if (entry.Parsed) return;
         entry.Parsed = true;
-        if (string.IsNullOrEmpty(entry.RawJson)) return;
+        // 星系 (StarSystemBitsOf のビット)。raw_json の場所の指定から判定し、判定できなければ finally で場所列と名前から判定する
+        int systems = 0;
         try
         {
+            if (string.IsNullOrEmpty(entry.RawJson)) return;
             using var doc = JsonDocument.Parse(entry.RawJson);
             if (entry.RecordName.StartsWith(ContractRecordPrefix))
             {
+                systems = ContractStarSystems(doc.RootElement);
                 ParseContractJson(entry, doc.RootElement);
                 return;
             }
             if (!doc.RootElement.TryGetProperty("_RecordValue_", out var rv)) return;
+
+            // 星系: localityAvailable (pu_missionlocality/…) と locationMissionAvailable (starmap/pu/system/…)
+            systems = StarSystemBitsOf(GetString(rv, "localityAvailable")) | StarSystemBitsOf(GetString(rv, "locationMissionAvailable"));
 
             // Resolve English/Japanese title from original @key
             var titleKey = GetString(rv, "title");
@@ -663,6 +779,60 @@ public class MissionService : IDisposable
             }
         }
         catch { }
+        finally
+        {
+            if (systems == 0) systems = StarSystemBitsOf(entry.Location) | StarSystemBitsOf(entry.NameBase);
+            entry.StarSystem = FormatStarSystems(systems);
+        }
+    }
+
+    // 星系のビット (一覧の「星系」列はこの順で並べる)
+    private const int SystemStanton = 1, SystemPyro = 2, SystemNyx = 4;
+
+    // 場所の指定 (ファイルパス・場所列・名前) に含まれる星系名からビットを作る。
+    // pu_missionlocality/stanton1, pyro_regions/regiona, stantonandnyx, starmap/pu/system/pyro/…, Stanton (Hurston) など
+    private static int StarSystemBitsOf(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return 0;
+        int bits = 0;
+        if (s.Contains("stanton", StringComparison.OrdinalIgnoreCase)) bits |= SystemStanton;
+        if (s.Contains("pyro", StringComparison.OrdinalIgnoreCase)) bits |= SystemPyro;
+        if (s.Contains("nyx", StringComparison.OrdinalIgnoreCase)) bits |= SystemNyx;
+        return bits;
+    }
+
+    private static string FormatStarSystems(int bits)
+    {
+        var names = new List<string>();
+        if ((bits & SystemStanton) != 0) names.Add("Stanton");
+        if ((bits & SystemPyro) != 0) names.Add("Pyro");
+        if ((bits & SystemNyx) != 0) names.Add("Nyx");
+        return string.Join(" / ", names);
+    }
+
+    // ContractGenerator 行の星系: _Contract_ と subContracts[] の additionalPrerequisites[] にある localityAvailable / locationAvailable
+    private static int ContractStarSystems(JsonElement root)
+    {
+        if (!root.TryGetProperty("_Contract_", out var contract) || contract.ValueKind != JsonValueKind.Object) return 0;
+        int bits = PrerequisiteStarSystems(contract);
+        if (contract.TryGetProperty("subContracts", out var subs) && subs.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var sub in subs.EnumerateArray())
+                if (sub.ValueKind == JsonValueKind.Object) bits |= PrerequisiteStarSystems(sub);
+        }
+        return bits;
+    }
+
+    private static int PrerequisiteStarSystems(JsonElement owner)
+    {
+        if (!owner.TryGetProperty("additionalPrerequisites", out var pres) || pres.ValueKind != JsonValueKind.Array) return 0;
+        int bits = 0;
+        foreach (var p in pres.EnumerateArray())
+        {
+            if (p.ValueKind != JsonValueKind.Object) continue;
+            bits |= StarSystemBitsOf(GetString(p, "localityAvailable")) | StarSystemBitsOf(GetString(p, "locationAvailable"));
+        }
+        return bits;
     }
 
     // ContractGenerator 行の record_name の接頭辞 (GameDataExtractor.ContractRecordPrefix と同じ)
@@ -731,7 +901,37 @@ public class MissionService : IDisposable
             if (GetBool(contract, "notForRelease")) entry.NotForRelease = true;
             // contractResults.timeToComplete は分単位
             if (contract.TryGetProperty("contractResults", out var results) && results.ValueKind == JsonValueKind.Object)
+            {
                 entry.CompletionTimeMinutes = GetDouble(results, "timeToComplete");
+
+                // 評判の報酬: contractResults.contractResults[] の ContractResult_LegacyReputation。
+                // missionResults (bool 5 個) の並びは MBE 行の missionResultReputationRewards と同じとみなす (成功 = 0, 放棄 = 2, 失敗 = 3)。subContracts の中は読まない
+                if (results.TryGetProperty("contractResults", out var resultList) && resultList.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var cr in resultList.EnumerateArray())
+                    {
+                        if (cr.ValueKind != JsonValueKind.Object || GetString(cr, "_Type_") != "ContractResult_LegacyReputation") continue;
+                        if (!cr.TryGetProperty("contractResultReputationAmounts", out var amt) || amt.ValueKind != JsonValueKind.Object) continue;
+                        if (!cr.TryGetProperty("missionResults", out var flags) || flags.ValueKind != JsonValueKind.Array) continue;
+                        int idx = 0;
+                        foreach (var flag in flags.EnumerateArray())
+                        {
+                            var list = flag.ValueKind != JsonValueKind.True ? null
+                                     : idx == 0 ? entry.SuccessRepRewards
+                                     : idx == 2 ? entry.AbandonRepRewards
+                                     : idx == 3 ? entry.FailRepRewards
+                                     : null;
+                            list?.Add(new ReputationRewardInfo
+                            {
+                                Faction = ExtractFileName(GetString(amt, "factionReputation")),
+                                Scope = ExtractFileName(GetString(amt, "reputationScope")),
+                                Amount = ExtractFileName(GetString(amt, "reward")),
+                            });
+                            idx++;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -808,6 +1008,15 @@ public class MissionService : IDisposable
             if (p.Equals("Medium", StringComparison.OrdinalIgnoreCase)) return "Medium";
             if (p.Equals("Hard", StringComparison.OrdinalIgnoreCase)) return "Hard";
             if (p.Equals("VHard", StringComparison.OrdinalIgnoreCase) || p.Equals("VeryHard", StringComparison.OrdinalIgnoreCase)) return "Very Hard";
+            // 略号 (VE / E / M / H / VH) と LRT 系 (DifficultyCodeMap)
+            if (p.Equals("VE", StringComparison.OrdinalIgnoreCase)) return "Very Easy";
+            if (p.Equals("E", StringComparison.OrdinalIgnoreCase)) return "Easy";
+            if (p.Equals("M", StringComparison.OrdinalIgnoreCase)) return "Medium";
+            if (p.Equals("H", StringComparison.OrdinalIgnoreCase)) return "Hard";
+            if (p.Equals("VH", StringComparison.OrdinalIgnoreCase)) return "Very Hard";
+            // Rank0 はランクの手順 (2) で別に扱うので、難易度の推定には使わない
+            if (p.Equals("Rank0", StringComparison.OrdinalIgnoreCase)) continue;
+            if (DifficultyCodeMap.TryGetValue(p, out var code)) return code;
         }
         return "";
     }
@@ -1038,7 +1247,18 @@ public class MissionService : IDisposable
 
     private static string FormatFaction(string f)
     {
+        var original = f;
         if (f.StartsWith("factionreputation_")) f = f["factionreputation_".Length..];
+        string FromDb()
+        {
+            var names = _factionNames;
+            if (names != null && !string.IsNullOrEmpty(original))
+            {
+                if (names.TryGetValue(original, out var n)) return n;
+                if (names.TryGetValue("factionreputation_" + f, out n)) return n;
+            }
+            return f;
+        }
         return f switch
         {
             "microtech" => "microTech",
@@ -1050,7 +1270,7 @@ public class MissionService : IDisposable
             "unlawful_headhuntersguild" => "Headhunters Guild",
             "unlawful_wildstar" => "WildStar",
             "pyro" => "Pyro",
-            _ => f,
+            _ => FromDb(),
         };
     }
 
@@ -1099,6 +1319,10 @@ public class MissionService : IDisposable
     private static string FormatRepAmount(string a)
     {
         if (a.StartsWith("reputationrewardamount_")) a = a["reputationrewardamount_".Length..];
+        // ContractGenerator 行には綴り違いのファイル名 (repuationrewardamount_positive_200 など) もある
+        else if (a.StartsWith("repuationrewardamount_")) a = a["repuationrewardamount_".Length..];
+        // Wikelo の契約の評判 (wikelo_10 など) は数値に + を付けて出す
+        if (a.StartsWith("wikelo_")) return $"+{a["wikelo_".Length..]}";
         if (a == "zero") return "±0";
         var positive = a.StartsWith("positive_");
         var negative = a.StartsWith("negative_");
@@ -1253,11 +1477,26 @@ public class MissionService : IDisposable
         _conn?.Dispose();
     }
 
-    public class MissionCategory
+    public class MissionCategory : INotifyPropertyChanged
     {
         public string Name { get; set; } = "";
         public int Count { get; set; }
         public override string ToString() => $"{Name} ({Count})";
+
+        // ミッション一覧で選んだ契約のカテゴリ (左の一覧で水色にする)。ListBox の選択とは別
+        private bool _isHighlighted;
+        public bool IsHighlighted
+        {
+            get => _isHighlighted;
+            set
+            {
+                if (_isHighlighted == value) return;
+                _isHighlighted = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsHighlighted)));
+            }
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
     }
 
     public class MissionEntry
@@ -1357,6 +1596,16 @@ public class MissionService : IDisposable
         public List<ReputationRewardInfo> AbandonRepRewards { get; set; } = new();
         public List<ReputationRewardInfo> FailRepRewards { get; set; } = new();
         public List<SpawnGroupInfo> EnemySpawns { get; set; } = new();
+
+        // 一覧の「星系」列 (Stanton / Pyro / Nyx。複数なら " / " でつなぐ。分からなければ "")。ParseRawJson で決める
+        public string StarSystem { get; set; } = "";
+        // 一覧の「カテゴリ」列
+        public string Category => CategoryOf(this);
+        // 一覧の「評判」列: 成功時の評判 ("組織 量" を ", " でつなぐ。無ければ "")
+        public string SuccessRepSummary =>
+            string.Join(", ", SuccessRepRewards.Select(r => $"{FormatFaction(r.Faction)} {FormatRepAmount(r.Amount)}".TrimEnd()));
+        // 成功時に評判が上がる (量が + のものが 1 つでもある)。一覧の行を薄い緑にする
+        public bool GivesReputation => SuccessRepRewards.Any(r => FormatRepAmount(r.Amount).StartsWith("+"));
 
         public string DisplayReward =>
             RewardBase > 0 ? $"{RewardBase:N0}"

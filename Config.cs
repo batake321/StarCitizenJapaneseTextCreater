@@ -14,6 +14,8 @@ public class AppConfig
     public bool WebServerAutoStart { get; set; } = false;
     public string VoiceVoxUrl { get; set; } = "http://localhost:50021";
     public int VoiceVoxSpeakerId { get; set; } = 0;
+    // VOICEVOX の読み上げ速度 (audio_query の speedScale。1.0 が標準)。Web チャットと［ゲームログ］の読み上げの両方で使う
+    public double VoiceVoxSpeedScale { get; set; } = 1.0;
 
     // Window state
     public double WindowLeft { get; set; } = double.NaN;
@@ -70,6 +72,8 @@ public class TranslationConfig
 {
     public int MaxRetries { get; set; } = 3;
     public List<BackendConfig> Backends { get; set; } = new();
+    // E2B / E4B (モデル名に gemma4:e2b / gemma4:e4b を含むもの) を AI 翻訳に使うか (既定は使わない)
+    public bool UseSmallModelsForTranslation { get; set; } = false;
 }
 
 public class BackendConfig
