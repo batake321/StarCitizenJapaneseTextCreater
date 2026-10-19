@@ -658,6 +658,10 @@ internal static class SyncService
         if (string.IsNullOrWhiteSpace(syncFolder)) throw new InvalidOperationException("共有フォルダが設定されていません");
         if (!Directory.Exists(syncFolder)) throw new DirectoryNotFoundException($"共有フォルダが見つかりません: {syncFolder}");
         var result = new ImportResult();
+        // アプリを閉じるとき (AppExit) は、相手の間と DB の間で止め、取り込み前の控えから戻す (閉じる処理は戻し終わるまで待つ)
+        using var exitWork = AppExit.BeginWork("PC 間の同期の取り込み");
+        // 前回の同期の取り込みの途中の印が残っていれば始めない (InterruptedWork。起動のときに戻して消すので、ふつうは残らない)
+        InterruptedWork.ThrowIfPending(workDir, InterruptedWork.KindSync);
         Gate.Wait();
         try
         {
@@ -689,6 +693,11 @@ internal static class SyncService
             var state = LoadState(workDir, log);
             foreach (var cand in candidates)
             {
+                if (AppExit.IsExiting)
+                {
+                    log?.Invoke("アプリを閉じるため、残りの相手の取り込みをやめました (次回取り込みます)");
+                    break;
+                }
                 var tempDir = Path.Combine(Path.GetTempPath(), $"sc_sync_in_{Guid.NewGuid():N}");
                 try
                 {
@@ -715,6 +724,13 @@ internal static class SyncService
                     var backups = new Dictionary<string, string>();
                     if (srcTrade != null) backups[tradePath] = DatabaseBackupService.CreateImportBackup(tradePath, ".sync.bak");
                     if (srcTrans != null) backups[transPath] = DatabaseBackupService.CreateImportBackup(transPath, ".sync.bak");
+                    // 途中の印 (InterruptedWork)。書き換え始める前に書き、成功したとき・控えから全部戻し終えたときに消す
+                    // (アプリが途中で終わったら、次の起動で印を見て trade_cache.db と translations.db を控えから戻す)
+                    var markerPath = InterruptedWork.Write(workDir, new InterruptedWork.Marker
+                    {
+                        Kind = InterruptedWork.KindSync, Label = "PC 間の同期の取り込み", Backups = new Dictionary<string, string>(backups),
+                    });
+                    var failedBackups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);   // 戻せなかった DB の控え (消さない)
                     var counts = new Dictionary<string, int>(StringComparer.Ordinal);
                     var transChanged = 0;
                     var glossaryChanged = 0;
@@ -722,8 +738,11 @@ internal static class SyncService
                     var since = state.LastImportedUtc.TryGetValue(cand.Machine, out var lastStr) ? ParseUtc(lastStr) : null;
                     try
                     {
+                        AppExit.Token.ThrowIfCancellationRequested();
                         if (srcTrade != null) ImportTrade(tradePath, srcTrade, counts, since, cand.ExportedAtUtc, machine);
+                        AppExit.Token.ThrowIfCancellationRequested();
                         if (srcTrans != null) transChanged = ImportTranslations(transPath, srcTrans, counts, out glossaryChanged, since, cand.ExportedAtUtc, machine);
+                        AppExit.Token.ThrowIfCancellationRequested();
                         if (srcIndex != null && File.Exists(indexPath)) ImportKnowledge(indexPath, srcIndex, counts, since, cand.ExportedAtUtc, machine);
                         SqliteConnection.ClearAllPools();
                     }
@@ -733,14 +752,27 @@ internal static class SyncService
                         foreach (var (target, backup) in backups)
                         {
                             try { DatabaseBackupService.RestoreImportBackup(backup, target); }
-                            catch (Exception rex) { log?.Invoke($"{Path.GetFileName(target)} を取り込み前の状態に戻せませんでした: {rex.Message} (控えは {backup})"); }
+                            catch (Exception rex)
+                            {
+                                // 戻せなかったら、その DB の控えを .failed-<日時> にして残し (次の取り込みで上書きされないように)、知らせる
+                                SqliteConnection.ClearAllPools();
+                                failedBackups.Add(backup);
+                                var kept = InterruptedWork.KeepFailedBackup(backup, markerPath, InterruptedWork.KindSync, log);
+                                failedBackups.Add(kept);
+                                log?.Invoke($"{target} を取り込み前の状態に戻せませんでした: {rex.Message} (取り込み前の控えは {kept})");
+                                result.Errors.Add($"{Path.GetFileName(target)} を取り込み前の状態に戻せませんでした (控えは {kept})");
+                            }
                         }
                         SqliteConnection.ClearAllPools();
                         throw;
                     }
                     finally
                     {
-                        foreach (var b in backups.Values) DatabaseBackupService.TryDelete(b);
+                        // 印を先に消してから控えを消す (控えを消し損ねても、印が無いので次の起動で戻さない)。
+                        // 戻せなかった控えは名前を変えてあるので消えない。起動のときに黙って戻すことはしない
+                        InterruptedWork.Clear(markerPath, InterruptedWork.KindSync, log);
+                        // 戻せなかった DB の控えは、名前を変えられたかどうかにかかわらず消さない
+                        foreach (var b in backups.Values.Where(b => !failedBackups.Contains(b))) DatabaseBackupService.TryDelete(b);
                     }
 
                     state.LastImportedUtc[cand.Machine] = Fmt(cand.ExportedAtUtc);
@@ -805,6 +837,13 @@ internal static class SyncService
                 if (table == DatabaseBackupService.OreStockTable) DatabaseBackupService.Exec(conn, tx, OreService.TradeTablesDdl);
                 else if (table == DatabaseBackupService.GameLogImportsTable || table == DatabaseBackupService.ComponentPurchasesTable) DatabaseBackupService.EnsureTradeSchemaTable(conn, tx);
                 else DatabaseBackupService.EnsureMainTable(conn, tx, table);
+                // 相手が品質 (quality_json) の列の無い版の my_components: 品質のある品は自分の行のまま残す (ReplaceMyComponentsFromOldPeer)
+                if (table == "my_components" && DatabaseBackupService.MainColumnExists(conn, tx, table, "quality_json")
+                    && !DatabaseBackupService.SourceColumnExists(conn, tx, table, "quality_json"))
+                {
+                    ReplaceMyComponentsFromOldPeer(conn, tx, counts);
+                    continue;
+                }
                 var cols = string.Join(", ", DatabaseBackupService.CommonColumns(conn, tx, table).Select(DatabaseBackupService.Q));
                 DatabaseBackupService.Exec(conn, tx, $"DELETE FROM main.{q}");
                 counts[table] = DatabaseBackupService.Exec(conn, tx, $"INSERT INTO main.{q} ({cols}) SELECT {cols} FROM src.{q}");
@@ -830,6 +869,60 @@ internal static class SyncService
         }
         DatabaseBackupService.NormalizeSequences(conn, tx);
         tx.Commit();
+    }
+
+    // 相手が品質 (quality_json) の列の無い版のときの my_components の置き換え。相手の行には品質が無く、相手の版は品質の違う同じ品を
+    // 1 行にまとめる (item_record と使用可だけが鍵) ので、相手の行で置き換えると自分の品質が消え、まとめられた行は元に戻せない。そこで:
+    //   - 自分に品質のある行 (quality_json が '' でない) が 1 行でもある品 (item_record) は、その品の自分の行 (品質なしの行も) を全部そのまま残し、相手のその品の行は入れない
+    //   - ほかの品は今までどおり相手の行で置き換える (両方にある列だけ。id も相手のまま)。相手の行の id が残した自分の行の id とぶつかるときは、その行だけ新しい id で入れる
+    //     (my_components の id を参照する表は無い。ship_loadouts・game_log_imports は item_record で持つ)
+    // 品質のある行が自分に無ければ、今までどおり全部を相手の行で置き換える
+    private static void ReplaceMyComponentsFromOldPeer(SqliteConnection conn, SqliteTransaction tx, Dictionary<string, int> counts)
+    {
+        const string KeepSql = "SELECT item_record FROM main.my_components WHERE COALESCE(quality_json, '') != ''";
+        var colList = DatabaseBackupService.CommonColumns(conn, tx, "my_components");
+        var cols = string.Join(", ", colList.Select(DatabaseBackupService.Q));
+        var colsNoId = string.Join(", ", colList.Where(c => !c.Equals("id", StringComparison.OrdinalIgnoreCase)).Select(DatabaseBackupService.Q));
+        var hasId = colList.Any(c => c.Equals("id", StringComparison.OrdinalIgnoreCase));
+        // 残す品と、その行の id
+        var keepRecords = new HashSet<string>(StringComparer.Ordinal);
+        var keptIds = new HashSet<long>();
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = $"SELECT id, item_record FROM main.my_components WHERE item_record IN ({KeepSql})";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) { keptIds.Add(r.GetInt64(0)); keepRecords.Add(r.GetString(1)); }
+        }
+        if (keepRecords.Count == 0)
+        {
+            DatabaseBackupService.Exec(conn, tx, "DELETE FROM main.my_components");
+            counts["my_components"] = DatabaseBackupService.Exec(conn, tx, $"INSERT INTO main.my_components ({cols}) SELECT {cols} FROM src.my_components");
+            return;
+        }
+        // 相手の行のうち入れるもの (残す品でないもの) を、id が残した行とぶつかるかで分ける
+        var plain = new List<long>();      // id のまま入れる相手の rowid
+        var renumber = new List<long>();   // 新しい id で入れる相手の rowid
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = hasId ? "SELECT rowid, item_record, id FROM src.my_components" : "SELECT rowid, item_record, NULL FROM src.my_components";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                if (!r.IsDBNull(1) && keepRecords.Contains(r.GetString(1))) continue;
+                if (hasId && !r.IsDBNull(2) && keptIds.Contains(r.GetInt64(2))) renumber.Add(r.GetInt64(0));
+                else plain.Add(r.GetInt64(0));
+            }
+        }
+        var deleted = DatabaseBackupService.Exec(conn, tx, $"DELETE FROM main.my_components WHERE item_record NOT IN ({KeepSql})");
+        var inserted = 0;
+        foreach (var rowid in plain)
+            inserted += DatabaseBackupService.Exec(conn, tx, $"INSERT INTO main.my_components ({cols}) SELECT {cols} FROM src.my_components WHERE rowid = {rowid}");
+        foreach (var rowid in renumber)
+            inserted += DatabaseBackupService.Exec(conn, tx, $"INSERT INTO main.my_components ({colsNoId}) SELECT {colsNoId} FROM src.my_components WHERE rowid = {rowid}");
+        counts["my_components"] = inserted;
+        counts["my_components (相手が品質の無い版のため、品質のある品は自分の行のまま)"] = keptIds.Count;
     }
 
     // translations.db: translations の個人行は key が同じとき japanese / source / translator / modified_at を相手の値にし、無ければ足す

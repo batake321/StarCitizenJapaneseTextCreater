@@ -109,6 +109,15 @@ public class HangarShipInstance
 }
 
 // 所持コンポーネント (my_components) の 1 件。装備インベントリ
+// SplitMyComponentQuality の結果。QuantityChanged のときの Quantity は行の今の数量
+public enum MyComponentQualityWriteKind { Written, NotWritten, Missing, QuantityChanged }
+public readonly record struct MyComponentQualityWrite(MyComponentQualityWriteKind Kind, int Quantity = 0)
+{
+    public static MyComponentQualityWrite Written => new(MyComponentQualityWriteKind.Written);
+    public static MyComponentQualityWrite NotWritten => new(MyComponentQualityWriteKind.NotWritten);   // 品質が同じ・書く場所が無い
+    public static MyComponentQualityWrite Missing => new(MyComponentQualityWriteKind.Missing);         // 行が既に無い
+}
+
 public class MyComponent
 {
     public int Id { get; set; }
@@ -121,6 +130,9 @@ public class MyComponent
     public bool Usable { get; set; } = true;          // false = 壊れている・貸出中 等
     public string Notes { get; set; } = "";
     public string AddedAt { get; set; } = "";
+    // 材料の枠ごとの品質 (自作品)。JSON {"枠の slot_debug_name": 0〜1000, ...} (キーは blueprint_materials.slot_debug_name)。
+    // '' は品質なし (自作でない・未入力)。同じ品をまとめる鍵に入る (品質の違う自作品は別の行)
+    public string QualityJson { get; set; } = "";
 
     public string SizeDisplay => Size > 0 ? $"S{Size}" : "";
     public string GradeDisplay => GradeToClass(Grade);
@@ -594,6 +606,7 @@ public class HangarService
     private void InitDb(SqliteConnection db)
     {
         db.Open();
+        SqliteWal.EnsureOn(db);   // 新しく作った trade_cache.db も WAL にする (もう WAL なら問い合わせ 1 回だけ)
         using var cmd = db.CreateCommand();
         cmd.CommandText = """
             CREATE TABLE IF NOT EXISTS hangar_pledges (
@@ -684,7 +697,8 @@ public class HangarService
                 quantity INTEGER DEFAULT 1,
                 usable INTEGER DEFAULT 1,
                 notes TEXT DEFAULT '',
-                added_at TEXT DEFAULT (datetime('now','localtime'))
+                added_at TEXT DEFAULT (datetime('now','localtime')),
+                quality_json TEXT DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS ship_loadouts (
                 ship_key TEXT NOT NULL,
@@ -713,6 +727,7 @@ public class HangarService
         MigrateStoreSchema(db);
         MigrateShipMatrixSchema(db);
         MigrateComponentPurchases(db);
+        MigrateMyComponentsSchema(db);
     }
 
     // 所持個人装備 (my_gear) と、［ゲームログ］の行を所持・在庫に入れた印 (game_log_imports。主キーは (kind, log_key))。
@@ -812,6 +827,15 @@ public class HangarService
             Exec(db, "ALTER TABLE ship_matrix ADD COLUMN cargocapacity REAL");
     }
 
+    // 旧スキーマ (quality_json 列なし) の my_components に列を追加する。DROP はしない (足した列は '' = 品質なし。今までの行は今までどおりまとまる)。
+    // 表が無ければ何もしない。DatabaseBackupService.EnsureTradeSchema からも使う
+    internal static void MigrateMyComponentsSchema(SqliteConnection db)
+    {
+        var cols = TableColumns(db, "my_components");
+        if (cols.Count > 0 && !cols.Contains("quality_json"))
+            Exec(db, "ALTER TABLE my_components ADD COLUMN quality_json TEXT DEFAULT ''");
+    }
+
     // 旧スキーマ (config_value_cents / availability 列なし) の hangar_pledges に列を追加する。DROP はしない
     private static void MigratePledgesSchema(SqliteConnection db)
     {
@@ -846,7 +870,7 @@ public class HangarService
     {
         if (_dbPath == null) return;
 
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
 
         // 既存 CCU の手入力値 (標準額・メモ) と手入力行を退避しておく
@@ -932,7 +956,7 @@ public class HangarService
         if (_dbPath == null) return;
         if (buybackTokens == null && storeCreditCents == null) return;
 
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         if (buybackTokens != null)
             SetMeta(db, "buyback_tokens", buybackTokens.Value.ToString(CultureInfo.InvariantCulture));
@@ -945,7 +969,7 @@ public class HangarService
         var list = new List<HangarPledge>();
         if (_dbPath == null || !File.Exists(_dbPath)) return list;
 
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
 
         var byId = new Dictionary<string, HangarPledge>(StringComparer.Ordinal);
@@ -1202,7 +1226,7 @@ public class HangarService
                     if (!candidates.Contains(full, StringComparer.OrdinalIgnoreCase)) candidates.Add(full);
                 }
 
-                using (var tdb = new SqliteConnection($"Data Source={transPath};Mode=ReadOnly"))
+                using (var tdb = new TrackedSqliteConnection($"Data Source={transPath};Mode=ReadOnly"))
                 {
                     tdb.Open();
                     foreach (var cand in candidates)
@@ -1256,7 +1280,7 @@ public class HangarService
     private static string? MatchShipRecord(string gamePath, List<string> keys)
     {
         var candidates = new List<string>();
-        using var gdb = new SqliteConnection($"Data Source={gamePath};Mode=ReadOnly");
+        using var gdb = new TrackedSqliteConnection($"Data Source={gamePath};Mode=ReadOnly");
         gdb.Open();
         const string shortSuffix = "_short";
         var baseKeys = keys.Select(k => k.Split(',')[0].Trim()).Where(k => k.Length > 0)
@@ -1294,7 +1318,7 @@ public class HangarService
 
         const string prefix = "EntityClassDefinition.";
         var candidates = new List<string>();
-        using var gdb = new SqliteConnection($"Data Source={gamePath};Mode=ReadOnly");
+        using var gdb = new TrackedSqliteConnection($"Data Source={gamePath};Mode=ReadOnly");
         gdb.Open();
         using var cmd = gdb.CreateCommand();
         cmd.CommandText = "SELECT record_name FROM ships";
@@ -1321,16 +1345,16 @@ public class HangarService
     public static string MyComponentDisplayName(MyComponent c, EquipmentService? equip)
         => equip?.GetCurrentItemName(c.ItemRecord) ?? c.ItemName;
 
-    // 読む前に、同じ品 (item_record と使用可が同じ) の行を 1 行にまとめる (MergeDuplicateMyComponents)
+    // 読む前に、同じ品 (item_record と使用可と品質 (quality_json) が同じ) の行を 1 行にまとめる (MergeDuplicateMyComponents)
     public List<MyComponent> LoadMyComponents()
     {
         var list = new List<MyComponent>();
         if (_dbPath == null || !File.Exists(_dbPath)) return list;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         MergeDuplicateMyComponents(db);
         using var cmd = db.CreateCommand();
-        cmd.CommandText = "SELECT id, item_record, item_name, item_type, size, grade, quantity, usable, notes, added_at FROM my_components ORDER BY item_type, size DESC, grade, item_name, id";
+        cmd.CommandText = "SELECT id, item_record, item_name, item_type, size, grade, quantity, usable, notes, added_at, COALESCE(quality_json, '') FROM my_components ORDER BY item_type, size DESC, grade, item_name, id";
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
@@ -1346,17 +1370,18 @@ public class HangarService
                 Usable = r.IsDBNull(7) || r.GetInt32(7) != 0,
                 Notes = r.IsDBNull(8) ? "" : r.GetString(8),
                 AddedAt = r.IsDBNull(9) ? "" : r.GetString(9),
+                QualityJson = r.GetString(10),
             });
         }
         return list;
     }
 
-    // 追加する。同じ品 (item_record と使用可が同じ) の行が既にあれば、新しい行を作らずその行の数量に足す
+    // 追加する。同じ品 (item_record と使用可と品質 (quality_json) が同じ) の行が既にあれば、新しい行を作らずその行の数量に足す
     // (メモは JoinNotes で連結。名前・種別・サイズ・グレード・追加日は既にある行のまま)。追加した (または足した) 行の id を返す
     public int AddMyComponent(MyComponent c)
     {
         if (_dbPath == null) return 0;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var tx = db.BeginTransaction();
         var id = AddOrMergeMyComponent(db, tx, c);
@@ -1364,17 +1389,65 @@ public class HangarService
         return id;
     }
 
-    // AddMyComponent の本体 (呼ぶ側のトランザクションの中で行う)。c.Id に行の id を入れる
+    // 品質 (quality_json) を 1 つの書き方に揃える。空・空白だけ・中身の無い {} は '' (品質なし)。それ以外はキーを序数 (Ordinal) の順に並べ、
+    // 空白を入れずに書く。数の値は値を揃えて書く (整数の値なら整数: 950.0・9.5e2 → 950。整数でない値は double の最短の書き方: 0.10 → 0.1。
+    // double で表せない数はそのまま)。数でない値は元の JSON の値のまま書き写す。JSON の object でない・同じキーが 2 つある・JSON として読めないなら false (normalized は '')
+    internal static bool TryNormalizeQualityJson(string? json, out string normalized)
+    {
+        normalized = "";
+        if (string.IsNullOrWhiteSpace(json)) return true;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+            var props = doc.RootElement.EnumerateObject().ToList();
+            if (props.Count == 0) return true;
+            if (props.Select(p => p.Name).Distinct(StringComparer.Ordinal).Count() != props.Count) return false;
+            using var ms = new MemoryStream();
+            using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = false, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
+            {
+                w.WriteStartObject();
+                foreach (var p in props.OrderBy(p => p.Name, StringComparer.Ordinal))
+                {
+                    w.WritePropertyName(p.Name);
+                    if (p.Value.ValueKind == JsonValueKind.Number)
+                    {
+                        if (p.Value.TryGetInt64(out var l)) w.WriteNumberValue(l);
+                        else if (p.Value.TryGetDouble(out var d) && double.IsFinite(d))
+                        {
+                            if (d == Math.Floor(d) && Math.Abs(d) < 9.0e15) w.WriteNumberValue((long)d);   // 9.0e15 未満なら double の整数はそのまま long で表せる
+                            else w.WriteNumberValue(d);
+                        }
+                        else p.Value.WriteTo(w);
+                    }
+                    else p.Value.WriteTo(w);
+                }
+                w.WriteEndObject();
+            }
+            normalized = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+            return true;
+        }
+        catch (JsonException) { return false; }
+    }
+
+    // 書く入口 (AddOrMergeMyComponent・UpdateMyComponentQuality・SplitMyComponentQuality) で使う。揃えられない値は書かずに例外にする (壊れた値を鍵にしないため)
+    private static string NormalizeQualityJsonOrThrow(string? json) =>
+        TryNormalizeQualityJson(json, out var normalized) ? normalized
+            : throw new ArgumentException($"品質 (quality_json) が JSON の object として読めません: {json}", nameof(json));
+
+    // AddMyComponent の本体 (呼ぶ側のトランザクションの中で行う)。c.Id に行の id を入れる。c.QualityJson は揃えた書き方にしてから使う (c にも入れ直す)
     private static int AddOrMergeMyComponent(SqliteConnection db, SqliteTransaction tx, MyComponent c)
     {
+        c.QualityJson = NormalizeQualityJsonOrThrow(c.QualityJson);
         int? existingId = null;
         var existingNotes = "";
         using (var find = db.CreateCommand())
         {
             find.Transaction = tx;
-            find.CommandText = "SELECT id, COALESCE(notes, '') FROM my_components WHERE item_record = @r AND (COALESCE(usable, 1) != 0) = @u ORDER BY id LIMIT 1";
+            find.CommandText = "SELECT id, COALESCE(notes, '') FROM my_components WHERE item_record = @r AND (COALESCE(usable, 1) != 0) = @u AND COALESCE(quality_json, '') = @qj ORDER BY id LIMIT 1";
             find.Parameters.AddWithValue("@r", c.ItemRecord);
             find.Parameters.AddWithValue("@u", c.Usable ? 1 : 0);
+            find.Parameters.AddWithValue("@qj", c.QualityJson);
             using var r = find.ExecuteReader();
             if (r.Read())
             {
@@ -1395,8 +1468,8 @@ public class HangarService
             return eid;
         }
         cmd.CommandText = """
-            INSERT INTO my_components (item_record, item_name, item_type, size, grade, quantity, usable, notes)
-            VALUES (@r, @n, @t, @s, @g, @q, @u, @o);
+            INSERT INTO my_components (item_record, item_name, item_type, size, grade, quantity, usable, notes, quality_json)
+            VALUES (@r, @n, @t, @s, @g, @q, @u, @o, @qj);
             SELECT last_insert_rowid();
             """;
         cmd.Parameters.AddWithValue("@r", c.ItemRecord);
@@ -1407,6 +1480,7 @@ public class HangarService
         cmd.Parameters.AddWithValue("@q", c.Quantity);
         cmd.Parameters.AddWithValue("@u", c.Usable ? 1 : 0);
         cmd.Parameters.AddWithValue("@o", c.Notes ?? "");
+        cmd.Parameters.AddWithValue("@qj", c.QualityJson);
         var id = (int)(long)(cmd.ExecuteScalar() ?? 0L);
         c.Id = id;
         return id;
@@ -1424,26 +1498,34 @@ public class HangarService
         return string.Join(" / ", parts);
     }
 
-    // 同じ品 (item_record と使用可が同じ) の行が 2 行以上あれば、id のいちばん小さい行に数量を合計してまとめ、ほかの行を消す。
+    // 同じ品 (item_record と使用可と品質 (quality_json) が同じ) の行が 2 行以上あれば、id のいちばん小さい行に数量を合計してまとめ、ほかの行を消す。
     // メモは id の順に JoinNotes で連結する。名前・種別・サイズ・グレード・追加日は id のいちばん小さい行のまま。
-    // 使用可が違う行は別の行のまま (使用可は行ごとの状態で、まとめるとどちらかが失われるため)
+    // 使用可・品質が違う行は別の行のまま (使用可は行ごとの状態、品質は自作品ごとの値で、まとめるとどちらかが失われるため)。
+    // 品質が揃った書き方 (TryNormalizeQualityJson) でない行は、揃えた書き方に書き直してから比べる。揃えられない (JSON として読めない) 値は
+    // 書き換えず、その文字列のまま比べる (消さない)
     private static void MergeDuplicateMyComponents(SqliteConnection db)
     {
-        var groups = new Dictionary<(string Record, bool Usable), List<(int Id, int Qty, string Notes)>>();
+        var groups = new Dictionary<(string Record, bool Usable, string Quality), List<(int Id, int Qty, string Notes)>>();
+        var rewrites = new List<(int Id, string Quality)>();
         using (var cmd = db.CreateCommand())
         {
-            cmd.CommandText = "SELECT id, item_record, COALESCE(quantity, 1), COALESCE(usable, 1), COALESCE(notes, '') FROM my_components ORDER BY id";
+            cmd.CommandText = "SELECT id, item_record, COALESCE(quantity, 1), COALESCE(usable, 1), COALESCE(notes, ''), COALESCE(quality_json, '') FROM my_components ORDER BY id";
             using var r = cmd.ExecuteReader();
             while (r.Read())
             {
-                var key = (r.IsDBNull(1) ? "" : r.GetString(1), r.GetInt32(3) != 0);
+                var stored = r.GetString(5);
+                var quality = TryNormalizeQualityJson(stored, out var normalized) ? normalized : stored;
+                if (quality != stored) rewrites.Add((r.GetInt32(0), quality));
+                var key = (r.IsDBNull(1) ? "" : r.GetString(1), r.GetInt32(3) != 0, quality);
                 if (!groups.TryGetValue(key, out var rows)) groups[key] = rows = new();
                 rows.Add((r.GetInt32(0), r.GetInt32(2), r.GetString(4)));
             }
         }
         var dups = groups.Values.Where(g => g.Count > 1).ToList();
-        if (dups.Count == 0) return;
+        if (dups.Count == 0 && rewrites.Count == 0) return;
         using var tx = db.BeginTransaction();
+        foreach (var (id, quality) in rewrites)
+            Exec(db, tx, "UPDATE my_components SET quality_json = @qj WHERE id = @id", ("@qj", quality), ("@id", id));
         foreach (var rows in dups)
         {
             var keep = rows[0];
@@ -1462,7 +1544,7 @@ public class HangarService
     {
         var dict = new Dictionary<(string, string), GameLogImportMark>();
         if (_dbPath == null || !File.Exists(_dbPath)) return dict;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var cmd = db.CreateCommand();
         cmd.CommandText = "SELECT kind, log_key, target, item_record, quantity FROM game_log_imports";
@@ -1479,7 +1561,7 @@ public class HangarService
     public GameLogImportMark? GetImportMark(string kind, string logKey)
     {
         if (_dbPath == null || !File.Exists(_dbPath)) return null;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         return ReadMark(db, null, kind, logKey);
     }
@@ -1527,7 +1609,7 @@ public class HangarService
         broken = 0;
         var list = new List<StoredGameLogEntry>();
         if (_dbPath == null || !File.Exists(_dbPath)) return list;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var cmd = db.CreateCommand();
         cmd.CommandText = "SELECT machine, payload_json FROM game_log_entries";
@@ -1547,7 +1629,7 @@ public class HangarService
     public int SaveGameLogEntries(IReadOnlyList<GameLogStore.Row> entries, string machine)
     {
         if (_dbPath == null || entries.Count == 0) return 0;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var tx = db.BeginTransaction();
         using var cmd = db.CreateCommand();
@@ -1596,7 +1678,7 @@ public class HangarService
     public int ImportBlueprintsFromLog(IReadOnlyList<GameLogBlueprintReceipt> receipts)
     {
         if (_dbPath == null || receipts.Count == 0) return 0;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var tx = db.BeginTransaction();
         var added = 0;
@@ -1620,7 +1702,7 @@ public class HangarService
     public bool SetBlueprintOwned(string bpUuid, string outputRecord, string name, bool owned)
     {
         if (_dbPath == null || string.IsNullOrEmpty(bpUuid)) return false;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var tx = db.BeginTransaction();
         bool changed;
@@ -1673,7 +1755,7 @@ public class HangarService
     {
         if (!File.Exists(tradeDbPath)) return null;
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        using var db = new SqliteConnection($"Data Source={tradeDbPath};Mode=ReadOnly;Pooling=False");
+        using var db = new TrackedSqliteConnection($"Data Source={tradeDbPath};Mode=ReadOnly;Pooling=False");
         db.Open();
         using var cmd = db.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'my_blueprints'";
@@ -1689,7 +1771,7 @@ public class HangarService
     public bool ImportComponent(string kind, string logKey, MyComponent c)
     {
         if (_dbPath == null) return false;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var tx = db.BeginTransaction();
         if (!InsertMark(db, tx, kind, logKey, "my_components", c.ItemRecord, c.Quantity)) return false;   // 入れ済み (tx は Commit せずに捨てる)
@@ -1702,7 +1784,7 @@ public class HangarService
     public bool ImportGear(string kind, string logKey, MyGear g)
     {
         if (_dbPath == null) return false;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var tx = db.BeginTransaction();
         if (!InsertMark(db, tx, kind, logKey, "my_gear", g.ItemRecord, g.Quantity)) return false;
@@ -1723,7 +1805,7 @@ public class HangarService
     public bool ImportShip(string kind, string logKey, string itemRecord, string name, string manufacturer, int scu, string notes, string origin, string? expiresAt, bool auto = false)
     {
         if (_dbPath == null) return false;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         TradeService.EnsureMyShipsSchema(db);
         using var tx = db.BeginTransaction();
@@ -1746,7 +1828,7 @@ public class HangarService
     public (bool Found, int Shortage) CancelImport(string kind, string logKey)
     {
         if (_dbPath == null) return (false, 0);
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var tx = db.BeginTransaction();
         var mark = ReadMark(db, tx, kind, logKey);
@@ -1790,20 +1872,110 @@ public class HangarService
         return (true, remaining);
     }
 
+    // 所持コンポーネントの行の全部の列 (品目・名前・種別・サイズ・グレード・数量・使用可・メモ) を c の値で書く。前の版からある関数で、今は呼ぶ所が無い。
+    // 全部の列を書くので、表の読み込み中の古い行 (MyComponentRow.Model) では使わない (ほかで変わった数量などが古い値に戻る)。
+    // 表からの使用可・数量の変更は UpdateMyComponentUsable・UpdateMyComponentQuantity (その列だけを書く) を使う
     public void UpdateMyComponent(MyComponent c)
     {
         if (_dbPath == null) return;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         Exec(db, "UPDATE my_components SET item_record = @r, item_name = @n, item_type = @t, size = @s, grade = @g, quantity = @q, usable = @u, notes = @o WHERE id = @id",
             ("@r", c.ItemRecord), ("@n", c.ItemName ?? ""), ("@t", c.ItemType ?? ""), ("@s", c.Size), ("@g", c.Grade),
             ("@q", c.Quantity), ("@u", c.Usable ? 1 : 0), ("@o", c.Notes ?? ""), ("@id", c.Id));
     }
 
+    // 所持コンポーネントの使用可 (usable) だけを書く。書いた行の数を返す (行が既に無ければ 0、DB の場所が決まっていなければ -1)
+    public int UpdateMyComponentUsable(int id, bool usable)
+    {
+        if (_dbPath == null) return -1;
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        return ExecCount(db, "UPDATE my_components SET usable = @u WHERE id = @id", ("@u", usable ? 1 : 0), ("@id", id));
+    }
+
+    // 所持コンポーネントの数量 (quantity) だけを書く。書いた行の数を返す (行が既に無ければ 0、DB の場所が決まっていなければ -1)
+    public int UpdateMyComponentQuantity(int id, int quantity)
+    {
+        if (_dbPath == null) return -1;
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        return ExecCount(db, "UPDATE my_components SET quantity = @q WHERE id = @id", ("@q", quantity), ("@id", id));
+    }
+
+    // 所持コンポーネントの品質 (quality_json) だけを、行の数量を確かめずに書く。json は {"枠の slot_debug_name": 品質, ...}、'' で品質なし。
+    // 揃えた書き方 (TryNormalizeQualityJson) にして書く (JSON の object として読めなければ例外)。
+    // 書いた結果、同じ品 (item_record・使用可・品質が同じ) の行ができたら、次の読み込み (LoadMyComponents) で 1 行にまとまる。
+    // 書いた行の数を返す (行が既に無ければ 0、DB の場所が決まっていなければ -1。0 なら呼ぶ側で知らせて表を読み直す)。
+    // 前の版から［品質を入力］で使っていた関数で、今は呼ぶ所が無い (［品質を入力］は、窓に出した数量を確かめてから書く SplitMyComponentQuality を使う)。
+    // 行の数量に関わらず行全部に品質が付くので、使うのは行の全部に品質を入れると決まっているときだけにする (表の読み込み中の古い数量で「全部」とみなさない)
+    public int UpdateMyComponentQuality(int id, string json)
+    {
+        if (_dbPath == null) return -1;
+        var normalized = NormalizeQualityJsonOrThrow(json);
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        return ExecCount(db, "UPDATE my_components SET quality_json = @qj WHERE id = @id", ("@qj", normalized), ("@id", id));
+    }
+
+    // 所持コンポーネントの行 id の数量のうち count 個だけに品質 json を入れる。count が数量以上なら行の品質を書き換える (UpdateMyComponentQuality と同じ書き方)。
+    // 数量より少なければ、行の数量から count を引き、count 個を品質 json の別の行として足す (AddOrMergeMyComponent: item_record・使用可・品質が同じ行が
+    // あればその行の数量に足す。LoadMyComponents の MergeDuplicateMyComponents と同じ鍵)。名前・種別・サイズ・グレード・使用可・メモは元の行のまま写す。
+    // 品質が元の行と同じなら何もしない。ship_loadouts・game_log_imports は item_record で持つので、行を分けても変わらない。
+    // expectedQuantity (品質の窓に出した数量) を渡したら、行の今の数量がそれと違えば何も書かない (QuantityChanged)。行が無ければ Missing
+    public MyComponentQualityWrite SplitMyComponentQuality(int id, int count, string json, int? expectedQuantity = null)
+    {
+        if (_dbPath == null || count <= 0) return MyComponentQualityWrite.NotWritten;
+        var normalized = NormalizeQualityJsonOrThrow(json);
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
+        InitDb(db);
+        using var tx = db.BeginTransaction();
+        MyComponent? row = null;
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "SELECT item_record, item_name, item_type, size, grade, COALESCE(quantity, 1), COALESCE(usable, 1), COALESCE(notes, ''), COALESCE(quality_json, '') FROM my_components WHERE id = @id";
+            cmd.Parameters.AddWithValue("@id", id);
+            using var r = cmd.ExecuteReader();
+            if (r.Read())
+                row = new MyComponent
+                {
+                    Id = id,
+                    ItemRecord = r.IsDBNull(0) ? "" : r.GetString(0),
+                    ItemName = r.IsDBNull(1) ? "" : r.GetString(1),
+                    ItemType = r.IsDBNull(2) ? "" : r.GetString(2),
+                    Size = r.IsDBNull(3) ? 0 : r.GetInt32(3),
+                    Grade = r.IsDBNull(4) ? 0 : r.GetInt32(4),
+                    Quantity = r.GetInt32(5),
+                    Usable = r.GetInt32(6) != 0,
+                    Notes = r.GetString(7),
+                    QualityJson = r.GetString(8),
+                };
+        }
+        if (row == null) return MyComponentQualityWrite.Missing;
+        if (expectedQuantity is { } eq && row.Quantity != eq) return new MyComponentQualityWrite(MyComponentQualityWriteKind.QuantityChanged, row.Quantity);
+        var stored = TryNormalizeQualityJson(row.QualityJson, out var sn) ? sn : row.QualityJson;
+        if (stored == normalized) return MyComponentQualityWrite.NotWritten;
+        if (count >= row.Quantity)
+        {
+            Exec(db, tx, "UPDATE my_components SET quality_json = @qj WHERE id = @id", ("@qj", normalized), ("@id", id));
+            tx.Commit();
+            return MyComponentQualityWrite.Written;
+        }
+        Exec(db, tx, "UPDATE my_components SET quantity = @q WHERE id = @id", ("@q", row.Quantity - count), ("@id", id));
+        AddOrMergeMyComponent(db, tx, new MyComponent
+        {
+            ItemRecord = row.ItemRecord, ItemName = row.ItemName, ItemType = row.ItemType, Size = row.Size, Grade = row.Grade,
+            Quantity = count, Usable = row.Usable, Notes = row.Notes, QualityJson = normalized,
+        });
+        tx.Commit();
+        return MyComponentQualityWrite.Written;
+    }
+
     public void DeleteMyComponent(int id)
     {
         if (_dbPath == null) return;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         Exec(db, "DELETE FROM my_components WHERE id = @id", ("@id", id));
     }
@@ -1819,7 +1991,7 @@ public class HangarService
     {
         var list = new List<MyGear>();
         if (_dbPath == null || !File.Exists(_dbPath)) return list;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         MergeDuplicateMyGear(db);
         using var cmd = db.CreateCommand();
@@ -1849,7 +2021,7 @@ public class HangarService
     public int AddMyGear(MyGear g)
     {
         if (_dbPath == null) return 0;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var tx = db.BeginTransaction();
         var id = AddOrMergeMyGear(db, tx, g);
@@ -1936,7 +2108,7 @@ public class HangarService
     public void UpdateMyGear(MyGear g)
     {
         if (_dbPath == null) return;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         Exec(db, "UPDATE my_gear SET item_record = @r, item_name = @n, item_type = @t, sub_type = @st, size = @s, quantity = @q, usable = @u, notes = @o WHERE id = @id",
             ("@r", g.ItemRecord), ("@n", g.ItemName ?? ""), ("@t", g.ItemType ?? ""), ("@st", g.SubType ?? ""), ("@s", g.Size),
@@ -1946,7 +2118,7 @@ public class HangarService
     public void DeleteMyGear(int id)
     {
         if (_dbPath == null) return;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         Exec(db, "DELETE FROM my_gear WHERE id = @id", ("@id", id));
     }
@@ -1956,7 +2128,7 @@ public class HangarService
     {
         var dict = new Dictionary<string, string>(StringComparer.Ordinal);
         if (_dbPath == null || !File.Exists(_dbPath)) return dict;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var cmd = db.CreateCommand();
         cmd.CommandText = "SELECT port_name, item_record FROM ship_loadouts WHERE ship_key = @k";
@@ -1974,7 +2146,7 @@ public class HangarService
     public void SetLoadoutItem(string shipKey, string portName, string? itemRecord)
     {
         if (_dbPath == null) return;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         if (itemRecord == null)
         {
@@ -2014,7 +2186,7 @@ public class HangarService
     public void SetLoadoutItem(string shipKey, string portKey, string? itemRecord, bool replacesChildren, string previousRecord, string defaultRecord)
     {
         if (_dbPath == null) return;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var tx = db.BeginTransaction();
         using var cmd = db.CreateCommand();
@@ -2046,7 +2218,7 @@ public class HangarService
     public void ClearLoadout(string shipKey)
     {
         if (_dbPath == null) return;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var tx = db.BeginTransaction();
         WriteLoadoutTombstones(db, tx, shipKey, LoadoutPortNames(db, tx, shipKey, null));
@@ -2058,8 +2230,10 @@ public class HangarService
     // ship_loadouts に上書きがあればそれを、無ければ ship_ports.equipped_item (デフォルト装備) を採用し、
     // item の表示名・Size・Grade は EquipmentService.GetItemByRecord で解決する (未解決なら record をそのまま名前にし Size/Grade = 0)。
     // ship_loadouts の上書きは PortKey (同名ポートの 2 つ目以降は "{port_name}#N") 単位で照合する
-    public List<ShipPortLoadout> GetShipLoadout(string shipKey, string shipRecordName, EquipmentService equip)
-        => BuildShipLoadout(shipKey, equip.GetShipPorts(shipRecordName), equip);
+    // throwIfBusy: 武器の種別の名前 (WeaponDamageKindLabel) を DB が使用中で読めなかったとき、投げる (［電力管理］が待って読み直す)。
+    // false (［装備］) なら、今までと同じく種別の名前を空にする
+    public List<ShipPortLoadout> GetShipLoadout(string shipKey, string shipRecordName, EquipmentService equip, bool throwIfBusy = false)
+        => BuildShipLoadout(shipKey, equip.GetShipPorts(shipRecordName), equip, throwIfBusy);
 
     // 子ポート行 (port_name = "{親port}/{子port}") も含めて集計する。ジンバル/マウント
     // (エンティティ名の basename が mount_ / weaponmount で始まる行、または item_type = WeaponMount) の行は
@@ -2116,7 +2290,17 @@ public class HangarService
     //   ジンバルの下の武器の行 (IsGimbalChild) は武器 (WeaponGun) だけ。
     //   タレット (Turret) のポートは、種別が同じで、形 (item_index.sub_type。CanardTurret / BallTurret 等) がそのポートの既定の装備と同じもの
     //     (既定の装備の形が分からないポートには、所持しているタレットを候補に出さない)。本当の大きさが無いときの上限は既定の装備の Size。
-    //   それ以外のポートは種別が同じもの
+    //   それ以外のポートは種別が同じもの (口の種類と部品の種類の名前の違いは SamePortType で合わせる。例 LifeSupport と LifeSupportGenerator)
+    // 武器の種別の名前。DB が使用中で読めなかったときは、throwIfBusy なら投げ、そうでなければ "" (覚えないので次の読み込みでもう一度読む)
+    // gate: 1 回の描き直しの中で一度「使用中」が出たら立てる。立った後は覚えた名前だけ返し、読みに行かない (待たない)。
+    // 失敗は覚えないので、次の描き直し (新しい gate) ではまた読みに行く
+    internal static string WeaponKindLabel(EquipmentService equip, string record, bool throwIfBusy, WeaponKindBusyGate gate)
+    {
+        if (gate.BusySeen) return equip.WeaponDamageKindLabel(record, cachedOnly: true);
+        try { return equip.WeaponDamageKindLabel(record); }
+        catch (Exception ex) when (!throwIfBusy && GameDataQueryService.IsBusy(ex)) { gate.BusySeen = true; return ""; }
+    }
+
     public static bool IsLoadoutCandidate(ShipPortLoadout p, MyComponent c, EquipmentService equip, string shipRecordName)
     {
         if (!c.Usable) return false;
@@ -2141,7 +2325,7 @@ public class HangarService
             if (!c.ItemType.Equals(WeaponGunPortType, StringComparison.OrdinalIgnoreCase)) return false;
             return SizeOk(p.PortSize);
         }
-        if (!c.ItemType.Equals(p.ItemType, StringComparison.OrdinalIgnoreCase)) return false;
+        if (!SamePortType(p.ItemType, c.ItemType)) return false;
         if (p.ItemType.Equals(TurretPortType, StringComparison.OrdinalIgnoreCase))
         {
             var portForm = equip.GetItemIndexSubType(p.DefaultItemRecord);
@@ -2151,6 +2335,13 @@ public class HangarService
         }
         return SizeOk(p.PortSize);
     }
+
+    // 口の種類 (ship_ports.item_type) と部品の種類 (items.item_type) が同じ種類か。ship_ports の種類はインデックス構築で
+    // 部品の種類から GameDataExtractor.ShipEquipmentPortType の表で作る (LifeSupportGenerator → LifeSupport、WeaponDefensive → CounterMeasure、
+    // TurretBase → Turret) ので、部品の種類も同じ表で口の種類にしてから比べる (表に無い種類はそのまま)
+    internal static bool SamePortType(string portType, string itemType) =>
+        portType.Equals(itemType, StringComparison.OrdinalIgnoreCase)
+        || portType.Equals(GameDataExtractor.ShipEquipmentPortType(itemType) ?? itemType, StringComparison.OrdinalIgnoreCase);
 
     // 2 つの record が同じ品目か (EntityClassDefinition. の有無と大文字小文字を無視して比べる。どちらも空なら同じ)
     public static bool SameRecord(string? a, string? b)
@@ -2175,7 +2366,7 @@ public class HangarService
                 && parts[1].Split(',').Any(x => x.Trim().Equals("GunTurret", StringComparison.OrdinalIgnoreCase));
         });
 
-    private List<ShipPortLoadout> BuildShipLoadout(string shipKey, List<ShipPortInfo> ports, EquipmentService equip)
+    private List<ShipPortLoadout> BuildShipLoadout(string shipKey, List<ShipPortInfo> ports, EquipmentService equip, bool throwIfBusy = false)
     {
         var overrides = LoadLoadout(shipKey);
         var result = new List<ShipPortLoadout>();
@@ -2335,12 +2526,14 @@ public class HangarService
             r.IsMountNow = r.CurrentItemRecord == null || SameRecord(r.CurrentItemRecord, r.DefaultItemRecord)
                 ? r.IsMount : equip.IsGimbalRecord(r.CurrentItemRecord);
         // 表の種別の欄: 今付いている品目が武器なら、ダメージの種類で分けた名前
+        // (DB が使用中で読めなかったら、この呼び出しの残りの武器は待たずに空にする: weaponKindGate)
+        var weaponKindGate = new WeaponKindBusyGate();
         foreach (var r in result)
         {
             var rec = r.EffectiveItemRecord;
             r.WeaponKindDisplay = rec.Length > 0
                 && string.Equals(equip.GetItemByRecord(rec)?.ItemType, WeaponGunPortType, StringComparison.OrdinalIgnoreCase)
-                ? equip.WeaponDamageKindLabel(rec) : "";
+                ? WeaponKindLabel(equip, rec, throwIfBusy, weaponKindGate) : "";
             // 武器の枠 (ジンバルの下の武器の行を除く) に、武器でなくジンバル/マウントと判定できる物が付いているときは「ジンバル/マウント」。
             // 判定: ジンバルの record (IsGimbalRecord)、item_index の種類が WeaponMount、
             // または表示名に mount / gimbal / マウント / ジンバル を含む (ノーズスクープ・カメラ・センサー等は「武器」のまま)。
@@ -2455,7 +2648,7 @@ public class HangarService
     public int PruneLoadouts(EquipmentService equip)
     {
         if (_dbPath == null || !File.Exists(_dbPath)) return 0;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
 
         var rows = new List<(string Key, string Port)>();
@@ -2485,7 +2678,7 @@ public class HangarService
             while (r.Read())
                 if (!r.IsDBNull(0) && !r.IsDBNull(1)) myShipNames[r.GetInt32(0)] = r.GetString(1);
         }
-        catch { }
+        catch (Exception ex) when (!GameDataQueryService.IsBusy(ex)) { }   // 使用中は投げる (裏で呼ぶ側が待ってやり直す。所持船の名前が欠けたまま整理しない)
 
         int deleted = 0;
         foreach (var g in rows.GroupBy(x => x.Key, StringComparer.Ordinal))
@@ -2523,7 +2716,9 @@ public class HangarService
 
     // 保有船 1 機のツールチップ文字列。Ship Matrix / 由来 / 同梱機 / 保険 / 装備 (ポート種別ごとに 1 行)。
     // shipKey は ship_loadouts のキー (HangarShipInstance.InstanceKey = "{pledge_id}|{ship_name}[#N]" / 所持船は "my|{my_ships.id}")
-    public string BuildShipTooltip(HangarShipInstance s, EquipmentService? equip, string shipKey)
+    // throwIfBusy: DB が使用中で読めなかったとき、「装備: 未解決」にせず投げる (裏で作って、待って読み直すため。MainWindow の船のツールチップ)。
+    // 船の record の解決 (ResolveShipRecordName) は中で受けて OnProgress に出すので、呼ぶ側がその文で見分ける
+    public string BuildShipTooltip(HangarShipInstance s, EquipmentService? equip, string shipKey, bool throwIfBusy = false)
     {
         var lines = new List<string> { s.Name };
 
@@ -2566,7 +2761,7 @@ public class HangarService
                     var allPorts = equip.GetShipPorts(record);
                     // 今ジンバル/マウントが付いている行は装備行に入れない (マウントの行を現在の装備の表に出す前と同じ内容にする)
                     var ports = allPorts.Count == 0 ? new List<ShipPortLoadout>()
-                        : BuildShipLoadout(shipKey, allPorts, equip).Where(p => !p.IsMountNow).ToList();
+                        : BuildShipLoadout(shipKey, allPorts, equip, throwIfBusy).Where(p => !p.IsMountNow).ToList();
                     if (allPorts.Count == 0)
                     {
                         equipFallback = "装備: 搭載枠情報なし (ゲームデータ未収録)";
@@ -2604,7 +2799,7 @@ public class HangarService
                     }
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!(throwIfBusy && GameDataQueryService.IsBusy(ex)))
             {
                 OnProgress?.Invoke($"装備の取得に失敗しました ({s.Name}): {ex.Message}");
             }
@@ -2663,7 +2858,7 @@ public class HangarService
         var list = new List<HangarCcu>();
         if (_dbPath == null || !File.Exists(_dbPath)) return list;
 
-        using (var db = new SqliteConnection($"Data Source={_dbPath}"))
+        using (var db = new TrackedSqliteConnection($"Data Source={_dbPath}"))
         {
             InitDb(db);
 
@@ -2699,7 +2894,7 @@ public class HangarService
     public void UpsertCcu(HangarCcu ccu)
     {
         if (_dbPath == null) return;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         Exec(db, """
             INSERT OR REPLACE INTO hangar_ccus
@@ -2715,7 +2910,7 @@ public class HangarService
     public void DeleteCcu(string pledgeId)
     {
         if (_dbPath == null) return;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         Exec(db, "DELETE FROM hangar_ccus WHERE pledge_id = @p", ("@p", pledgeId));
         SyncService.WriteTombstone(db, null, "hangar_ccus", pledgeId);   // 同期でもう片方から戻らないように
@@ -2725,7 +2920,7 @@ public class HangarService
     public void SetCcuStdPrice(string pledgeId, long stdPriceCents)
     {
         if (_dbPath == null) return;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         Exec(db, "UPDATE hangar_ccus SET std_price_cents = @sp WHERE pledge_id = @p",
             ("@sp", stdPriceCents), ("@p", pledgeId));
@@ -2736,7 +2931,7 @@ public class HangarService
     public HangarShipMark GetMark(string pledgeId, string shipName)
     {
         if (_dbPath == null || !File.Exists(_dbPath)) return HangarShipMark.None;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var cmd = db.CreateCommand();
         cmd.CommandText = "SELECT mark FROM hangar_ship_marks WHERE pledge_id = @p AND ship_name = @s";
@@ -2750,7 +2945,7 @@ public class HangarService
     public void SetMark(string pledgeId, string shipName, HangarShipMark mark)
     {
         if (_dbPath == null) return;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         if (mark == HangarShipMark.None)
         {
@@ -2769,7 +2964,7 @@ public class HangarService
         var dict = new Dictionary<(string, string), HangarShipMark>();
         if (_dbPath == null || !File.Exists(_dbPath)) return dict;
 
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var cmd = db.CreateCommand();
         cmd.CommandText = "SELECT pledge_id, ship_name, mark FROM hangar_ship_marks";
@@ -2793,7 +2988,7 @@ public class HangarService
         var t = new HangarTotals();
         if (_dbPath == null || !File.Exists(_dbPath)) return t;
 
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
 
         t.PledgeCount = (int)ScalarLong(db, "SELECT COUNT(*) FROM hangar_pledges");
@@ -2872,7 +3067,7 @@ public class HangarService
 
     private async Task<(int Count, bool Fetched)> RefreshShipMatrixCoreAsync(bool force)
     {
-        using (var db = new SqliteConnection($"Data Source={_dbPath}"))
+        using (var db = new TrackedSqliteConnection($"Data Source={_dbPath}"))
         {
             InitDb(db);
             var fetchedAtRaw = GetMeta(db, "ship_matrix_fetched_at");
@@ -2937,7 +3132,7 @@ public class HangarService
             throw new InvalidOperationException("Ship Matrix が 0 件でした。API の構造が変わった可能性があります。");
 
         var now = DateTime.Now.ToString("o");
-        using (var db = new SqliteConnection($"Data Source={_dbPath}"))
+        using (var db = new TrackedSqliteConnection($"Data Source={_dbPath}"))
         {
             InitDb(db);
             using var tx = db.BeginTransaction();
@@ -2970,7 +3165,7 @@ public class HangarService
     {
         if (_dbPath == null) return 0;
 
-        using (var db = new SqliteConnection($"Data Source={_dbPath}"))
+        using (var db = new TrackedSqliteConnection($"Data Source={_dbPath}"))
         {
             InitDb(db);
             var fetchedAtRaw = GetMeta(db, "loaners_fetched_at");
@@ -3028,7 +3223,7 @@ public class HangarService
         }
 
         var now = DateTime.Now.ToString("o");
-        using (var db = new SqliteConnection($"Data Source={_dbPath}"))
+        using (var db = new TrackedSqliteConnection($"Data Source={_dbPath}"))
         {
             InitDb(db);
             using (var tx = db.BeginTransaction())
@@ -3070,7 +3265,7 @@ public class HangarService
         var dict = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         if (_dbPath == null || !File.Exists(_dbPath)) return _loanerCache = dict;
 
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var cmd = db.CreateCommand();
         cmd.CommandText = "SELECT ship_name, loaner_name FROM ship_loaners";
@@ -3103,7 +3298,7 @@ public class HangarService
         var list = new List<ShipMatrixEntry>();
         if (_dbPath == null || !File.Exists(_dbPath)) return list;
 
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var cmd = db.CreateCommand();
         cmd.CommandText = "SELECT id, name, manufacturer_code, manufacturer_name, focus, type, size, production_status, production_note, cargocapacity FROM ship_matrix ORDER BY name";
@@ -3289,7 +3484,7 @@ public class HangarService
 
     private async Task<(int Count, bool Fetched)> RefreshStoreCoreAsync(bool force, CancellationToken ct)
     {
-        using (var db = new SqliteConnection($"Data Source={_dbPath}"))
+        using (var db = new TrackedSqliteConnection($"Data Source={_dbPath}"))
         {
             InitDb(db);
             var fetchedAtRaw = GetMeta(db, "store_fetched_at");
@@ -3339,7 +3534,7 @@ public class HangarService
             throw new InvalidOperationException($"ストア取得が全カテゴリで失敗しました: {string.Join(", ", failed)}");
 
         int total;
-        using (var db = new SqliteConnection($"Data Source={_dbPath}"))
+        using (var db = new TrackedSqliteConnection($"Data Source={_dbPath}"))
         {
             InitDb(db);
             using var tx = db.BeginTransaction();
@@ -3526,7 +3721,7 @@ public class HangarService
         var list = new List<StoreSku>();
         if (_dbPath == null || !File.Exists(_dbPath)) return list;
 
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         using var cmd = db.CreateCommand();
         cmd.CommandText = """
@@ -3564,7 +3759,7 @@ public class HangarService
     public string? StoreFetchedAt()
     {
         if (_dbPath == null || !File.Exists(_dbPath)) return null;
-        using var db = new SqliteConnection($"Data Source={_dbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_dbPath}");
         InitDb(db);
         return GetMeta(db, "store_fetched_at");
     }
@@ -3879,13 +4074,16 @@ public class HangarService
         cmd.ExecuteNonQuery();
     }
 
-    private static void Exec(SqliteConnection db, string sql, params (string name, object value)[] parms)
+    private static void Exec(SqliteConnection db, string sql, params (string name, object value)[] parms) => ExecCount(db, sql, parms);
+
+    // Exec と同じ。変えた行の数を返す
+    private static int ExecCount(SqliteConnection db, string sql, params (string name, object value)[] parms)
     {
         using var cmd = db.CreateCommand();
         cmd.CommandText = sql;
         foreach (var (name, value) in parms)
             cmd.Parameters.AddWithValue(name, value);
-        cmd.ExecuteNonQuery();
+        return cmd.ExecuteNonQuery();
     }
 }
 
@@ -4037,4 +4235,11 @@ public static class PortNameJa
         foreach (var n in nums) Append(n);
         return sb.Length > 0 ? sb.ToString() : raw;
     }
+}
+
+// 武器の種別の名前 (EquipmentService.WeaponDamageKindLabel) を 1 回の描き直しの中で読むときの印。
+// 一度 DB が使用中 (SQLITE_BUSY / LOCKED) で読めなかったら立て、残りは待たずに空にする (HangarService.WeaponKindLabel)
+internal sealed class WeaponKindBusyGate
+{
+    public bool BusySeen;
 }

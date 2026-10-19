@@ -1,8 +1,149 @@
+using System.Data;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
 namespace StarCitizenJapaneseTextCreater;
+
+// 裏の読み込みひとつが、どの DB を読んでいたか・どの DB が使用中で読めなかったかを持つ。書くのは TrackedSqliteConnection / TrackedSqliteCommand。
+// Run(work) の間、その thread で開いた・読んだ接続の DB を記録する (work は 1 つの thread で通して行う、裏の読み込み)
+public sealed class SqliteReadContext
+{
+    private volatile string? _currentPath;
+    private volatile string? _busyPath;
+
+    // 最後に読み始めた DB のパス (読み込みに時間がかかっているときの知らせに使う)
+    public string? CurrentPath => _currentPath;
+    // 最後に使用中で読めなかった DB のパス (中で例外を受けて知らせの文だけを出す所 (ResolveShipRecordName など) のため)
+    public string? BusyPath => _busyPath;
+    public void ClearBusy() => _busyPath = null;
+
+    [ThreadStatic] private static SqliteReadContext? _ambient;
+    internal static SqliteReadContext? Ambient => _ambient;
+    internal void SetCurrent(string path) => _currentPath = path;
+    internal void SetBusy(string path) => _busyPath = path;
+
+    public T Run<T>(Func<T> work)
+    {
+        var prev = _ambient;
+        _ambient = this;
+        try { return work(); }
+        finally { _ambient = prev; }
+    }
+
+    private const string DataKey = "SqliteBusyDb";
+
+    // 使用中の例外に、その接続の DB のパスを付ける (まだ付いていなければ)。読み込みの記録にも残す。例外の絞り込み (when) から呼ぶので常に false
+    internal static bool NoteBusy(Exception ex, string? path)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(path) || !GameDataQueryService.IsBusy(ex)) return false;
+            if (!ex.Data.Contains(DataKey)) ex.Data[DataKey] = path;
+            _ambient?.SetBusy(path);
+        }
+        catch { }
+        return false;
+    }
+
+    // 使用中の例外が出た接続の DB のファイル名 (例外 (中の例外も) に付いたもの)。無ければ、この読み込みで最後に使用中で読めなかった DB。分からなければ null
+    public string? BusyNameOf(Exception? ex) => BusyNameOfException(ex) ?? FileNameOf(_busyPath);
+
+    public static string? BusyNameOfException(Exception? ex)
+    {
+        for (; ex != null; ex = ex.InnerException)
+            if (ex.Data.Contains(DataKey) && ex.Data[DataKey] is string path) return FileNameOf(path);
+        return null;
+    }
+
+    // 中で例外を受けて知らせの文だけを出した使用中の失敗を、例外にし直す (この読み込みで最後に使用中で読めなかった DB を付ける)
+    public static SqliteException NewBusyException(string message)
+    {
+        var ex = new SqliteException(message, 5);
+        if (_ambient?.BusyPath is { } path) ex.Data[DataKey] = path;
+        return ex;
+    }
+
+    public static string? FileNameOf(string? path) => string.IsNullOrEmpty(path) ? null : Path.GetFileName(path);
+}
+
+// 使用中 (SQLITE_BUSY / LOCKED) で失敗したとき、その例外にこの接続の DB を付け、今の読み込み (SqliteReadContext) にも残す接続。
+// 読み始めた DB も今の読み込みに残す。SqliteConnection と同じに使う
+public class TrackedSqliteConnection : SqliteConnection
+{
+    public TrackedSqliteConnection(string connectionString) : base(connectionString) { }
+
+    internal void NoteRead()
+    {
+        try { if (SqliteReadContext.Ambient is { } ctx && DataSource is { Length: > 0 } path) ctx.SetCurrent(path); } catch { }
+    }
+
+    public override void Open()
+    {
+        try { base.Open(); }
+        catch (Exception ex) when (SqliteReadContext.NoteBusy(ex, DataSource)) { throw; }
+    }
+
+    // 作るコマンドだけを替える (時間切れ・トランザクションは元のコマンドと同じ)
+    public override SqliteCommand CreateCommand()
+    {
+        using var b = base.CreateCommand();
+        return new TrackedSqliteCommand { Connection = this, CommandTimeout = b.CommandTimeout, Transaction = b.Transaction };
+    }
+
+    public override SqliteTransaction BeginTransaction()
+    {
+        try { return base.BeginTransaction(); }
+        catch (Exception ex) when (SqliteReadContext.NoteBusy(ex, DataSource)) { throw; }
+    }
+
+    public override SqliteTransaction BeginTransaction(bool deferred)
+    {
+        try { return base.BeginTransaction(deferred); }
+        catch (Exception ex) when (SqliteReadContext.NoteBusy(ex, DataSource)) { throw; }
+    }
+
+    public override SqliteTransaction BeginTransaction(IsolationLevel isolationLevel)
+    {
+        try { return base.BeginTransaction(isolationLevel); }
+        catch (Exception ex) when (SqliteReadContext.NoteBusy(ex, DataSource)) { throw; }
+    }
+
+    public override SqliteTransaction BeginTransaction(IsolationLevel isolationLevel, bool deferred)
+    {
+        try { return base.BeginTransaction(isolationLevel, deferred); }
+        catch (Exception ex) when (SqliteReadContext.NoteBusy(ex, DataSource)) { throw; }
+    }
+}
+
+// TrackedSqliteConnection のコマンド。実行の前に読み始めた DB を残し、使用中で失敗したら例外にその DB を付ける
+// (行を読み進める Read の中の失敗は付けない。そのときは「DB」と出す)
+public class TrackedSqliteCommand : SqliteCommand
+{
+    private string? Db => Connection?.DataSource;
+    private void Begin() => (Connection as TrackedSqliteConnection)?.NoteRead();
+
+    public override SqliteDataReader ExecuteReader(CommandBehavior behavior)
+    {
+        Begin();
+        try { return base.ExecuteReader(behavior); }
+        catch (Exception ex) when (SqliteReadContext.NoteBusy(ex, Db)) { throw; }
+    }
+
+    public override int ExecuteNonQuery()
+    {
+        Begin();
+        try { return base.ExecuteNonQuery(); }
+        catch (Exception ex) when (SqliteReadContext.NoteBusy(ex, Db)) { throw; }
+    }
+
+    public override object? ExecuteScalar()
+    {
+        Begin();
+        try { return base.ExecuteScalar(); }
+        catch (Exception ex) when (SqliteReadContext.NoteBusy(ex, Db)) { throw; }
+    }
+}
 
 public partial class GameDataQueryService : IDisposable
 {
@@ -17,7 +158,7 @@ public partial class GameDataQueryService : IDisposable
     {
         DbPath = gamedataCacheDbPath;
         _translationsDbPath = Path.Combine(Path.GetDirectoryName(gamedataCacheDbPath) ?? "", "translations.db");
-        _conn = new SqliteConnection($"Data Source={gamedataCacheDbPath}");
+        _conn = new TrackedSqliteConnection($"Data Source={gamedataCacheDbPath}");
         _conn.Open();
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "CREATE TABLE IF NOT EXISTS knowledge (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT NOT NULL DEFAULT 'general', content TEXT NOT NULL, created_at TEXT NOT NULL)";
@@ -25,9 +166,15 @@ public partial class GameDataQueryService : IDisposable
         // PC 間の同期の墓石 (sync_tombstones。記憶を消すときにここから書く)
         cmd.CommandText = SyncService.TombstonesDdl;
         cmd.ExecuteNonQuery();
-        // 売り場・価格の表 (インデックス構築前の古い DB には無いので、ここでも作っておく)
-        cmd.CommandText = ShopPriceStore.TableDdl;
-        cmd.ExecuteNonQuery();
+        // 売り場・価格の表 (インデックス構築前の古い DB には無いので、ここでも作っておく)。
+        // 一意の索引 (ux_item_shop_prices_key) があれば、表も索引もそろっていて、TableDdl の重複の掃除 (DELETE) も何もしないので流さない
+        // (DELETE は消す行が無くても書き込みのロックを取るので、WAL でもほかの接続の書き込みが終わるまで待つ。この口は読むだけの所で開く)
+        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'ux_item_shop_prices_key')";
+        if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0)
+        {
+            cmd.CommandText = ShopPriceStore.TableDdl;
+            cmd.ExecuteNonQuery();
+        }
         cmd.CommandText = ItemVariantsDdl;
         cmd.ExecuteNonQuery();
         cmd.CommandText = PlayerDamageParamsDdl;
@@ -129,7 +276,7 @@ public partial class GameDataQueryService : IDisposable
         try
         {
             if (!File.Exists(_translationsDbPath)) return null;
-            using var conn = new SqliteConnection($"Data Source={_translationsDbPath};Mode=ReadOnly");
+            using var conn = new TrackedSqliteConnection($"Data Source={_translationsDbPath};Mode=ReadOnly");
             conn.Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT japanese, english FROM translations WHERE key = @k OR key = @kp ORDER BY (key = @k) DESC LIMIT 1";
@@ -264,6 +411,24 @@ public partial class GameDataQueryService : IDisposable
     // 武器 1 件のダメージの種類のキー (Physical / Energy など)。［船舶戦闘］の「ダメージの種類」と同じ判定 (WeaponDamageTypes:
     // 弾の直撃 + 爆発、弾が無ければビーム)。record 名は "EntityClassDefinition." の有無どちらでもよい。
     // 色違いで性能の JSON を空にしてある品目は、色違いの表 (item_variants) の基本品目の JSON で判定する。読めなければ空
+    // DB が使用中 (SQLITE_BUSY = 5 / SQLITE_LOCKED = 6) で読めなかったか (中の例外も見る)
+    public static bool IsBusy(Exception? ex)
+    {
+        for (; ex != null; ex = ex.InnerException)
+            if (ex is SqliteException se && se.SqliteErrorCode is 5 or 6) return true;
+        return false;
+    }
+
+    // 使用中で待っているときの状態の文 (［装備］の表・所持コンポーネントの表・船のツールチップ・［電力管理］)。
+    // dbName は使用中の例外が出た接続の DB (SqliteReadContext.BusyNameOf)。分からなければ「DB」
+    public static string BusyWaitStatus(string? dbName) => $"読み込み中... ({dbName ?? "DB"} が使用中のため待っています)";
+
+    // 読み込みに時間がかかっているときの状態の文。dbName はその読み込みが最後に読み始めた DB (SqliteReadContext.CurrentPath)。
+    // 使用中かどうかは分からない (SQLite の中で空くのを待っている間は例外が出ない) ので「使用中なら」。分からなければ「DB」
+    public static string SlowWaitStatus(string? dbName) => $"読み込み中... (時間がかかっています。{dbName ?? "DB"} が使用中なら、空くまで待ちます)";
+
+    // 読めなかったとき (items の読み出しの例外) は投げる (呼ぶのは EquipmentService.WeaponDamageKindLabel だけで、
+    // 読めなかった結果を「ダメージの種類が無い」として覚えないように)。行が無いときは空
     public List<string> WeaponDamageTypesOf(string recordName)
     {
         const string prefix = "EntityClassDefinition.";
@@ -272,17 +437,13 @@ public partial class GameDataQueryService : IDisposable
         if (!rn.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) rn = prefix + rn;
         (string Component, string Raw)? Read(string record)
         {
-            try
-            {
-                using var cmd = _conn.CreateCommand();
-                cmd.CommandText = "SELECT COALESCE(component_json, ''), COALESCE(raw_json, ''), record_name FROM items WHERE record_name = @rn COLLATE NOCASE LIMIT 1";
-                cmd.Parameters.AddWithValue("@rn", record);
-                using var r = cmd.ExecuteReader();
-                if (!r.Read()) return null;
-                rn = r.GetString(2);
-                return (r.GetString(0), r.GetString(1));
-            }
-            catch { return null; }
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT COALESCE(component_json, ''), COALESCE(raw_json, ''), record_name FROM items WHERE record_name = @rn COLLATE NOCASE LIMIT 1";
+            cmd.Parameters.AddWithValue("@rn", record);
+            using var r = cmd.ExecuteReader();
+            if (!r.Read()) return null;
+            rn = r.GetString(2);
+            return (r.GetString(0), r.GetString(1));
         }
         var row = Read(rn);
         if (row == null) return new List<string>();
@@ -326,7 +487,7 @@ public partial class GameDataQueryService : IDisposable
                 if (!r.Read()) return null;
                 return (r.GetString(0), r.GetString(1));
             }
-            catch { return null; }
+            catch (Exception ex) when (!IsBusy(ex)) { return null; }   // 使用中は投げる (呼ぶのは EquipmentService.ComponentPerfLabel だけ)
         }
         var row = Read(rn);
         if (row == null) return "";
@@ -3146,6 +3307,8 @@ public partial class GameDataQueryService : IDisposable
                 {
                     AddDescCell(e);
                     if (string.Equals(e.ItemType, "Missile", StringComparison.OrdinalIgnoreCase)) FillMissileCells(e);
+                    // 追加で取り込む品目 (採掘レーザー・鉱石ポッドなど。GameDataQueryService.ExtraItems.cs)
+                    FillExtraItemCells(e, Comp, loc);
                     break;
                 }
             }
@@ -3824,7 +3987,8 @@ public partial class GameDataQueryService : IDisposable
             CompareKind.Armor => ["ダメージ軽減 (説明文)", "耐えられる温度", "放射線防護", "所持容量 (説明文)", GForceColumn, "対応 (バックパック/コア)"],
             // それ以外の種類。ミサイル・魚雷は FillMissileCells の値 (ダメージの種類・1発のダメージ・弾速・追尾)、
             // ロケットポッドは船の武器の値 (DPS も) を出す (値のある品目があるときだけ)
-            _ => ["サイズ", "ダメージの種類", "1発のダメージ", "DPS (バースト / 平均)", "弾速", "追尾", "性能 (説明文)"],
+            // 追加で取り込む品目 (採掘レーザー・鉱石ポッドなど) の欄 (ExtraItemColumns) は、その種類の品目だけが値を持つ
+            _ => ["サイズ", "ダメージの種類", "1発のダメージ", "DPS (バースト / 平均)", "弾速", "追尾", .. ExtraItemColumns, "性能 (説明文)"],
         };
         // 武器 (個人・船) の表では、1発のダメージ・DPS・弾速は、弾のデータが無い品目は「データ無し」と出すため常に残す (医療ガンだけの表では残さない)。
         // それ以外は値の無い列を落とす
@@ -3937,7 +4101,7 @@ public partial class GameDataQueryService : IDisposable
             {
                 if (File.Exists(path))
                 {
-                    _c = new SqliteConnection($"Data Source={path};Mode=ReadOnly");
+                    _c = new TrackedSqliteConnection($"Data Source={path};Mode=ReadOnly");
                     _c.Open();
                 }
             }

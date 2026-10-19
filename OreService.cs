@@ -160,6 +160,7 @@ public sealed class OreService
         if (_dbPath == null) throw new InvalidOperationException("作業ディレクトリが決まっていません (SetCacheDir)");
         var db = new SqliteConnection($"Data Source={_dbPath}");
         db.Open();
+        SqliteWal.EnsureOn(db);   // 新しく作った trade_cache.db も WAL にする (もう WAL なら問い合わせ 1 回だけ)
         using var cmd = db.CreateCommand();
         // 印の表 (game_log_imports) もここで書くので、HangarService の DDL も通す (印を消すときに書く墓石 (sync_tombstones) の DDL も)
         cmd.CommandText = TradeTablesDdl + HangarService.GearImportTablesDdl + SyncService.TombstonesDdl;

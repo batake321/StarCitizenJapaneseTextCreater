@@ -5,9 +5,11 @@ using Microsoft.Data.Sqlite;
 namespace StarCitizenJapaneseTextCreater;
 
 // ［詳細］タブの検索の候補 1 件 (item_index の 1 品目。船・車両・武器・装備のすべて)
-public sealed record DetailCandidate(string Record, string Name, string ItemType, string SubType, string Manufacturer)
+// Note は同じ名前・同じ種類の候補が複数あるときに添える見分け (record 名。追加で取り込む品目だけ。SearchDetailCandidates)
+public sealed record DetailCandidate(string Record, string Name, string ItemType, string SubType, string Manufacturer, string? Note = null)
 {
-    public string Display => $"{Name}  [{GameDataQueryService.DetailTypeLabel(ItemType)}{(SubType.Length > 0 && SubType != "UNDEFINED" ? " / " + SubType : "")}]";
+    public string Display => $"{Name}  [{GameDataQueryService.DetailTypeLabel(ItemType)}{(SubType.Length > 0 && SubType != "UNDEFINED" ? " / " + SubType : "")}]"
+                             + (string.IsNullOrEmpty(Note) ? "" : $"  ({Note})");
     public override string ToString() => Display;
 }
 
@@ -17,7 +19,9 @@ public sealed record DetailShipRow(string Record, string Name, string Kind, int 
 public partial class GameDataQueryService
 {
     // ［詳細］タブの検索。item_index のあいまい検索 (FuzzySearch: 全文検索 (trigram)、無ければ LIKE) で候補を出し、
-    // 少なければ綴りの揺れ用の検索 (EditDistanceSearch) も足す。名前がプレースホルダ・空のものは除き、同じ名前・同じ種類は 1 件にする
+    // 少なければ綴りの揺れ用の検索 (EditDistanceSearch) も足す。名前がプレースホルダ・空のものは除き、同じ名前・同じ種類は 1 件にする。
+    // ただし追加で取り込む品目 (IsExtraDetailType の種類。例 Mining_Laser_MPUV_Arm と Mining_Laser_GRIN_Arbor_S1 の「Arbor MH1 Mining Laser」) は
+    // 別の品目なので record ごとに残し、同じ名前・同じ種類が複数あるときは record 名を添えて見分けられるようにする
     public List<DetailCandidate> SearchDetailCandidates(string query, int limit = 40)
     {
         var q = (query ?? "").Trim();
@@ -28,8 +32,16 @@ public partial class GameDataQueryService
         {
             var n = (name ?? "").Trim();
             if (rec.Length == 0 || n.Length == 0 || n.Contains("PLACEHOLDER", StringComparison.OrdinalIgnoreCase) || n.Contains("プレースホルダ")) return;
-            if (!seen.Add(n + "\u0001" + type)) return;
+            var key = n + "\u0001" + type + (IsExtraDetailType(type) ? "\u0001" + rec : "");
+            if (!seen.Add(key)) return;
             list.Add(new DetailCandidate(rec, n, type, sub, mfr));
+        }
+        void AddNotes()
+        {
+            const string head = "EntityClassDefinition.";
+            foreach (var g in list.Select((c, i) => (c, i)).GroupBy(x => x.c.Name + "\u0001" + x.c.ItemType, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+                foreach (var (c, i) in g)
+                    list[i] = c with { Note = c.Record.StartsWith(head, StringComparison.Ordinal) ? c.Record[head.Length..] : c.Record };
         }
         try
         {
@@ -38,6 +50,7 @@ public partial class GameDataQueryService
                 foreach (var r in EditDistanceSearch(q, 10)) Add(r.recordName, r.name, r.itemType, r.subType, r.manufacturer);
         }
         catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
+        AddNotes();
         return list.Take(limit).ToList();
     }
 
@@ -129,7 +142,7 @@ public partial class GameDataQueryService
         var indexKey = indexName != null ? DetailNameKey(indexName) : null;
         sb.AppendLine($"  名前: {ItemNameJaEn(nameEn, nameJa)}" + (indexName != null && indexKey != DetailNameKey(nameEn) && (nameJa == null || indexKey != DetailNameKey(nameJa)) ? $" ({indexName})" : ""));
         var typeJa = DetailTypeLabel(itemType);
-        sb.AppendLine($"  種類: {typeJa}" + (subType.Length > 0 && subType != "UNDEFINED" ? $" / {subType}" : "") + (typeJa != itemType ? $" ({itemType})" : ""));
+        sb.AppendLine($"  種類: {typeJa}" + (subType.Length > 0 && subType != "UNDEFINED" ? $" / {subType}" : "") + (typeJa != itemType && !typeJa.Contains($"({itemType})") ? $" ({itemType})" : ""));
         var mfr = ManufacturerName(itemsMfr.Length > 0 ? itemsMfr : indexMfr, loc);
         if (mfr.Length == 0) mfr = indexMfr;
         if (mfr.Length > 0) sb.AppendLine($"  メーカー: {mfr}");
@@ -773,6 +786,26 @@ public partial class GameDataQueryService
         "FPS_Deployable" => "設置型の爆発物",
         "Gadget" => "道具",
         "Grenade" => "手榴弾",
+        // 追加で取り込む品目の種類。ゲームの global.ini の item_Type* の訳 (item_TypeContainer「コンテナ」・item_TypeDockingCollar「ドッキングカラー」・
+        // item_TypeMisc「その他」・item_TypeCargo「貨物」・item_TypeDrink「ドリンク」・item_TypeFood「食べ物」・item_TypeBottle「ボトル」・
+        // item_TypeRemovableChip「デバイス」・item_TypeBattery「バッテリー」・item_TypeMiningModifier「採掘モジュール」・item_TypeSalvageHead「サルベージビーム」)。
+        // item_Type* の無い種類: Currency は mobiGlas_PlayerTrade_Currency_Title の「通貨」、InventoryContainer は
+        // shop_ui_transactionResult_05_InventoryContainerRequestFail の「インベントリコンテナ」、SalvageModifier は品目名の訳
+        // (「… スクレーパーモジュール」「… トラクターモジュール」) の「モジュール」と item_TypeSalvageHead の「サルベージ」から「サルベージモジュール」
+        "Container" => "コンテナ",
+        "DockingCollar" => "ドッキングカラー",
+        "Misc" => "その他",
+        "Cargo" => "貨物",
+        "Drink" => "ドリンク",
+        "Food" => "食べ物",
+        "Bottle" => "ボトル",
+        "RemovableChip" => "デバイス",
+        "Battery" => "バッテリー",
+        "MiningModifier" => "採掘モジュール",
+        "SalvageHead" => "サルベージビーム",
+        "Currency" => "通貨",
+        "InventoryContainer" => "インベントリコンテナ",
+        "SalvageModifier" => "サルベージモジュール",
         _ when itemType.StartsWith("Char_Armor_", StringComparison.Ordinal) => "アーマー",
         _ when itemType.StartsWith("Char_Clothing_", StringComparison.Ordinal) => "服",
         _ => new ShipPortInfo { ItemType = itemType }.TypeDisplay,

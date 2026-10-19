@@ -89,7 +89,7 @@ public partial class KeyAssignDialog : Window
             "確認", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
             return;
 
-        binding.Keyboard = "";
+        binding.Keyboard = "kb1_ ";   // 割り当て解除はゲームの解除の書き方 (接頭辞 + 空白) で持つ (押した直後から「（解除）」と出る)
         _changed = true;
         RefreshCurrentBindings();
         dgAvailableActions.Items.Refresh();

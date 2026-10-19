@@ -145,7 +145,7 @@ public partial class DetailPanel : UserControl
     // 書き先は MainWindow.Log と同じ決め方 (App.Config.WorkingDirectory をそのまま使う。空なら今いるディレクトリからの相対パス)
     private static void AppendAppLog(string msg)
     {
-        try { File.AppendAllText(Path.Combine(App.Config.WorkingDirectory, "app_log.txt"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}\n", Encoding.UTF8); } catch { }
+        App.AppendStartupLog(App.Config.WorkingDirectory, msg);   // ほかの書き込みと重ならないよう App のロックを通す
     }
 
     // 詳細の文字 (GetItemDetailText の形) を出す。WebView2 では Markdown の表にして HTML で、使えなければ文字のまま

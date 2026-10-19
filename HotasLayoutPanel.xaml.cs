@@ -88,11 +88,56 @@ public partial class HotasLayoutPanel : UserControl
         InitializeComponent();
     }
 
+    // 表に無い番号 (ボタン 33 以降、ハット 3 以降) を押したときに足した行 (js 番号ごと。修飾キーと js 番号を付けない部分コード)。
+    //   表を作り直しても残し (UpdateBindingTables で毎回この行も作る)、新しいデータを受け取ったら (SetData) 消す
+    private readonly Dictionary<int, List<string>> _extraInputs = new() { [1] = new(), [2] = new() };
+
+    private static readonly System.Text.RegularExpressions.Regex ButtonCodeRegex = new(@"^button(\d+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    private static readonly System.Text.RegularExpressions.Regex HatCodeRegex = new(@"^hat(\d+)_(up|down|left|right)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    private static readonly string[] HatDirections = { "up", "down", "left", "right" };
+
     public void SetData(ActionMapData data, Action? onBindingChanged)
     {
         _data = data;
         _onBindingChanged = onBindingChanged;
+        _extraInputs[1].Clear();
+        _extraInputs[2].Clear();
         UpdateBindingTables();
+    }
+
+    // 表に無い番号として行を足せる入力か (ボタン 33 以降、ハット 3 以降の上下左右)
+    private static bool IsExtraInputCode(string code)
+    {
+        var b = ButtonCodeRegex.Match(code);
+        if (b.Success) return int.TryParse(b.Groups[1].Value, out var n) && n >= 33;
+        var h = HatCodeRegex.Match(code);
+        if (h.Success) return int.TryParse(h.Groups[1].Value, out var n) && n >= 3;
+        return false;
+    }
+
+    // 足した行の並び: ボタン (番号順) → ハット (番号順、上下左右の順)
+    private static (int Kind, int Number, int Dir) ExtraInputSortKey(string code)
+    {
+        var b = ButtonCodeRegex.Match(code);
+        if (b.Success && int.TryParse(b.Groups[1].Value, out var bn)) return (0, bn, 0);
+        var h = HatCodeRegex.Match(code);
+        if (h.Success && int.TryParse(h.Groups[1].Value, out var hn))
+            return (1, hn, Array.IndexOf(HatDirections, h.Groups[2].Value.ToLowerInvariant()));
+        return (2, 0, 0);
+    }
+
+    // 足した行の見出し (既存の行と同じ書き方: "Button 40"、"Hat3 Up")
+    private static string ExtraInputLabel(string code)
+    {
+        var b = ButtonCodeRegex.Match(code);
+        if (b.Success) return $"Button {b.Groups[1].Value}";
+        var h = HatCodeRegex.Match(code);
+        if (h.Success)
+        {
+            var d = h.Groups[2].Value.ToLowerInvariant();
+            return $"Hat{h.Groups[1].Value} {char.ToUpperInvariant(d[0])}{d[1..]}";
+        }
+        return code;
     }
 
     private string BuildModifierPrefix()
@@ -104,8 +149,23 @@ public partial class HotasLayoutPanel : UserControl
         return parts.Count > 0 ? string.Join("+", parts) + "+" : "";
     }
 
-    // 「表示の入れ替え」の設定が変わったときに呼ぶ (呼び出し元が保存フォルダごとに覚える)
+    // 「表示の入れ替え」の設定が変わったときに呼ぶ (呼び出し元が機器の定義の指紋ごとに覚える)
     public Action<bool>? DisplaySwapChanged { get; set; }
+
+    // ［js1/js2 の入れ替え］をしたときに呼ぶ (呼び出し元が「元の js1 の機器」の判定の表示を書き直す)
+    public Action? InstanceSwapped { get; set; }
+
+    // ［記録を消す］(元の js1 の機器の記録) を押したときに呼ぶ (確かめと記録の書き換えは呼び出し元が行う)
+    public Action? ClearOriginalJs1Requested { get; set; }
+
+    // 元の js1 の機器の記録と、今の保存データの判定を出す。canClear = ［記録を消す］を押せるか (記録があるか)
+    public void ShowOriginalJs1Status(string text, bool canClear)
+    {
+        txtOriginalJs1.Text = text;
+        btnClearOriginalJs1.IsEnabled = canClear;
+    }
+
+    private void ClearOriginalJs1_Click(object sender, RoutedEventArgs e) => ClearOriginalJs1Requested?.Invoke();
 
     // 物理スティックを押したときに強調している行
     private Border? _pressHighlight;
@@ -128,22 +188,57 @@ public partial class HotasLayoutPanel : UserControl
 
         _pressHighlight = null;
         txtPressInfo.Text = "";
-        BuildStickPanel(panelRight, $"js{rightJs}_", $"joystick{rightJs}", allActions, modPrefix);
-        BuildStickPanel(panelLeft, $"js{leftJs}_", $"joystick{leftJs}", allActions, modPrefix);
+        HideJsChoice();
+        BuildStickPanel(panelRight, $"js{rightJs}_", $"joystick{rightJs}", allActions, modPrefix, _extraInputs[rightJs]);
+        BuildStickPanel(panelLeft, $"js{leftJs}_", $"joystick{leftJs}", allActions, modPrefix, _extraInputs[leftJs]);
 
-        int rCount = allActions.Count(a => !string.IsNullOrEmpty(GetJoystickValue(a, rightJs)));
-        int lCount = allActions.Count(a => !string.IsNullOrEmpty(GetJoystickValue(a, leftJs)));
+        // 割り当て解除 ("js1_ " など) は数えない
+        int rCount = allActions.Count(a => InputCodeHelper.IsAssigned(GetJoystickValue(a, rightJs)));
+        int lCount = allActions.Count(a => InputCodeHelper.IsAssigned(GetJoystickValue(a, leftJs)));
         txtInfo.Text = $"HOTAS R: {rCount} バインド | HOTAS L: {lCount} バインド";
     }
 
-    // 物理スティックが押されたとき: js 番号のパネルで、今の修飾キーのチェックを加味した行を強調してスクロールする
+    // 物理スティックが押されたとき: js 番号を決めて行を強調する。
+    //   options から js 番号を決められなければ「この機器は js◯」を選ぶ欄を出す (手で選んだ番号のときも、選び直せるように出す)
+    public void HandleJoystickPress(GameControllerInputEventArgs e)
+    {
+        if (_data.TryResolveJsForDevice(e.VendorId, e.ProductId, e.DeviceId, out var js, out var manual))
+        {
+            HighlightInput(js, e.InputCode);
+            if (manual)
+            {
+                if (txtPressInfo.Text.Length == 0)
+                    txtPressInfo.Text = $"{e.DisplayName}: 手で選んだ js{js} として表示しています";
+                ShowJsChoice(e);
+            }
+        }
+        else
+        {
+            ShowPressMessage($"{e.DisplayName} {e.InputCode}: どの js 番号か判別できません");
+            ShowJsChoice(e);
+        }
+    }
+
+    // 物理スティックが押されたとき: js 番号のパネルで、今の修飾キーのチェックを加味した行を強調してスクロールする。
+    //   表に無い番号 (ボタン 33 以降、ハット 3 以降) なら、その行を表の最後に足してから強調する
     public void HighlightInput(int js, string inputCode)
     {
         ClearPressHighlight();
-        var panel = js == LeftJs ? panelLeft : panelRight;
-        var fullCode = InputCodeHelper.ToGameForm(BuildModifierPrefix() + $"js{js}_" + inputCode, null);
-        var row = panel.Children.OfType<Border>()
-            .FirstOrDefault(b => b.Tag is HotasRowTag t && string.Equals(t.FullCode, fullCode, StringComparison.OrdinalIgnoreCase));
+        HideJsChoice();
+        var row = FindRow(js, inputCode);
+        bool added = false;
+        if (row == null && (js == 1 || js == 2) && IsExtraInputCode(inputCode))
+        {
+            var list = _extraInputs[js];
+            if (!list.Contains(inputCode, StringComparer.OrdinalIgnoreCase))
+            {
+                list.Add(inputCode.ToLowerInvariant());
+                list.Sort((a, b) => ExtraInputSortKey(a).CompareTo(ExtraInputSortKey(b)));
+            }
+            UpdateBindingTables();
+            row = FindRow(js, inputCode);
+            added = true;
+        }
         if (row == null)
         {
             txtPressInfo.Text = $"js{js} {inputCode}: 該当する行がありません";
@@ -153,14 +248,61 @@ public partial class HotasLayoutPanel : UserControl
         row.BorderBrush = new SolidColorBrush(Color.FromRgb(255, 111, 0));
         row.BorderThickness = new Thickness(2);
         _pressHighlight = row;
-        row.BringIntoView();
+        if (added)
+        {
+            // 作り直した直後は行の配置がまだ決まっていないので、配置が済んでからスクロールする
+            var target = row;
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, () => { if (_pressHighlight == target) target.BringIntoView(); });
+        }
+        else
+        {
+            row.BringIntoView();
+        }
+    }
+
+    // js 番号のパネルで、今の修飾キーのチェックを加味した入力の行。無ければ null
+    private Border? FindRow(int js, string inputCode)
+    {
+        var panel = js == LeftJs ? panelLeft : panelRight;
+        var fullCode = InputCodeHelper.ToGameForm(BuildModifierPrefix() + $"js{js}_" + inputCode, null);
+        return panel.Children.OfType<Border>()
+            .FirstOrDefault(b => b.Tag is HotasRowTag t && string.Equals(t.FullCode, fullCode, StringComparison.OrdinalIgnoreCase));
     }
 
     // 押された入力についての知らせ (js 番号が分からないときなど)
     public void ShowPressMessage(string message)
     {
         ClearPressHighlight();
+        HideJsChoice();
         txtPressInfo.Text = message;
+    }
+
+    // 「この機器は js◯」を選ぶ欄に出している押下
+    private GameControllerInputEventArgs? _jsChoicePress;
+
+    private void ShowJsChoice(GameControllerInputEventArgs e)
+    {
+        _jsChoicePress = e;
+        btnChooseJs1.Content = $"js1 (HOTAS {_data.GetJsSideLabel(1)})";
+        btnChooseJs2.Content = $"js2 (HOTAS {_data.GetJsSideLabel(2)})";
+        pnlJsChoice.Visibility = Visibility.Visible;
+    }
+
+    private void HideJsChoice()
+    {
+        _jsChoicePress = null;
+        pnlJsChoice.Visibility = Visibility.Collapsed;
+    }
+
+    private void ChooseJs1_Click(object sender, RoutedEventArgs e) => ChooseJs(1);
+    private void ChooseJs2_Click(object sender, RoutedEventArgs e) => ChooseJs(2);
+
+    // 選んだ js 番号を覚えて (ActionMapData。保存フォルダごとの記録はエディターが行う)、同じ押下で行を強調し直す
+    private void ChooseJs(int js)
+    {
+        if (_jsChoicePress is not { } press) return;
+        _data.SetManualJsForDevice(press.VendorId, press.ProductId, press.DeviceId, js);
+        HandleJoystickPress(press);
     }
 
     private void ClearPressHighlight()
@@ -187,15 +329,25 @@ public partial class HotasLayoutPanel : UserControl
         if (MessageBox.Show(msg, "js1/js2 の入れ替え", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
             return;
         _data.SwapJoystick1And2Bindings();
+        // 足した行 (表に無い番号) も、割り当てといっしょに反対側の js 番号へ移す (2 回で元に戻る)
+        (_extraInputs[1], _extraInputs[2]) = (_extraInputs[2], _extraInputs[1]);
         UpdateBindingTables();
         _onBindingChanged?.Invoke();
+        InstanceSwapped?.Invoke();
     }
 
-    private void BuildStickPanel(StackPanel panel, string prefix, string deviceType, List<ActionBinding> allActions, string modPrefix)
+    // extraCodes: 表に無い番号を押して足した行 (あれば最後に「表に無い入力 (押したもの)」の組として出す)
+    private void BuildStickPanel(StackPanel panel, string prefix, string deviceType, List<ActionBinding> allActions, string modPrefix, IReadOnlyList<string> extraCodes)
     {
         panel.Children.Clear();
 
-        foreach (var group in StickGroups)
+        var groups = StickGroups;
+        if (extraCodes.Count > 0)
+            groups = StickGroups
+                .Append(new JoystickGroup("表に無い入力 (押したもの)", extraCodes.Select(c => new JoystickInput(ExtraInputLabel(c), c)).ToList()))
+                .ToList();
+
+        foreach (var group in groups)
         {
             bool hasAnyBinding = false;
             var rows = new List<UIElement>();

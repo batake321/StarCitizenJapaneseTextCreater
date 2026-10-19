@@ -791,7 +791,7 @@ public partial class BlueprintPanel : UserControl
     // 作業ディレクトリの app_log.txt に 1 行追記する (MainWindow.Log と同じファイル・同じ行の形。DetailPanel.AppendAppLog と同じ書き方)
     private static void AppendAppLog(string workDir, string msg)
     {
-        try { File.AppendAllText(Path.Combine(workDir, "app_log.txt"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}\n", System.Text.Encoding.UTF8); } catch { }
+        App.AppendStartupLog(workDir, msg);   // ほかの書き込みと重ならないよう App のロックを通す
     }
 
     // === ［ゲームログ］の BP受信の品名 → BP ===
@@ -878,16 +878,8 @@ public partial class BlueprintPanel : UserControl
     private static (string Stamp, List<OreResource> Resources)? _resourcesCache;
     private static (string Stamp, HashSet<string> Keys, Dictionary<string, (string? En, string? Ja)> Loc)? _translationsCache;
 
-    // DB ファイルの鍵 (パス・最終更新時刻・長さ)。無ければ「無し」
-    private static string FileStamp(string path)
-    {
-        try
-        {
-            var fi = new FileInfo(path);
-            return fi.Exists ? $"{fi.FullName}|{fi.LastWriteTimeUtc.Ticks}|{fi.Length}" : $"{path}|無し";
-        }
-        catch { return $"{path}|?"; }
-    }
+    // DB ファイルの鍵 (パス・最終更新時刻・長さ。WAL の -wal も見る: SqliteWal.FileStamp)。無ければ「無し」
+    private static string FileStamp(string path) => SqliteWal.FileStamp(path);
 
     // OreService.LoadResources と同じ結果 (gamedata_cache.db と translations.db が変わっていなければ前の結果)
     private static List<OreResource> CachedResources(string gdPath, string trPath)

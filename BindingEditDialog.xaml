@@ -121,6 +121,12 @@
                 <StackPanel Grid.Column="0">
                     <TextBlock x:Name="txtPressInput" FontWeight="Bold" TextWrapping="Wrap"/>
                     <TextBlock x:Name="txtPressCurrent" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                    <!-- js 番号を判別できない機器 (と手で選んだ機器) のときだけ出す: 「この機器は js◯」を選ぶ -->
+                    <WrapPanel x:Name="pnlPressJsChoice" Visibility="Collapsed" Margin="0,4,0,0">
+                        <TextBlock Text="この機器は:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <Button x:Name="btnPressJs1" Content="js1" Click="PressJs1_Click" Padding="8,2" Margin="0,0,4,0"/>
+                        <Button x:Name="btnPressJs2" Content="js2" Click="PressJs2_Click" Padding="8,2"/>
+                    </WrapPanel>
                     <ScrollViewer MaxHeight="72" VerticalScrollBarVisibility="Auto" Margin="0,4,0,0">
                         <TextBlock x:Name="txtPressOthers" TextWrapping="Wrap"/>
                     </ScrollViewer>

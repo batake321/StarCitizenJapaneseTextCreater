@@ -2022,7 +2022,7 @@ public class ChatService
             case "key":
                 sb.AppendLine($"=== キー '{query}' の割り当て ===");
                 var keyBindings = allActions.Where(a =>
-                    !string.IsNullOrEmpty(a.Keyboard) &&
+                    InputCodeHelper.IsAssigned(a.Keyboard) &&   // 割り当て解除 ("kb1_ " など) は割り当てなしとして扱う
                     KeyMatchesQuery(a.Keyboard, query)).ToList();
                 if (keyBindings.Count == 0)
                     sb.AppendLine($"キー '{query}' には割り当てがありません。");
@@ -2044,11 +2044,12 @@ public class ChatService
                     a.ActionName.Contains(query, StringComparison.OrdinalIgnoreCase) ||
                     a.CategoryDisplayName.Contains(query, StringComparison.OrdinalIgnoreCase) ||
                     a.CategoryName.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                    a.KeyboardDisplay.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                    a.MouseDisplay.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                    a.GamepadDisplay.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                    a.Joystick1Display.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                    a.Joystick2Display.Contains(query, StringComparison.OrdinalIgnoreCase)
+                    // 割り当ての無い欄 (割り当て解除 "kb1_ " などを含む。InputCodeHelper.IsAssigned が false) は照合に使わない
+                    (InputCodeHelper.IsAssigned(a.Keyboard) && a.KeyboardDisplay.Contains(query, StringComparison.OrdinalIgnoreCase)) ||
+                    (InputCodeHelper.IsAssigned(a.Mouse) && a.MouseDisplay.Contains(query, StringComparison.OrdinalIgnoreCase)) ||
+                    (InputCodeHelper.IsAssigned(a.Gamepad) && a.GamepadDisplay.Contains(query, StringComparison.OrdinalIgnoreCase)) ||
+                    (InputCodeHelper.IsAssigned(a.Joystick1) && a.Joystick1Display.Contains(query, StringComparison.OrdinalIgnoreCase)) ||
+                    (InputCodeHelper.IsAssigned(a.Joystick2) && a.Joystick2Display.Contains(query, StringComparison.OrdinalIgnoreCase))
                 ).ToList();
 
                 if (results.Count == 0)
@@ -2059,16 +2060,17 @@ public class ChatService
                     foreach (var r in results.Take(30))
                     {
                         var parts = new List<string>();
-                        if (!string.IsNullOrEmpty(r.Keyboard))
+                        // 割り当て解除 ("kb1_ "、"js1_ " など) は割り当てなしとして扱う (InputCodeHelper.IsAssigned)
+                        if (InputCodeHelper.IsAssigned(r.Keyboard))
                             parts.Add($"KB: {r.KeyboardDisplay}");
-                        if (!string.IsNullOrEmpty(r.Mouse))
+                        if (InputCodeHelper.IsAssigned(r.Mouse))
                             parts.Add($"Mouse: {r.MouseDisplay}");
-                        if (!string.IsNullOrEmpty(r.Gamepad))
+                        if (InputCodeHelper.IsAssigned(r.Gamepad))
                             parts.Add($"GP: {r.GamepadDisplay}");
                         // HOTAS の R/L はエディターと同じ js 番号と物理スティックの対応で決める (判定材料が無ければ従来どおり js1 = R)
-                        if (!string.IsNullOrEmpty(r.Joystick1))
+                        if (InputCodeHelper.IsAssigned(r.Joystick1))
                             parts.Add($"HOTAS {_keybindData.GetJsSideLabel(1)}: {r.Joystick1Display}");
-                        if (!string.IsNullOrEmpty(r.Joystick2))
+                        if (InputCodeHelper.IsAssigned(r.Joystick2))
                             parts.Add($"HOTAS {_keybindData.GetJsSideLabel(2)}: {r.Joystick2Display}");
                         var bindStr = parts.Count > 0 ? string.Join(" / ", parts) : "(未割当)";
 

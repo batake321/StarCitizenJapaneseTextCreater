@@ -80,9 +80,18 @@ public partial class MainWindow : Window
         DetailPanel.Requested += OnDetailRequested;
         DetailPanel.SearchRequested += OnDetailSearchRequested;
         Closed += (_, _) => { DetailPanel.Requested -= OnDetailRequested; DetailPanel.SearchRequested -= OnDetailSearchRequested; };
+        // Windows のサインアウト・シャットダウン: 閉じるのを止めず (e.Cancel は効かない)、すぐに終わる片付けだけを同期で行う
+        if (Application.Current != null)
+        {
+            Application.Current.SessionEnding += OnSessionEnding;
+            Closed += (_, _) => { if (Application.Current != null) Application.Current.SessionEnding -= OnSessionEnding; };
+        }
         // 装備タブの表: Ctrl+C で選んだセルの文字だけをコピーする
         DataGridCellCopy.Attach(dgMyComponents);
         DataGridCellCopy.Attach(dgLoadout);
+        // 所持コンポーネントの表・［装備］の表の読み込みの間 (IsHitTestVisible が偽の間) は、キーボードの操作も止める (見た目は変えない)
+        BlockKeysWhileLoading(dgMyComponents);
+        BlockKeysWhileLoading(dgLoadout);
         DataGridCellCopy.Attach(dgMyGear);
         // ［ゲームログ］の購入の行の「装備に入れる」ボタン
         gameLogPanel.ImportClassifier = ClassifyGameLogImports;
@@ -106,6 +115,10 @@ public partial class MainWindow : Window
         blueprintPanel.WorkDirProvider = () => WorkDir;
         // ［BP］タブの入手のダブルクリック → ミッションタブにそのミッションの詳細を出す
         blueprintPanel.MissionOpener = OnBlueprintMissionRequested;
+        // ［船舶管理］の［電力管理］: 作業ディレクトリ・装備のサービス・［装備］の船セレクタの船・所持コンポーネントを渡す
+        powerPanel.WorkDirProvider = () => WorkDir;
+        powerPanel.OwnedShipsProvider = () => (cmbLoadoutShip.ItemsSource as IEnumerable<LoadoutShipChoice>) ?? [];
+        powerPanel.MyComponentsProvider = () => _myComponents;
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -245,7 +258,7 @@ public partial class MainWindow : Window
             txtTaskLog.ScrollToEnd();
         }
         // ログタブの内容を作業ディレクトリの app_log.txt にも追記する (あとから見返せるように)
-        try { File.AppendAllText(Path.Combine(WorkDir, "app_log.txt"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}\n", Encoding.UTF8); } catch { }
+        App.AppendStartupLog(WorkDir, msg);   // ほかの書き込みと重ならないよう App のロックを通す
     }
 
     private void SaveLog_Click(object sender, RoutedEventArgs e)
@@ -1586,8 +1599,7 @@ public partial class MainWindow : Window
                               || selectDlg.SelectedCategories.Contains(BackupCategory.Glossary);
             if (reopenEquip)
             {
-                _hangarEquip?.Dispose();
-                _hangarEquip = null;
+                CloseHangarEquip();
             }
             // インデックス構築と同じく、取り込みの間は売り場・価格の裏の取得 (とチャットの価格の取り直し) を止め、
             // 終わったら (成功・失敗とも) 構築が失敗したときと同じ方法 (止めた取得が途中だったときだけ続きを再開) で戻す
@@ -1637,6 +1649,7 @@ public partial class MainWindow : Window
                 // trade_cache.db の在庫・記録と gamedata_cache.db の資源の種類が替わったかもしれないので、［鉱石］を読み直す (［BP］も: blueprints と在庫)
                 orePanel?.Reload();
                 blueprintPanel?.Reload();
+                powerPanel?.Reload();   // ［電力管理］も (gamedata_cache.db・訳・所持コンポーネントが替わったかもしれない)
                 // trade_cache.db に残した［ゲームログ］の行 (ほかの PC の行) も替わったかもしれないので読み直す
                 gameLogPanel?.ReloadStored();
                 // ほかの取り込みがまだ走っていれば何もしない (最後に終わった取り込みが戻す)
@@ -1660,13 +1673,13 @@ public partial class MainWindow : Window
             if (selectDlg.SelectedCategories.Contains(BackupCategory.Glossary))
                 LoadGlossary();
 
-            MessageBox.Show("インポートが完了しました。", "インポート完了");
+            if (!_exiting) MessageBox.Show("インポートが完了しました。", "インポート完了");
         }
         catch (Exception ex)
         {
             txtBackupStatus.Text = "";
             Log($"[インポート] 失敗: {ex}");
-            MessageBox.Show($"インポートに失敗しました: {ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+            if (!_exiting) MessageBox.Show($"インポートに失敗しました: {ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
@@ -1685,7 +1698,11 @@ public partial class MainWindow : Window
 
         try
         {
+            // プールの接続を閉じてから、本体と横のファイル (-wal / -shm / -journal) を消す
+            // (古い -wal が残ると、次に作る translations.db に当たって壊れる)
+            SqliteConnection.ClearAllPools();
             File.Delete(DbPath);
+            SqliteWal.DeleteSideFiles(DbPath);
             if (File.Exists(UntranslatedPath)) File.Delete(UntranslatedPath);
             if (File.Exists(TranslatedPath)) File.Delete(TranslatedPath);
             if (File.Exists(ProgressPath)) File.Delete(ProgressPath);
@@ -1716,11 +1733,15 @@ public partial class MainWindow : Window
         // (次に必要になったときに新しいディレクトリで作り直され、購入先の一括取得もやり直される)
         if (!string.Equals(prevWorkDir, App.Config.WorkingDirectory, StringComparison.OrdinalIgnoreCase))
         {
-            _hangarEquip?.Dispose();
-            _hangarEquip = null;
+            // 新しいディレクトリの DB も WAL にする (起動したときと同じ。前の版で作った DB も切り替わる)
+            if (Directory.Exists(App.Config.WorkingDirectory))
+                App.EnsureWorkDbsWal(App.Config.WorkingDirectory, m => Log($"[WAL] {m}"));
+            CloseHangarEquip();
             _uexPrefetchStarted = false;
             orePanel?.Reload();   // ［鉱石］は新しいディレクトリの DB を読み直す
             blueprintPanel?.Reload();   // ［BP］も同じく
+            powerPanel?.Reload();   // ［電力管理］も同じく
+            RefreshMyComponentsForBlueprints();   // 所持コンポーネントも新しいディレクトリの DB (所持・BP の品質の増減) で読み直す
         }
         App.Config.OutputLanguage = txtOutputLang.Text.Trim();
         App.Config.ScApiKey = txtScApiKey.Text.Trim();
@@ -2438,12 +2459,12 @@ public partial class MainWindow : Window
         {
             var workDir = App.Config.WorkingDirectory;
             if (string.IsNullOrEmpty(workDir)) workDir = AppDomain.CurrentDomain.BaseDirectory;
-            Task<(int Cargo, int Resources, int Blueprints, int Starmap, string? Skipped)> task;
+            Task<(int Cargo, int Resources, int Blueprints, int Starmap, int Extra, string? Skipped)> task;
             // 構築・再抽出・インポートの印の確認と、取り消し用の登録は _priceRefreshTasks のロックの中で行う
             // (印は取得を止める依頼より前に立つので、依頼が登録より先に来たときは、ここで印を見て始めない)
             lock (_priceRefreshTasks)
             {
-                if (_indexBuildRunning || GameDataExtractor.IsIndexBuildRunning || _importsRunning > 0) return;
+                if (_exiting || _indexBuildRunning || GameDataExtractor.IsIndexBuildRunning || _importsRunning > 0) return;
                 cts = new CancellationTokenSource();
                 var ct = cts.Token;
                 task = Task.Run(async () =>
@@ -2469,16 +2490,17 @@ public partial class MainWindow : Window
                     catch (Exception ex) { Log($"[名前] AI 訳の名前の英語への書き戻しに失敗しました: {ex.Message}"); }
 
                     using var extractor = new GameDataExtractor(workDir);
-                    if (!extractor.IsReady) return (0, 0, 0, 0, "starbreaker か Data.p4k が見つからない");
+                    if (!extractor.IsReady) return (0, 0, 0, 0, 0, "starbreaker か Data.p4k が見つからない");
                     var needsCargo = extractor.NeedsShipCargo();
                     var needsResources = extractor.NeedsResourceTypes();
                     var needsPorts = extractor.NeedsCharacterPorts();
                     var needsBlueprints = extractor.NeedsBlueprints();
                     var needsStarmap = extractor.NeedsStarmapNames();
-                    if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints && !needsStarmap) return (0, 0, 0, 0, (string?)null);
-                    if (GameDataExtractor.IsIndexBuildRunning) return (0, 0, 0, 0, "インデックス構築・装備データの再抽出が走っている");
+                    var needsExtra = extractor.NeedsExtraItems();
+                    if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints && !needsStarmap && !needsExtra) return (0, 0, 0, 0, 0, (string?)null);
+                    if (GameDataExtractor.IsIndexBuildRunning) return (0, 0, 0, 0, 0, "インデックス構築・装備データの再抽出が走っている");
                     ct.ThrowIfCancellationRequested();
-                    int cargo = 0, resources = 0, blueprints = 0, starmap = 0;
+                    int cargo = 0, resources = 0, blueprints = 0, starmap = 0, extra = 0;
                     // 積載量・資源の種類 (失敗はここでログに残し、口の定義へ進む。取り消しはそのまま上げる)
                     try
                     {
@@ -2540,14 +2562,29 @@ public partial class MainWindow : Window
                             Log($"[場所名] 星図の場所の名前の取り出しに失敗しました (次の起動でまた試します): {ex.Message}");
                         }
                     }
-                    return (cargo, resources, blueprints, starmap, (string?)null);
+                    // 追加の品目 (採掘レーザー・鉱石ポッド・BP や契約から参照される品目など。BP の表を使うので BP の後)
+                    if (needsExtra)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        try
+                        {
+                            Log("[品目の追加] 採掘レーザー・採掘モジュール・鉱石ポッド・BP や契約から参照される品目などをまだ取り込んでいないので、裏で取り込みます");
+                            extra = await extractor.RebuildExtraItemsAsync(new Progress<string>(m => Log(m.StartsWith("[品目の追加]") ? m : $"[品目の追加] {m}")), ct);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            Log($"[品目の追加] 取り込みに失敗しました (次の起動でまた試します): {ex.Message}");
+                        }
+                    }
+                    return (cargo, resources, blueprints, starmap, extra, (string?)null);
                 });
                 _startupBackfillCts = cts;
                 _startupBackfillTask = task;
             }
-            var (count, resourceCount, blueprintCount, starmapCount, skipped) = await task;
+            var (count, resourceCount, blueprintCount, starmapCount, extraCount, skipped) = await task;
             if (skipped != null)
             {
+                Log($"[品目の追加] 採掘レーザー・鉱石ポッドなどの取り込みをしませんでした ({skipped})");
                 Log($"[積載量] 船の積載量 (SCU) の計算・資源の種類の取り出しをしませんでした ({skipped})");
                 Log($"[装備の口] 口の定義の取り出しをしませんでした ({skipped})");
                 Log($"[BP] ブループリントの取り出しをしませんでした ({skipped})");
@@ -2560,7 +2597,20 @@ public partial class MainWindow : Window
                 orePanel?.Reload();               // ［鉱石］の資源の一覧 (グループ) も読み直す
             }
             if (resourceCount > 0 || blueprintCount > 0) blueprintPanel?.Reload();   // ［BP］(資源名・原石の精錬後・blueprints) を読み直す
+            if (blueprintCount > 0) powerPanel?.Reload();   // ［電力管理］の品質の増減 (blueprints) も
+            if (blueprintCount > 0) RefreshMyComponentsForBlueprints();   // 所持コンポーネントの品質の列・［品質を入力］が押せるかも
             if (starmapCount > 0) gameLogPanel?.ClearNameCache();   // 取り出した場所名を使うよう、［ゲームログ］の名前の覚えを捨てる
+            if (extraCount > 0)
+            {
+                gameLogPanel?.ClearNameCache();   // 足した品目の名前を使うよう、［ゲームログ］の名前の覚えを捨てる
+                blueprintPanel?.Reload();         // ［BP］のできる品・材料の名前 (item_index から引く) も読み直す
+                // 足した品目の売り場・価格を取る (まだ取っていない品目だけ。［価格の取得を中止］で止めていれば始めない)。
+                // 構築・再抽出・取り込みの最中なら始めない (それぞれの終わりに取得の依頼・再開がある)
+                var extraDbPath = Path.Combine(workDir, "gamedata_cache.db");
+                bool busy;
+                lock (_priceRefreshTasks) busy = _indexBuildRunning || GameDataExtractor.IsIndexBuildRunning || _importsRunning > 0 || _priceRefreshBlocked;
+                if (!busy) StartShopPriceFetch(extraDbPath, afterRebuild: false);
+            }
         }
         catch (OperationCanceledException) when (cts?.IsCancellationRequested == true)
         {
@@ -2711,8 +2761,7 @@ public partial class MainWindow : Window
 
             // 装備タブの読み込み口 (EquipmentService) は覚えた結果 (子ポートの定義・本当の大きさ等) を持つので、
             // 装備データの再抽出と同じく、構築の前に閉じて構築の後に作り直す (ReopenHangarEquip)
-            _hangarEquip?.Dispose();
-            _hangarEquip = null;
+            CloseHangarEquip();
 
             bool built = false;
             try
@@ -2735,7 +2784,8 @@ public partial class MainWindow : Window
             catch (Exception ex)
             {
                 txtGameDataStatus.Text = "構築失敗";
-                MessageBox.Show($"インデックス構築エラー:\n{ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+                // 閉じる途中 (取り消して控えから戻した) は知らせない (窓が閉じられなくならないように)
+                if (!_exiting) MessageBox.Show($"インデックス構築エラー:\n{ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
             }
             finally
             {
@@ -2765,14 +2815,14 @@ public partial class MainWindow : Window
     {
         // gamedata_cache.db が替わったので、船の積載量 (ships.cargo_scu) の覚えた結果を捨てる
         ShipCargo.Invalidate();
-        _hangarEquip?.Dispose();
-        _hangarEquip = null;
+        CloseHangarEquip();
         // 手掘りの鉱石 → 資源の覚え (resource_types) と資源の一覧 (納品の品名の引き当て) も捨てる
         _mineralResources.Clear();
         _oreResources = null;
         // ［鉱石］の資源の一覧・名前 (resource_types) も替わったので読み直す (一度も表示していなければ何もしない)。［BP］(blueprints・資源名) も同じく
         orePanel?.Reload();
         blueprintPanel?.Reload();
+        powerPanel?.Reload();   // ［電力管理］も (この画面だけの口を開き直す)
         if (!_upgradeDataLoadedOnce) return;
         try
         {
@@ -2836,6 +2886,7 @@ public partial class MainWindow : Window
                 gameLogPanel?.ClearNameCache();
                 orePanel?.Reload();
                 blueprintPanel?.Reload();
+                powerPanel?.Reload();   // ［電力管理］の部品の名前・品質の窓の訳も
                 if (changed > 0)
                 {
                     ReopenHangarEquip();
@@ -2861,6 +2912,7 @@ public partial class MainWindow : Window
         gameLogPanel?.ClearNameCache();
         orePanel?.Reload();
         blueprintPanel?.Reload();
+        powerPanel?.Reload();
         GameDataExtractor.NotifyItemNamesChanged();
         if (!_itemNameRefreshDeferred) return;
         _itemNameRefreshDeferred = false;
@@ -2901,17 +2953,38 @@ public partial class MainWindow : Window
     // インデックス構築 (設定タブ・チャットの自動構築)・装備データの再抽出が終わったとき (別スレッドから呼ばれることがある)
     private void OnShopPriceFetchRequested(string dbPath)
     {
+        // 閉じている途中は始めない (止めた取得をまた始めない)。次の起動で取得が始まるよう、取得中の印を立てる
+        if (_exiting) { MarkShopPriceFetchForNextStart(dbPath, afterRebuild: true); return; }
         // 構築で resource_types・item_ports 等が作り直されたので、［ゲームログ］の名前の覚えを捨てる (設定タブの構築・再抽出・インポートは
         // RunDeferredItemNameRefresh でも捨てるが、チャットの自動構築 (ChatService → BuildStructuredIndexAsync) はここにしか来ない)
         gameLogPanel?.ClearNameCache();
         orePanel?.Reload();   // 別スレッドからでも呼べる (OrePanel.Reload が UI のスレッドへ回す)
         blueprintPanel?.Reload();   // ［BP］も (構築で blueprints が作り直された。同じく UI のスレッドへ回す)
+        powerPanel?.Reload();   // ［電力管理］も (構築で items・ship_ports・blueprints が作り直された。同じく UI のスレッドへ回す)
+        RefreshMyComponentsForBlueprints();   // 所持コンポーネントの品質の列・［品質を入力］が押せるかも (blueprint_modifiers が作り直された。同じく UI のスレッドへ回す)
         lock (_priceRefreshTasks)
         {
             if (DeferShopPriceRequestIfImporting(dbPath, afterRebuild: true)) return;
             _priceRefreshBlocked = false;
         }
         StartShopPriceFetch(dbPath, afterRebuild: true);
+    }
+
+    // 閉じる途中に来た売り場・価格の取得の依頼: 取得中の印 (shop_price_fetch_in_progress) を立て、次の起動の続き取得 (起動時の
+    // StartShopPriceFetch(onlyIfInterrupted: true)) で取るようにする。afterRebuild (構築・再抽出の後) なら、始めるときと同じく手動中止の印を消す。
+    // afterRebuild でなく手動中止の印があれば何もしない (始めるときと同じ)
+    private void MarkShopPriceFetchForNextStart(string dbPath, bool afterRebuild)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(dbPath) || !File.Exists(dbPath)) return;
+            if (afterRebuild) GameDataExtractor.SetShopPriceFetchStopped(dbPath, false);
+            else if (GameDataExtractor.IsShopPriceFetchStopped(dbPath)) return;
+            GameDataExtractor.MarkShopPriceFetchInProgress(dbPath);
+            var workDir = WorkDir;
+            if (!string.IsNullOrEmpty(workDir)) App.AppendStartupLog(workDir, "[売り場・価格] 閉じる途中に取得の依頼が来たので、次の起動で取得します");
+        }
+        catch { }
     }
 
     // バックアップの取り込み (ImportDb_Click) が走っている数と、その間に来た再開の依頼 (取り込みの finally で行う)。
@@ -2946,6 +3019,7 @@ public partial class MainWindow : Window
     // 構築・再抽出が失敗したとき。止めた取得が途中だったときだけ続きを再開する (［価格の取得を中止］で止めていたときは再開しない)
     private void OnShopPriceFetchResumeRequested(string dbPath)
     {
+        if (_exiting) return;   // 閉じている途中は再開しない
         lock (_priceRefreshTasks)
         {
             if (DeferShopPriceRequestIfImporting(dbPath, afterRebuild: false)) return;
@@ -2981,6 +3055,12 @@ public partial class MainWindow : Window
     // onlyIfInterrupted: 前回の取得が途中で終わっていたとき (取得中の印がある) だけ始める (起動時・構築の失敗後)
     private void StartShopPriceFetch(string dbPath, bool afterRebuild, bool onlyIfInterrupted = false)
     {
+        // 閉じている途中は始めない。続き取得 (onlyIfInterrupted) でなければ、次の起動で取得が始まるよう取得中の印を立てる
+        if (_exiting)
+        {
+            if (!onlyIfInterrupted) MarkShopPriceFetchForNextStart(dbPath, afterRebuild);
+            return;
+        }
         if (!Dispatcher.CheckAccess())
         {
             Dispatcher.BeginInvoke(() => StartShopPriceFetch(dbPath, afterRebuild, onlyIfInterrupted));
@@ -3846,6 +3926,7 @@ public partial class MainWindow : Window
         var refreshPhase = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (_priceRefreshTasks)
         {
+            if (_exiting) return;   // 閉じている途中は取り直さない
             if (_priceRefreshBlocked)
             {
                 ChatService.LogExternal("[価格の取り直し] インデックス構築・再抽出の最中なので取り直しません");
@@ -4102,18 +4183,62 @@ public partial class MainWindow : Window
 
     // === Window State ===
 
-    // 船名のツールチップは開く直前に生成する (行の実体化時に船ごとの SQL を前倒しで走らせない)
+    // 船名のツールチップは開く直前に生成する (行の実体化時に船ごとの SQL を前倒しで走らせない)。
+    // 作るのは裏のスレッド (LoadShipTooltipAsync)。できるまでは「読み込み中...」を出し、できたら中身を入れ替える (できた文は覚える)
     private void ShipTooltip_Opening(object sender, ToolTipEventArgs e)
     {
         if (sender is not FrameworkElement fe) return;
-        var text = fe.DataContext switch
+        var src = fe.DataContext switch
         {
-            UpgradeShipRow r => r.Tooltip,
-            MyShipRow m => m.Tooltip,
-            _ => "",
+            UpgradeShipRow r => r.TooltipSource,
+            MyShipRow m => m.TooltipSource,
+            _ => null,
         };
-        if (string.IsNullOrWhiteSpace(text)) { e.Handled = true; return; }
-        fe.ToolTip = text;
+        if (src?.Text is { } text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) { e.Handled = true; return; }
+            fe.ToolTip = text;
+            return;
+        }
+        if (src?.Build == null) { e.Handled = true; return; }
+        var tip = new ToolTip { Content = EquipLoadingStatus };
+        fe.ToolTip = tip;
+        src.CurrentTip = tip;
+        if (!src.Loading) _ = LoadShipTooltipAsync(src);
+    }
+
+    // 船のツールチップを裏で作る。使用中なら訳を出して待って作り直す (ツールチップを閉じたらやめる。次に開いたときにまた作る)
+    private async Task LoadShipTooltipAsync(ShipTooltipSource src)
+    {
+        src.Loading = true;
+        var workDir = WorkDir;
+        var gamedataPath = Path.Combine(workDir, "gamedata_cache.db");
+        var owner = _hangarEquip;   // null なら装備の行は「装備: 未解決」(今までと同じ)
+        var ownerGen = _hangarEquipGen;
+        var build = src.Build!;
+        bool Open() => src.CurrentTip?.IsOpen == true;
+        string? text;
+        try
+        {
+            text = await RunEquipBgAsync(() =>
+            {
+                lock (_equipBgLock)
+                    return RunBgWithHangar(workDir, h => build(h, owner != null ? BgEquip(gamedataPath, owner, ownerGen) : null));
+            }, new SqliteReadContext(), Open, m => { if (src.CurrentTip is { } t) t.Content = m; }, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            if (src.CurrentTip is { } t) t.Content = $"読み込みエラー: {ex.Message}";
+            return;
+        }
+        finally { src.Loading = false; }
+        if (text == null) return;   // 使用中のまま閉じた・装備 DB の口が閉じられた (次に開いたときにまた作る)
+        src.Text = text;
+        if (src.CurrentTip is { } tip)
+        {
+            if (string.IsNullOrWhiteSpace(text)) tip.IsOpen = false;
+            else tip.Content = text;
+        }
     }
 
     // 装備アイテムのツールチップ。1 行目にアイテム名、2 行目に record 名、そのあとに購入先 (UEX のローカルキャッシュ)。
@@ -4201,14 +4326,95 @@ public partial class MainWindow : Window
         ApplyTooltip(sender, e, choice == null ? "" : BuildItemTooltip(choice.ItemName, choice.ItemRecord));
     }
 
+    // 閉じる流れ: 1 回目の Closing は閉じるのを取り消して、閉じる処理 (RunExitAsync) を始める。終わったら _exitReady を立てて Close() を呼び直し、
+    // 2 回目の Closing で後片付けだけをして閉じる。閉じる処理の間に来た Closing (×・Alt+F4 の押し直し) は取り消して何もしない
+    // _exiting: 閉じる処理を始めた (裏の書き込みを新しく始めない印。裏のスレッドからも読む)
+    private volatile bool _exiting;
+    private bool _exitReady;
+
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
-        // 売り場・価格の裏での取得は中止する (取得済みの分は保存済み。次回は続きから)
-        _shopPriceRestart = false;
-        _shopPriceCts?.Cancel();
-        _captureService?.Dispose();
-        _hangarEquip?.Dispose();
+        if (_exitReady)
+        {
+            _captureService?.Dispose();
+            CloseHangarEquip();
+            return;
+        }
+        e.Cancel = true;
+        if (_exiting) return;
+        _exiting = true;
+        _ = RunExitAsync();
+    }
 
+    // 閉じる処理: 裏の書き込み (売り場・価格の取得・起動後の裏の処理・チャットの価格の取り直し) を止め (取得済みの分は保存済み。売り場・価格は次回は続きから)、
+    // 2 秒まで終わるのを待ち (閉じるときのチェックポイント (App.CheckpointWorkDbs) が空振りしないように)、設定を保存し、同期の書き出しをする。
+    // 途中で例外が出ても必ず閉じる
+    private async Task RunExitAsync()
+    {
+        try
+        {
+            _syncTimer?.Stop();
+            var baseTitle = Title;
+            try { Title = $"{baseTitle} - 終了しています…"; } catch { }
+            // 閉じる処理の間は窓の中を押せなくする (インデックス構築などを始められないように)
+            try { if (Content is UIElement root) root.IsEnabled = false; } catch { }
+            // インデックス構築・装備データの再抽出・バックアップの取り込み・PC 間の同期の取り込みを取り消し (AppExit)、
+            // それぞれの控えから戻し終わるまで LongWorkExitWait まで待つ
+            AppExit.Cancel();
+            var backgroundWrites = CancelBackgroundWritesForExit();
+            var longWork = AppExit.RunningLabels();
+            if (longWork.Count > 0)
+            {
+                var what = string.Join("・", longWork);
+                try { Title = $"{baseTitle} - 終了しています（{what}を止めています）…"; } catch { }
+                var workDir0 = WorkDir;
+                var swLong = System.Diagnostics.Stopwatch.StartNew();
+                var stopped = await AppExit.WaitIdleAsync(LongWorkExitWait);
+                if (!string.IsNullOrEmpty(workDir0))
+                    App.AppendStartupLog(workDir0, stopped
+                        ? $"[終了] {what}を止めました (控えから戻すのを含めて {swLong.ElapsedMilliseconds:N0} ms)"
+                        : $"[終了] {what}が {LongWorkExitWait.TotalSeconds:F0} 秒で止まりませんでした ({string.Join("・", AppExit.RunningLabels())})。待つのをやめて閉じます");
+                try { Title = $"{baseTitle} - 終了しています…"; } catch { }
+            }
+            var exitWaitStart = System.Diagnostics.Stopwatch.StartNew();
+            await WaitBackgroundWritesForExitAsync(backgroundWrites, BackgroundWriteExitWait - exitWaitStart.Elapsed);
+
+            SaveConfigForExit();
+            // PC 間の同期: 終了時の書き出し (設定の保存の後。共有フォルダへは裏のスレッドで触り、最大 10 秒待つ)。
+            // 待ちの間に Windows のサインアウト・シャットダウンが始まったら書き出さない
+            if (!_sessionEnding) await SyncExportOnClosingAsync();
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                var workDir = WorkDir;
+                if (!string.IsNullOrEmpty(workDir)) App.AppendStartupLog(workDir, $"[終了] 閉じる処理の途中でエラーが起きました (そのまま閉じます): {ex}");
+            }
+            catch { }
+        }
+        finally
+        {
+            _exitReady = true;
+            // サインアウト・シャットダウンが始まっていれば、WPF が窓を閉じる (ここでは呼び直さない)
+            if (!_sessionEnding) _ = Dispatcher.BeginInvoke(() =>
+            {
+                try { Close(); }
+                catch (Exception ex)
+                {
+                    try { App.AppendStartupLog(WorkDir, $"[終了] 窓を閉じられませんでした: {ex.Message}"); } catch { }
+                    Application.Current?.Shutdown();
+                }
+            });
+        }
+    }
+
+    // 閉じるときの設定の保存 (窓の位置と大きさ・タブ)。閉じる処理とサインアウト・シャットダウンの片付けで重ねて行わない
+    private bool _exitConfigSaved;
+    private void SaveConfigForExit()
+    {
+        if (_exitConfigSaved) return;
+        _exitConfigSaved = true;
         var config = App.Config;
         if (WindowState == WindowState.Maximized)
         {
@@ -4224,8 +4430,94 @@ public partial class MainWindow : Window
         }
         SaveTabState();
         SaveConfigToFile();
-        // PC 間の同期: 終了時の書き出し (設定の保存の後。共有フォルダへは裏のスレッドで触り、最大 10 秒待つ)
-        SyncExportOnClosing();
+    }
+
+    // Windows のサインアウト・シャットダウン (Application.SessionEnding。WM_QUERYENDSESSION のとき UI のスレッドで呼ばれる)。
+    // WPF はこの後 Application.Shutdown で窓を閉じ、そのときの Closing の e.Cancel は効かない (Window.ShouldCloseWindow が _appShuttingDown を見る)。
+    // そのため、ここで同期で片付ける: 裏の書き込みを止める (待たない)・設定の保存・作業フォルダの DB のチェックポイント。同期の書き出し (10 秒まで待つ) はしない。
+    // ほかで取り消された (e.Cancel) ときは何もしない
+    private volatile bool _sessionEnding;
+    private void OnSessionEnding(object? sender, SessionEndingCancelEventArgs e)
+    {
+        if (e.Cancel) return;
+        _sessionEnding = true;
+        _exiting = true;
+        var workDir = WorkDir;
+        void LogFile(string s) { try { if (!string.IsNullOrEmpty(workDir)) App.AppendStartupLog(workDir, s); } catch { } }
+        LogFile($"[終了] Windows の{(e.ReasonSessionEnding == ReasonSessionEnding.Shutdown ? "シャットダウン" : "サインアウト")}で閉じます (同期の書き出しはしません)");
+        try
+        {
+            _syncTimer?.Stop();
+            // インデックス構築・装備データの再抽出・取り込みも取り消す (戻し終わるのは待たない。途中で切れたときの扱いは AppExit の説明)
+            AppExit.Cancel();
+            var running = AppExit.RunningLabels();
+            if (running.Count > 0) LogFile($"[終了] {string.Join("・", running)}の途中です (止めるよう伝えました。戻し終わるのは待ちません)");
+            var tasks = CancelBackgroundWritesForExit();
+            // 裏の書き込みは 1 秒まで終わるのを待つ (同期で待つ。シャットダウンを長く止めない。裏の処理が UI のスレッドを待っていても 1 秒で抜ける)
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            try { Task.WaitAll(tasks.Select(x => x.Task).ToArray(), TimeSpan.FromSeconds(1)); } catch { }
+            var left = tasks.Where(x => !x.Task.IsCompleted).Select(x => x.Name).Distinct().ToList();
+            if (tasks.Count > 0)
+                LogFile(left.Count == 0
+                    ? $"[終了] 裏の書き込みを止めました ({sw.ElapsedMilliseconds:N0} ms)"
+                    : $"[終了] 裏の書き込みが 1 秒で止まりませんでした ({string.Join("、", left)})。待つのをやめて閉じます");
+        }
+        catch (Exception ex) { LogFile($"[終了] 裏の書き込みを止められませんでした: {ex.Message}"); }
+        try { SaveConfigForExit(); }
+        catch (Exception ex) { LogFile($"[終了] 設定を保存できませんでした: {ex.Message}"); }
+        App.CheckpointWorkDbs();
+        // この後の Closing は後片付けだけをする
+        _exitReady = true;
+    }
+
+    // 閉じるときに裏の書き込みが終わるのを待つ時間 (止めるのを伝えてから。閉じるのを長く待たせない)
+    private static readonly TimeSpan BackgroundWriteExitWait = TimeSpan.FromSeconds(2);
+
+    // 閉じるときに、インデックス構築・装備データの再抽出・取り込みが止まって控えから戻し終わるのを待つ時間。
+    // 写しの gamedata_cache.db (770MB) で、構築前の控えから戻すのが 3.4 秒、再抽出の *_bak 表から戻すのが 1.4 秒だった。
+    // 遅いディスクや、取り消しが効くまでの段階 (dcb query の終わり・品目名の付け直し・VACUUM などの途中で止められない処理) の分を見込んで 60 秒
+    private static readonly TimeSpan LongWorkExitWait = TimeSpan.FromSeconds(60);
+
+    // 閉じるとき: DB に書く裏の処理に取り消しを伝え、終わるのを待つタスク (名前と) を返す。新しい取り直し・取得も始めない。
+    // どれも書き込みは 1 品目・1 表ごとのトランザクションで、取り消しはトランザクションの外 (間) で効く
+    private List<(string Name, Task Task)> CancelBackgroundWritesForExit()
+    {
+        var tasks = new List<(string, Task)>();
+        _shopPriceRestart = false;
+        if (_shopPriceCts != null)
+        {
+            _shopPriceCts.Cancel();
+            if (_shopPriceTask != null) tasks.Add(("売り場・価格の取得", _shopPriceTask));
+        }
+        lock (_priceRefreshTasks)
+        {
+            _priceRefreshBlocked = true;
+            if (_startupBackfillCts != null)
+            {
+                _startupBackfillCts.Cancel();
+                if (_startupBackfillTask != null) tasks.Add(("起動後の裏の処理 (積載量・資源の種類・口の定義・BP・場所名の取り出し)", _startupBackfillTask));
+            }
+            _priceRefreshCts.Cancel();
+            foreach (var t in _priceRefreshTasks) tasks.Add(("チャットの価格の取り直し", t));
+        }
+        return tasks;
+    }
+
+    // 裏の書き込みが終わるのを、timeout まで待つ (await で待つので UI のスレッドは止めない。裏の処理が Dispatcher.Invoke で UI のスレッドを待っても止まらないように)。
+    // 待った結果を app_log.txt に出す
+    private async Task WaitBackgroundWritesForExitAsync(List<(string Name, Task Task)> tasks, TimeSpan timeout)
+    {
+        if (tasks.Count == 0) return;
+        var workDir = WorkDir;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var all = Task.WhenAll(tasks.Select(x => x.Task));
+        if (!all.IsCompleted && timeout > TimeSpan.Zero)
+            await Task.WhenAny(all, Task.Delay(timeout));
+        var left = tasks.Where(x => !x.Task.IsCompleted).Select(x => x.Name).Distinct().ToList();
+        if (!string.IsNullOrEmpty(workDir))
+            App.AppendStartupLog(workDir, left.Count == 0
+                ? $"[終了] 裏の書き込み ({string.Join("、", tasks.Select(x => x.Name).Distinct())}) を止めました ({sw.ElapsedMilliseconds:N0} ms)"
+                : $"[終了] 裏の書き込みが {Math.Max(0, timeout.TotalSeconds):F1} 秒で止まりませんでした ({string.Join("、", left)})。待つのをやめて閉じます");
     }
 
     // 最上位のタブの並びと今見ているタブを設定に入れる (保存は SaveConfigToFile)
@@ -4305,6 +4597,8 @@ public partial class MainWindow : Window
                 Log("[Ship] 同期: 所持船は最新です");
                 txtMyShipStatus.Text = $"所持船: {_tradeService.MyShips.Count} 隻 | 所持船は最新です";
             }
+            // ［電力管理］も (船の一覧・Ship Matrix が替わったかもしれない。この画面だけの HangarService の覚えも捨てる)
+            powerPanel?.Reload();
         }
         catch (Exception ex)
         {
@@ -4324,6 +4618,7 @@ public partial class MainWindow : Window
     // 戻り値: 正常終了なら true、途中で例外に入った (RecomputeUpgradeSim → RefreshMyShipRows に達しなかった可能性がある) なら false
     private bool LoadUpgradeData()
     {
+        _bgHangarStale = true;   // 裏の読み込みの HangarService の覚え (Ship Matrix・船の record) も、次の読み込みで作り直す
         try
         {
             _hangarService.SetCacheDir(WorkDir);
@@ -4410,7 +4705,7 @@ public partial class MainWindow : Window
                     OriginDisplay = s.OriginDisplay,
                     PledgeShipNames = s.PledgeShipNames,
                     // ツールチップは初回表示時に生成 (58 船分の SQL を UI スレッドで前倒し実行しない)
-                    TooltipFactory = () => _hangarService.BuildShipTooltip(s, _hangarEquip, s.InstanceKey),
+                    TooltipFactory = (h, equip) => h.BuildShipTooltip(s, equip, s.InstanceKey, throwIfBusy: true),
                     Meltable = meltable,
                     PledgeValueCents = p?.ValueCents ?? 0,
                     PriceDisplay = p?.ValueDisplay ?? "",
@@ -4500,10 +4795,10 @@ public partial class MainWindow : Window
                     CanUpgrade = false,
                     SellEnabled = false,
                     // 未同期の所持船と同じツールチップ経路 (Ship Matrix の情報 + "my|{id}" の装備)
-                    TooltipFactory = () =>
+                    TooltipFactory = (h, equip) =>
                     {
                         var tmp = new HangarShipInstance { Name = myName, Matrix = matrix };
-                        return _hangarService.BuildShipTooltip(tmp, _hangarEquip, $"my|{myId}");
+                        return h.BuildShipTooltip(tmp, equip, $"my|{myId}", throwIfBusy: true);
                     },
                 };
                 entries.Add((row.Name, new List<UpgradeShipRow> { row }));
@@ -5608,17 +5903,17 @@ public partial class MainWindow : Window
         var hangarRow = FindHangarRowForMyShip(row);
         if (hangarRow != null)
         {
-            row.TooltipFactory = () => hangarRow.Tooltip;
+            row.TooltipSource = hangarRow.TooltipSource;   // 保有船の行と同じもの (作った文も同じく覚える)
         }
         else
         {
             // 未同期: Ship Matrix の情報のみ
             var myId = e.Id;
             var myName = e.Name;
-            row.TooltipFactory = () =>
+            row.TooltipFactory = (h, equip) =>
             {
-                var tmp = new HangarShipInstance { Name = myName, Matrix = _hangarService.ResolveShip(myName) };
-                return _hangarService.BuildShipTooltip(tmp, _hangarEquip, $"my|{myId}");
+                var tmp = new HangarShipInstance { Name = myName, Matrix = h.ResolveShip(myName) };
+                return h.BuildShipTooltip(tmp, equip, $"my|{myId}", throwIfBusy: true);
             };
         }
         return row;
@@ -5737,37 +6032,17 @@ public partial class MainWindow : Window
 
     // === 装備サブタブ: 所持コンポーネント (my_components) ===
 
-    // my_components を読み直してグリッドに出す。種別コンボは初回のみ埋める
+    // my_components を読み直してグリッドに出す。種別コンボは初回のみ埋める。
+    // DB の読み出し (my_components・名前・性能・武器の種別・BP の品質の増減) は裏のスレッドで行い (LoadMyComponentsAsync)、終わったら画面に入れる
     private void RefreshMyComponents()
     {
         if (dgMyComponents == null) return;   // XAML 読込中
         try
         {
             // 数量の欄を編集したまま Tab で移った等で行の編集が開いていると、ItemsSource の入れ直しが失敗しうるので先に確定する
+            // (確定した数量の保存は、読み出しより先に行う)
             dgMyComponents.CommitEdit(DataGridEditingUnit.Row, true);
-            _hangarService.SetCacheDir(WorkDir);
-            _myComponents = _hangarService.LoadMyComponents();
-            _myComponentRows = _myComponents
-                .Select(c => new MyComponentRow(c)
-                {
-                    // 名称の欄は保存した item_name ではなく、item_record から引いた今の名前 (今の訳に合わせた item_index.name)
-                    CurrentName = HangarService.MyComponentDisplayName(c, _hangarEquip),
-                    OnUsableChanged = MyComponentUsable_Changed,
-                    OnQuantityChanged = MyComponentQuantity_Changed,
-                    // 種別の欄の武器の名前 (装備の表と同じく、ダメージの種類で分ける) と性能の欄。gamedata_cache.db が無ければ空
-                    WeaponKindDisplay = _hangarEquip != null && c.ItemType == "WeaponGun" ? _hangarEquip.WeaponDamageKindLabel(c.ItemRecord) : "",
-                    PerfDisplay = _hangarEquip?.ComponentPerfLabel(c.ItemRecord, c.ItemType) ?? "",
-                })
-                .ToList();
-            var selectedId = (dgMyComponents.SelectedItem as MyComponentRow)?.Id;
-            dgMyComponents.ItemsSource = null;
-            dgMyComponents.ItemsSource = _myComponentRows;
-            if (selectedId != null)
-                dgMyComponents.SelectedItem = _myComponentRows.FirstOrDefault(c => c.Id == selectedId.Value);
-            txtCompStatus.Text = _hangarEquip == null
-                ? "gamedata_cache.db がありません (コンポーネントの検索・追加はできません)"
-                : $"所持コンポーネント: {_myComponents.Count} 件";
-            PopulateCompTypeCombo();
+            MyComponentsLoadTask = LoadMyComponentsAsync();
         }
         catch (Exception ex)
         {
@@ -5776,6 +6051,389 @@ public partial class MainWindow : Window
         // ［ゲームログ］の「入れる」「取り消す」ボタンの状態も決め直す (装備 DB を開き直したときなど)。印の一覧も読み直す
         InvalidateImportMarks();
         gameLogPanel?.RefreshPurchaseButtons();
+    }
+
+    // 所持コンポーネントの表の読み込み (確かめ用に今の読み込みを出す)。番号で古い読み込みの結果を捨てる
+    internal Task MyComponentsLoadTask { get; private set; } = Task.CompletedTask;
+    private int _myCompLoadVersion;
+    private CancellationTokenSource? _myCompLoadCts;
+    private bool _myCompLoading;   // 読み込みが終わっていない (その間に「使用可」を変えたら読み直す)
+    // 使用可・数量を変えようとした行が既に無かったときの知らせ。表を読み直した後の状態の欄に足して出す (出したら消す)
+    private string? _myCompNotice;
+
+    private sealed class MyComponentsLoad
+    {
+        public List<MyComponent> List = new();
+        public List<MyComponentRow> Rows = new();
+        public bool HasEquip;
+    }
+
+    private async Task LoadMyComponentsAsync()
+    {
+        _myCompLoadCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _myCompLoadCts = cts;
+        var token = cts.Token;
+        var version = ++_myCompLoadVersion;
+        _myCompLoading = true;
+        var workDir = WorkDir;
+        var gamedataPath = Path.Combine(workDir, "gamedata_cache.db");
+        var owner = _hangarEquip;   // gamedata_cache.db が無ければ null (名前・性能・武器の種別は引かない)
+        var ownerGen = _hangarEquipGen;
+        bool Current() => version == _myCompLoadVersion;
+        // 読み込みの間は表と［選択を削除］［品質を入力］を操作させない (読み直す前の行で使用可・数量・品質を変えないように。
+        // 見た目は変えない。［装備］の表と同じ。キーボードは BlockKeysWhileLoading・ボタンの処理の中で止める)
+        SetMyComponentsInteractive(false);
+        txtCompStatus.Text = EquipLoadingStatus;
+        var ctx = new SqliteReadContext();
+        _ = EquipSlowNoticeAsync(ctx, () => Current() && txtCompStatus.Text == EquipLoadingStatus, t => txtCompStatus.Text = t, token);
+        MyComponentsLoad? res;
+        try
+        {
+            res = await RunEquipBgAsync(() => ReadMyComponents(workDir, gamedataPath, owner, ownerGen, token), ctx, Current,
+                t => txtCompStatus.Text = t, token);
+        }
+        catch (Exception ex)
+        {
+            if (!Current()) return;
+            _myCompLoading = false;
+            cts.Cancel();
+            SetMyComponentsInteractive(true);
+            txtCompStatus.Text = WithMyCompNotice($"読み込みエラー: {ex.Message}");
+            return;
+        }
+        if (!Current()) return;   // 新しい読み込みに替わった
+        _myCompLoading = false;
+        cts.Cancel();   // 時間がかかっている知らせを止める
+        SetMyComponentsInteractive(true);
+        if (res == null)
+        {
+            // 読み込みの間に UI の口 (_hangarEquip) が閉じられた (結果は捨てる。開き直した後に読み直す)。表は今の行のまま
+            txtCompStatus.Text = WithMyCompNotice(EquipStaleStatus);
+            return;
+        }
+        try
+        {
+            dgMyComponents.CommitEdit(DataGridEditingUnit.Row, true);
+            _myComponents = res.List;
+            foreach (var r in res.Rows)
+            {
+                r.OnUsableChanged = MyComponentUsable_Changed;
+                r.OnQuantityChanged = MyComponentQuantity_Changed;
+            }
+            _myComponentRows = res.Rows;
+            var selectedId = (dgMyComponents.SelectedItem as MyComponentRow)?.Id;
+            dgMyComponents.ItemsSource = null;
+            dgMyComponents.ItemsSource = _myComponentRows;
+            if (selectedId != null)
+                dgMyComponents.SelectedItem = _myComponentRows.FirstOrDefault(c => c.Id == selectedId.Value);
+            txtCompStatus.Text = WithMyCompNotice(!res.HasEquip
+                ? "gamedata_cache.db がありません (コンポーネントの検索・追加はできません)"
+                : $"所持コンポーネント: {_myComponents.Count} 件");
+            PopulateCompTypeCombo();
+        }
+        catch (Exception ex)
+        {
+            txtCompStatus.Text = WithMyCompNotice($"読み込みエラー: {ex.Message}");
+        }
+        // ［電力管理］の部品の候補 (MyComponentsProvider) が替わった。表示中ならその場で読み直す (変わっていなければ何もしない)。
+        // 表示していなければ、次に来たときに読み直す (画面に来たときの読み直しが所持コンポーネントの印を比べる)
+        powerPanel?.MyComponentsChanged();
+    }
+
+    // 所持コンポーネントの表と［選択を削除］［品質を入力］を、マウスで押せる/押せないにする (見た目は変えない。［品質を入力］の IsEnabled の
+    // 結び付けはそのまま)。押せない間は、表のキーボードの操作 (BlockKeysWhileLoading) とボタンの処理 (MyComponentsBusy) も止める
+    private void SetMyComponentsInteractive(bool on)
+    {
+        dgMyComponents.IsHitTestVisible = on;
+        if (btnDeleteMyComponent != null) btnDeleteMyComponent.IsHitTestVisible = on;
+        if (btnEditMyComponentQuality != null) btnEditMyComponentQuality.IsHitTestVisible = on;
+    }
+
+    // 所持コンポーネントの表の読み込み中 (ボタンをキーボードで押されたときも何もしない)
+    private bool MyComponentsBusy => dgMyComponents != null && !dgMyComponents.IsHitTestVisible;
+
+    // 表の IsHitTestVisible が偽 (読み込み中) の間は、表を編集・操作するキー (IsGridEditOrMoveKey) と文字の入力を表 (中の編集の欄も) に届けない。
+    // Tab・Ctrl+Tab (フォーカスやタブの移動)・Alt の組み合わせ (メニューのアクセスキー)・Ctrl+C (セルのコピー) などは通す
+    private static void BlockKeysWhileLoading(DataGrid grid)
+    {
+        grid.PreviewKeyDown += (_, e) => { if (!grid.IsHitTestVisible && IsGridEditOrMoveKey(e.Key, Keyboard.Modifiers)) e.Handled = true; };
+        grid.PreviewTextInput += (_, e) =>
+        {
+            // 文字の入力 (セルの編集が始まる)。Alt の組み合わせ・Ctrl の組み合わせ (Text が空で ControlText に入る) は通す
+            if (!grid.IsHitTestVisible && !string.IsNullOrEmpty(e.Text) && (Keyboard.Modifiers & (ModifierKeys.Alt | ModifierKeys.Control)) == 0)
+                e.Handled = true;
+        };
+    }
+
+    // 表を編集する・行や選択を動かすキーか。Alt の組み合わせ (key は System になる) は含めない
+    internal static bool IsGridEditOrMoveKey(Key key, ModifierKeys modifiers)
+    {
+        if ((modifiers & ModifierKeys.Alt) != 0 || key == Key.System) return false;
+        switch (key)
+        {
+            // 編集 (使用可の切り替え・編集の始まりと確定・行の削除)
+            case Key.Space: case Key.Enter: case Key.F2: case Key.Delete: case Key.Back:
+            // 行・選択の移動
+            case Key.Up: case Key.Down: case Key.Left: case Key.Right:
+            case Key.PageUp: case Key.PageDown: case Key.Home: case Key.End:
+                return true;
+        }
+        if ((modifiers & ModifierKeys.Control) != 0)
+            return key is Key.A or Key.V or Key.X;   // 全部を選ぶ・貼り付け・切り取り (Ctrl+C・Ctrl+Tab は通す)
+        // 修飾なし・Shift だけの文字・数字のキー (セルの編集が始まる。文字そのものは PreviewTextInput でも止める)
+        return key is >= Key.A and <= Key.Z or >= Key.D0 and <= Key.D9 or >= Key.NumPad0 and <= Key.Divide or >= Key.Oem1 and <= Key.Oem102;
+    }
+
+    // 状態の欄の文に、行が既に無かったときの知らせ (_myCompNotice) を足す。足したら消す
+    private string WithMyCompNotice(string status)
+    {
+        var notice = _myCompNotice;
+        _myCompNotice = null;
+        return notice == null ? status : $"{status} ― {notice}";
+    }
+
+    // 使用可・数量を書いた行の数が 0 (行が既に無い。読み込みでまとめられた・ほかで消した) なら、知らせを覚えて表を読み直す。書けたら true
+    private bool CheckMyComponentWritten(int written, MyComponentRow row, string what)
+    {
+        if (written != 0) return true;
+        _myCompNotice = $"「{row.ItemName}」の行が既に無かったため、{what}の変更は入りませんでした";
+        Log($"[Equip] {what}: 「{row.ItemName}」(id {row.Id}) の行が既に無かったため、変更は入りませんでした");
+        return false;
+    }
+
+    // 所持コンポーネントの行を作る (裏のスレッド)。使用中なら投げる (RunEquipBgAsync が待って読み直す)
+    private MyComponentsLoad ReadMyComponents(string workDir, string gamedataPath, EquipmentService? owner, int ownerGen, CancellationToken token)
+    {
+        lock (_equipBgLock)
+        {
+            token.ThrowIfCancellationRequested();
+            return RunBgWithHangar(workDir, h =>
+            {
+                var list = h.LoadMyComponents();
+                // 品質の増減のある BP のできる品 (［品質を入力］を押せる行)。gamedata_cache.db が無い・表が無ければ空
+                var qualityOutputs = GameDataQueryService.ReadOutputsWithQualityModifiers(gamedataPath);
+                var equip = owner != null ? BgEquip(gamedataPath, owner, ownerGen) : null;
+                var rows = new List<MyComponentRow>();
+                foreach (var c in list)
+                {
+                    token.ThrowIfCancellationRequested();
+                    rows.Add(new MyComponentRow(c)
+                    {
+                        // 名称の欄は保存した item_name ではなく、item_record から引いた今の名前 (今の訳に合わせた item_index.name)
+                        CurrentName = HangarService.MyComponentDisplayName(c, equip),
+                        // 種別の欄の武器の名前 (装備の表と同じく、ダメージの種類で分ける) と性能の欄。gamedata_cache.db が無ければ空
+                        WeaponKindDisplay = equip != null && c.ItemType == "WeaponGun" ? equip.WeaponDamageKindLabel(c.ItemRecord) : "",
+                        PerfDisplay = equip?.ComponentPerfLabel(c.ItemRecord, c.ItemType) ?? "",
+                        QualityDisplay = PowerMath.QualityLabel(PowerMath.ParseQualityJson(c.QualityJson)),
+                        HasQualityBlueprint = qualityOutputs.Contains(c.ItemRecord.StartsWith("EntityClassDefinition.", StringComparison.OrdinalIgnoreCase) ? c.ItemRecord : "EntityClassDefinition." + c.ItemRecord),
+                    });
+                }
+                return new MyComponentsLoad { List = list, Rows = rows, HasEquip = owner != null };
+            });
+        }
+    }
+
+    // ===== ［装備］の表・所持コンポーネントの表・船のツールチップの DB の読み出し (裏のスレッド) =====
+    // ［電力管理］(PowerPanel) と同じく、裏の読み込みだけの読み取り専用の口 (_bgEquip) を _equipBgLock の中で使う (UI の口 _hangarEquip とは取り合わない)。
+    // HangarService も読み込みごとに新しく作る (UI の _hangarService の覚えと取り合わない)。
+    // DB が使用中 (SQLITE_BUSY / LOCKED) なら使用中の待ちの文 (GameDataQueryService.BusyWaitStatus) を出し、間を置いて読み直す
+    private readonly object _equipBgLock = new();
+    private EquipmentService? _bgEquip;          // _equipBgLock の中で使う
+    private EquipmentService? _bgEquipOwner;     // _bgEquip をどの _hangarEquip に合わせて開いたか (_hangarEquip が開き直されたら開き直す)
+    // UI の口 (_hangarEquip) を閉じた回数 (CloseHangarEquip で 1 つ進める)。読み込みは始めたときの値を持ち、閉じた後 (値が進んだ後) に
+    // 古い口に合わせて裏の口を開き直さない (StaleEquipException で結果を捨てる)
+    private int _hangarEquipGen;
+    private const string EquipLoadingStatus = "読み込み中...";
+    // 読み込みの間に UI の口 (_hangarEquip) が閉じられた (インデックスの構築・バックアップの取り込み・作業ディレクトリの変更などの前) ときの文
+    private const string EquipStaleStatus = "読み込みをやめました (gamedata_cache.db を開き直した後に読み直します)";
+    // 使用中・時間がかかっているときの文は GameDataQueryService.BusyWaitStatus / SlowWaitStatus (DB の名前を入れる。分からなければ「DB」)。
+    // 名前は、読み込みごとの記録 (SqliteReadContext) から出す: 使用中の例外が出た接続の DB・最後に読み始めた DB
+    private const int EquipBusyRetryMs = 2000;    // 使用中だったときに読み直すまでの間
+    private const int EquipSlowNoticeMs = 3000;   // この時間たっても終わらなければ GameDataQueryService.SlowWaitStatus を出す
+
+    // 読み込みを始めたときの UI の口が、もう閉じられている (結果を捨てる。閉じた側が新しい読み込みを始める)
+    private sealed class StaleEquipException() : Exception("装備 DB の口が閉じられました");
+
+    // 裏の口 (_equipBgLock の中で呼ぶ)。owner (その読み込みを始めたときの _hangarEquip) が前と違えば開き直す。
+    // ownerGen (始めたときの _hangarEquipGen) から UI の口が閉じられていたら、開き直さずに StaleEquipException を投げる
+    private EquipmentService BgEquip(string gamedataPath, EquipmentService owner, int ownerGen)
+    {
+        if (ownerGen != Volatile.Read(ref _hangarEquipGen)) throw new StaleEquipException();
+        if (_bgEquip != null && ReferenceEquals(_bgEquipOwner, owner)) return _bgEquip;
+        CloseBgEquip();
+        _bgHangarStale = true;   // DB が替わったので、船の record の解決の覚えも次の読み込みで捨てる
+        _bgEquip = EquipmentService.OpenReadOnly(gamedataPath, throwIfBusy: true);
+        _bgEquipOwner = owner;
+        return _bgEquip;
+    }
+
+    private void CloseBgEquip()
+    {
+        try { _bgEquip?.Dispose(); } catch { }
+        _bgEquip = null;
+        _bgEquipOwner = null;
+    }
+
+    // UI の口 (_hangarEquip) を閉じる。合わせて開いた裏の口も、裏で (読み込み中なら終わってから) 閉じる (UI のスレッドは待たない)
+    private void CloseHangarEquip()
+    {
+        var old = _hangarEquip;
+        old?.Dispose();
+        _hangarEquip = null;
+        if (old == null) return;
+        Interlocked.Increment(ref _hangarEquipGen);   // 閉じる前に始めた読み込みが、後で古い口に合わせて裏の口を開き直さないように
+        _ = Task.Run(() =>
+        {
+            lock (_equipBgLock)
+                if (ReferenceEquals(_bgEquipOwner, old)) CloseBgEquip();
+        });
+    }
+
+    // 裏の読み込みだけの HangarService (_equipBgLock の中で使う)。UI の _hangarService の覚えとは別。
+    // 使用中で失敗したとき (船の record の解決は失敗の null も覚えるので)・LoadUpgradeData (同期・ストア・Ship Matrix の更新の後)・
+    // 装備 DB の口を開き直したときに捨て、次に作り直す
+    private HangarService? _bgHangar;
+    private volatile bool _bgHangarStale;
+
+    // 裏の読み込みだけの HangarService で work を行う。shared なら _bgHangar を使う (_equipBgLock の中で呼ぶ)。そうでなければこの呼び出しだけのもの。
+    // 船の record の解決 (ResolveShipRecordName) は失敗を中で受けて OnProgress に出すので、その文が使用中 (SQLite Error 5 / 6) なら投げる
+    // (待って読み直す)。ほかの知らせは今までどおりログに出す
+    private T RunBgWithHangar<T>(string workDir, Func<HangarService, T> work, bool shared = true)
+    {
+        HangarService h;
+        if (shared)
+        {
+            if (_bgHangarStale) { _bgHangar = null; _bgHangarStale = false; }
+            h = _bgHangar ??= new HangarService();
+        }
+        else h = new HangarService();
+        h.SetCacheDir(workDir);
+        string? busy = null;
+        void OnProgress(string m)
+        {
+            if (m.Contains("SQLite Error 5:") || m.Contains("SQLite Error 6:")) busy = m;
+            else Dispatcher.BeginInvoke(() => Log($"[Hangar] {m}"));
+        }
+        h.OnProgress += OnProgress;
+        try
+        {
+            var result = work(h);
+            if (busy != null) throw SqliteReadContext.NewBusyException(busy);   // 使用中で読めなかった DB を付ける
+            return result;
+        }
+        catch (Exception ex) when (GameDataQueryService.IsBusy(ex))
+        {
+            if (shared && ReferenceEquals(_bgHangar, h)) _bgHangar = null;   // 使用中の失敗を覚えたかもしれないので捨てる
+            throw;
+        }
+        finally { h.OnProgress -= OnProgress; }
+    }
+
+    // 裏で work を行う (ctx にその読み込みの DB を記録する)。使用中なら onBusy (使用中の待ちの文。使用中の例外が出た接続の DB の名前入り) を
+    // 出して間を置き、読み直す。current() が偽になった (新しい読み込みに替わった)・token でやめた・UI の口が閉じられた (StaleEquipException) なら null。
+    // 使用中でない失敗は投げる
+    private static async Task<T?> RunEquipBgAsync<T>(Func<T> work, SqliteReadContext ctx, Func<bool> current, Action<string> onBusy, CancellationToken token) where T : class
+    {
+        while (true)
+        {
+            string? busyName;
+            try
+            {
+                var (result, busy, name) = await Task.Run(() =>
+                {
+                    ctx.ClearBusy();
+                    try { return ((T?)ctx.Run(work), false, (string?)null); }
+                    catch (Exception ex) when (GameDataQueryService.IsBusy(ex)) { return (null, true, ctx.BusyNameOf(ex)); }
+                }, token);
+                if (!busy) return result;
+                busyName = name;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { return null; }
+            catch (StaleEquipException) { return null; }
+            if (!current()) return null;
+            onBusy(GameDataQueryService.BusyWaitStatus(busyName));
+            try { await Task.Delay(EquipBusyRetryMs, token); }
+            catch (OperationCanceledException) { return null; }
+            if (!current()) return null;
+        }
+    }
+
+    // 読み込みが EquipSlowNoticeMs たっても終わらなければ、待っている訳を出す (中で使用中を待っているときなど。
+    // その読み込みが最後に読み始めた DB (ctx) が分かればその名前)
+    private static async Task EquipSlowNoticeAsync(SqliteReadContext ctx, Func<bool> stillLoading, Action<string> show, CancellationToken token)
+    {
+        try { await Task.Delay(EquipSlowNoticeMs, token); }
+        catch (OperationCanceledException) { return; }
+        if (stillLoading()) show(GameDataQueryService.SlowWaitStatus(SqliteReadContext.FileNameOf(ctx.CurrentPath)));
+    }
+
+    // BP の品質の増減 (blueprint_modifiers) が替わったとき (起動後の裏の BP の取り出し・インデックスの構築・作業ディレクトリの変更) に呼ぶ:
+    // 所持コンポーネントの一覧 (品質の列と［品質を入力］が押せるか) を読み直す。設定タブの構築とバックアップの取り込み (インデックス) は
+    // ReopenHangarEquip → LoadUpgradeData で読み直す。一度も読んでいなければ何もしない (初めて読むときに今の DB を読む)。
+    // 別のスレッドからは UI のスレッドへ回す。装備 DB の口 (_hangarEquip) を閉じた後なら開いてから読む (名前・性能の欄のため)
+    private void RefreshMyComponentsForBlueprints()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(RefreshMyComponentsForBlueprints);
+            return;
+        }
+        if (!_upgradeDataLoadedOnce) return;
+        EnsureHangarEquip();
+        RefreshMyComponents();
+    }
+
+    // ［品質を入力］: 選んだ所持コンポーネントの材料の枠ごとの品質を入れて保存する (HangarService.SplitMyComponentQuality だけで書く。
+    // 窓の数が全部のときも同じ処理で、窓に出した数量を渡して確かめてから書く)
+    // 窓を閉じた後、行の今の数量が窓に出した数量と違えば (窓を開いている間に読み直した・ほかで変えた) 書かずに表を読み直し、状態の欄に知らせる。
+    // 行が既に無いときも同じ
+    private void EditMyComponentQuality_Click(object sender, RoutedEventArgs e)
+    {
+        if (MyComponentsBusy) return;   // 表の読み込み中 (キーボードで押されたとき)
+        if (dgMyComponents.SelectedItem is not MyComponentRow row) return;
+        var gamedataPath = Path.Combine(WorkDir, "gamedata_cache.db");
+        var info = GameDataQueryService.ReadBlueprintQuality(gamedataPath, row.ItemRecord);
+        if (info is not { HasModifiers: true })
+        {
+            txtCompStatus.Text = "この部品の BP (品質の増減) がありません";
+            return;
+        }
+        var names = QualityNames.Load(Path.Combine(WorkDir, "translations.db"), [info]);
+        // 数量が 2 以上なら、品質を入れる数を選べる (既定は全部。全部より少なければ、その数だけ品質つきの別の行に分ける: SplitMyComponentQuality)
+        var shownQuantity = row.Model.Quantity;
+        var dlg = new ComponentQualityDialog(row.ItemName, info, PowerMath.ParseQualityJson(row.Model.QualityJson), names, shownQuantity) { Owner = this };
+        if (dlg.ShowDialog() != true) return;
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            var json = dlg.Result is { } q ? PowerMath.ToQualityJson(q) : "";
+            // 数を全部にしたときも、行の今の数量が窓に出した数量のときだけ書く (同じ確かめの中で書く)
+            var res = _hangarService.SplitMyComponentQuality(row.Id, dlg.Count, json, shownQuantity);
+            switch (res.Kind)
+            {
+                case MyComponentQualityWriteKind.Missing:
+                    CheckMyComponentWritten(0, row, "品質");
+                    break;
+                case MyComponentQualityWriteKind.QuantityChanged:
+                    _myCompNotice = $"「{row.ItemName}」の数量が ×{shownQuantity} から ×{res.Quantity} に変わっていたため、品質の変更は入りませんでした";
+                    Log($"[Equip] 品質: 「{row.ItemName}」(id {row.Id}) の数量が ×{shownQuantity} から ×{res.Quantity} に変わっていたため、変更は入りませんでした");
+                    break;
+                case MyComponentQualityWriteKind.Written:   // 書いたときだけログに出す (品質が前と同じで書くことが無かった NotWritten は出さない)
+                    if (dlg.Count < shownQuantity)
+                        Log($"[Equip] 品質を保存: {row.ItemName} ×{dlg.Count} (×{shownQuantity} のうち。別の行に分けた) {PowerMath.QualityLabel(dlg.Result)}");
+                    else
+                        Log($"[Equip] 品質を保存: {row.ItemName} {PowerMath.QualityLabel(dlg.Result)}");
+                    break;
+            }
+            RefreshMyComponents();
+            // 行を分けたときは［装備］の候補 (所持コンポーネントの行ごとの ×数量) も変わるので、数量の書き換えと同じく装備の表も描き直す (書いたときだけ)
+            if (res.Kind == MyComponentQualityWriteKind.Written && dlg.Count < shownQuantity) RefreshLoadoutGrid();
+        }
+        catch (Exception ex)
+        {
+            txtCompStatus.Text = $"品質を保存できません: {ex.Message}";
+        }
     }
 
     private void PopulateCompTypeCombo()
@@ -5872,6 +6530,7 @@ public partial class MainWindow : Window
 
     private void DeleteMyComponent_Click(object sender, RoutedEventArgs e)
     {
+        if (MyComponentsBusy) return;   // 表の読み込み中 (キーボードで押されたとき)
         if (dgMyComponents.SelectedItem is not MyComponentRow row) return;
         var c = row.Model;
         if (MessageBox.Show($"「{row.ItemName}」({c.SizeDisplay} {c.GradeDisplay} ×{c.Quantity}) を削除しますか？", "確認", MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
@@ -5889,13 +6548,16 @@ public partial class MainWindow : Window
         }
     }
 
-    // 「使用可」チェックの変更 (MyComponentRow.Usable の setter から) → DB へ書き戻す
+    // 「使用可」チェックの変更 (MyComponentRow.Usable の setter から) → DB へ書き戻す (使用可の列だけ)。
+    // 行が既に無ければ (読み直しでまとめられた等)、変更が入らなかったことを状態の欄に出して表を読み直す
     private void MyComponentUsable_Changed(MyComponentRow row)
     {
         try
         {
             _hangarService.SetCacheDir(WorkDir);
-            _hangarService.UpdateMyComponent(row.Model);
+            var written = _hangarService.UpdateMyComponentUsable(row.Id, row.Usable);
+            // 行が既に無い・所持コンポーネントの表の読み込みが終わっていなければ、保存の前に読んだ値で表を入れないよう読み直す
+            if (!CheckMyComponentWritten(written, row, "使用可") || _myCompLoading) RefreshMyComponents();
             RefreshLoadoutGrid();   // 使用可否は装備候補に影響する
         }
         catch (Exception ex)
@@ -5908,7 +6570,8 @@ public partial class MainWindow : Window
     private void MyComponentQuantity_Changed(MyComponentRow row, int quantity) =>
         Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => ApplyMyComponentQuantity(row, quantity));
 
-    // 数量を quantity にする (UpdateMyComponent)。0 になるなら行を消すか確かめ、「いいえ」なら変えない。負の数は受け付けない
+    // 数量を quantity にする (数量の列だけを書く)。0 になるなら行を消すか確かめ、「いいえ」なら変えない。負の数は受け付けない。
+    // 行が既に無ければ (読み直しでまとめられた等)、変更が入らなかったことを状態の欄に出す (表は下で読み直す)
     private void ApplyMyComponentQuantity(MyComponentRow row, int quantity)
     {
         var c = row.Model;
@@ -5932,8 +6595,8 @@ public partial class MainWindow : Window
                 var before = c.Quantity;
                 c.Quantity = quantity;
                 _hangarService.SetCacheDir(WorkDir);
-                _hangarService.UpdateMyComponent(c);
-                Log($"[Equip] 数量: {row.ItemName} ×{before} → ×{quantity}");
+                if (CheckMyComponentWritten(_hangarService.UpdateMyComponentQuantity(c.Id, quantity), row, "数量"))
+                    Log($"[Equip] 数量: {row.ItemName} ×{before} → ×{quantity}");
             }
         }
         catch (Exception ex)
@@ -6804,40 +7467,138 @@ public partial class MainWindow : Window
         RefreshLoadoutGrid();
     }
 
-    // 選択中の船の全ポートを「デフォルト装備 / 現在の装備 / 候補」で出す
+    // 選択中の船の全ポートを「デフォルト装備 / 現在の装備 / 候補」で出す。
+    // DB の読み出し (船の record の解決・搭載枠・現在の装備・候補) は裏のスレッドで行い (LoadLoadoutGridAsync)、終わったら画面に入れる
     private void RefreshLoadoutGrid()
     {
         if (dgLoadout == null) return;   // XAML 読込中
         var ship = cmbLoadoutShip.SelectedItem as LoadoutShipChoice;
-        dgLoadout.ItemsSource = null;
-        if (_hangarEquip == null)
+        _loadoutLoadCts?.Cancel();
+        var version = ++_loadoutLoadVersion;   // 終わっていない読み込みの結果は捨てる
+        if (_hangarEquip == null || ship == null)
         {
-            txtLoadoutStatus.Text = "gamedata_cache.db がありません";
+            dgLoadout.ItemsSource = null;
+            _loadoutShownShipKey = null;
+            dgLoadout.IsHitTestVisible = true;
+            txtLoadoutStatus.Text = _hangarEquip == null ? "gamedata_cache.db がありません" : "船を選択してください";
+            LoadoutLoadTask = Task.CompletedTask;
             return;
         }
-        if (ship == null)
+        // 別の船の行は消す (読み込みの間に、前の船の行で選び直して今の船に保存しないように)。同じ船なら読み込みが終わるまで今の行を出しておき、
+        // 読み込みの間は操作させない (読み直す前の行で選び直さないように)
+        if (_loadoutShownShipKey != ship.ShipKey)
         {
-            txtLoadoutStatus.Text = "船を選択してください";
-            return;
+            dgLoadout.ItemsSource = null;
+            _loadoutShownShipKey = null;
         }
+        dgLoadout.IsHitTestVisible = false;
+        LoadoutLoadTask = LoadLoadoutGridAsync(ship, version);
+    }
+
+    // ［装備］の表の読み込み (確かめ用に今の読み込みを出す)
+    internal Task LoadoutLoadTask { get; private set; } = Task.CompletedTask;
+    private int _loadoutLoadVersion;
+    private CancellationTokenSource? _loadoutLoadCts;
+    private string? _loadoutShownShipKey;   // 今の dgLoadout の行の船 (LoadoutShipChoice.ShipKey)
+
+    private sealed class LoadoutLoad
+    {
+        public string? Record;
+        public List<LoadoutRow> Rows = new();
+    }
+
+    private async Task LoadLoadoutGridAsync(LoadoutShipChoice ship, int version)
+    {
+        var cts = new CancellationTokenSource();
+        _loadoutLoadCts = cts;
+        var token = cts.Token;
+        bool Current() => version == _loadoutLoadVersion;
+        txtLoadoutStatus.Text = EquipLoadingStatus;
+        var ctx = new SqliteReadContext();
+        _ = EquipSlowNoticeAsync(ctx, () => Current() && txtLoadoutStatus.Text == EquipLoadingStatus, t => txtLoadoutStatus.Text = t, token);
         try
         {
-            _hangarService.SetCacheDir(WorkDir);
-            ship.Record ??= _hangarService.ResolveShipRecordName(ship.Name, ship.Manufacturer);
-            if (ship.Record == null)
+            // 候補は所持コンポーネントの表と同じもの (_myComponents)。表の読み込みが終わっていなければ、終わってから使う
+            // (追加・削除・数量の書き換えの後は、所持コンポーネントの表を読み直してから装備の表を描き直す)
+            while (!MyComponentsLoadTask.IsCompleted)
             {
+                try { await MyComponentsLoadTask; } catch { }   // 失敗は所持コンポーネントの表の状態の欄に出ている
+                if (!Current()) return;
+            }
+            var mine = _myComponents.ToList();
+            var workDir = WorkDir;
+            var gamedataPath = Path.Combine(workDir, "gamedata_cache.db");
+            var owner = _hangarEquip;
+            var ownerGen = _hangarEquipGen;
+            if (owner == null)
+            {
+                dgLoadout.ItemsSource = null;
+                _loadoutShownShipKey = null;
+                txtLoadoutStatus.Text = "gamedata_cache.db がありません";
+                return;
+            }
+            var (shipKey, record, name, manufacturer) = (ship.ShipKey, ship.Record, ship.Name, ship.Manufacturer);
+            LoadoutLoad? res;
+            try
+            {
+                res = await RunEquipBgAsync(() => ReadLoadoutRows(workDir, gamedataPath, owner, ownerGen, shipKey, record, name, manufacturer, mine, token),
+                    ctx, Current, t => txtLoadoutStatus.Text = t, token);
+            }
+            catch (Exception ex)
+            {
+                if (!Current()) return;
+                dgLoadout.ItemsSource = null;
+                _loadoutShownShipKey = null;
+                txtLoadoutStatus.Text = $"読み込みエラー: {ex.Message}";
+                return;
+            }
+            if (!Current()) return;   // 新しい読み込みに替わった
+            if (res == null)
+            {
+                // 読み込みの間に UI の口 (_hangarEquip) が閉じられた (結果は捨てる。開き直した後に読み直す)。表は今の行のまま
+                txtLoadoutStatus.Text = EquipStaleStatus;
+                return;
+            }
+            if (res.Record == null)
+            {
+                dgLoadout.ItemsSource = null;
+                _loadoutShownShipKey = null;
                 txtLoadoutStatus.Text = $"「{ship.Name}」の装備データ (ships.record_name) を解決できません";
                 return;
             }
-            var rows = _hangarService.GetShipLoadout(ship.ShipKey, ship.Record, _hangarEquip)
-                .Select(p => MakeLoadoutRow(p, ship.Record))
-                .ToList();
-            dgLoadout.ItemsSource = rows;
-            txtLoadoutStatus.Text = $"{ship.Name}: 搭載枠 {rows.Count} / 設定済 {rows.Count(r => r.IsCustom)}";
+            ship.Record ??= res.Record;   // 解決した record は船セレクタの項目に覚える (UI のスレッドで書く)
+            dgLoadout.ItemsSource = res.Rows;
+            _loadoutShownShipKey = ship.ShipKey;
+            txtLoadoutStatus.Text = $"{ship.Name}: 搭載枠 {res.Rows.Count} / 設定済 {res.Rows.Count(r => r.IsCustom)}";
         }
-        catch (Exception ex)
+        finally
         {
-            txtLoadoutStatus.Text = $"読み込みエラー: {ex.Message}";
+            if (Current())
+            {
+                cts.Cancel();   // 時間がかかっている知らせを止める
+                dgLoadout.IsHitTestVisible = true;
+            }
+        }
+    }
+
+    // ［装備］の表の行を作る (裏のスレッド)。使用中なら投げる (RunEquipBgAsync が待って読み直す)
+    private LoadoutLoad ReadLoadoutRows(string workDir, string gamedataPath, EquipmentService owner, int ownerGen, string shipKey, string? record,
+        string name, string? manufacturer, List<MyComponent> mine, CancellationToken token)
+    {
+        lock (_equipBgLock)
+        {
+            token.ThrowIfCancellationRequested();
+            return RunBgWithHangar(workDir, h =>
+            {
+                var rec = record ?? h.ResolveShipRecordName(name, manufacturer);
+                if (rec == null) return new LoadoutLoad();
+                var equip = BgEquip(gamedataPath, owner, ownerGen);
+                token.ThrowIfCancellationRequested();
+                var rows = h.GetShipLoadout(shipKey, rec, equip, throwIfBusy: true)
+                    .Select(p => MakeLoadoutRow(p, rec, mine, equip))
+                    .ToList();
+                return new LoadoutLoad { Record = rec, Rows = rows };
+            });
         }
     }
 
@@ -6846,8 +7607,8 @@ public partial class MainWindow : Window
     // 武器のハードポイントは武器とジンバルの両方 (ジンバルは他の船の既定の装備のものを除く)。本当の大きさ (最小〜最大) と
     // 受け付ける種類が分かるときはそれでも絞る)。
     // shipRecordName は船の ships.record_name。
-    // 先頭は「(デフォルトに戻す)」
-    private LoadoutRow MakeLoadoutRow(ShipPortLoadout p, string shipRecordName)
+    // 先頭は「(デフォルトに戻す)」。裏のスレッドで呼ぶ (mine は所持コンポーネント、equip は裏の口)
+    private static LoadoutRow MakeLoadoutRow(ShipPortLoadout p, string shipRecordName, List<MyComponent> mine, EquipmentService equip)
     {
         var row = new LoadoutRow
         {
@@ -6876,11 +7637,11 @@ public partial class MainWindow : Window
 
         var defaultChoice = new LoadoutChoice { IsDefault = true, ItemRecord = "", Display = "(デフォルトに戻す)" };
         row.Candidates.Add(defaultChoice);
-        foreach (var c in _myComponents)
+        foreach (var c in mine)
         {
-            if (_hangarEquip == null || !HangarService.IsLoadoutCandidate(p, c, _hangarEquip, shipRecordName)) continue;
+            if (!HangarService.IsLoadoutCandidate(p, c, equip, shipRecordName)) continue;
             // 名前は所持リストの名称の欄と同じ (item_record から引いた今の名前。引けなければ保存した item_name)
-            var name = HangarService.MyComponentDisplayName(c, _hangarEquip);
+            var name = HangarService.MyComponentDisplayName(c, equip);
             var parts = new List<string>();
             if (c.SizeDisplay.Length > 0) parts.Add(c.SizeDisplay);
             if (c.GradeDisplay.Length > 0) parts.Add(c.GradeDisplay);
@@ -7353,15 +8114,14 @@ public partial class MainWindow : Window
     // コモディティタブの商品名の表示: 「日本語 (英語)」。日本語は価格キャプチャと同じ引き方 (CommodityDictionary.GetJapaneseNames)。
     // 訳が無い・訳が英語名と同じときは英語だけ。並べ替え・絞り込み・価格の照合などは今までどおり英語名 (CommodityName) を使う
     private Dictionary<string, string>? _commodityJaNames;
-    private (string path, DateTime dbWrite, DateTime priceUpdate, int count) _commodityJaNamesStamp;
+    private (string path, string dbStamp, DateTime priceUpdate, int count) _commodityJaNamesStamp;
 
     private string CommodityLabel(string englishName)
     {
         var dbPath = Path.Combine(WorkDir, "translations.db");
-        DateTime dbWrite;
-        try { dbWrite = File.Exists(dbPath) ? File.GetLastWriteTimeUtc(dbPath) : DateTime.MinValue; }
-        catch { dbWrite = DateTime.MinValue; }
-        var stamp = (dbPath, dbWrite, _tradeService.LastPriceUpdate, _tradeService.PriceCount);
+        // translations.db の印 (更新日時・長さ。WAL の -wal も見る)
+        var dbStamp = SqliteWal.FileStamp(dbPath);
+        var stamp = (dbPath, dbStamp, _tradeService.LastPriceUpdate, _tradeService.PriceCount);
         if (_commodityJaNames == null || _commodityJaNamesStamp != stamp)
         {
             var names = _tradeService.GetCommodityNames()
@@ -7719,8 +8479,7 @@ public partial class MainWindow : Window
         var progress = new Progress<string>(msg => txtUpgradeStatus.Text = msg);
 
         // 抽出先 (gamedata_cache.db) を開いている装備 DB 接続は先に閉じる (再抽出後に LoadUpgradeData が開き直す)
-        _hangarEquip?.Dispose();
-        _hangarEquip = null;
+        CloseHangarEquip();
 
         string result;
         bool rebuilt = false;
@@ -7739,7 +8498,7 @@ public partial class MainWindow : Window
         {
             Log($"[Hangar] 装備データ再抽出エラー: {ex}");
             result = $"装備データ再抽出エラー: {ex.Message}";
-            MessageBox.Show($"装備データの再抽出に失敗しました: {ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+            if (!_exiting) MessageBox.Show($"装備データの再抽出に失敗しました: {ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
         }
 
         try
@@ -7754,9 +8513,8 @@ public partial class MainWindow : Window
                 {
                     try
                     {
-                        _hangarService.SetCacheDir(WorkDir);
-                        using var equip = new EquipmentService(gamedataPath);
-                        var pruned = _hangarService.PruneLoadouts(equip);
+                        // 裏のスレッドで行う (使用中なら待ってやり直す)。終わってから下の LoadUpgradeData で読み直す (順番は今までと同じ)
+                        var pruned = await PruneLoadoutsInBackgroundAsync(WorkDir, gamedataPath);
                         if (pruned > 0) Log($"[Hangar] 存在しないポートの装備設定 {pruned} 件を削除しました");
                     }
                     catch (Exception ex)
@@ -7773,6 +8531,35 @@ public partial class MainWindow : Window
             btnRebuildEquipment.IsEnabled = true;
             SetUpgradeActionButtonsEnabled(true);
             RunDeferredItemNameRefresh();
+        }
+    }
+
+    // 再抽出の後の装備設定の整理 (HangarService.PruneLoadouts) を裏のスレッドで行う。この整理だけの口と HangarService を使う。
+    // DB が使用中なら、一度だけログに出して間を置いてやり直す (消すのは今のポートキーに無い行だけなので、やり直しても同じ結果)。
+    // ログには使用中の DB の名前を入れる (分からなければ「DB」)
+    private async Task<int> PruneLoadoutsInBackgroundAsync(string workDir, string gamedataPath)
+    {
+        var told = false;
+        var ctx = new SqliteReadContext();
+        while (true)
+        {
+            var (count, busy, name) = await Task.Run(() =>
+            {
+                ctx.ClearBusy();
+                try
+                {
+                    return (ctx.Run(() =>
+                    {
+                        using var equip = EquipmentService.OpenReadOnly(gamedataPath, throwIfBusy: true);
+                        return RunBgWithHangar(workDir, h => h.PruneLoadouts(equip), shared: false);
+                    }), false, (string?)null);
+                }
+                catch (Exception ex) when (GameDataQueryService.IsBusy(ex)) { return (0, true, ctx.BusyNameOf(ex)); }
+            });
+            if (!busy) return count;
+            if (!told) Log($"[Hangar] 装備設定 (ship_loadouts) の整理: {name ?? "DB"} が使用中のため待っています");
+            told = true;
+            await Task.Delay(EquipBusyRetryMs);
         }
     }
 
@@ -8271,17 +9058,18 @@ public class UpgradeShipRow
     public int MyShipId { get; set; }                   // my_ships.id (IsNonPledge の行のみ。「装備」ボタンで "my|{id}" の船を開く)
     // ツールチップ。船行は TooltipFactory (HangarService.BuildShipTooltip) を初回アクセス時に評価してキャッシュする
     // (WPF の ToolTip バインドはツールチップ表示時に評価される)。ヘッダ行・CCU 行は文字列を直接セット
-    private string? _tooltip;
-    private Func<string>? _tooltipFactory;
-    public Func<string>? TooltipFactory
+    // TooltipSource は MainWindow.ShipTooltip_Opening が裏で作って覚える (所持船の行は保有船の行と同じ物を使う)
+    public ShipTooltipSource? TooltipSource { get; set; }
+    public Func<HangarService, EquipmentService?, string>? TooltipFactory
     {
-        get => _tooltipFactory;
-        set { _tooltipFactory = value; _tooltip = null; }
+        get => TooltipSource?.Build;
+        set => TooltipSource = value == null ? null : new ShipTooltipSource { Build = value };
     }
+    // 作った文 (まだなら "")。代入すると、その文をそのまま出す
     public string Tooltip
     {
-        get => _tooltip ??= _tooltipFactory?.Invoke() ?? "";
-        set { _tooltip = value; _tooltipFactory = null; }
+        get => TooltipSource?.Text ?? "";
+        set => TooltipSource = new ShipTooltipSource { Text = value };
     }
     public string StoreUpgradeDisplay { get; set; } = "";   // "購入可 (N)" / "Warbond あり (N)" / ""
     public string UpgradableDisplay { get; set; } = "";     // CanUpgrade ? "○" : ""
@@ -8378,17 +9166,18 @@ public class MyShipRow
     public string HangarStoreUpgradeDisplay { get; set; } = "";
     public string LoanerDisplay { get; set; } = "";   // その船で借りられる機体 (" / " 連結)。無ければ空
     // ツールチップ。TooltipFactory を初回アクセス時に評価してキャッシュする (UpgradeShipRow と同じ)
-    private string? _tooltip;
-    private Func<string>? _tooltipFactory;
-    public Func<string>? TooltipFactory
+    // TooltipSource は MainWindow.ShipTooltip_Opening が裏で作って覚える (所持船の行は保有船の行と同じ物を使う)
+    public ShipTooltipSource? TooltipSource { get; set; }
+    public Func<HangarService, EquipmentService?, string>? TooltipFactory
     {
-        get => _tooltipFactory;
-        set { _tooltipFactory = value; _tooltip = null; }
+        get => TooltipSource?.Build;
+        set => TooltipSource = value == null ? null : new ShipTooltipSource { Build = value };
     }
+    // 作った文 (まだなら "")。代入すると、その文をそのまま出す
     public string Tooltip
     {
-        get => _tooltip ??= _tooltipFactory?.Invoke() ?? "";
-        set { _tooltip = value; _tooltipFactory = null; }
+        get => TooltipSource?.Text ?? "";
+        set => TooltipSource = new ShipTooltipSource { Text = value };
     }
     public override string ToString() => DisplayName;
 }
@@ -8407,6 +9196,15 @@ public class LoadoutShipChoice
     public ShipCargo.Info? Cargo => CargoFactory?.Invoke();
     public string DisplayWithCargo => Cargo is { } c ? $"{Display} ({ShipCargo.Format(c.Scu)} SCU)" : Display;
     public override string ToString() => Display;
+}
+
+// 船のツールチップの作り方と、作った文 (UI のスレッドで読み書きする)。Build は裏のスレッドで、裏の読み込みだけの HangarService と口で呼ぶ
+public sealed class ShipTooltipSource
+{
+    public Func<HangarService, EquipmentService?, string>? Build { get; set; }
+    public string? Text { get; set; }
+    public ToolTip? CurrentTip { get; set; }   // 今開いているツールチップ (作れたら中身を入れ替える)
+    public bool Loading { get; set; }
 }
 
 // 装備グリッドの ComboBox の選択肢。IsDefault = 「(デフォルトに戻す)」
@@ -8451,6 +9249,9 @@ public class MyComponentRow : INotifyPropertyChanged
     public string GradeDisplay => Model.GradeDisplay;
     // 性能の欄 (種類ごとに 1 つの代表の値。EquipmentService.ComponentPerfLabel。record の基本値)
     public string PerfDisplay { get; set; } = "";
+    // 品質の欄 (PowerMath.QualityLabel。品質なしは "") と、品質の増減のある BP があるか (［品質を入力］を押せるか)
+    public string QualityDisplay { get; set; } = "";
+    public bool HasQualityBlueprint { get; set; }
     public int Quantity
     {
         get => Model.Quantity;

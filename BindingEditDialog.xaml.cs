@@ -70,17 +70,15 @@ public partial class BindingEditDialog : Window
         new("Start","gp1_start"), new("Back","gp1_back"),
     };
 
+    // 一覧から選べるジョイスティックのボタン番号の上限
+    private const int MaxJoystickButton = 128;
+
     // Logical joystick inputs (no js1_/js2_ prefix). Prefix is applied based on edit target.
-    private static readonly List<InputItem> JoystickKeysBase = new()
+    //   ボタンは 1〜MaxJoystickButton (128)、続けて軸・ハット (ハットは 1〜2)
+    private static readonly List<InputItem> JoystickKeysBase = Enumerable.Range(1, MaxJoystickButton)
+        .Select(n => new InputItem($"Btn {n}", $"button{n}"))
+        .Concat(new List<InputItem>
     {
-        new("Btn 1","button1"), new("Btn 2","button2"), new("Btn 3","button3"), new("Btn 4","button4"),
-        new("Btn 5","button5"), new("Btn 6","button6"), new("Btn 7","button7"), new("Btn 8","button8"),
-        new("Btn 9","button9"), new("Btn 10","button10"), new("Btn 11","button11"), new("Btn 12","button12"),
-        new("Btn 13","button13"), new("Btn 14","button14"), new("Btn 15","button15"), new("Btn 16","button16"),
-        new("Btn 17","button17"), new("Btn 18","button18"), new("Btn 19","button19"), new("Btn 20","button20"),
-        new("Btn 21","button21"), new("Btn 22","button22"), new("Btn 23","button23"), new("Btn 24","button24"),
-        new("Btn 25","button25"), new("Btn 26","button26"), new("Btn 27","button27"), new("Btn 28","button28"),
-        new("Btn 29","button29"), new("Btn 30","button30"), new("Btn 31","button31"), new("Btn 32","button32"),
         new("X Axis","x"), new("Y Axis","y"), new("Z Axis","z"),
         new("RX","rotx"), new("RY","roty"), new("RZ","rotz"),
         new("Slider 1","slider1"), new("Slider 2","slider2"),
@@ -88,7 +86,7 @@ public partial class BindingEditDialog : Window
         new("Hat1 Left","hat1_left"), new("Hat1 Right","hat1_right"),
         new("Hat2 Up","hat2_up"), new("Hat2 Down","hat2_down"),
         new("Hat2 Left","hat2_left"), new("Hat2 Right","hat2_right"),
-    };
+    }).ToList();
 
     public BindingEditDialog(ActionBinding binding)
     {
@@ -246,12 +244,16 @@ public partial class BindingEditDialog : Window
         return InputCodeHelper.ToGameForm(inputValue, null);
     }
 
+    // 確認欄に出している、js 番号を options から決められなかったジョイスティックの押下 (「この機器は js◯」を選んだら、これで出し直す)
+    private GameControllerInputEventArgs? _jsChoicePress;
+
     // 物理コントローラー / HOTAS が押されたら確認欄を出す
     private void ControllerInput_Pressed(object? sender, GameControllerInputEventArgs e)
     {
         string deviceType;
         string deviceLabel;
         string baseValue;
+        HideJsChoice();
         if (e.Kind == GameControllerKind.Gamepad)
         {
             deviceType = "gamepad";
@@ -260,19 +262,24 @@ public partial class BindingEditDialog : Window
         }
         else
         {
-            if (!_data.TryGetJsForDevice(e.VendorId, e.ProductId, out var js))
+            if (!_data.TryResolveJsForDevice(e.VendorId, e.ProductId, e.DeviceId, out var js, out var manual))
             {
                 _pendingPress = null;
                 txtPressInput.Text = $"押された入力: {e.DisplayName} — {e.InputCode}";
                 txtPressCurrent.Text = "どの js 番号か判別できません";
                 txtPressOthers.Text = "";
                 btnPressApply.IsEnabled = false;
+                ShowJsChoice(e);
                 pnlPressConfirm.Visibility = Visibility.Visible;
                 return;
             }
             deviceType = $"joystick{js}";
-            deviceLabel = $"HOTAS {_data.GetJsSideLabel(js)} (js{js})";
+            deviceLabel = manual
+                ? $"HOTAS {_data.GetJsSideLabel(js)} (js{js}・手で選んだ番号)"
+                : $"HOTAS {_data.GetJsSideLabel(js)} (js{js})";
             baseValue = $"js{js}_{e.InputCode}";
+            // 手で選んだ番号のときは、選び直せるように選択の欄も出す
+            if (manual) ShowJsChoice(e);
         }
 
         var value = AddCheckedModifiers(baseValue, deviceType);
@@ -291,9 +298,14 @@ public partial class BindingEditDialog : Window
             .ToList();
 
         txtPressInput.Text = $"押された入力: {e.DisplayName} ({deviceLabel}) — {InputDisplayHelper.FormatInputJa(value)}  ({value})";
+        // 割り当て解除 (接頭辞と空白だけ。"js1_ " など) は、ほかの表示と同じく「（解除）」だけを出す
+        var currentCleared = !string.IsNullOrEmpty(current) &&
+                             current.Split('+').All(p => InputCodeHelper.StripDevicePrefix(p).Length == 0);
         txtPressCurrent.Text = string.IsNullOrEmpty(current)
             ? $"この機能の{deviceLabel}の今の割り当て: なし"
-            : $"この機能の{deviceLabel}の今の割り当て: {InputDisplayHelper.FormatInputJa(current)}  ({current})";
+            : currentCleared
+                ? $"この機能の{deviceLabel}の今の割り当て: {InputDisplayHelper.FormatInputJa(current)}"
+                : $"この機能の{deviceLabel}の今の割り当て: {InputDisplayHelper.FormatInputJa(current)}  ({current})";
         txtPressOthers.Text = others.Count == 0
             ? "この入力を使っている他の機能: なし"
             : "この入力を使っている他の機能:\n" + string.Join("\n", others.Select(a => $"・{a.DisplayName}  ({a.CategoryDisplayName})"));
@@ -323,7 +335,34 @@ public partial class BindingEditDialog : Window
     private void HidePressConfirm()
     {
         _pendingPress = null;
+        HideJsChoice();
         pnlPressConfirm.Visibility = Visibility.Collapsed;
+    }
+
+    // 「この機器は js◯」の選択の欄を出す (ボタンには js 番号と HOTAS の左右を出す)
+    private void ShowJsChoice(GameControllerInputEventArgs e)
+    {
+        _jsChoicePress = e;
+        btnPressJs1.Content = $"js1 (HOTAS {_data.GetJsSideLabel(1)})";
+        btnPressJs2.Content = $"js2 (HOTAS {_data.GetJsSideLabel(2)})";
+        pnlPressJsChoice.Visibility = Visibility.Visible;
+    }
+
+    private void HideJsChoice()
+    {
+        _jsChoicePress = null;
+        pnlPressJsChoice.Visibility = Visibility.Collapsed;
+    }
+
+    private void PressJs1_Click(object sender, RoutedEventArgs e) => ChooseJs(1);
+    private void PressJs2_Click(object sender, RoutedEventArgs e) => ChooseJs(2);
+
+    // 選んだ js 番号を覚えて (ActionMapData。保存フォルダごとの記録はエディターが行う)、同じ押下で確認欄を出し直す
+    private void ChooseJs(int js)
+    {
+        if (_jsChoicePress is not { } press) return;
+        _data.SetManualJsForDevice(press.VendorId, press.ProductId, press.DeviceId, js);
+        ControllerInput_Pressed(this, press);
     }
 
     private void ResetDefault_Click(object sender, RoutedEventArgs e)
@@ -336,15 +375,16 @@ public partial class BindingEditDialog : Window
         UpdateFields();
     }
 
+    // 割り当て解除: ゲームの解除の書き方 (機器の接頭辞 + 空白。"kb1_ "、"js1_ " など) で持つ (押した直後から「（解除）」と出る)
     private void Clear_Click(object sender, RoutedEventArgs e)
     {
         switch (_editTarget)
         {
-            case "keyboard": _keyboard = ""; break;
-            case "mouse": _mouse = ""; break;
-            case "gamepad": _gamepad = ""; break;
-            case "joystick1": _joystick1 = ""; break;
-            case "joystick2": _joystick2 = ""; break;
+            case "keyboard": _keyboard = "kb1_ "; break;
+            case "mouse": _mouse = "mo1_ "; break;
+            case "gamepad": _gamepad = "gp1_ "; break;
+            case "joystick1": _joystick1 = "js1_ "; break;
+            case "joystick2": _joystick2 = "js2_ "; break;
         }
         UpdateFields();
     }

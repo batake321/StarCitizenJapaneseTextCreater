@@ -1312,6 +1312,12 @@
                                                     <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
                                                 </DataGridTextColumn.ElementStyle>
                                             </DataGridTextColumn>
+                                            <!-- 品質: 自作品の材料の枠ごとの品質 (my_components.quality_json)。全部の枠が同じなら「Q950」、違えば「Q 枠ごと」。下の［品質を入力］で入れる -->
+                                            <DataGridTextColumn Header="品質" Binding="{Binding QualityDisplay}" Width="70" IsReadOnly="True">
+                                                <DataGridTextColumn.ElementStyle>
+                                                    <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                                                </DataGridTextColumn.ElementStyle>
+                                            </DataGridTextColumn>
                                             <!-- 数量: 書き換えられる。MyComponentRow.Quantity の setter が MyComponentQuantity_Changed で DB へ書き戻す (0 なら行を消すか確かめる) -->
                                             <DataGridTextColumn Header="数量" Binding="{Binding Quantity}" Width="50" IsReadOnly="False">
                                                 <DataGridTextColumn.ElementStyle>
@@ -1379,7 +1385,11 @@
                                     </Grid>
 
                                     <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,6,0,0">
-                                        <Button Content="選択を削除" Click="DeleteMyComponent_Click" Padding="12,4" Margin="0,0,8,0" Foreground="#D32F2F"/>
+                                        <Button x:Name="btnDeleteMyComponent" Content="選択を削除" Click="DeleteMyComponent_Click" Padding="12,4" Margin="0,0,8,0" Foreground="#D32F2F"/>
+                                        <!-- 自作品の品質: 選んだ行の部品の BP に品質の増減があるときだけ押せる (MyComponentRow.HasQualityBlueprint) -->
+                                        <Button x:Name="btnEditMyComponentQuality" Content="品質を入力" Click="EditMyComponentQuality_Click" Padding="12,4" Margin="0,0,8,0"
+                                                IsEnabled="{Binding SelectedItem.HasQualityBlueprint, ElementName=dgMyComponents, FallbackValue=False}"
+                                                ToolTip="選んだ所持コンポーネント (自作品) の、材料の枠ごとの品質 (0〜1000) を入れて保存する"/>
                                         <TextBlock x:Name="txtCompStatus" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
                                     </StackPanel>
                                 </Grid>
@@ -1494,6 +1504,10 @@
                                 </Grid>
                             </GroupBox>
                         </Grid>
+                    </TabItem>
+                    <!-- ［電力管理］: 電力のピップの割り振りと、出力の残り・冷却剤・シールド・武器の DPS (PowerPanel。名前はゲームの訳 RN_powerManagement) -->
+                    <TabItem x:Name="tabPower" Header="電力管理">
+                        <local:PowerPanel x:Name="powerPanel"/>
                     </TabItem>
                 </TabControl>
             </TabItem>

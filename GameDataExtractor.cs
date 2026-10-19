@@ -9,7 +9,7 @@ using Microsoft.Data.Sqlite;
 
 namespace StarCitizenJapaneseTextCreater;
 
-public class GameDataExtractor : IDisposable
+public partial class GameDataExtractor : IDisposable
 {
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(5) };
     private const string StarBreakerVersion = "v0.2.2";
@@ -138,17 +138,18 @@ public class GameDataExtractor : IDisposable
     // DB を開き、表・列を今の形に揃える (起動時に同梱 DB を取り込む前に、古い版の DB に無い列・表を足すために App から呼ぶ)
     internal void EnsureSchema() => EnsureDb();
 
-    // 起動時に App (PlanBundledDbSync → CheckWorkDbHealth) が quick_check を済ませて ok だった DB (パスと更新日時)。
-    // EnsureDb で同じパス・同じ更新日時のファイルを開くときに 1 回だけ quick_check を省く (使ったら消す)
+    // 起動時に App (PlanBundledDbSync → CheckWorkDbHealth) が quick_check を済ませて ok だった DB (パスと、本体と -wal の印: SqliteWal.FileStamp)。
+    // EnsureDb で同じパス・同じ印のファイルを開くときに 1 回だけ quick_check を省く (使ったら消す)。WAL では書き込みが -wal に入り、本体の更新日時が
+    // 変わらないことがあるので、-wal の印も比べる
     private static readonly object QuickCheckOkLock = new();
-    private static (string Path, DateTime LastWriteUtc)? _quickCheckOk;
+    private static (string Path, string Stamp)? _quickCheckOk;
 
     internal static void NoteQuickCheckOk(string path)
     {
         try
         {
             var full = Path.GetFullPath(path);
-            var stamp = File.GetLastWriteTimeUtc(full);
+            var stamp = SqliteWal.FileStamp(full);
             lock (QuickCheckOkLock) _quickCheckOk = (full, stamp);
         }
         catch { lock (QuickCheckOkLock) _quickCheckOk = null; }   // 調べられなければ省かない
@@ -164,7 +165,7 @@ public class GameDataExtractor : IDisposable
                 var full = Path.GetFullPath(path);
                 if (!string.Equals(ok.Path, full, StringComparison.OrdinalIgnoreCase)) return false;
                 _quickCheckOk = null;   // 同じパスなら、省くかどうかに関わらず 1 回で使い切る
-                return File.Exists(full) && File.GetLastWriteTimeUtc(full) == ok.LastWriteUtc;
+                return File.Exists(full) && SqliteWal.FileStamp(full) == ok.Stamp;
             }
             catch { return false; }
         }
@@ -188,6 +189,7 @@ public class GameDataExtractor : IDisposable
             }
             catch { try { _db?.Dispose(); } catch { } _db = null; }
         }
+        var existedBefore = File.Exists(DbPath);
         _db = new SqliteConnection($"Data Source={DbPath}");
         string? corruptReason = null;
         SqliteException? corruptEx = null;   // 退避に失敗したとき再スローする元の例外 (quick_check 不一致の場合は null)
@@ -216,7 +218,7 @@ public class GameDataExtractor : IDisposable
         if (corruptReason != null)
         {
             // 開けない/破損した DB は削除せず .corrupt-yyyyMMdd_HHmmss へリネーム退避してから新規作成する
-            // (-journal / -wal / -shm も同じ接尾辞で一緒に退避)
+            // (-journal / -wal / -shm も一緒に退避。名前は "<退避した名前>-wal" 等で、退避した DB と組になる)
             _db.Dispose();
             _db = null;
             SqliteConnection.ClearAllPools();
@@ -224,11 +226,12 @@ public class GameDataExtractor : IDisposable
             var quarantined = DbPath + suffix;
             try
             {
+                // 横のファイルは「退避した DB の名前」+ "-wal" 等にする (退避した DB と組のまま開けるように)
                 File.Move(DbPath, quarantined);
                 foreach (var ext in new[] { "-journal", "-wal", "-shm" })
                 {
                     var side = DbPath + ext;
-                    if (File.Exists(side)) File.Move(side, side + suffix);
+                    if (File.Exists(side)) File.Move(side, quarantined + ext);
                 }
             }
             catch (Exception moveEx)
@@ -241,7 +244,10 @@ public class GameDataExtractor : IDisposable
             StatusChanged?.Invoke($"gamedata_cache.db を開けなかったため ({corruptReason}) {Path.GetFileName(quarantined)} へ退避し、新規作成します");
             _db = new SqliteConnection($"Data Source={DbPath}");
             _db.Open();
+            existedBefore = false;
         }
+        // 新しく作った DB は WAL にする (前からある DB は起動したときに App が切り替えている)
+        if (!existedBefore) SqliteWal.EnsureOn(_db);
 
         using var cmd = _db.CreateCommand();
         cmd.CommandText = """
@@ -490,6 +496,12 @@ public class GameDataExtractor : IDisposable
     //   blueprint_materials: 枠ごとの材料。resource_uuid (ResourceType の _RecordId_) か item_record (CraftingCost_Item の record 名) のどちらかが '' (NULL ではない。主キーのため)。
     //     quantity は SCU (資源) か個数 (品目)。QuantityMultiplier の context があれば掛けた値。min_quality は品質の下限 (0〜1000)
     //   blueprint_pools: 抽選プール → BP。pool_file はプールの record 名を小文字にしたもの (missions.raw_json の blueprintPool のファイル名と結合する用)
+    //   blueprint_modifiers: 材料の品質によるできる品の増減。枠 (CraftingCost_Select) の context[] の CraftingCostContext_ResultGameplayPropertyModifiers の
+    //     gameplayPropertyModifiers.gameplayPropertyModifiers[] (CraftingGameplayPropertyModifierCommon) の valueRanges[] を 1 行ずつ。
+    //     slot_debug_name は blueprint_materials.slot_debug_name と同じ (枠の nameInfo.debugName)、property は gameplayPropertyRecord のファイル名 (.json を除く。
+    //     例 gpp_itemresource_coolantgeneration)、range_index は valueRanges の中の位置 (null の要素は飛ばすが位置は数える)、
+    //     kind は 'Linear' (value_start/end = modifierAtStart/End。倍率) か 'LinearIntegerAdditive' (value_start/end = additiveModifierAtStart/End。足し算)。
+    //     前の版で構築した DB には無い (表は EnsureDb が空で作る) ので、NeedsBlueprints が真になり起動後に一度だけ取り出す
     internal const string BlueprintsDdl = """
 
         CREATE TABLE IF NOT EXISTS blueprints (
@@ -522,6 +534,18 @@ public class GameDataExtractor : IDisposable
             PRIMARY KEY(pool_record, bp_uuid)
         );
         CREATE INDEX IF NOT EXISTS idx_blueprint_pools_file ON blueprint_pools(pool_file);
+        CREATE TABLE IF NOT EXISTS blueprint_modifiers (
+            bp_uuid TEXT NOT NULL,
+            slot_debug_name TEXT NOT NULL,
+            property TEXT NOT NULL,
+            range_index INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            start_quality INTEGER NOT NULL,
+            end_quality INTEGER NOT NULL,
+            value_start REAL NOT NULL,
+            value_end REAL NOT NULL,
+            PRIMARY KEY (bp_uuid, slot_debug_name, property, range_index)
+        );
         """;
 
     // 品目 (タレット・ジンバル・船の武器と、着る物 CharacterPortRecordTypes) 自身の子ポートの定義 (record の SItemPortContainerComponentParams.Ports)。
@@ -1299,17 +1323,26 @@ public class GameDataExtractor : IDisposable
 
     // === BP (ブループリント) ===
 
-    // BP の表 (blueprints) が無い・空か、resource_types に原石の精錬後 (refined_uuid) が 1 行も入っていないか (前の版で構築した DB・
-    // 前の版のバックアップを取り込んだ DB)。起動後の RebuildBlueprintsAsync を走らせるか決めるため。表と列は EnsureDb が作る
+    // BP の表 (blueprints) が無い・空か、resource_types に原石の精錬後 (refined_uuid) が 1 行も入っていないか、品質の増減 (blueprint_modifiers) が
+    // 1 行も無く、取り出した記録 (gamedata_meta の BlueprintModifiersMetaKey) も無いか (前の版で構築した DB・前の版のバックアップを取り込んだ DB)。
+    // 起動後の RebuildBlueprintsAsync を走らせるか決めるため。表と列は EnsureDb が作る。
+    // 増減は、取り出した結果が 0 行でも記録があれば取り直さない (起動のたびに取り直さないため)
     public bool NeedsBlueprints()
     {
         EnsureDb();
         using var cmd = _db!.CreateCommand();
-        cmd.CommandText = "SELECT (NOT EXISTS (SELECT 1 FROM blueprints)) OR (NOT EXISTS (SELECT 1 FROM resource_types WHERE refined_uuid IS NOT NULL))";
+        cmd.CommandText = "SELECT (NOT EXISTS (SELECT 1 FROM blueprints)) OR (NOT EXISTS (SELECT 1 FROM resource_types WHERE refined_uuid IS NOT NULL))"
+            + " OR ((NOT EXISTS (SELECT 1 FROM blueprint_modifiers)) AND (NOT EXISTS (SELECT 1 FROM gamedata_meta WHERE key = @k)))";
+        cmd.Parameters.AddWithValue("@k", BlueprintModifiersMetaKey);
         return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
     }
 
-    // BP だけを取り出し直す (インデックス構築をせずに blueprints / blueprint_materials / blueprint_pools を作り、resource_types の refined_uuid を埋める)。
+    // BP の品質の増減 (blueprint_modifiers) を取り出した時刻 (UTC, ISO 8601) の gamedata_meta の記録。ExtractBlueprintsAsync が増減を書くのと同じトランザクションで書く。
+    // 増減が 0 行でも取り出しは済んだことを NeedsBlueprints に知らせる。インデックス構築の最初に消す (RebuiltDataMetaKeys)。
+    // 増減の無い古いバックアップを取り込んだときは DatabaseBackupService.ImportIndexDb が消す (次の起動で取り直す)
+    internal const string BlueprintModifiersMetaKey = "blueprint_modifiers_extracted_at";
+
+    // BP だけを取り出し直す (インデックス構築をせずに blueprints / blueprint_materials / blueprint_pools / blueprint_modifiers を作り、resource_types の refined_uuid を埋める)。
     // 入れた BP の件数を返す。起動後に裏で一度だけ呼ばれる (MainWindow: NeedsBlueprints のとき)。
     // RebuildResourceTypesAsync と同じく dcb query が数回なので Game2.dcb は取り出さず Data.p4k から直接読む。
     // 途中で構築が始まったら (IsIndexBuildRunning)、構築が作り直すので書き込まずに 0 を返す
@@ -1380,6 +1413,28 @@ public class GameDataExtractor : IDisposable
         public int? ChooseCount;
         public bool Starter;
         public List<BlueprintMaterial> Materials = new();
+        public List<BlueprintModifier> Modifiers = new();
+        public BlueprintRangeSkips RangeSkips = new();   // 品質の増減の範囲のうち飛ばしたもの (進み具合の表示に出す)
+    }
+
+    // 品質の増減の範囲のうち、行にせずに飛ばしたものの件数
+    private sealed class BlueprintRangeSkips
+    {
+        public Dictionary<string, int> UnknownTypes = new(StringComparer.Ordinal);   // 種類の分からない範囲の _Type_ (無ければ "(なし)") → 件数
+        public int MissingNumbers;                                                   // 種類は分かるが数 (startQuality・endQuality・始めと終わりの値) の欠けた範囲の件数
+    }
+
+    // 品質の増減の範囲 1 つ (blueprint_modifiers の 1 行)
+    private sealed class BlueprintModifier
+    {
+        public string SlotDebugName = "";
+        public string Property = "";          // gameplayPropertyRecord のファイル名 (.json を除く)
+        public int RangeIndex;                // valueRanges の中の位置
+        public string Kind = "";              // "Linear" / "LinearIntegerAdditive"
+        public int StartQuality;
+        public int EndQuality;
+        public double ValueStart;
+        public double ValueEnd;
     }
 
     private sealed class BlueprintMaterial
@@ -1392,7 +1447,7 @@ public class GameDataExtractor : IDisposable
         public int MinQuality;
     }
 
-    // BP を 3 表 (blueprints / blueprint_materials / blueprint_pools) に入れ直す。CraftingBlueprintRecord・BlueprintPoolRecord・CraftingGlobalParams を問い合わせ、
+    // BP を 4 表 (blueprints / blueprint_materials / blueprint_pools / blueprint_modifiers) に入れ直す。CraftingBlueprintRecord・BlueprintPoolRecord・CraftingGlobalParams を問い合わせ、
     // item_index に無いできる品の名前は EntityClassDefinition を record 名で問い合わせて Name キーを取る (filter は大文字小文字を区別するので、
     // 小文字のファイル名で当たらなければ未解決のまま = 名前はファイル名)。取得できなければ前の行を残して 0 を返す。入れた BP の件数を返す
     private async Task<int> ExtractBlueprintsAsync(string p4kPath, string now, CancellationToken ct, bool skipWriteIfIndexBuildStarts = false)
@@ -1405,6 +1460,18 @@ public class GameDataExtractor : IDisposable
         {
             StatusChanged?.Invoke("BP (CraftingBlueprintRecord) を取得できませんでした (前のデータを残します)");
             return 0;
+        }
+        // 品質の増減の範囲のうち、種類 (Linear・LinearIntegerAdditive) の分からないものは入れずに飛ばしたので、種類ごとの件数を知らせる
+        var unknownRanges = bps.SelectMany(b => b.RangeSkips.UnknownTypes).GroupBy(kv => kv.Key, StringComparer.Ordinal)
+            .Select(g => (Type: g.Key, Count: g.Sum(kv => kv.Value))).OrderBy(t => t.Type, StringComparer.Ordinal).ToList();
+        var missingNumberRanges = bps.Sum(b => b.RangeSkips.MissingNumbers);
+        if (unknownRanges.Count > 0 || missingNumberRanges > 0)
+        {
+            var parts = new List<string>();
+            if (unknownRanges.Count > 0)
+                parts.Add($"種類の分からない {unknownRanges.Sum(t => t.Count)} 件 (" + string.Join("、", unknownRanges.Select(t => $"{t.Type} {t.Count} 件")) + ")");
+            if (missingNumberRanges > 0) parts.Add($"数の欠けた {missingNumberRanges} 件");
+            StatusChanged?.Invoke("BP: 品質の増減の範囲のうち、" + string.Join("、", parts) + "を飛ばしました");
         }
         StatusChanged?.Invoke($"BP: {bps.Count} 件 ({sw.Elapsed.TotalSeconds:F1}秒)。抽選プール (BlueprintPoolRecord) を取り出し中...");
         ct.ThrowIfCancellationRequested();
@@ -1498,13 +1565,13 @@ public class GameDataExtractor : IDisposable
         }
         ct.ThrowIfCancellationRequested();
 
-        int poolRows = 0, materialRows = 0;
+        int poolRows = 0, materialRows = 0, modifierRows = 0;
         using (var tx = _db.BeginTransaction())
         {
             using (var del = _db.CreateCommand())
             {
                 del.Transaction = tx;
-                del.CommandText = "DELETE FROM blueprint_pools; DELETE FROM blueprint_materials; DELETE FROM blueprints";
+                del.CommandText = "DELETE FROM blueprint_pools; DELETE FROM blueprint_materials; DELETE FROM blueprint_modifiers; DELETE FROM blueprints";
                 del.ExecuteNonQuery();
             }
             using (var ins = _db.CreateCommand())
@@ -1566,6 +1633,43 @@ public class GameDataExtractor : IDisposable
             using (var ins = _db.CreateCommand())
             {
                 ins.Transaction = tx;
+                ins.CommandText = "INSERT OR REPLACE INTO blueprint_modifiers(bp_uuid,slot_debug_name,property,range_index,kind,start_quality,end_quality,value_start,value_end) "
+                    + "VALUES(@b,@s,@p,@i,@k,@sq,@eq,@vs,@ve)";
+                var pB = ins.Parameters.Add("@b", SqliteType.Text);
+                var pS = ins.Parameters.Add("@s", SqliteType.Text);
+                var pP = ins.Parameters.Add("@p", SqliteType.Text);
+                var pI = ins.Parameters.Add("@i", SqliteType.Integer);
+                var pK = ins.Parameters.Add("@k", SqliteType.Text);
+                var pSq = ins.Parameters.Add("@sq", SqliteType.Integer);
+                var pEq = ins.Parameters.Add("@eq", SqliteType.Integer);
+                var pVs = ins.Parameters.Add("@vs", SqliteType.Real);
+                var pVe = ins.Parameters.Add("@ve", SqliteType.Real);
+                foreach (var bp in bps)
+                    foreach (var m in bp.Modifiers)
+                    {
+                        pB.Value = bp.Uuid;
+                        pS.Value = m.SlotDebugName;
+                        pP.Value = m.Property;
+                        pI.Value = m.RangeIndex;
+                        pK.Value = m.Kind;
+                        pSq.Value = m.StartQuality;
+                        pEq.Value = m.EndQuality;
+                        pVs.Value = m.ValueStart;
+                        pVe.Value = m.ValueEnd;
+                        modifierRows += ins.ExecuteNonQuery();
+                    }
+            }
+            using (var meta = _db.CreateCommand())
+            {
+                meta.Transaction = tx;
+                meta.CommandText = "INSERT OR REPLACE INTO gamedata_meta(key, value) VALUES(@k, @v)";
+                meta.Parameters.AddWithValue("@k", BlueprintModifiersMetaKey);
+                meta.Parameters.AddWithValue("@v", now);
+                meta.ExecuteNonQuery();
+            }
+            using (var ins = _db.CreateCommand())
+            {
+                ins.Transaction = tx;
                 ins.CommandText = "INSERT OR REPLACE INTO blueprint_pools(pool_record,pool_file,bp_uuid) VALUES(@p,@f,@b)";
                 var pP = ins.Parameters.Add("@p", SqliteType.Text);
                 var pF = ins.Parameters.Add("@f", SqliteType.Text);
@@ -1585,7 +1689,7 @@ public class GameDataExtractor : IDisposable
             }
             tx.Commit();
         }
-        StatusChanged?.Invoke($"BP: {bps.Count} 件、材料 {materialRows} 行、抽選プール {poolRows} 行を入れました ({sw.Elapsed.TotalSeconds:F1}秒)");
+        StatusChanged?.Invoke($"BP: {bps.Count} 件、材料 {materialRows} 行、品質の増減 {modifierRows} 行、抽選プール {poolRows} 行を入れました ({sw.Elapsed.TotalSeconds:F1}秒)");
         return bps.Count;
     }
 
@@ -1632,13 +1736,13 @@ public class GameDataExtractor : IDisposable
                                 {
                                     if (slot.ValueKind != JsonValueKind.Object) continue;
                                     slotCount++;
-                                    ReadBlueprintSlot(slot, row.Materials);
+                                    ReadBlueprintSlot(slot, row.Materials, row.Modifiers, row.RangeSkips);
                                 }
                                 if (mc.TryGetProperty("count", out var cnt) && cnt.ValueKind == JsonValueKind.Number && cnt.TryGetInt32(out var count) && count > 0 && count < slotCount)
                                     row.ChooseCount = count;
                             }
                             else
-                                ReadBlueprintSlot(mc, row.Materials);   // 枠を並べた形でなければ、それ自体を 1 枠として読む (今のデータには無い)
+                                ReadBlueprintSlot(mc, row.Materials, row.Modifiers, row.RangeSkips);   // 枠を並べた形でなければ、それ自体を 1 枠として読む (今のデータには無い)
                         }
                         break;   // tiers は 1 つ (今のデータ)。複数あっても最初のものを使う
                     }
@@ -1650,8 +1754,9 @@ public class GameDataExtractor : IDisposable
         return list;
     }
 
-    // 枠 (CraftingCost_Select) の options[] の材料を読む。枠でなく材料そのものなら、その 1 件を枠名なしで読む
-    private static void ReadBlueprintSlot(JsonElement slot, List<BlueprintMaterial> materials)
+    // 枠 (CraftingCost_Select) の options[] の材料と、枠の context[] の品質の増減 (CraftingCostContext_ResultGameplayPropertyModifiers) を読む。
+    // 枠でなく材料そのものなら、その 1 件を枠名なしで読む (品質の増減は読まない。材料の側の増減は今のデータでは valueRanges が null だけ)
+    private static void ReadBlueprintSlot(JsonElement slot, List<BlueprintMaterial> materials, List<BlueprintModifier> modifiers, BlueprintRangeSkips skips)
     {
         var type = Str(slot, "_Type_");
         if (type == "CraftingCost_Select")
@@ -1666,9 +1771,68 @@ public class GameDataExtractor : IDisposable
             if (slot.TryGetProperty("options", out var opts) && opts.ValueKind == JsonValueKind.Array)
                 foreach (var opt in opts.EnumerateArray())
                     if (opt.ValueKind == JsonValueKind.Object && ReadBlueprintCost(opt, slotName, slotKey) is { } m) materials.Add(m);
+            ReadBlueprintSlotModifiers(slot, slotName, modifiers, skips);
             return;
         }
         if (ReadBlueprintCost(slot, "", null) is { } single) materials.Add(single);
+    }
+
+    // 枠の context[] → CraftingCostContext_ResultGameplayPropertyModifiers → gameplayPropertyModifiers.gameplayPropertyModifiers[] の valueRanges[] を読む。
+    // null の要素・種類の分からない範囲・数の欠けた範囲は飛ばす (range_index は valueRanges の中の位置のまま)。
+    // 種類の分からない範囲は skips.UnknownTypes に _Type_ (無ければ "(なし)") ごとの件数を、数の欠けた範囲は skips.MissingNumbers に件数を足す
+    // (ExtractBlueprintsAsync が進み具合の表示に出す)
+    private static void ReadBlueprintSlotModifiers(JsonElement slot, string slotName, List<BlueprintModifier> modifiers, BlueprintRangeSkips skips)
+    {
+        if (!slot.TryGetProperty("context", out var ctx) || ctx.ValueKind != JsonValueKind.Array) return;
+        foreach (var c in ctx.EnumerateArray())
+        {
+            if (c.ValueKind != JsonValueKind.Object || Str(c, "_Type_") != "CraftingCostContext_ResultGameplayPropertyModifiers") continue;
+            if (!c.TryGetProperty("gameplayPropertyModifiers", out var list) || list.ValueKind != JsonValueKind.Object
+                || !list.TryGetProperty("gameplayPropertyModifiers", out var mods) || mods.ValueKind != JsonValueKind.Array) continue;
+            foreach (var mod in mods.EnumerateArray())
+            {
+                if (mod.ValueKind != JsonValueKind.Object || !mod.TryGetProperty("valueRanges", out var ranges) || ranges.ValueKind != JsonValueKind.Array) continue;
+                if (!mod.TryGetProperty("gameplayPropertyRecord", out var gpr)) continue;
+                // ファイルのパスの文字列 (dcb の出力の形)。参照の object で来たときは _RecordPath_ のファイル名を使う
+                var property = gpr.ValueKind == JsonValueKind.String ? FileStem(gpr.GetString())
+                    : gpr.ValueKind == JsonValueKind.Object ? FileStem(Str(gpr, "_RecordPath_")) : null;
+                if (property == null) continue;
+                int index = 0;
+                foreach (var r in ranges.EnumerateArray())
+                {
+                    int i = index++;
+                    if (r.ValueKind != JsonValueKind.Object) continue;
+                    var rangeType = Str(r, "_Type_");
+                    string kind, startKey, endKey;
+                    if (rangeType == "CraftingGameplayPropertyModifierValueRange_Linear") { kind = "Linear"; startKey = "modifierAtStart"; endKey = "modifierAtEnd"; }
+                    else if (rangeType == "CraftingGameplayPropertyModifierValueRange_LinearIntegerAdditive") { kind = "LinearIntegerAdditive"; startKey = "additiveModifierAtStart"; endKey = "additiveModifierAtEnd"; }
+                    else
+                    {
+                        var name = rangeType ?? "(なし)";
+                        skips.UnknownTypes[name] = skips.UnknownTypes.GetValueOrDefault(name) + 1;
+                        continue;
+                    }
+                    if (!TryNum(r, "startQuality", out var sq) || !TryNum(r, "endQuality", out var eq)
+                        || !TryNum(r, startKey, out var vs) || !TryNum(r, endKey, out var ve))
+                    {
+                        skips.MissingNumbers++;
+                        continue;
+                    }
+                    modifiers.Add(new BlueprintModifier
+                    {
+                        SlotDebugName = slotName, Property = property, RangeIndex = i, Kind = kind,
+                        StartQuality = (int)Math.Round(sq), EndQuality = (int)Math.Round(eq), ValueStart = vs, ValueEnd = ve,
+                    });
+                }
+            }
+        }
+
+        static bool TryNum(JsonElement e, string name, out double value)
+        {
+            if (e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number) { value = v.GetDouble(); return true; }
+            value = 0;
+            return false;
+        }
     }
 
     // CraftingCost_Resource / CraftingCost_Item を 1 件の材料にする。どちらでもなければ null
@@ -2648,6 +2812,10 @@ public class GameDataExtractor : IDisposable
     // (成功したときは、ShopPriceFetchRequested の受け手が手動中止の印を消して取得を始める)
     public async Task BuildStructuredIndexAsync(string dataP4kPath, CancellationToken ct = default, bool requestShopPriceFetch = true)
     {
+        // アプリを閉じるとき (AppExit) も取り消す。取り消すと構築前の控えから戻してから終わる (閉じる処理はそれを待つ)
+        using var exitWork = AppExit.BeginWork("インデックス構築");
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, AppExit.Token);
+        ct = linkedCts.Token;
         // 構築中かどうか (IsIndexBuildRunning) は、取得を止める前から、再開を頼んだ後まで立てておく
         Interlocked.Increment(ref s_indexBuildsRunning);
         try
@@ -2680,14 +2848,95 @@ public class GameDataExtractor : IDisposable
     // BuildStructuredIndexAsync・RebuildEquipmentDataAsync が走っている間 true (バックアップのインポートの終わりに、構築が止めた取得を再開しないために MainWindow が見る)
     internal static bool IsIndexBuildRunning => Volatile.Read(ref s_indexBuildsRunning) > 0;
 
+    // VACUUM の直前の空きの確かめ。WAL では VACUUM の間に -wal が DB とほぼ同じ大きさまで大きくなる (804MB の写しで 808MB) ので、
+    // 今の gamedata_cache.db の 1.1 倍 (VacuumWalFactor) の空きが要る。
+    // 加えて VACUUM は作業用の一時 DB (DB 以下の大きさ。実測で DB の約 0.8 倍) を一時フォルダに作る (同梱の SQLite は TEMP_STORE=1 で、
+    // temp_store を変えていないので一時ファイルはディスクに作る)。一時フォルダは、temp_store_directory を設定していないので Windows では
+    // GetTempPath() が返すフォルダ (SQLite の「Temporary Files」の説明。SQLITE_TMPDIR などの環境変数は Windows では SQLite 自身は見ない)。
+    // DB の 1.0 倍で見込み、一時フォルダが DB と同じドライブならその空きに足し、違うドライブならそのドライブの空きを別に確かめる。
+    // 足りなければ知らせの文 (構築の前の確かめと同じ書き方)、足りれば null。空きを調べられなければ null (今までどおり VACUUM する)
+    private const double VacuumWalFactor = 1.1;
+    private static long VacuumWalBytes(long dbBytes) => (long)Math.Ceiling(dbBytes * VacuumWalFactor);
+
+    // VACUUM の一時 DB を置くドライブ (Path.GetTempPath の根)。DB と同じドライブなら null。調べられなければ例外
+    private static DriveInfo? VacuumTempDrive(DriveInfo dbDrive)
+    {
+        var tempDrive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(Path.GetTempPath()))!);
+        return string.Equals(tempDrive.Name, dbDrive.Name, StringComparison.OrdinalIgnoreCase) ? null : tempDrive;
+    }
+
+    // 空きの知らせの文の一部: "<ドライブ> の空き ◯MB (◯MB以上必要。<内訳1> に ◯MB と <内訳2> に ◯MB ...)"。
+    // 「以上必要」の数は、内訳それぞれを MB に切り捨てた数の合計 (内訳の和と合うように)。MB に切り捨てて 0 の内訳は文に出さない。
+    // 空きが足りれば null (足りるかは切り捨てる前のバイトで比べる)
+    private static long ToMB(long bytes) => bytes / 1024 / 1024;
+    private static string? SpaceShortageText(DriveInfo drive, string prefix, params (string Label, long Bytes)[] parts)
+    {
+        long need = parts.Sum(x => x.Bytes);
+        if (drive.AvailableFreeSpace >= need) return null;
+        var shown = parts.Where(x => ToMB(x.Bytes) > 0).ToList();
+        return $"{prefix}{drive.Name} の空き {ToMB(drive.AvailableFreeSpace)}MB ({parts.Sum(x => ToMB(x.Bytes))}MB以上必要"
+            + (shown.Count > 0 ? "。" + string.Join(" と", shown.Select(x => $"{x.Label}に {ToMB(x.Bytes)}MB")) : "") + ")";
+    }
+
+    // 一時フォルダが違うドライブのとき、そのドライブの空きが tempBytes に足りなければ知らせの文の一部、足りれば null
+    private static string? VacuumTempShortage(DriveInfo tempDrive, long tempBytes)
+        => SpaceShortageText(tempDrive, $"一時フォルダ ({Path.GetTempPath()}) の ", ("最適化 (VACUUM) の一時 DB ", tempBytes));
+
+    private string? VacuumSpaceShortage()
+    {
+        try
+        {
+            var dbDrive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(DbPath))!);
+            long dbBytes = File.Exists(DbPath) ? new FileInfo(DbPath).Length : 0;
+            long walBytes = VacuumWalBytes(dbBytes);
+            long tempBytes = dbBytes;
+            // 一時フォルダのドライブを調べられなければ、一時 DB の分の確かめだけを飛ばす (DB のドライブの -wal の分は確かめる。構築の前の確かめと同じ扱い)
+            bool tempKnown;
+            DriveInfo? tempDrive = null;
+            try { tempDrive = VacuumTempDrive(dbDrive); tempKnown = true; }
+            catch { tempKnown = false; }
+            var dbParts = new List<(string, long)> { ("最適化 (VACUUM) の -wal ", walBytes) };
+            if (tempKnown && tempDrive == null) dbParts.Add(("一時 DB ", tempBytes));
+            var dbShort = SpaceShortageText(dbDrive, "", dbParts.ToArray());
+            string? tempShort = null;
+            if (tempDrive != null)
+            {
+                try { tempShort = VacuumTempShortage(tempDrive, tempBytes); }
+                catch { tempShort = null; }   // 一時フォルダのドライブの空きを調べられなければ、その確かめだけを飛ばす
+            }
+            if (dbShort == null && tempShort == null) return null;
+            return "ディスク容量不足のため最適化 (VACUUM) を飛ばしました: " + string.Join("、", new[] { dbShort, tempShort }.Where(x => x != null));
+        }
+        catch { return null; }
+    }
+
     private async Task BuildStructuredIndexCoreAsync(string dataP4kPath, CancellationToken ct, bool requestShopPriceFetch)
     {
-        // 構築の作業に 500MB、加えて構築前の控え (BuildIndexAsync が今の gamedata_cache.db を丸ごと控える) の分が要る
-        var dbDrive = new DriveInfo(Path.GetPathRoot(DbPath)!);
+        // 構築の作業に 500MB、加えて構築前の控え (BuildIndexAsync が今の gamedata_cache.db を丸ごと控える) の分と、
+        // 最後の最適化 (VACUUM) の -wal の分 (WAL では VACUUM の間に -wal が DB とほぼ同じ大きさになる。今の gamedata_cache.db の 1.1 倍で見込む) と、
+        // VACUUM の一時 DB の分 (一時フォルダに作る。DB の 1.0 倍で見込む。VacuumSpaceShortage の説明) が要る
+        // (一時フォルダが DB と同じドライブなら合わせて DB の 3.1 倍 + 500MB。違うドライブなら DB のドライブに 2.1 倍 + 500MB、一時フォルダのドライブに 1.0 倍)
+        var dbDrive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(DbPath))!);
         long backupBytes = File.Exists(DbPath) ? new FileInfo(DbPath).Length : 0;
-        long needBytes = 500L * 1024 * 1024 + backupBytes;
-        if (dbDrive.AvailableFreeSpace < needBytes)
-            throw new IOException($"ディスク容量不足: {dbDrive.Name} の空き {dbDrive.AvailableFreeSpace / 1024 / 1024}MB ({needBytes / 1024 / 1024}MB以上必要。構築の作業に 500MB と構築前の控えに {backupBytes / 1024 / 1024}MB)");
+        long walBytes = VacuumWalBytes(backupBytes);
+        long tempBytes = backupBytes;
+        // 一時フォルダのドライブを調べられなければ、一時 DB の分の確かめだけを飛ばす (構築は止めない。VACUUM の直前の確かめと同じ扱い)
+        bool tempKnown;
+        DriveInfo? tempDrive = null;
+        try { tempDrive = VacuumTempDrive(dbDrive); tempKnown = true; }
+        catch { tempKnown = false; }
+        var dbParts = new List<(string, long)> { ("構築の作業", 500L * 1024 * 1024), ("構築前の控え", backupBytes), ("最適化 (VACUUM) の -wal ", walBytes) };
+        if (tempKnown && tempDrive == null) dbParts.Add(("一時 DB ", tempBytes));
+        var dbShort = SpaceShortageText(dbDrive, "", dbParts.ToArray());
+        string? tempShort = null;
+        if (tempDrive != null)
+        {
+            try { tempShort = VacuumTempShortage(tempDrive, tempBytes); }
+            catch { tempShort = null; }   // 一時フォルダのドライブの空きを調べられなければ、その確かめだけを飛ばす
+        }
+        // DB のドライブと一時フォルダのドライブが両方足りなければ、両方を「、」でつないで 1 回で知らせる
+        if (dbShort != null || tempShort != null)
+            throw new IOException("ディスク容量不足: " + string.Join("、", new[] { dbShort, tempShort }.Where(x => x != null)));
 
         await EnsureStarBreakerAsync();
         EnsureDb();
@@ -2696,16 +2945,50 @@ public class GameDataExtractor : IDisposable
         // 構築は最初に表を消してから段階ごとに入れ直す。各段階が自分のトランザクションを使い、最後に VACUUM (トランザクションの中では
         // 実行できない) をするので、全体を 1 つのトランザクションでは包めない。消す前に DB を丸ごと控え (VACUUM INTO)、
         // 途中で失敗・中止したら控えから元に戻す (名前だけ並んで詳細が空、のまま残さない)。控えを作れなければ何も消さずに止める
+        // 前回の構築の途中の印が残っていれば始めない (InterruptedWork。起動のときに戻して消すので、ふつうは残らない)
+        var workDir = Path.GetDirectoryName(Path.GetFullPath(DbPath)) ?? ".";
+        InterruptedWork.ThrowIfPending(workDir, InterruptedWork.KindBuild);
         var preBuildBackup = CreatePreBuildBackup();
+        // 控えを作っている間に取り消された (アプリを閉じる等) ときは、まだ何も消していないので戻さずに止める
+        if (ct.IsCancellationRequested)
+        {
+            DeletePreBuildBackup(preBuildBackup);
+            ct.ThrowIfCancellationRequested();
+        }
+        // 途中の印 (InterruptedWork)。書き換え始める前に書き、成功したとき・控えから戻し終えたときに消す
+        // (アプリが途中で終わったら、次の起動で印を見て控えから戻す)。書けなければ何も消さずに止める
+        string markerPath;
+        try
+        {
+            markerPath = InterruptedWork.Write(workDir, new InterruptedWork.Marker
+            {
+                Kind = InterruptedWork.KindBuild, Label = "インデックス構築",
+                Backups = new Dictionary<string, string> { [DbPath] = preBuildBackup },
+            });
+        }
+        catch (Exception ex)
+        {
+            DeletePreBuildBackup(preBuildBackup);
+            throw new IOException($"途中の印を書けなかったため、インデックス構築を中止しました (データは消していません): {ex.Message}", ex);
+        }
         try
         {
             await BuildStructuredIndexStepsAsync(dataP4kPath, ct, requestShopPriceFetch);
         }
         catch (Exception ex)
         {
-            RestorePreBuildBackup(preBuildBackup, ex);
+            // 戻せなかったら控えを .failed-<日時> にして残し (次の構築で上書きされないように)、場所を知らせる。どちらでも印は消す
+            // (起動のときに黙って戻すことはしない)
+            if (!RestorePreBuildBackup(preBuildBackup, ex))
+            {
+                var kept = InterruptedWork.KeepFailedBackup(preBuildBackup, markerPath, InterruptedWork.KindBuild, s => StatusChanged?.Invoke(s));
+                StatusChanged?.Invoke($"構築前の控えは {kept} に残しています (gamedata_cache.db を構築前に戻すには、アプリを閉じてこのファイルで置き換えてください)");
+            }
+            InterruptedWork.Clear(markerPath, InterruptedWork.KindBuild, s => StatusChanged?.Invoke(s));
             throw;
         }
+        // 成功: 印を先に消してから控えを消す (控えを消し損ねても、印が無いので次の起動で戻さない)
+        InterruptedWork.Clear(markerPath, InterruptedWork.KindBuild, s => StatusChanged?.Invoke(s));
         DeletePreBuildBackup(preBuildBackup);
     }
 
@@ -2735,8 +3018,8 @@ public class GameDataExtractor : IDisposable
     }
 
     // 控えから構築前の状態に戻す (同じ接続へ SQLite のバックアップで書き戻すので、他で開いている接続があっても戻せる)。
-    // 戻せなかったら控えは消さずに残し、場所を知らせる
-    private void RestorePreBuildBackup(string backupPath, Exception cause)
+    // 戻せなかったら控えは消さずに残し、場所を知らせる。戻せたら true
+    private bool RestorePreBuildBackup(string backupPath, Exception cause)
     {
         StatusChanged?.Invoke($"インデックス構築が途中で終わったため ({cause.Message})、構築前のデータへ戻しています...");
         try
@@ -2747,12 +3030,16 @@ public class GameDataExtractor : IDisposable
                 bak.Open();
                 bak.BackupDatabase(_db!);
             }
+            // バックアップ API で戻した中身はいったん -wal に入る (DB と同じくらいの大きさ) ので、本体に書き戻して -wal を空にする
+            SqliteWal.CheckpointOrRetryLater(_db!);
             StatusChanged?.Invoke("構築前のデータへ戻しました");
             DeletePreBuildBackup(backupPath);
+            return true;
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"構築前のデータへ戻せませんでした: {ex.Message} (控えは {backupPath} に残しています)");
+            StatusChanged?.Invoke($"構築前のデータへ戻せませんでした: {ex.Message}");
+            return false;
         }
     }
 
@@ -2875,6 +3162,12 @@ public class GameDataExtractor : IDisposable
         try { blueprintCount = await ExtractBlueprintsAsync(dataP4kPath, now, ct); }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { StatusChanged?.Invoke($"BP (ブループリント) の取り出しに失敗しました: {ex.Message}"); }
+        // Step 6b: 決め打ちの接頭辞・種類では取れない品目 (採掘レーザー・採掘モジュール・鉱石ポッド・BP や契約から参照される品目など。ExtractExtraItemsAsync)。
+        // BP の表と契約を使うので BP の後、船の口 (ship_ports) の判定を変えないよう船の後に行う。失敗しても構築は続ける (起動後に裏で取り直す)
+        int extraCount = 0;
+        try { extraCount = await ExtractExtraItemsAsync(dataP4kPath, now, ct, typeMap); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { StatusChanged?.Invoke($"[品目の追加] 取り込みに失敗しました (起動後に裏で取り直します): {ex.Message}"); }
 
         // Step 7: メタ情報
         step++;
@@ -2891,20 +3184,29 @@ public class GameDataExtractor : IDisposable
         // 中身を消して入れ直したページが空きとして残り、ファイルが大きいままになるので VACUUM で詰める。
         // 売り場・価格の裏の取得 (ShopPriceFetchRequested) はこの後に始まる。失敗しても構築の結果は使えるので、知らせて続ける
         ClearCstoneNotFoundMarks();
-        StatusChanged?.Invoke("DB を最適化中 (VACUUM)...");
-        var vacuumSw = Stopwatch.StartNew();
-        try
+        // 構築の途中で空きが減ったときのため、VACUUM の直前にも -wal の分 (DB の 1.1 倍) の空きを確かめる。足りなければ VACUUM だけを飛ばす (構築の結果は使える)
+        var vacuumShortage = VacuumSpaceShortage();
+        if (vacuumShortage != null) StatusChanged?.Invoke(vacuumShortage);
+        else
         {
-            using var vac = _db!.CreateCommand();
-            vac.CommandText = "VACUUM";
-            vac.ExecuteNonQuery();
-            StatusChanged?.Invoke($"DB の最適化完了 ({vacuumSw.Elapsed.TotalSeconds:F1}秒)");
+            StatusChanged?.Invoke("DB を最適化中 (VACUUM)...");
+            var vacuumSw = Stopwatch.StartNew();
+            try
+            {
+                using var vac = _db!.CreateCommand();
+                vac.CommandText = "VACUUM";
+                vac.ExecuteNonQuery();
+                // WAL では VACUUM の中身がいったん -wal に入る (DB と同じくらいの大きさ) ので、本体に書き戻して -wal を空にする
+                // (ほかの接続が読んでいて途中で止まったら、少し後に試し直す)
+                SqliteWal.CheckpointOrRetryLater(_db!);
+                StatusChanged?.Invoke($"DB の最適化完了 ({vacuumSw.Elapsed.TotalSeconds:F1}秒)");
+            }
+            catch (Exception ex) { StatusChanged?.Invoke($"DB の最適化 (VACUUM) に失敗しました: {ex.Message}"); }
         }
-        catch (Exception ex) { StatusChanged?.Invoke($"DB の最適化 (VACUUM) に失敗しました: {ex.Message}"); }
 
         sw.Stop();
         ProgressChanged?.Invoke(100, $"完了！ ({sw.Elapsed.TotalSeconds:F1}秒)");
-        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}, 装備: {itemCount}, 弾: {ammoCount}, 契約: {missionCount}, 商品: {commodityCount}, 資源: {resourceCount}, 場所名: {starmapCount}, BP: {blueprintCount}");
+        StatusChanged?.Invoke($"構造化インデックス完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}, 装備: {itemCount}, 弾: {ammoCount}, 契約: {missionCount}, 商品: {commodityCount}, 資源: {resourceCount}, 場所名: {starmapCount}, BP: {blueprintCount}, 追加の品目: {extraCount}");
 
         // 新しい品目の売り場・価格は、構築とは別に裏で取得する (MainWindow が受けて FetchNewShopPricesAsync を走らせる)
         if (requestShopPriceFetch) ShopPriceFetchRequested?.Invoke(DbPath);
@@ -3197,7 +3499,10 @@ public class GameDataExtractor : IDisposable
     // SAttachableComponentParams の AttachDef.Tags (空白区切り) に FPS_Barrel があるものだけを入れる
     // (色違いで raw_json を空にした行は json_each に渡すと malformed JSON で問い合わせ全体が失敗するので、json_valid で NULL にして飛ばす)
     // アーマー・アンダースーツ・バックパック・服、船の部品 (シールド・動力装置・クアンタムドライブ・冷却装置・レーダー)、
-    // 船の武器・ミサイル・ミサイルラック・爆弾、船のトラクタービーム・サルベージヘッド。名前の無いもの・プレースホルダは除く。
+    // 船の武器・ミサイル・ミサイルラック・爆弾、船のトラクタービーム・サルベージヘッド。
+    // 追加で取り込む品目 (ExtractExtraItemsAsync) のうち、採掘レーザー・採掘モジュール・サルベージのモジュール・燃料ノズル (DockingCollar の Fuel)・
+    // 採掘の鉱石ポッド (Container で record 名が Cargo_ShipMining_Pod_* / Cargo_GroundVehicleMining_Pod_*)。どれも cstone の品目のページに
+    // 売り場がある (finder.cstone.space/search/{uuid} で確かめた。サルベージヘッドは売り場なし)。名前の無いもの・プレースホルダは除く。
     // プレースホルダは、名前のローカライズキーが @LOC_PLACEHOLDER のもの。item_index.name はキーを訳した文 (英語の global.ini に
     // 日本語が入っていれば「<= プレースホルダー =>」) なので、キーが残っている items.name で判定し、items に行が無いときのために
     // 訳した文 (英語・日本語) でも外す
@@ -3205,7 +3510,11 @@ public class GameDataExtractor : IDisposable
         (item_type IN ('WeaponPersonal', 'Grenade', 'FPS_Deployable', 'FPS_Consumable', 'Gadget',
                        'Shield', 'PowerPlant', 'QuantumDrive', 'Cooler', 'Radar',
                        'WeaponGun', 'Missile', 'MissileLauncher', 'Bomb', 'BombLauncher',
-                       'TractorBeam', 'SalvageHead', 'TowingBeam')
+                       'TractorBeam', 'SalvageHead', 'TowingBeam',
+                       'WeaponMining', 'MiningModifier', 'SalvageModifier')
+         OR (item_type = 'DockingCollar' AND sub_type = 'Fuel')
+         OR (item_type = 'Container' AND (record_name LIKE 'EntityClassDefinition.Cargo\_ShipMining\_Pod\_%' ESCAPE '\'
+                                          OR record_name LIKE 'EntityClassDefinition.Cargo\_GroundVehicleMining\_Pod\_%' ESCAPE '\'))
          OR item_type LIKE 'Char_Armor_%' OR item_type LIKE 'Char_Clothing_%'
          OR (item_type = 'WeaponAttachment' AND sub_type IN ('IronSight', 'BottomAttachment', 'Magazine', 'Utility', 'Missile'))
          OR (item_type = 'WeaponAttachment' AND sub_type = 'Barrel'
@@ -3413,6 +3722,14 @@ public class GameDataExtractor : IDisposable
 
     // この PC だけの印 (売り場・価格の取得中・手動中止)。バックアップに入れず、インポートでも受け取った側の印を上書きしない
     internal static readonly string[] LocalOnlyMetaKeys = [ShopPriceInProgressMetaKey, ShopPriceStoppedMetaKey];
+
+    // 取得中の印を立てる (アプリを閉じる途中に取得の依頼が来たとき。次の起動で、まだ取っていない品目から取る: MainWindow の起動時の続き取得)
+    public static void MarkShopPriceFetchInProgress(string dbPath)
+    {
+        using var db = new SqliteConnection($"Data Source={dbPath}");
+        db.Open();
+        SetMeta(db, ShopPriceInProgressMetaKey, DateTime.UtcNow.ToString("o"));
+    }
 
     public static bool IsShopPriceFetchInterrupted(string dbPath)
     {
@@ -3630,10 +3947,13 @@ public class GameDataExtractor : IDisposable
     // インデックス構築 (BuildStructuredIndexStepsAsync) が作り直すデータについての gamedata_meta の記録。構築の最初に消す。
     // game_version / p4k_last_modified / indexed_at / p4k_path / 版: 構築の手順6で書き直す。
     // equipment_rebuilt_at: 構築が作り直す装備データ (item_index / ships / ship_ports) を前に再抽出した時刻。
+    // BlueprintModifiersMetaKey: BP の品質の増減を取り出した時刻 (構築の手順6の BP の取り出しで書き直す。失敗したら書かれない。
+    // 起動後に取り直すのは、増減の行が 0 行で、この記録も無いとき (NeedsBlueprints))。
+    // ExtraItemsMetaKey: 追加の品目を取り込んだ時刻 (構築の手順6b で書き直す。失敗したら書かれず、起動後に裏で取り込む: NeedsExtraItems)。
     internal static readonly string[] RebuiltDataMetaKeys =
     [
         "game_version", "p4k_last_modified", "indexed_at", "p4k_path", BuildVersionMetaKey, BuildChangeNumMetaKey,
-        "equipment_rebuilt_at",
+        "equipment_rebuilt_at", BlueprintModifiersMetaKey, ExtraItemsMetaKey,
     ];
 
     // gamedata_meta に残すゲームの版 (build_manifest.id の Data.Version と Data.RequestedP4ChangeNum)
@@ -3673,6 +3993,10 @@ public class GameDataExtractor : IDisposable
     // 進捗は progress と StatusChanged の両方へ流す
     public async Task RebuildEquipmentDataAsync(IProgress<string>? progress = null, CancellationToken ct = default)
     {
+        // アプリを閉じるとき (AppExit) も取り消す。取り消すと *_bak 表から戻してから終わる (閉じる処理はそれを待つ)
+        using var exitWork = AppExit.BeginWork("装備データの再抽出");
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, AppExit.Token);
+        ct = linkedCts.Token;
         var p4kPath = FindDataP4k()
             ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
 
@@ -3695,7 +4019,9 @@ public class GameDataExtractor : IDisposable
             StatusChanged?.Invoke("装備データ (item_index / ships / ship_ports) を再構築中...");
 
             // 抽出が途中で失敗しても 3 表が空のまま残らないよう、DELETE の前に同 DB 内へバックアップ表を作る
-            // (成功・失敗いずれでも finally で DROP する)
+            // (成功・失敗いずれでも finally で DROP する)。前回の再抽出の途中の印が残っていれば始めない (InterruptedWork)
+            var workDir = Path.GetDirectoryName(Path.GetFullPath(DbPath)) ?? ".";
+            InterruptedWork.ThrowIfPending(workDir, InterruptedWork.KindEquip);
             using (var cmd = _db!.CreateCommand())
             {
                 cmd.CommandText = string.Join(" ", EquipmentTables.Select(t =>
@@ -3704,6 +4030,27 @@ public class GameDataExtractor : IDisposable
             }
             // item_index.name をどこから作ったかの記録も、失敗して戻すときに一緒に戻す (ExtractItemIndexAsync が書き換える)
             var prevNameSource = ReadMetaValue(_db, ItemNameSourceMetaKey);
+            // 途中の印 (InterruptedWork)。*_bak 表を作った後、消し始める前に書き、成功したとき・*_bak 表から戻し終えたときに消す
+            // (アプリが途中で終わったら、次の起動で印を見て *_bak 表から戻す)。書けなければ何も消さずに止める
+            string markerPath;
+            try
+            {
+                markerPath = InterruptedWork.Write(workDir, new InterruptedWork.Marker
+                {
+                    Kind = InterruptedWork.KindEquip, Label = "装備データの再抽出", Db = DbPath, NameSource = prevNameSource,
+                });
+            }
+            catch (Exception ex)
+            {
+                using (var cmd = _db.CreateCommand())
+                {
+                    cmd.CommandText = string.Join(" ", EquipmentTables.Select(t => $"DROP TABLE IF EXISTS {t}_bak;"));
+                    cmd.ExecuteNonQuery();
+                }
+                throw new IOException($"途中の印を書けなかったため、装備データの再抽出を中止しました (データは消していません): {ex.Message}", ex);
+            }
+            bool succeeded = false, restored = false, failedKept = false;
+            var heldTables = new List<string>();   // 戻せず、名前も変えられなかった *_bak 表 (消さない)
 
             try
             {
@@ -3726,44 +4073,81 @@ public class GameDataExtractor : IDisposable
                 UpdateShipEnglishNames();
                 await UpdateShipPortSizesAsync(p4kPath, ct);
                 await UpdateShipCargoAsync(p4kPath, ct);
+                // 追加の品目 (item_index を消して作り直したので入れ直す。船の後に行う)。失敗しても再抽出は続ける (印が消えて起動後に裏で取り直す)
+                try
+                {
+                    DeleteMeta(_db, ExtraItemsMetaKey);
+                    await ExtractExtraItemsAsync(p4kPath, now, ct);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { StatusChanged?.Invoke($"[品目の追加] 取り込みに失敗しました (起動後に裏で取り直します): {ex.Message}"); }
 
                 SetMeta("equipment_rebuilt_at", now);
                 try { await RebuildMissionReputationAsync(progress, ct); }
                 catch (Exception ex) { StatusChanged?.Invoke($"評判報酬の取り込みに失敗しました: {ex.Message}"); }
                 sw.Stop();
                 StatusChanged?.Invoke($"装備データ再構築完了 ({sw.Elapsed.TotalSeconds:F1}秒) - インデックス: {indexCount}, 船: {shipCount}");
+                succeeded = true;
             }
             catch
             {
-                // 失敗時はバックアップから 3 表を復元し、item_index_fts も復元後の item_index に合わせる
+                // 失敗時はバックアップから表を復元し、item_index_fts も復元後の item_index に合わせる。
+                // 戻せなかったら *_bak 表を *_failed_<日時> に名前を変えて残し (次の再抽出で消されないように)、知らせる。どちらでも印は消す
                 StatusChanged?.Invoke("装備データの再抽出に失敗したため、再抽出前のデータへ復元中...");
-                using (var cmd = _db.CreateCommand())
+                try
                 {
-                    cmd.CommandText = string.Join(" ", EquipmentTables.Select(t =>
-                        $"DELETE FROM {t}; INSERT INTO {t} SELECT * FROM {t}_bak;"));
-                    cmd.ExecuteNonQuery();
+                    RestoreEquipmentBackupTables(_db, prevNameSource);
+                    restored = true;
                 }
-                if (prevNameSource == null) DeleteMeta(_db, ItemNameSourceMetaKey);
-                else SetMeta(_db, ItemNameSourceMetaKey, prevNameSource);
-                RebuildFts5Index();
+                catch (Exception rex)
+                {
+                    var kept = KeepFailedEquipmentBackupTables(_db, markerPath, s => StatusChanged?.Invoke(s), heldTables);
+                    failedKept = true;
+                    StatusChanged?.Invoke($"再抽出前のデータへ戻せませんでした: {rex.Message} (再抽出前の表は {DbPath} の中の {kept} に残しています)");
+                }
                 throw;
             }
             finally
             {
-                using var cmd = _db.CreateCommand();
-                cmd.CommandText = string.Join(" ", EquipmentTables.Select(t => $"DROP TABLE IF EXISTS {t}_bak;"));
-                cmd.ExecuteNonQuery();
+                if (succeeded || restored || failedKept)
+                {
+                    // 印を先に消してから *_bak 表を消す (表を消し損ねても、印が無いので次の起動で戻さない)
+                    InterruptedWork.Clear(markerPath, InterruptedWork.KindEquip, s => StatusChanged?.Invoke(s));
+                    // 戻せず名前も変えられなかった表 (heldTables) は消さない
+                    var drop = EquipmentTables.Select(t => t + "_bak").Where(t => !heldTables.Contains(t)).ToList();
+                    if (drop.Count > 0)
+                    {
+                        using var cmd = _db.CreateCommand();
+                        cmd.CommandText = string.Join(" ", drop.Select(t => $"DROP TABLE IF EXISTS {t};"));
+                        cmd.ExecuteNonQuery();
+                    }
+                }
             }
 
             // ここに到達するのは成功時のみ (失敗時は上の catch で再スロー済み)。
             // DELETE した旧 3 表とバックアップ表 (ships.raw_json の複製約 315MB を含む) のページが freelist に残って DB が肥大するため VACUUM で回収する。
             // VACUUM はトランザクション内では実行できないので、トランザクション外 (各抽出メソッドの tx は Commit 済み) で実行する
             ClearCstoneNotFoundMarks();
-            StatusChanged?.Invoke("DB を最適化中...");
-            using (var cmd = _db.CreateCommand())
+            // VACUUM の直前に -wal の分 (DB の 1.1 倍) の空きを確かめる。足りなければ VACUUM だけを飛ばし、再抽出の結果はそのまま使う
+            if (VacuumSpaceShortage() is { } shortage)
             {
-                cmd.CommandText = "VACUUM";
-                cmd.ExecuteNonQuery();
+                StatusChanged?.Invoke(shortage);
+            }
+            else
+            {
+                // インデックスの構築と同じく、VACUUM が失敗しても再抽出の結果は使えるので、知らせて続ける (下の売り場・価格の取得の頼みも出す)
+                StatusChanged?.Invoke("DB を最適化中...");
+                try
+                {
+                    using (var cmd = _db.CreateCommand())
+                    {
+                        cmd.CommandText = "VACUUM";
+                        cmd.ExecuteNonQuery();
+                    }
+                    // WAL では VACUUM の中身がいったん -wal に入るので、本体に書き戻して -wal を空にする (止まったら少し後に試し直す)
+                    SqliteWal.CheckpointOrRetryLater(_db);
+                }
+                catch (Exception ex) { StatusChanged?.Invoke($"DB の最適化 (VACUUM) に失敗しました: {ex.Message}"); }
             }
 
             // 新しい品目の売り場・価格を裏で取得してもらう
@@ -3779,6 +4163,89 @@ public class GameDataExtractor : IDisposable
             Interlocked.Decrement(ref s_indexBuildsRunning);
             if (relay != null) StatusChanged -= relay;
         }
+    }
+
+    // 装備データの再抽出の *_bak 表から戻す (取り消し・失敗したときと、次の起動で途中の印があったとき: InterruptedWork)。
+    // 1 つのトランザクションで全部の表を戻し、item_index.name の作り方の記録を戻し、item_index_fts を作り直す。*_bak 表は消さない (呼び出し元が消す)
+    internal static void RestoreEquipmentBackupTables(SqliteConnection db, string? prevNameSource)
+    {
+        foreach (var t in EquipmentTables)
+        {
+            using var chk = db.CreateCommand();
+            chk.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=@n";
+            chk.Parameters.AddWithValue("@n", t + "_bak");
+            if (Convert.ToInt64(chk.ExecuteScalar() ?? 0L) == 0) throw new InvalidOperationException($"控えの表 {t}_bak がありません");
+        }
+        using (var tx = db.BeginTransaction())
+        {
+            using var cmd = db.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandTimeout = 0;
+            cmd.CommandText = string.Join(" ", EquipmentTables.Select(t => $"DELETE FROM {t}; INSERT INTO {t} SELECT * FROM {t}_bak;"));
+            cmd.ExecuteNonQuery();
+            tx.Commit();
+        }
+        if (prevNameSource == null) DeleteMeta(db, ItemNameSourceMetaKey);
+        else SetMeta(db, ItemNameSourceMetaKey, prevNameSource);
+        RebuildFts5Index(db);
+    }
+
+    // 戻せなかった *_bak 表を *_failed_<日時> に名前を変えて残す (次の再抽出の DROP TABLE IF EXISTS *_bak で消されないように)。残した表の名前を返す。
+    // 名前を変えられなかった表は *_bak のまま残し、held (渡されたとき) と印のフォルダの held_equip.json に書く (次の再抽出を ThrowIfPending が止める)
+    internal static string KeepFailedEquipmentBackupTables(SqliteConnection db, string markerPath, Action<string>? log = null, List<string>? held = null)
+    {
+        var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+        var kept = new List<string>();
+        foreach (var t in EquipmentTables)
+        {
+            try
+            {
+                using var chk = db.CreateCommand();
+                chk.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=@n";
+                chk.Parameters.AddWithValue("@n", t + "_bak");
+                if (Convert.ToInt64(chk.ExecuteScalar() ?? 0L) == 0) continue;
+                using var cmd = db.CreateCommand();
+                cmd.CommandText = $"ALTER TABLE {t}_bak RENAME TO {t}_failed_{stamp}";
+                cmd.ExecuteNonQuery();
+                kept.Add($"{t}_failed_{stamp}");
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke($"控えの表 {t}_bak の名前を変えられませんでした ({ex.Message})。元の名前のまま残します (この表がある間は、装備データの再抽出を始めません)");
+                kept.Add($"{t}_bak");
+                held?.Add($"{t}_bak");
+                InterruptedWork.AddHeld(markerPath, InterruptedWork.KindEquip, $"{Path.GetFullPath(db.DataSource)}::{t}_bak", log);
+            }
+        }
+        return string.Join("・", kept);
+    }
+
+    internal static string KeepFailedEquipmentBackupTables(string dbPath, string markerPath, Action<string>? log = null)
+    {
+        try
+        {
+            using var db = new SqliteConnection($"Data Source={dbPath};Pooling=False");
+            db.Open();
+            return KeepFailedEquipmentBackupTables(db, markerPath, log);
+        }
+        catch (Exception ex)
+        {
+            // DB を開けなければ表は何も変わっていない。*_bak のまま残るので、次の再抽出を止める
+            log?.Invoke($"控えの表の名前を変えられませんでした: {ex.Message}");
+            foreach (var t in EquipmentTables) InterruptedWork.AddHeld(markerPath, InterruptedWork.KindEquip, $"{Path.GetFullPath(dbPath)}::{t}_bak", log);
+            return "*_bak";
+        }
+    }
+
+    // 次の起動で: DB を開いて *_bak 表から戻し、*_bak 表を消す
+    internal static void RestoreEquipmentBackupTables(string dbPath, string? prevNameSource)
+    {
+        using var db = new SqliteConnection($"Data Source={dbPath};Pooling=False");
+        db.Open();
+        RestoreEquipmentBackupTables(db, prevNameSource);
+        using var drop = db.CreateCommand();
+        drop.CommandText = string.Join(" ", EquipmentTables.Select(t => $"DROP TABLE IF EXISTS {t}_bak;"));
+        drop.ExecuteNonQuery();
     }
 
     // RebuildEquipmentDataAsync が作り直す 5 表 (バックアップ表 "{name}_bak" の対象)
@@ -4086,7 +4553,14 @@ public class GameDataExtractor : IDisposable
             names.Add(shortName);
         }
         names.Sort(StringComparer.Ordinal);
+        return BuildRecordFilters(names);
+    }
 
+    // record の短い名前 (EntityClassDefinition. を除いたもの) を並べた filter にまとめる (BuildTypedExtraFilters と追加の品目 ExtractExtraItemsAsync で共用)。
+    // 1 回の filter は TypedFilterMaxChars 文字・TypedFilterMaxRecords 件まで。名前に glob の記号を含むものは 1 件ずつの filter にする
+    internal static List<(string Filter, HashSet<string> Records)> BuildRecordFilters(IEnumerable<string> names)
+    {
+        const string head = "EntityClassDefinition.";
         var result = new List<(string, HashSet<string>)>();
         var batch = new List<string>();
         int batchChars = 0;
@@ -4128,35 +4602,76 @@ public class GameDataExtractor : IDisposable
          "Weapon_Rack", "MXOX", "KRON", "GLSN", "HRST", "UMNT", "TOAG", "KBAR", "ASAD", "RPOD", "GMNT", "BMBRCK", "BOMB"];
 
     // typeMap は QueryEntityTypesAsync の結果 (null なら中で取る)。決め打ちの接頭辞で取れない武器類を、種類で拾って追加する
-    private async Task<int> ExtractItemIndexAsync(string p4kPath, string now, CancellationToken ct, Dictionary<string, string>? typeMap = null)
+    // item_index.name を作る辞書 (ExtractItemIndexAsync と、追加で取り込む品目 ExtractExtraItemsAsync で共用)。
+    // english の ini → (english の ini が無い環境では) 今の訳から作った値 (Merged) → japanese の ini の順に引く
+    private sealed class ItemNameDicts
+    {
+        public Dictionary<string, string> En = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, string> Ja = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, string>? Merged;
+        public string Source => En.Count > 0 ? ItemNameSourceEnglish : Merged != null ? ItemNameSourceTranslations : ItemNameSourceJapaneseIni;
+
+        // name は AttachDef.Localization.Name ("@キー" か文字)。返り値: 表示名 (解決できなければ name のまま)、日本語名 (japanese の ini。無ければ "")、
+        // キー ("@" を除いたもの。"@" で始まらなければ null)、名前を解決できたか
+        public (string Name, string NameJa, string? Key, bool Resolved) Resolve(string name)
+        {
+            if (!name.StartsWith("@") || name.Length <= 1) return (name, "", null, false);
+            var locKey = name[1..];
+            var resolved = false;
+            if (En.TryGetValue(locKey, out var enName) && !enName.StartsWith("!"))
+            {
+                name = enName;
+                resolved = true;
+            }
+            else if (Merged != null && IniMerger.TryGetIniValue(Merged, locKey, out var mergedName))
+            {
+                name = mergedName;
+                resolved = true;
+            }
+            else if (Ja.TryGetValue(locKey, out var jaName) && !jaName.StartsWith("!"))
+            {
+                name = jaName;
+                resolved = true;
+            }
+            var nameJa = Ja.TryGetValue(locKey, out var jaVal) && !jaVal.StartsWith("!") ? jaVal : "";
+            return (name, nameJa, locKey, resolved);
+        }
+    }
+
+    // statusPrefix は進み具合の文の頭 (例 "[1/4] ")
+    private async Task<ItemNameDicts> LoadItemNameDictsAsync(string statusPrefix, CancellationToken ct)
     {
         var gamePath = App.Config.GamePath;
-        var enDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var jaDict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var d = new ItemNameDicts();
         var enIniPath = GameLocalizationIniPath(gamePath, "english");
         var jaIniPath = GameLocalizationIniPath(gamePath, "japanese_(japan)");
         if (File.Exists(enIniPath))
         {
-            StatusChanged?.Invoke("[1/4] ローカライズデータ（英語）を読み込み中...");
-            enDict = GlobalIniParser.Parse(enIniPath);
+            StatusChanged?.Invoke($"{statusPrefix}ローカライズデータ（英語）を読み込み中...");
+            d.En = GlobalIniParser.Parse(enIniPath);
         }
         if (File.Exists(jaIniPath))
         {
-            StatusChanged?.Invoke("[1/4] ローカライズデータ（日本語）を読み込み中...");
-            jaDict = GlobalIniParser.Parse(jaIniPath);
+            StatusChanged?.Invoke($"{statusPrefix}ローカライズデータ（日本語）を読み込み中...");
+            d.Ja = GlobalIniParser.Parse(jaIniPath);
         }
         // english の ini が無い (ふつうの環境) ときは、名前を今の訳から作る: ［日本語化］の［実行］がゲーム用 ini に書き出す値
         // (IniMerger.MergeForItemNames。RefreshItemNamesFromTranslations と同じ)。作れない (抽出済みの ini が無い等) ときは今までどおり japanese の ini
-        Dictionary<string, string>? merged = null;
-        if (enDict.Count == 0)
+        if (d.En.Count == 0)
         {
-            StatusChanged?.Invoke("[1/4] 今の訳から品目名を作成中...");
+            StatusChanged?.Invoke($"{statusPrefix}今の訳から品目名を作成中...");
             var workDir = Path.GetDirectoryName(DbPath) ?? "";
-            try { merged = await Task.Run(() => IniMerger.MergeForItemNames(workDir), ct); }
+            try { d.Merged = await Task.Run(() => IniMerger.MergeForItemNames(workDir), ct); }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { StatusChanged?.Invoke($"[1/4] 今の訳から品目名を作れませんでした (japanese の ini の値を使います): {ex.Message}"); }
+            catch (Exception ex) { StatusChanged?.Invoke($"{statusPrefix}今の訳から品目名を作れませんでした (japanese の ini の値を使います): {ex.Message}"); }
         }
-        var nameSource = enDict.Count > 0 ? ItemNameSourceEnglish : merged != null ? ItemNameSourceTranslations : ItemNameSourceJapaneseIni;
+        return d;
+    }
+
+    private async Task<int> ExtractItemIndexAsync(string p4kPath, string now, CancellationToken ct, Dictionary<string, string>? typeMap = null)
+    {
+        var names = await LoadItemNameDictsAsync("[1/4] ", ct);
+        var nameSource = names.Source;
         int resolved = 0;
 
         int count = 0;
@@ -4243,31 +4758,10 @@ public class GameDataExtractor : IDisposable
                     // AttachDef.Size が無い (0) ときは record 名の "_S{n}" (末尾または "_" の前) から補完
                     if (size <= 0) size = InferSizeFromEntityName(recordName);
 
-                    string nameJa = "";
-                    // 名前のローカライズキー ("@" を除いたもの)。PopulateJapaneseNames が translations.db のキーと照合する
-                    string? nameKey = null;
-                    if (name.StartsWith("@") && name.Length > 1)
-                    {
-                        var locKey = name[1..];
-                        nameKey = locKey;
-                        if (enDict.TryGetValue(locKey, out var enName) && !enName.StartsWith("!"))
-                        {
-                            name = enName;
-                            resolved++;
-                        }
-                        else if (merged != null && IniMerger.TryGetIniValue(merged, locKey, out var mergedName))
-                        {
-                            name = mergedName;
-                            resolved++;
-                        }
-                        else if (jaDict.TryGetValue(locKey, out var jaName) && !jaName.StartsWith("!"))
-                        {
-                            name = jaName;
-                            resolved++;
-                        }
-                        if (jaDict.TryGetValue(locKey, out var jaVal) && !jaVal.StartsWith("!"))
-                            nameJa = jaVal;
-                    }
+                    // 名前のローカライズキー (nameKey。"@" を除いたもの)。PopulateJapaneseNames が translations.db のキーと照合する
+                    var (resolvedName, nameJa, nameKey, ok) = names.Resolve(name);
+                    name = resolvedName;
+                    if (ok) resolved++;
 
                     pUuid.Value = uuid; pRn.Value = recordName; pNm.Value = name;
                     pJa.Value = string.IsNullOrEmpty(nameJa) ? DBNull.Value : nameJa;
@@ -4387,8 +4881,9 @@ public class GameDataExtractor : IDisposable
         "MiningModifier", "SalvageModifier",
     };
 
-    // 付いている物の種類 (item_index.item_type) が装備なら ship_ports の種類、装備でない・item_index に無い・空なら null
-    private static string? ShipEquipmentPortType(string? itemType)
+    // 付いている物の種類 (item_index.item_type) が装備なら ship_ports の種類、装備でない・item_index に無い・空なら null。
+    // HangarService.IsLoadoutCandidate も、所持コンポーネントの種類 (items.item_type) と口の種類を比べるのに使う
+    internal static string? ShipEquipmentPortType(string? itemType)
     {
         if (string.IsNullOrEmpty(itemType) || !ShipEquipmentItemTypes.Contains(itemType)) return null;
         return itemType switch
@@ -4743,7 +5238,8 @@ public class GameDataExtractor : IDisposable
 
     // record の JSON を、形 ({"_RecordName_", "_RecordId_", "_RecordValue_": {"_Type_", "Components": [...]}}) はそのままに、
     // Components を SlimRawJsonComponents と、種類 itemType の SlimRawJsonComponentsByType だけにしたものにする
-    internal static string SlimItemRawJson(JsonElement root, string itemType = "")
+    // alsoKeep を渡すと、その部品も残す (追加で取り込む品目の性能に使う部品。ExtraItemKeepComponents)
+    internal static string SlimItemRawJson(JsonElement root, string itemType = "", IReadOnlySet<string>? alsoKeep = null)
     {
         SlimRawJsonComponentsByType.TryGetValue(itemType ?? "", out var extra);
         using var ms = new MemoryStream();
@@ -4769,7 +5265,7 @@ public class GameDataExtractor : IDisposable
                     {
                         if (comp.ValueKind != JsonValueKind.Object || !comp.TryGetProperty("_Type_", out var t)) continue;
                         var type = t.GetString() ?? "";
-                        if (SlimRawJsonComponents.Contains(type) || (extra != null && extra.Contains(type))) comp.WriteTo(w);
+                        if (SlimRawJsonComponents.Contains(type) || (extra != null && extra.Contains(type)) || (alsoKeep != null && alsoKeep.Contains(type))) comp.WriteTo(w);
                     }
                     w.WriteEndArray();
                 }

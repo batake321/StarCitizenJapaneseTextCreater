@@ -20,6 +20,18 @@
                 <Button Content="js1/js2 の入れ替え" Click="InstanceSwap_Click" Padding="8,2" Margin="0,0,8,0" VerticalAlignment="Center"
                         ToolTip="全ての機能の js1 と js2 の割り当てを入れ替えます (保存時に actionmaps.xml に反映)"/>
                 <TextBlock x:Name="txtPressInfo" VerticalAlignment="Center" Foreground="#D32F2F" FontSize="12"/>
+                <!-- js 番号を判別できない機器 (と手で選んだ機器) を押したときだけ出す: 「この機器は js◯」を選ぶ -->
+                <StackPanel x:Name="pnlJsChoice" Orientation="Horizontal" Visibility="Collapsed" VerticalAlignment="Center" Margin="8,0,0,0">
+                    <TextBlock Text="この機器は:" VerticalAlignment="Center" FontSize="12" Margin="0,0,6,0"/>
+                    <Button x:Name="btnChooseJs1" Content="js1" Click="ChooseJs1_Click" Padding="8,2" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                    <Button x:Name="btnChooseJs2" Content="js2" Click="ChooseJs2_Click" Padding="8,2" VerticalAlignment="Center"/>
+                </StackPanel>
+                <!-- 元の js1 の機器の記録 (js1/js2 の入れ替え済みかの判定に使う) と、その記録を消すボタン -->
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
+                    <TextBlock x:Name="txtOriginalJs1" VerticalAlignment="Center" Foreground="#666" FontSize="12" TextWrapping="Wrap" MaxWidth="700"/>
+                    <Button x:Name="btnClearOriginalJs1" Content="記録を消す" Click="ClearOriginalJs1_Click" Padding="8,2" Margin="8,0,0,0" VerticalAlignment="Center"
+                            ToolTip="元の js1 の機器の記録を消します (次に js1/js2 の入れ替えを保存したときに記録し直します)"/>
+                </StackPanel>
             </WrapPanel>
         </Border>
 

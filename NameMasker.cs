@@ -31,12 +31,15 @@ public static class NameMasker
 
     public static int Count { get; private set; }
 
-    // 品名として扱わない品目の種類 (item_type)。座席・扉・エレベーター・画面・操作盤・照明・貨物グリッドなど船の設備・飾り・器の類
+    // 品名として扱わない品目の種類 (item_type)。座席・扉・エレベーター・画面・操作盤・照明・貨物グリッドなど船の設備・飾り・器の類。
+    // 食べ物・飲み物・通貨・データチップ類・箱・電池は、契約から参照される品目として item_index に足す (GameDataExtractor.ExtractExtraItemsAsync) が、
+    // 名前が「Datapad」「Council Scrip」のような一般の語なので品名として扱わない
     private static readonly HashSet<string> NonProductItemTypes = new(StringComparer.OrdinalIgnoreCase)
     {
         "Seat", "SeatAccess", "SeatDashboard", "Door", "Elevator", "Usable", "Misc", "Room", "AttachedPart", "CargoGrid",
         "Light", "DockingCollar", "DockingAnimator", "AirTrafficController", "Display", "ControlPanel", "Player", "Container",
         "LandingSystem", "LandingGear", "Decal", "Flair_Surface", "FPS_Deployable",
+        "Food", "Drink", "Bottle", "Currency", "RemovableChip", "InventoryContainer", "Battery",
     };
 
     // 地名として扱わない星図の場所 (starmap_names.record_name。大文字小文字無視):

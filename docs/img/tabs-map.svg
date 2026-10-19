@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" width="900" height="620" role="img" aria-labelledby="t d">
   <title id="t">アプリ画面のタブ構成</title>
-  <desc id="d">上部の GamePath バーと、翻訳・翻訳エディタ・用語集・プロファイル・コモディティ・船舶管理・価格キャプチャ・契約・船舶戦闘・個人戦闘・船舶装備・個人装備・詳細・チャット・設定・ゲームログ・鉱石・BP・ログの 19 タブ。船舶管理の中に所持船・アップグレード管理・装備の 3 タブ、個人戦闘の中に表・ダメージ判定の 2 タブがあります。</desc>
+  <desc id="d">上部の GamePath バーと、翻訳・翻訳エディタ・用語集・プロファイル・コモディティ・船舶管理・価格キャプチャ・契約・船舶戦闘・個人戦闘・船舶装備・個人装備・詳細・チャット・設定・ゲームログ・鉱石・BP・ログの 19 タブ。船舶管理の中に所持船・アップグレード管理・装備・電力管理の 4 タブ、個人戦闘の中に表・ダメージ判定の 2 タブがあります。</desc>
   <style>
     .f { font-family: "Segoe UI","Yu Gothic UI",Meiryo,sans-serif; }
     .lbl { font-size: 15px; fill: #dbe4ee; }
@@ -64,6 +64,7 @@
     <rect x="160" y="386" width="140" height="34" rx="6" fill="#101d2a" stroke="#2f6f96"/><text x="230" y="408" text-anchor="middle" fill="#bfe6ff">所持船</text>
     <rect x="314" y="386" width="200" height="34" rx="6" fill="#101d2a" stroke="#2f6f96"/><text x="414" y="408" text-anchor="middle" fill="#bfe6ff">アップグレード管理</text>
     <rect x="528" y="386" width="140" height="34" rx="6" fill="#101d2a" stroke="#2f6f96"/><text x="598" y="408" text-anchor="middle" fill="#bfe6ff">装備</text>
+    <rect x="682" y="386" width="140" height="34" rx="6" fill="#101d2a" stroke="#2f6f96"/><text x="752" y="408" text-anchor="middle" fill="#bfe6ff">電力管理</text>
     <text x="50" y="452" fill="#bfe6ff">個人戦闘</text>
     <rect x="160" y="430" width="140" height="34" rx="6" fill="#101d2a" stroke="#2f6f96"/><text x="230" y="452" text-anchor="middle" fill="#bfe6ff">表</text>
     <rect x="314" y="430" width="200" height="34" rx="6" fill="#101d2a" stroke="#2f6f96"/><text x="414" y="452" text-anchor="middle" fill="#bfe6ff">ダメージ判定</text>

@@ -21,6 +21,7 @@ public class TranslationDatabase : IDisposable
         _dbPath = dbPath;
         _conn = new SqliteConnection($"Data Source={dbPath}");
         _conn.Open();
+        SqliteWal.EnsureOn(_conn);   // 新しく作った DB も WAL にする (もう WAL なら問い合わせ 1 回だけ)
         InitSchema();
     }
 

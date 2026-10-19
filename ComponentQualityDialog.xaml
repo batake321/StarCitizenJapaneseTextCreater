@@ -1,0 +1,47 @@
+<Window x:Class="StarCitizenJapaneseTextCreater.ComponentQualityDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="品質" SizeToContent="WidthAndHeight" MinWidth="420" MaxHeight="700"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
+    <!-- 自作品の材料の枠ごとの品質 (0〜1000)。枠は BP の材料の枠 (blueprint_materials)、変わる性質は blueprint_modifiers の property -->
+    <StackPanel Margin="16">
+        <TextBlock x:Name="txtTitle" FontWeight="Bold" Margin="0,0,0,4"/>
+        <TextBlock x:Name="txtHelp" Foreground="#666" TextWrapping="Wrap" MaxWidth="480" Margin="0,0,0,8"
+                   Text="材料の枠ごとに品質 (0〜1000) を入れます。空の枠は品質 500 (ゲームデータの既定の品質) として計算します。"/>
+        <!-- 数量が 2 以上の所持コンポーネントだけ: 品質を入れる数 (既定は全部) -->
+        <StackPanel x:Name="pnlCount" Orientation="Horizontal" Margin="0,0,0,8" Visibility="Collapsed">
+            <TextBlock Text="品質を入れる数:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <TextBox x:Name="txtCount" Width="60" VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <TextBlock x:Name="txtCountMax" VerticalAlignment="Center" Foreground="#666" TextWrapping="Wrap" MaxWidth="380"/>
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="全部の枠に同じ品質:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <TextBox x:Name="txtAll" Width="60" VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <Button Content="当てる" Padding="8,2" Click="ApplyAll_Click"/>
+        </StackPanel>
+        <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="420">
+            <ItemsControl x:Name="lstSlots">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Margin="0,2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="170"/>
+                                <ColumnDefinition Width="70"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="{Binding Name}" VerticalAlignment="Center" ToolTip="{Binding DebugName}"/>
+                            <TextBox Grid.Column="1" Text="{Binding Text, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="60" VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="2" Text="{Binding Effects}" Foreground="#666" VerticalAlignment="Center" Margin="8,0,0,0" TextWrapping="Wrap" MaxWidth="260"/>
+                        </Grid>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+        <TextBlock x:Name="txtError" Foreground="#D32F2F" Margin="0,6,0,0" TextWrapping="Wrap" MaxWidth="480"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="品質なしにする" Padding="8,2" Margin="0,0,16,0" Click="Clear_Click" ToolTip="品質を消す (自作でない・品質を入れない)"/>
+            <Button Content="OK" Width="80" Margin="0,0,8,0" Click="Ok_Click" IsDefault="True"/>
+            <Button Content="キャンセル" Width="80" Click="Cancel_Click" IsCancel="True"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

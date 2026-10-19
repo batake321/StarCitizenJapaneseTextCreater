@@ -17,6 +17,14 @@ $Repo = "batake321/StarCitizenJapaneseTextCreater"
 
 Set-Location $ProjectDir
 
+# アプリが起動中なら止める (どこから起動したものでも。インストール先から起動したものも含む)。
+# 起動中だと publish の exe を置き換えられず、D:\temp の DB の中身が -wal に残っていることもある
+$running = @(Get-Process -Name $ProjectName -ErrorAction SilentlyContinue)
+if ($running.Count -gt 0) {
+    $where = ($running | ForEach-Object { if ($_.Path) { $_.Path } else { "PID $($_.Id)" } }) -join ', '
+    throw "アプリを閉じてから実行してください (起動中: $where)"
+}
+
 # 1. Build & Publish
 Write-Host "=== Build & Publish ===" -ForegroundColor Cyan
 dotnet publish -c Release -r win-x64 --self-contained false -o $PublishDir
@@ -29,6 +37,14 @@ $workDir = "D:\temp"
 # 同梱してよい DB はこの 3 つだけ。
 # 所持船・My Hangar・所持コンポーネント・装備の設定は trade_cache.db に入っており、これは個人データなので絶対に同梱しない
 $allowedDbs = @("translations.db", "gamedata_cache.db", "equipment_cache.db")
+# gamedata_cache.db と translations.db は WAL (journal_mode=WAL) で使う。書き込みはまず <名前>-wal に入り、DB の本体だけを写すと中身が抜けるので、
+# -wal が 0 バイトでなければ止める (アプリを閉じると、閉じるときのチェックポイントで -wal が空になる)
+foreach ($db in @("gamedata_cache.db", "translations.db")) {
+    $wal = Join-Path $workDir "$db-wal"
+    if ((Test-Path $wal) -and ((Get-Item $wal).Length -gt 0)) {
+        throw "アプリを一度起動して閉じ直してから実行してください ($wal に、まだ DB に書き戻していない中身があります)"
+    }
+}
 foreach ($db in $allowedDbs) {
     $src = Join-Path $workDir $db
     if (Test-Path $src) {
@@ -37,6 +53,29 @@ foreach ($db in $allowedDbs) {
     } else {
         Write-Host "  Skip: $db (not found in $workDir)" -ForegroundColor Yellow
     }
+}
+
+# 同梱する gamedata_cache.db と translations.db を DELETE 方式の 1 つのファイルにする (WAL の見出しのままだと、書けないフォルダ
+# (インストール先) で読み取り専用で開けない)。publish の exe の --prepare-bundled-db が DELETE にして、見出し 1/1・quick_check ok・横のファイルが
+# 無いことを確かめる。だめなら止める
+$prepareDbs = @(@("gamedata_cache.db", "translations.db") | ForEach-Object { Join-Path $PublishDir $_ } | Where-Object { Test-Path $_ })
+if ($prepareDbs.Count -gt 0) {
+    $exePath = Join-Path $PublishDir "$ProjectName.exe"
+    $outFile = [System.IO.Path]::GetTempFileName()
+    $proc = Start-Process -FilePath $exePath -ArgumentList (@("--prepare-bundled-db") + ($prepareDbs | ForEach-Object { "`"$_`"" })) -PassThru -NoNewWindow -Wait -RedirectStandardOutput $outFile
+    Get-Content $outFile -Encoding UTF8 | ForEach-Object { Write-Host "  $_" }
+    Remove-Item $outFile -ErrorAction SilentlyContinue
+    if ($proc.ExitCode -ne 0) { throw "同梱する DB を DELETE 方式にできませんでした (終了コード $($proc.ExitCode))" }
+    foreach ($p in $prepareDbs) {
+        # 見出しの 18・19 バイト目が 1/1 (DELETE などの方式。2/2 は WAL) か、ここでも確かめる
+        $fs = [System.IO.File]::OpenRead($p)
+        try { $hdr = New-Object byte[] 100; [void]$fs.Read($hdr, 0, 100) } finally { $fs.Dispose() }
+        if ($hdr[18] -ne 1 -or $hdr[19] -ne 1) { throw "同梱する DB の見出しが DELETE 方式ではありません: $p ($($hdr[18])/$($hdr[19]))" }
+        foreach ($sfx in @("-wal", "-shm", "-journal")) {
+            if (Test-Path "$p$sfx") { throw "同梱する DB の横のファイルが残っています: $p$sfx" }
+        }
+    }
+    Write-Host "  Bundled DB journal mode: DELETE (header 1/1, quick_check ok)" -ForegroundColor Green
 }
 
 # 許可した DB 以外が publish に紛れていたら ZIP を作らずに止める (個人データの同梱防止)

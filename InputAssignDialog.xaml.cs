@@ -131,7 +131,16 @@ public partial class InputAssignDialog : Window
             "確認", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
             return;
 
-        SetBindingValue(binding, "");
+        // 割り当て解除はゲームの解除の書き方 (機器の接頭辞 + 空白。"js1_ " など) で持つ (押した直後から「（解除）」と出る)
+        var clearValue = _deviceType switch
+        {
+            "mouse" => "mo1_ ",
+            "gamepad" => "gp1_ ",
+            "joystick1" => "js1_ ",
+            "joystick2" => "js2_ ",
+            _ => "",
+        };
+        SetBindingValue(binding, clearValue);
         _changed = true;
         RefreshCurrentBindings();
         ApplyActionFilter();

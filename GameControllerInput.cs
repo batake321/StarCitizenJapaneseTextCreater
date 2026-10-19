@@ -27,20 +27,24 @@ public sealed class GameControllerInputEventArgs : EventArgs
     public ushort ProductId { get; }
     public string DisplayName { get; }
     public string InputCode { get; }
+    // 機器を見分ける ID (ジョイスティックは RawGameController.NonRoamableId。ゲームパッドと、取れなかったときは "")
+    public string DeviceId { get; }
 
-    public GameControllerInputEventArgs(GameControllerKind kind, ushort vendorId, ushort productId, string displayName, string inputCode)
+    public GameControllerInputEventArgs(GameControllerKind kind, ushort vendorId, ushort productId, string displayName, string inputCode, string deviceId = "")
     {
         Kind = kind;
         VendorId = vendorId;
         ProductId = productId;
         DisplayName = displayName;
         InputCode = inputCode;
+        DeviceId = deviceId ?? "";
     }
 }
 
 public sealed class GameControllerInput : IDisposable
 {
-    private const double TriggerThreshold = 0.5;   // LT / RT はこの値を超えた瞬間を押下とする
+    private const double TriggerThreshold = 0.5;          // LT / RT はこの値を超えた瞬間を押下とする
+    private const double TriggerReleaseThreshold = 0.3;   // 押下中の LT / RT は、この値を下回ったら離したとみなす (しきい値付近の揺れで続けて通知しないため)
     private const long RetryDelayMs = 1000;        // 新しいデバイスの最初の読み取りに失敗したとき、再構築で再挑戦するまでの間隔
 
     // ゲームパッドのボタンと部分コード (gp1_ を除いた表記。BindingEditDialog.GamepadKeys と同じ)
@@ -65,11 +69,13 @@ public sealed class GameControllerInput : IDisposable
         public required ushort VendorId;
         public required ushort ProductId;
         public required string DisplayName;
+        public required string DeviceId;            // RawGameController.NonRoamableId (取れなければ "")
         public required bool[] Buttons;
         public required GameControllerSwitchPosition[] Switches;
         public required double[] Axes;              // GetCurrentReading に渡すための入れ物 (軸は通知しない)
         public bool[] PrevButtons = Array.Empty<bool>();
-        public GameControllerSwitchPosition[] PrevSwitches = Array.Empty<GameControllerSwitchPosition>();
+        // ハットごとの「最後に読んだ斜めでない値」(中央か上下左右)。斜めの読み値では変えない
+        public GameControllerSwitchPosition[] LastStraightSwitches = Array.Empty<GameControllerSwitchPosition>();
     }
 
     private sealed class GamepadState
@@ -221,7 +227,10 @@ public sealed class GameControllerInput : IDisposable
                 continue;
             }
             Array.Copy(j.Buttons, j.PrevButtons, j.Buttons.Length);
-            Array.Copy(j.Switches, j.PrevSwitches, j.Switches.Length);
+            // 止めている間の動きは分からないので、斜めを読んだハットは新しくつないだときと同じく中央から数え直す
+            for (int i = 0; i < j.Switches.Length; i++)
+                j.LastStraightSwitches[i] = GameControllerSwitchPosition.Center;
+            UpdateLastStraight(j.Switches, j.LastStraightSwitches);
             joysticks.Add(j);
         }
 
@@ -238,8 +247,8 @@ public sealed class GameControllerInput : IDisposable
                 continue;
             }
             g.PrevButtons = r.Buttons;
-            g.PrevLeftTrigger = r.LeftTrigger > TriggerThreshold;
-            g.PrevRightTrigger = r.RightTrigger > TriggerThreshold;
+            g.PrevLeftTrigger = IsTriggerPressed(r.LeftTrigger, g.PrevLeftTrigger);
+            g.PrevRightTrigger = IsTriggerPressed(r.RightTrigger, g.PrevRightTrigger);
             gamepads.Add(g);
         }
 
@@ -273,6 +282,7 @@ public sealed class GameControllerInput : IDisposable
                     VendorId = raw.HardwareVendorId,
                     ProductId = raw.HardwareProductId,
                     DisplayName = raw.DisplayName ?? "",
+                    DeviceId = raw.NonRoamableId ?? "",
                     Buttons = new bool[raw.ButtonCount],
                     Switches = new GameControllerSwitchPosition[raw.SwitchCount],
                     Axes = new double[raw.AxisCount],
@@ -285,7 +295,10 @@ public sealed class GameControllerInput : IDisposable
                 continue;
             }
             s.PrevButtons = (bool[])s.Buttons.Clone();
-            s.PrevSwitches = (GameControllerSwitchPosition[])s.Switches.Clone();
+            // 斜めでない値をまだ読んでいないので中央とし、最初の読み値で更新する (つないだときに押していた方向は通知しない)
+            s.LastStraightSwitches = new GameControllerSwitchPosition[s.Switches.Length];
+            Array.Fill(s.LastStraightSwitches, GameControllerSwitchPosition.Center);
+            UpdateLastStraight(s.Switches, s.LastStraightSwitches);
             joysticks.Add(s);
         }
 
@@ -424,13 +437,16 @@ public sealed class GameControllerInput : IDisposable
         for (int i = 0; i < j.Buttons.Length; i++)
         {
             if (j.Buttons[i] && !j.PrevButtons[i])
-                pressed.Add(new GameControllerInputEventArgs(GameControllerKind.Joystick, j.VendorId, j.ProductId, j.DisplayName, $"button{i + 1}"));
+                pressed.Add(new GameControllerInputEventArgs(GameControllerKind.Joystick, j.VendorId, j.ProductId, j.DisplayName, $"button{i + 1}", j.DeviceId));
         }
 
-        // ハット: switch のインデックス + 1 を hat 番号とする。中央 → 上下左右 の 4 方向へ変わったときだけ通知 (斜めは通知しない)
+        // ハット: switch のインデックス + 1 を hat 番号とする。読み値が上下左右のどれかで、
+        //   「最後に読んだ斜めでない値」(中央か上下左右) と違うときに通知する
+        //   (上 → 右上 → 上 では再通知しない、中央 → 左上 → 上 では「上」、上 → 右上 → 右 では「右」を通知)。
+        //   斜めは通知しない: ゲームのハットの入力名は hat?_up/down/left/right だけ
         for (int i = 0; i < j.Switches.Length; i++)
         {
-            if (j.PrevSwitches[i] != GameControllerSwitchPosition.Center) continue;
+            if (j.Switches[i] == j.LastStraightSwitches[i]) continue;
             var dir = j.Switches[i] switch
             {
                 GameControllerSwitchPosition.Up => "up",
@@ -440,11 +456,22 @@ public sealed class GameControllerInput : IDisposable
                 _ => null,
             };
             if (dir != null)
-                pressed.Add(new GameControllerInputEventArgs(GameControllerKind.Joystick, j.VendorId, j.ProductId, j.DisplayName, $"hat{i + 1}_{dir}"));
+                pressed.Add(new GameControllerInputEventArgs(GameControllerKind.Joystick, j.VendorId, j.ProductId, j.DisplayName, $"hat{i + 1}_{dir}", j.DeviceId));
         }
 
         Array.Copy(j.Buttons, j.PrevButtons, j.Buttons.Length);
-        Array.Copy(j.Switches, j.PrevSwitches, j.Switches.Length);
+        UpdateLastStraight(j.Switches, j.LastStraightSwitches);
+    }
+
+    // 斜めでない読み値 (中央か上下左右) だけを「最後に読んだ斜めでない値」に入れる
+    private static void UpdateLastStraight(GameControllerSwitchPosition[] current, GameControllerSwitchPosition[] lastStraight)
+    {
+        for (int i = 0; i < current.Length; i++)
+        {
+            if (current[i] is GameControllerSwitchPosition.Center or GameControllerSwitchPosition.Up or GameControllerSwitchPosition.Down
+                or GameControllerSwitchPosition.Left or GameControllerSwitchPosition.Right)
+                lastStraight[i] = current[i];
+        }
     }
 
     private static void PollGamepad(GamepadState g, List<GameControllerInputEventArgs> pressed)
@@ -457,8 +484,8 @@ public sealed class GameControllerInput : IDisposable
                 pressed.Add(new GameControllerInputEventArgs(GameControllerKind.Gamepad, g.VendorId, g.ProductId, g.DisplayName, code));
         }
 
-        bool lt = r.LeftTrigger > TriggerThreshold;
-        bool rt = r.RightTrigger > TriggerThreshold;
+        bool lt = IsTriggerPressed(r.LeftTrigger, g.PrevLeftTrigger);
+        bool rt = IsTriggerPressed(r.RightTrigger, g.PrevRightTrigger);
         if (lt && !g.PrevLeftTrigger)
             pressed.Add(new GameControllerInputEventArgs(GameControllerKind.Gamepad, g.VendorId, g.ProductId, g.DisplayName, "triggerl_btn"));
         if (rt && !g.PrevRightTrigger)
@@ -468,4 +495,8 @@ public sealed class GameControllerInput : IDisposable
         g.PrevLeftTrigger = lt;
         g.PrevRightTrigger = rt;
     }
+
+    // LT / RT の押下状態 (戻り幅付き): 離している間は TriggerThreshold を超えたら押下、押下中は TriggerReleaseThreshold を下回ったら離した
+    private static bool IsTriggerPressed(double value, bool wasPressed) =>
+        wasPressed ? value >= TriggerReleaseThreshold : value > TriggerThreshold;
 }

@@ -210,7 +210,7 @@ public partial class MouseLayoutPanel : UserControl
         // Build full mouse binding list on right side
         double listY = _bindingListY;
         var mouseBindings = allActions
-            .Where(a => !string.IsNullOrEmpty(a.Mouse))
+            .Where(a => InputCodeHelper.IsAssigned(a.Mouse))   // 割り当て解除 ("mo1_ " など) は載せない
             .OrderBy(a => a.Mouse)
             .ToList();
 

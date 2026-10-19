@@ -42,13 +42,236 @@ public partial class App : Application
         catch { }
     }
 
+    // ===== 処理されなかった例外 =====
+    //   UI スレッド (DispatcherUnhandledException):
+    //     画面が出た後 (MainWindow の Loaded の後) は、落とさずに止め (Handled)、app_log.txt に全文を残して知らせる。
+    //       知らせを出している間に続けて起きた分は記録だけする (知らせが重ならないように)。
+    //       同じ種類・同じメッセージの例外が、前の回から 10 秒 (RepeatWindow) 以内に続けて起きたときは、記録も知らせもせずに数えるだけにし、
+    //       続きが途切れたとき (別の例外が起きた・10 秒より空いた・アプリの終了) に「さらに N 回起きた」と 1 行だけ記録する。
+    //       知らせは種類によらず 1 分に 3 回まで (超えた分は記録だけ)
+    //     起動の途中の「起動エラー」の窓を出している間に起きた分は、記録だけ (窓を重ねない)
+    //     起動の途中 (MainWindow の Loaded より前) と --export-backup の途中は、続けずに記録・知らせをしてから終わる
+    //       (起動の途中は知らせの窓を出して終了コード 1、--export-backup はコンソールに出して終了コード 1)
+    //   待たれなかったタスク (TaskScheduler.UnobservedTaskException): 記録だけして、観測済みにする (知らせは出さない)
+    //   それ以外のスレッド (AppDomain.UnhandledException): 止められない (アプリは終わる) ので、記録して、終わることを知らせる
+    //   記録先は作業ディレクトリの app_log.txt (MainWindow.Log と同じ)。作業ディレクトリがまだ決まっていない・無いときは
+    //   LocalAppData\StarCitizenJapaneseTextCreater の app_log.txt (書く前にフォルダを作る)
+    private static int _showingUnhandledError;
+    private static volatile bool _mainWindowLoaded;   // MainWindow の Loaded が来た (= 画面が出た。起動の途中ではない)
+    private static volatile bool _exportingBackup;    // --export-backup の途中
+
+    private static readonly TimeSpan RepeatWindow = TimeSpan.FromSeconds(10);
+    private static readonly object RepeatLock = new();
+    private static string? _lastExceptionKey;          // 直前の例外の「種類: メッセージ」
+    private static DateTime _lastExceptionAt;          // 直前の例外 (数えるだけにした分を含む) が起きた時刻
+    private static int _repeatCount;                   // 直前の例外と同じものが続けて起きて、記録しなかった回数
+    private static int _showingStartupError;           // 「起動エラー」の窓を出している間 1
+
+    // 画面が出た後の知らせの回数の上限: 種類によらず、1 分 (NoticeLimitWindow) に 3 回 (NoticeLimitCount) まで。超えた分は記録だけ
+    private static readonly TimeSpan NoticeLimitWindow = TimeSpan.FromMinutes(1);
+    private const int NoticeLimitCount = 3;
+    private static readonly Queue<DateTime> _noticeTimes = new();   // 知らせを出した時刻 (RepeatLock の中で使う)
+
+    private static string FallbackLogDir =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "StarCitizenJapaneseTextCreater");
+
+    // 例外の記録を書く。書いた先のフォルダを返す (知らせに場所を出すため)
+    private static string WriteUnhandledLog(string msg)
+    {
+        var wd = Config?.WorkingDirectory;
+        string dir;
+        if (!string.IsNullOrEmpty(wd) && Directory.Exists(wd))
+        {
+            dir = wd;
+        }
+        else
+        {
+            dir = FallbackLogDir;
+            try { Directory.CreateDirectory(dir); } catch { }   // 予備の書き先は、まだ無ければ作ってから書く
+        }
+        AppendStartupLog(dir, msg);
+        return dir;
+    }
+
+    private static string RepeatSummary(string? key, int count) =>
+        $"[例外] 直前の例外 ({(key ?? "").Replace("\r", " ").Replace("\n", " ")}) が、続けてさらに {count} 回起きました (記録と知らせは最初の 1 回だけ)";
+
+    // 続けて起きて数えるだけにした例外があれば、その回数を 1 行記録する
+    private static void FlushRepeatedExceptionSummary()
+    {
+        string? summary = null;
+        lock (RepeatLock)
+        {
+            if (_repeatCount > 0) summary = RepeatSummary(_lastExceptionKey, _repeatCount);
+            _repeatCount = 0;
+            _lastExceptionKey = null;
+        }
+        if (summary != null) WriteUnhandledLog(summary);
+    }
+
+    private void RegisterUnhandledExceptionHandlers()
+    {
+        DispatcherUnhandledException += OnDispatcherUnhandledException;
+        // 画面が出たかは MainWindow の Loaded で決める (MainWindow 側には手を入れない)
+        EventManager.RegisterClassHandler(typeof(MainWindow), FrameworkElement.LoadedEvent,
+            new RoutedEventHandler((_, _) => _mainWindowLoaded = true));
+        Exit += (_, _) => FlushRepeatedExceptionSummary();
+        // 閉じるときは作業フォルダの WAL の DB をチェックポイントして -wal を空にする (DB の本体だけで中身がそろうように。
+        // release.ps1 が D:\temp の DB の本体を同梱するときなど)。ほかの接続が読んでいて最後までできなくても、次に開いたときに -wal から読める
+        Exit += (_, _) => CheckpointWorkDbs();
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            WriteUnhandledLog($"[例外] 待たれなかったタスクの例外 (アプリは続けます): {args.Exception}");
+            args.SetObserved();
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
+            FlushRepeatedExceptionSummary();
+            var dir = WriteUnhandledLog($"[例外] 画面以外の処理で処理されなかった例外 (終了する: {args.IsTerminating}): {args.ExceptionObject}");
+            if (!args.IsTerminating) return;
+            try
+            {
+                var ex = args.ExceptionObject as Exception;
+                System.Windows.MessageBox.Show(
+                    $"予期しないエラーが起きたため、アプリを終了します。\n\n{ex?.GetType().Name}: {ex?.Message}\n\n(詳しくは {Path.Combine(dir, "app_log.txt")})",
+                    "エラー", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+            }
+            catch { }
+        };
+    }
+
+    private void OnDispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)
+    {
+        e.Handled = true;   // ここでは落とさない (続けられないときは、記録・知らせの後に下で終わる)
+        var ex = e.Exception;
+
+        // --export-backup の途中: 画面は無いのでコンソールに出し、失敗の終了コードで終わる
+        if (_exportingBackup)
+        {
+            ReportExportFailureAndExit(ex);
+            return;
+        }
+
+        // 起動の途中 (画面が出る前): 続けると半端な状態になるので、知らせてから終わる
+        if (!_mainWindowLoaded)
+        {
+            FlushRepeatedExceptionSummary();
+            // 「起動エラー」の窓を出している間に起きた分は、記録だけにして窓を重ねない (窓を閉じると終わる)
+            if (Interlocked.Exchange(ref _showingStartupError, 1) == 1)
+            {
+                WriteUnhandledLog($"[例外] 起動の途中で処理されなかった例外 (起動エラーの知らせを出している間なので、記録だけ): {ex}");
+                return;
+            }
+            var startDir = WriteUnhandledLog($"[例外] 起動の途中で処理されなかった例外 (アプリを終了します): {ex}");
+            try
+            {
+                System.Windows.MessageBox.Show(
+                    $"起動の途中で予期しないエラーが起きたため、アプリを終了します。\n\n{ex.GetType().Name}: {ex.Message}\n\n(詳しくは {Path.Combine(startDir, "app_log.txt")})",
+                    "起動エラー", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+            }
+            catch { }
+            ExitAfterFatalError(1);
+            return;
+        }
+
+        // 同じ例外が続けて起きているときは数えるだけ (記録も知らせもしない)
+        var key = $"{ex.GetType().FullName}: {ex.Message}";
+        var now = DateTime.Now;
+        string? summary = null;
+        lock (RepeatLock)
+        {
+            if (_lastExceptionKey == key && now - _lastExceptionAt <= RepeatWindow)
+            {
+                _repeatCount++;
+                _lastExceptionAt = now;
+                return;
+            }
+            if (_repeatCount > 0) summary = RepeatSummary(_lastExceptionKey, _repeatCount);
+            _lastExceptionKey = key;
+            _lastExceptionAt = now;
+            _repeatCount = 0;
+        }
+        if (summary != null) WriteUnhandledLog(summary);
+
+        // 知らせの回数の上限 (種類によらず NoticeLimitWindow の間に NoticeLimitCount 回まで)。超えた分は記録だけ
+        bool noticeAllowed;
+        lock (RepeatLock)
+        {
+            while (_noticeTimes.Count > 0 && now - _noticeTimes.Peek() > NoticeLimitWindow) _noticeTimes.Dequeue();
+            noticeAllowed = _noticeTimes.Count < NoticeLimitCount;
+        }
+        var dir = WriteUnhandledLog(noticeAllowed
+            ? $"[例外] 画面の処理で処理されなかった例外 (その操作を止めて、アプリは続けます): {ex}"
+            : $"[例外] 画面の処理で処理されなかった例外 (その操作を止めて、アプリは続けます。知らせは {NoticeLimitWindow.TotalSeconds:0} 秒に {NoticeLimitCount} 回までのため、記録だけ): {ex}");
+        if (!noticeAllowed) return;
+        if (Interlocked.Exchange(ref _showingUnhandledError, 1) == 1) return;   // 知らせを出している間は記録だけ
+        lock (RepeatLock) _noticeTimes.Enqueue(now);
+        try
+        {
+            System.Windows.MessageBox.Show(
+                $"予期しないエラーが起きたため、その操作を止めました。\n\n{ex.GetType().Name}: {ex.Message}\n\n" +
+                $"アプリはそのまま使えますが、表示や動作がおかしいときはアプリを再起動してください。\n(詳しくは {Path.Combine(dir, "app_log.txt")})",
+                "エラー", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+        }
+        catch { }
+        finally
+        {
+            Interlocked.Exchange(ref _showingUnhandledError, 0);
+        }
+    }
+
+    // --export-backup の失敗: 記録し、標準エラーに出し、終了コード 1 で終わる
+    private static void ReportExportFailureAndExit(Exception ex)
+    {
+        WriteUnhandledLog($"[例外] --export-backup の途中で処理されなかった例外 (失敗として終了します): {ex}");
+        try { Console.Error.WriteLine($"Export failed: {ex.GetType().Name}: {ex.Message}"); } catch { }
+        ExitAfterFatalError(1);
+    }
+
+    // 続けられない例外のあとで終わる。二重起動の防止の Mutex を先に手放して閉じる
+    //   (手放せなくても、プロセスが終わればハンドルは閉じられる)
+    private static void ExitAfterFatalError(int exitCode)
+    {
+        try { _singleInstance?.ReleaseMutex(); } catch { }
+        try { _singleInstance?.Dispose(); } catch { }
+        _singleInstance = null;
+        Environment.Exit(exitCode);
+    }
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        RegisterUnhandledExceptionHandlers();
+
+        // release.ps1 から: publish に写した同梱 DB を DELETE 方式の 1 つのファイルにして確かめる (画面は出さない。結果は標準出力と終了コード)。
+        // 書けないフォルダ (インストール先) で読み取り専用で開くとき、WAL の見出しの DB は -shm を作れずに開けないため
+        if (e.Args.Length >= 2 && e.Args[0] == "--prepare-bundled-db")
+        {
+            Console.OutputEncoding = System.Text.Encoding.UTF8;   // release.ps1 は UTF-8 で読む
+            var failed = false;
+            foreach (var path in e.Args.Skip(1))
+            {
+                var why = SqliteWal.PrepareForBundle(path);
+                Console.WriteLine(why == null ? $"OK: {path} (DELETE 方式・quick_check ok)" : $"NG: {why}");
+                failed |= why != null;
+            }
+            Environment.Exit(failed ? 1 : 0);
+            return;
+        }
 
         if (e.Args.Length >= 2 && e.Args[0] == "--export-backup")
         {
-            RunBackupExport(e.Args[1]);
+            _exportingBackup = true;   // この途中の例外は、記録してから失敗の終了コードで終わる
+            try
+            {
+                RunBackupExport(e.Args[1]);
+            }
+            catch (Exception ex)
+            {
+                // DispatcherUnhandledException に届くかに頼らず、ここで記録・標準エラーへの出力をして、失敗の終了コードで終わる
+                ReportExportFailureAndExit(ex);
+                return;
+            }
             // Shutdown() は遅延実行なので、その前に App.xaml の StartupUri が MainWindow を作ってしまい、
             // 終了コードが 1 になる (呼び出し側のスクリプトが失敗と誤判定する)。ここで確実に終わらせる
             Environment.Exit(0);
@@ -113,6 +336,32 @@ public partial class App : Application
                 "起動エラー", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
         }
 
+        // 前回、インデックス構築・装備データの再抽出・バックアップの取り込み・PC 間の同期の取り込みの途中でアプリが終わっていたら
+        // (途中の印 InterruptedWork が残っている)、控えから元に戻す。ほかの DB の接続を開く前、WAL への切り替えと、同梱 DB からの作り直しの判定
+        // (DB の quick_check の印 = 更新日時を見る) より前に行う。結果は app_log.txt に出し、画面が出た後に一度だけ知らせる
+        if (workDirReady)
+        {
+            try
+            {
+                var notices = InterruptedWork.RecoverAll(Config.WorkingDirectory, s => AppendStartupLog(Config.WorkingDirectory, $"[途中で終わった処理] {s}"));
+                if (notices.Count > 0)
+                {
+                    var text = string.Join("\n\n", notices);
+                    Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, () =>
+                        System.Windows.MessageBox.Show(text, "前回の終了", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information));
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendStartupLog(Config.WorkingDirectory, $"[途中で終わった処理] 戻す処理に失敗しました: {ex}");
+            }
+        }
+
+        // 作業フォルダの DB (gamedata_cache.db / trade_cache.db / translations.db) を WAL にする (前の版で作った DELETE 方式の DB も、ここで切り替わる)。
+        // ほかの接続を開く前に行う。下の作り直しの quick_check の印 (更新日時) より前に行い、切り替えで印が外れないようにする
+        if (workDirReady)
+            EnsureWorkDbsWal(Config.WorkingDirectory, s => AppendStartupLog(Config.WorkingDirectory, $"[WAL] {s}"));
+
         // 同梱 DB が替わった・作業フォルダの DB が無い・使えないときは、同梱 DB を土台に作り直す (今までの DB の個人データは取り込む)。
         // 時間がかかるので「準備中」の小さな窓を出し、裏で行う。失敗したら画面が出た後に知らせる
         if (workDirReady)
@@ -130,6 +379,42 @@ public partial class App : Application
                 failed.Failures.Add($"同梱 DB: {ex.Message}");
                 NotifyBundledDbResult(failed);
             }
+        }
+    }
+
+    // 作業フォルダの WAL にする DB (SqliteWal.WalDbNames) を WAL にする (ネットワークのドライブなら DELETE)。無い DB は飛ばす
+    internal static void EnsureWorkDbsWal(string workDir, Action<string>? log)
+    {
+        foreach (var name in SqliteWal.WalDbNames)
+            SqliteWal.Ensure(Path.Combine(workDir, name), log);
+    }
+
+    // 閉じるときに作業フォルダの WAL の DB をチェックポイントする (プールの接続を閉じてから)。裏の書き込みは MainWindow の Window_Closing で
+    // 先に止めてある (StopBackgroundWritesForExit)。空振りしたら少し間を置いて、全部で ExitCheckpointBudget までやり直す。
+    // DB ごとの結果を app_log.txt に出す。失敗してもアプリを閉じるのは止めない
+    // Windows のサインアウト・シャットダウンのときは MainWindow.OnSessionEnding が先に呼ぶ。全部の DB が成功したときだけ済んだ印
+    // (_workDbsCheckpointed) を立て、Exit では重ねて行わない。空振り・失敗があれば印を下ろし、Exit でもう一度試す
+    private static readonly TimeSpan ExitCheckpointBudget = TimeSpan.FromSeconds(3);
+    private static int _workDbsCheckpointed;
+    internal static void CheckpointWorkDbs()
+    {
+        if (Interlocked.CompareExchange(ref _workDbsCheckpointed, 1, 0) != 0) return;
+        var allDone = false;
+        try
+        {
+            var workDir = Config.WorkingDirectory;
+            if (string.IsNullOrEmpty(workDir) || !Directory.Exists(workDir)) { allDone = true; return; }
+            SqliteConnection.ClearAllPools();
+            allDone = SqliteWal.CheckpointForExit(SqliteWal.WalDbNames.Select(n => Path.Combine(workDir, n)),
+                s => AppendStartupLog(workDir, $"[WAL] {s}"), ExitCheckpointBudget);
+        }
+        catch (Exception ex)
+        {
+            try { AppendStartupLog(Config.WorkingDirectory, $"[WAL] 閉じるときのチェックポイントに失敗しました: {ex.Message}"); } catch { }
+        }
+        finally
+        {
+            if (!allDone) Volatile.Write(ref _workDbsCheckpointed, 0);
         }
     }
 
@@ -537,6 +822,16 @@ public partial class App : Application
         {
             report?.Invoke(0, $"{job.DbName} を作業フォルダへ写しています...");
             CopyFileWithProgress(job.SrcPath, tmp, pct => report?.Invoke(pct, $"{job.DbName} を作業フォルダへ写しています... {pct}%"));
+            // 同梱 DB は WAL の見出しのことがある (release.ps1 が WAL の DB の本体を同梱する)。作り直しの間は DELETE 方式で扱い
+            // (読み取り専用の接続が .tmp の横に -wal / -shm を残して、下の入れ替えが止まらないように)、入れ替えた後で WAL にする
+            if (job.DbName is "gamedata_cache.db" or "translations.db")
+            {
+                using var jm = new SqliteConnection($"Data Source={tmp};Pooling=False");
+                jm.Open();
+                using var jc = jm.CreateCommand();
+                jc.CommandText = "PRAGMA journal_mode=DELETE";
+                jc.ExecuteScalar();
+            }
 
             PersonalImportCounts counts;
             using (var db = new SqliteConnection($"Data Source={tmp};Pooling=False"))
@@ -556,6 +851,9 @@ public partial class App : Application
             SqliteConnection.ClearAllPools();
 
             if (ReplaceWithRebuilt(tmp, job.DestPath) is { } bakWarning) warnings.Add(bakWarning);
+            // 入れ替えた DB を WAL にする (切り替えられなくても作り直しは失敗にしない。次の起動でまた切り替える)
+            if (SqliteWal.WalDbNames.Contains(job.DbName))
+                SqliteWal.Ensure(job.DestPath, m => AppendStartupLog(workDir, $"[WAL] {m}"));
             return counts;
         }
         catch
@@ -1081,9 +1379,15 @@ public partial class App : Application
     }
 
     // 起動時の出来事を作業ディレクトリの app_log.txt に残す (MainWindow.Log と同じ書き先・書式)
+    //   書き込みはロックの中で行う (例外の記録 (WriteUnhandledLog)・同梱 DB の作り直し (裏のスレッド)・同期 (MainWindow.Sync) の
+    //   呼び出しが重なって、開けずに 1 行が抜けないように)。MainWindow.Log など、この関数を通らず同じファイルに直接書く所はこのロックの外
+    private static readonly object AppLogLock = new();
     internal static void AppendStartupLog(string workDir, string msg)
     {
-        try { File.AppendAllText(Path.Combine(workDir, "app_log.txt"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}\n", System.Text.Encoding.UTF8); } catch { }
+        lock (AppLogLock)
+        {
+            try { File.AppendAllText(Path.Combine(workDir, "app_log.txt"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}\n", System.Text.Encoding.UTF8); } catch { }
+        }
     }
 
     private static bool CanWriteToDirectory(string dir, out string error)

@@ -10,7 +10,7 @@ namespace StarCitizenJapaneseTextCreater;
 //   - ゲーム中 (Game.log が 10 分以内に更新されている間): 10 分ごとに取り込み → 書き出し (起動時と同じ順)
 //   - ゲーム終了: StarCitizen のプロセスがゲーム起動の後に一度でも見つかっていて見つからなくなったとき、
 //     プロセスが一度も見つからない環境では Game.log の更新が 5 分止まったとき → 書き出し (1 回)
-//   - アプリ終了 (Window_Closing → SyncExportOnClosing): 書き出し (最大 10 秒待つ)
+//   - アプリ終了 (Window_Closing → RunExitAsync → SyncExportOnClosingAsync): 書き出し (最大 10 秒待つ)
 // 自動の書き出しは内容が前回と同じなら書き出さない (SyncService.Export の Unchanged。手動の「今すぐ書き出す」は常に書き出す)。
 // 自動の取り込みは両方で変更がある相手 (Candidate.BothChanged) を取り込まず、状態欄とログに出す。手動の「今すぐ取り込む」は確認の上で取り込む。
 // 共有フォルダへは裏のスレッド (Task.Run / SyncService の Task.Run) だけで触る (フォルダの有無の確認も)。失敗はログだけ (設定タブの手動のボタンのときだけ MessageBox)。
@@ -160,8 +160,8 @@ public partial class MainWindow
         }
     }
 
-    // アプリ終了時の書き出し (Window_Closing から。UI のスレッドで共有フォルダに触らず、裏の Task を最大 10 秒待つ)
-    private void SyncExportOnClosing()
+    // アプリ終了時の書き出し (閉じる処理 RunExitAsync から。UI のスレッドで共有フォルダに触らず、裏の Task を最大 10 秒待つ)
+    private async Task SyncExportOnClosingAsync()
     {
         _syncTimer?.Stop();
         var folder = (App.Config.SyncFolder ?? "").Trim();
@@ -171,7 +171,7 @@ public partial class MainWindow
         try
         {
             var task = Task.Run(() => SyncService.Export(folder, workDir, SyncMachine, SyncAppVersion, LogFile));
-            if (!task.Wait(TimeSpan.FromSeconds(10)))
+            if (await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(10))) != task)
                 LogFile("書き出し (終了) が 10 秒で終わらなかったので待つのをやめました");
             else if (task.Result.Unchanged)
                 LogFile("書き出し (終了): 前回の書き出しから変更が無いので書き出しませんでした");
@@ -192,6 +192,7 @@ public partial class MainWindow
             if (manual) MessageBox.Show("共有フォルダが設定されていません。", "PC 間の同期", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
+        if (_exiting) return;   // 閉じている途中は取り込まない (DB に書くので)
         if (_syncImportRunning)
         {
             if (manual) MessageBox.Show("取り込みの最中です。", "PC 間の同期");

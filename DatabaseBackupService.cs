@@ -26,10 +26,10 @@ public static class DatabaseBackupService
     // item_index: 品目の索引 (全文検索の表 item_index_fts は取り込まず、取り込んだ後に item_index から作り直す)。item_vectors: チャットのベクトル検索の埋め込み。
     // mission_reputation / faction_reputation / reputation_reward_amount: ミッションの派閥・貢献度 (日本語化で使う)
     // resource_types: 資源の種類 (商品売買のログの resourceGUID → 名前。インデックス構築で作る)
-    // blueprints / blueprint_materials / blueprint_pools: BP (ブループリント。［BP］タブ。インデックス構築で作る)
+    // blueprints / blueprint_materials / blueprint_pools / blueprint_modifiers: BP (ブループリント。［BP］タブ。インデックス構築で作る)
     // starmap_names: 星図の場所のレコード名 → 表示名の翻訳キー (［ゲームログ］の場所名。インデックス構築で作る)
     private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache", "item_shop_prices", "ammo_params", "item_variants", "player_damage_params", "item_ports", "item_port_labels",
-        "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount", "resource_types", "blueprints", "blueprint_materials", "blueprint_pools", "starmap_names"];
+        "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount", "resource_types", "blueprints", "blueprint_materials", "blueprint_pools", "blueprint_modifiers", "starmap_names"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
     // ore_stock / commodity_trades / mining_log: ［鉱石］タブの在庫・売買の記録・採掘の記録 (個人データ。OreService)
     // my_gear: 所持個人装備、game_log_imports: ［ゲームログ］の行を所持・在庫に入れた印 (個人データ。HangarService)
@@ -63,7 +63,9 @@ public static class DatabaseBackupService
                 {
                     onStatus?.Invoke("translations.db をコピー中...");
                     var tempTransPath = Path.Combine(tempDir, "translations.db");
-                    File.Copy(translationDbPath, tempTransPath, true);
+                    // WAL の DB は本体だけを写すと -wal の中身が抜けるので、VACUUM INTO で一貫した写しを作る (写しは DELETE 方式の 1 つのファイル)。
+                    // VACUUM INTO が失敗したら (DB が壊れているときなど) 本体と -wal・-shm を組で写す
+                    CopyForExport(translationDbPath, tempTransPath, onStatus);
                     if (dropTombstones)
                     {
                         using (var conn = new SqliteConnection($"Data Source={tempTransPath}"))
@@ -78,7 +80,7 @@ public static class DatabaseBackupService
                 {
                     onStatus?.Invoke("gamedata_cache.db をコピー中...");
                     var tempIndexPath = Path.Combine(tempDir, "gamedata_cache.db");
-                    File.Copy(indexDbPath, tempIndexPath, true);
+                    CopyForExport(indexDbPath, tempIndexPath, onStatus);
                     // この PC だけの印 (売り場・価格の取得中・手動中止) はバックアップに入れない
                     using (var conn = new SqliteConnection($"Data Source={tempIndexPath}"))
                     {
@@ -98,7 +100,7 @@ public static class DatabaseBackupService
                 {
                     onStatus?.Invoke("trade_cache.db をコピー中...");
                     var tempTradePath = Path.Combine(tempDir, "trade_cache.db");
-                    File.Copy(tradeDbPath, tempTradePath, true);
+                    CopyForExport(tradeDbPath, tempTradePath, onStatus);
 
                     if (!includeMyShips)
                     {
@@ -150,6 +152,13 @@ public static class DatabaseBackupService
         finally { try { Directory.Delete(tempDir, true); } catch { } }
 
         onStatus?.Invoke("エクスポート完了");
+    }
+
+    // 書き出しの写しを作る (SqliteWal.SnapshotOrCopyTo)。VACUUM INTO で写せずに組で写したときは、DB が壊れている可能性を添えて知らせる
+    private static void CopyForExport(string src, string dest, Action<string>? onStatus)
+    {
+        if (SqliteWal.SnapshotOrCopyTo(src, dest) is { } why)
+            onStatus?.Invoke($"{Path.GetFileName(src)} は VACUUM INTO で写せなかったため、ファイル (本体と -wal・-shm) をそのまま写しました。DB が壊れている可能性があります ({why})");
     }
 
     // 書き出しの写しから PC 間の同期の墓石 (sync_tombstones) を消す (表が無ければ何もしない)
@@ -242,7 +251,8 @@ public static class DatabaseBackupService
     internal static readonly string[] TradePersonalKeyedTables = ["hangar_pledges", "hangar_ccus", "hangar_ship_marks", "ship_loadouts", "commodity_trades", "mining_log", "game_log_entries", "my_blueprints"];
     // 個人で、行を見分ける主キーが無いもの (主キーが無い、または中身と関係の無い連番の id だけのもの): 自然な鍵で a 優先の和集合
     //   my_ships: 正規化した船名 (HangarService.NormalizeShipName。所持船の名前一致の流儀) が a に無い b の船を足す。a にある船はそのまま (数量の概念なし)
-    //   my_components / my_gear: item_record と使用可 (usable) が同じなら a の行を残して quantity は max(a, b)、notes は JoinNotes。無い品は b から足す
+    //   my_components / my_gear: item_record と使用可 (usable) が同じ (my_components は品質 (quality_json。揃えた書き方で比べる) も同じ) なら
+    //     a の行を残して quantity は max(a, b)、notes は JoinNotes。無い品は b から足す
     //   hangar_items / hangar_nameable_ships: 全列で重複を除いた和集合
     internal static readonly string[] TradePersonalUnkeyedTables = ["my_ships", "my_components", "hangar_items", "hangar_nameable_ships", "my_gear"];
     // ［ゲームログ］の行を所持・在庫に入れた印 (game_log_imports と、旧の my_component_purchases): 主キーで a 優先の和集合 (Keyed と同じ)。
@@ -277,9 +287,16 @@ public static class DatabaseBackupService
         return Task.Run(() => ImportCore(sources, translationDbPath, indexDbPath, cats, onStatus, tradeDbPath));
     }
 
+    // アプリを閉じるとき (AppExit) は、控えを作る前なら何もせずに止め、控えを作った後なら段階の間で止めて取り込み前の控えから戻す
+    // (閉じる処理は戻し終わるまで待つ)
     private static void ImportCore(List<string> sources, string translationDbPath, string indexDbPath,
         HashSet<BackupCategory> cats, Action<string>? onStatus, string? tradeDbPath)
     {
+        using var exitWork = AppExit.BeginWork("バックアップの取り込み");
+        var exitToken = AppExit.Token;
+        exitToken.ThrowIfCancellationRequested();
+        // 前回の取り込みの途中の印が残っていれば始めない (InterruptedWork。起動のときに戻して消すので、ふつうは残らない)
+        InterruptedWork.ThrowIfPending(Path.GetDirectoryName(Path.GetFullPath(indexDbPath)) ?? ".", InterruptedWork.KindImport);
         string? srcTrans = null, srcIndex = null, srcTrade = null;
         foreach (var p in sources)
         {
@@ -322,16 +339,39 @@ public static class DatabaseBackupService
         {
             foreach (var t in targets.Where(File.Exists))
             {
+                exitToken.ThrowIfCancellationRequested();
                 current = t;
                 onStatus?.Invoke($"{Path.GetFileName(t)} の取り込み前の控えを作っています...");
                 backups[t] = CreateImportBackup(t);
             }
+        }
+        catch (OperationCanceledException)
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var b in backups.Values) TryDelete(b);
+            throw;
         }
         catch (Exception ex)
         {
             SqliteConnection.ClearAllPools();
             foreach (var b in backups.Values) TryDelete(b);
             throw new IOException($"{Path.GetFileName(current)} の取り込み前の控えを作れなかったため、何も取り込んでいません: {ex.Message}", ex);
+        }
+
+        // 途中の印 (InterruptedWork)。取り込み先を書き換え始める (形を揃える) 前に書き、控えを足すたびに書き直す。成功したとき・
+        // 控えから全部戻し終えたときに消す (アプリが途中で終わったら、次の起動で印を見て全部の DB を控えから戻す)。書けなければ何も取り込まない
+        var markerDir = Path.GetDirectoryName(Path.GetFullPath(indexDbPath)) ?? ".";   // 印は今の作業フォルダに書く (InterruptedWork.MarkerDir。決まっていなければここ)
+        // 最初に決めた印の場所を覚え、書き直し・消すのはその場所に対して行う (途中で作業フォルダの設定が変わっても、ずれないように)
+        var markerPath = InterruptedWork.MarkerPath(InterruptedWork.MarkerDir(markerDir), InterruptedWork.KindImport);
+        void WriteMarker() => InterruptedWork.WriteAt(markerPath, new InterruptedWork.Marker
+        {
+            Kind = InterruptedWork.KindImport, Label = "バックアップの取り込み", Backups = new Dictionary<string, string>(backups),
+        });
+        try { WriteMarker(); }
+        catch (Exception ex)
+        {
+            foreach (var b in backups.Values) TryDelete(b);
+            throw new IOException($"途中の印を書けなかったため、何も取り込んでいません: {ex.Message}", ex);
         }
 
         try
@@ -372,23 +412,28 @@ public static class DatabaseBackupService
             {
                 onStatus?.Invoke($"{Path.GetFileName(t)} の取り込み前の控えを作っています...");
                 backups[t] = CreateImportBackup(t);
+                WriteMarker();
             }
 
+            exitToken.ThrowIfCancellationRequested();
             if (doTrans)
             {
                 onStatus?.Invoke("翻訳DBにインポート中...");
                 ImportTranslationsDb(translationDbPath, srcTrans!, cats, onStatus);
             }
+            exitToken.ThrowIfCancellationRequested();
             if (doIndex)
             {
                 onStatus?.Invoke("インデックスDBにインポート中...");
                 ImportIndexDb(indexDbPath, srcIndex!, cats, onStatus);
             }
+            exitToken.ThrowIfCancellationRequested();
             if (doTrade)
             {
                 onStatus?.Invoke("交易DBにインポート中...");
                 ImportTradeDb(tradeDbPath!, srcTrade!, onStatus);
             }
+            exitToken.ThrowIfCancellationRequested();
             if (repopulate && File.Exists(indexDbPath))
             {
                 onStatus?.Invoke("日本語名を付け直し、全文検索の表を作り直しています...");
@@ -416,20 +461,34 @@ public static class DatabaseBackupService
         catch (Exception ex)
         {
             SqliteConnection.ClearAllPools();
-            onStatus?.Invoke("インポートに失敗したため、取り込み前の状態に戻しています...");
+            onStatus?.Invoke(ex is OperationCanceledException ? "アプリを閉じるため、取り込み前の状態に戻しています..." : "インポートに失敗したため、取り込み前の状態に戻しています...");
+            // DB ごとに戻す。戻せた DB の控えは消し、戻せなかった DB の控えは .failed-<日時> にして残す (次の取り込みで上書きされないように)。
+            // どちらでも印は消す (起動のときに黙って戻すことはしない)
             var notRestored = new List<string>();
             foreach (var (target, backup) in backups)
             {
-                try { RestoreImportBackup(backup, target); }
-                catch (Exception rex) { notRestored.Add($"{Path.GetFileName(target)} ({rex.Message}。控えは {backup})"); }
+                try
+                {
+                    RestoreImportBackup(backup, target);
+                    SqliteConnection.ClearAllPools();
+                    TryDelete(backup);
+                }
+                catch (Exception rex)
+                {
+                    SqliteConnection.ClearAllPools();
+                    var kept = InterruptedWork.KeepFailedBackup(backup, markerPath, InterruptedWork.KindImport, onStatus);
+                    notRestored.Add($"{target} ({rex.Message}。取り込み前の控えは {kept})");
+                }
             }
             SqliteConnection.ClearAllPools();
+            InterruptedWork.Clear(markerPath, InterruptedWork.KindImport, onStatus);
             if (notRestored.Count > 0)
-                throw new IOException($"インポートに失敗し、次の DB を取り込み前の状態に戻せませんでした: {string.Join(", ", notRestored)}。元の失敗: {ex.Message}", ex);
-            foreach (var b in backups.Values) TryDelete(b);
+                throw new IOException($"インポートに失敗し、次の DB を取り込み前の状態に戻せませんでした (控えを残しています): {string.Join(", ", notRestored)}。元の失敗: {ex.Message}", ex);
             throw new InvalidOperationException($"インポートに失敗したため、取り込み前の状態に戻しました: {ex.Message}", ex);
         }
 
+        // 成功: 印を先に消してから控えを消す (控えを消し損ねても、印が無いので次の起動で戻さない)
+        InterruptedWork.Clear(markerPath, InterruptedWork.KindImport, onStatus);
         foreach (var b in backups.Values) TryDelete(b);
         onStatus?.Invoke("インポート完了");
     }
@@ -457,6 +516,9 @@ public static class DatabaseBackupService
         using var dest = new SqliteConnection($"Data Source={dbPath};Pooling=False");
         dest.Open();
         bak.BackupDatabase(dest);
+        // バックアップ API で戻した中身はいったん -wal に入る (DB と同じくらいの大きさ) ので、本体に書き戻して -wal を空にする
+        // (ほかの接続が読んでいて途中で止まったら、少し後に試し直す。RestorePreBuildBackup と同じ)
+        SqliteWal.CheckpointOrRetryLater(dest);
     }
 
     internal static void TryDelete(string path)
@@ -564,6 +626,22 @@ public static class DatabaseBackupService
             {
                 Exec(conn, tx, $"DELETE FROM main.gamedata_meta WHERE key NOT IN ({LocalOnlyMetaKeyList})");
                 Exec(conn, tx, $"INSERT OR REPLACE INTO main.gamedata_meta (key, value) SELECT key, value FROM src.gamedata_meta WHERE key NOT IN ({LocalOnlyMetaKeyList})");
+            }
+            // 追加の品目 (GameDataExtractor.ExtractExtraItemsAsync) の取り込みの記録は消す (取り込んだ item_index に無い版のバックアップでも、
+            // 次の起動で NeedsExtraItems が真になって足りない分だけを足す。足りていれば何も足さずに記録だけ書く)
+            if (Scalar(conn, tx, "SELECT COUNT(*) FROM main.sqlite_master WHERE type='table' AND name='gamedata_meta'") > 0)
+                Exec(conn, tx, $"DELETE FROM main.gamedata_meta WHERE key = '{GameDataExtractor.ExtraItemsMetaKey}'");
+            // BP の品質の増減 (blueprint_modifiers) の無い版のバックアップの blueprints を入れたときは、今の増減を空にし、取り出した記録
+            // (GameDataExtractor.BlueprintModifiersMetaKey) も消す (入れた BP と組にならない増減を残さず、次の起動で NeedsBlueprints が真になって取り直すように)
+            if (SourceTableExists(conn, tx, "blueprints") && !SourceTableExists(conn, tx, "blueprint_modifiers"))
+            {
+                if (Scalar(conn, tx, "SELECT COUNT(*) FROM main.sqlite_master WHERE type='table' AND name='blueprint_modifiers'") > 0)
+                {
+                    var n = Exec(conn, tx, "DELETE FROM main.blueprint_modifiers");
+                    onStatus?.Invoke($"blueprint_modifiers: バックアップに無いため {n} 件消しました (次の起動で取り直します)");
+                }
+                if (Scalar(conn, tx, "SELECT COUNT(*) FROM main.sqlite_master WHERE type='table' AND name='gamedata_meta'") > 0)
+                    Exec(conn, tx, $"DELETE FROM main.gamedata_meta WHERE key = '{GameDataExtractor.BlueprintModifiersMetaKey}'");
             }
         }
         if (cats.Contains(BackupCategory.Knowledge) && SourceTableExists(conn, tx, "knowledge"))
@@ -757,8 +835,10 @@ public static class DatabaseBackupService
         return n;
     }
 
-    // my_components / my_gear: 同じ品 (item_record と使用可 (usable) が同じ) の行が a にあれば、その行 (id のいちばん小さい行) を残して
-    // quantity を max(a, b)、notes を JoinNotes にする。無ければ b の行を新しい id で足す。足した行数を返す
+    // my_components / my_gear: 同じ品 (item_record と使用可 (usable) が同じ。my_components は品質 (quality_json) も同じ) の行が a にあれば、
+    // その行 (id のいちばん小さい行) を残して quantity を max(a, b)、notes を JoinNotes にする。無ければ b の行を新しい id で足す。足した行数を返す。
+    // 品質は a に列があるときだけ鍵に入れる (b に列が無ければ b の行は '' = 品質なしとして扱う)。品質は a・b とも揃えた書き方
+    // (HangarService.TryNormalizeQualityJson) にして比べる (a の揃っていない値は揃えて書き直し、b から足した行も揃えて入れる。揃えられない値はそのまま)
     private static int MergeQuantityRows(SqliteConnection conn, SqliteTransaction tx, string table)
     {
         var cols = CommonColumns(conn, tx, table);
@@ -768,14 +848,43 @@ public static class DatabaseBackupService
         var srcHasUsable = SourceColumnExists(conn, tx, table, "usable");
         var srcHasQty = SourceColumnExists(conn, tx, table, "quantity");
         var srcHasNotes = SourceColumnExists(conn, tx, table, "notes");
+        var mainHasQuality = MainColumnExists(conn, tx, table, "quality_json");
+        var srcHasQuality = SourceColumnExists(conn, tx, table, "quality_json");
 
-        var bRows = new List<(long Rowid, string Record, bool Usable, long Qty, string Notes)>();
+        var bRows = new List<(long Rowid, string Record, bool Usable, long Qty, string Notes, string Quality)>();
         using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = tx;
-            cmd.CommandText = $"SELECT rowid, item_record, {(srcHasUsable ? "(COALESCE(usable, 1) != 0)" : "1")}, {(srcHasQty ? "COALESCE(quantity, 1)" : "1")}, {(srcHasNotes ? "COALESCE(notes, '')" : "''")} FROM src.{Q(table)} ORDER BY rowid";
+            cmd.CommandText = $"SELECT rowid, item_record, {(srcHasUsable ? "(COALESCE(usable, 1) != 0)" : "1")}, {(srcHasQty ? "COALESCE(quantity, 1)" : "1")}, {(srcHasNotes ? "COALESCE(notes, '')" : "''")}, "
+                + $"{(srcHasQuality ? "COALESCE(quality_json, '')" : "''")} FROM src.{Q(table)} ORDER BY rowid";
             using var r = cmd.ExecuteReader();
-            while (r.Read()) bRows.Add((r.GetInt64(0), r.GetString(1), r.GetInt64(2) != 0, r.GetInt64(3), r.GetString(4)));
+            while (r.Read())
+            {
+                var quality = r.GetString(5);
+                if (HangarService.TryNormalizeQualityJson(quality, out var normalized)) quality = normalized;
+                bRows.Add((r.GetInt64(0), r.GetString(1), r.GetInt64(2) != 0, r.GetInt64(3), r.GetString(4), quality));
+            }
+        }
+        if (mainHasQuality)
+        {
+            var rewrites = new List<(long Id, string Quality)>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = $"SELECT id, COALESCE(quality_json, '') FROM main.{Q(table)}";
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                    if (HangarService.TryNormalizeQualityJson(r.GetString(1), out var normalized) && normalized != r.GetString(1)) rewrites.Add((r.GetInt64(0), normalized));
+            }
+            foreach (var (rid, quality) in rewrites)
+            {
+                using var upd = conn.CreateCommand();
+                upd.Transaction = tx;
+                upd.CommandText = $"UPDATE main.{Q(table)} SET quality_json = @qj WHERE id = @id";
+                upd.Parameters.AddWithValue("@qj", quality);
+                upd.Parameters.AddWithValue("@id", rid);
+                upd.ExecuteNonQuery();
+            }
         }
 
         var added = 0;
@@ -785,9 +894,11 @@ public static class DatabaseBackupService
             using (var find = conn.CreateCommand())
             {
                 find.Transaction = tx;
-                find.CommandText = $"SELECT id, COALESCE(quantity, 1), COALESCE(notes, '') FROM main.{Q(table)} WHERE item_record = @r AND (COALESCE(usable, 1) != 0) = @u ORDER BY id LIMIT 1";
+                find.CommandText = $"SELECT id, COALESCE(quantity, 1), COALESCE(notes, '') FROM main.{Q(table)} WHERE item_record = @r AND (COALESCE(usable, 1) != 0) = @u"
+                    + (mainHasQuality ? " AND COALESCE(quality_json, '') = @qj" : "") + " ORDER BY id LIMIT 1";
                 find.Parameters.AddWithValue("@r", b.Record);
                 find.Parameters.AddWithValue("@u", b.Usable ? 1 : 0);
+                if (mainHasQuality) find.Parameters.AddWithValue("@qj", b.Quality);
                 using var r = find.ExecuteReader();
                 if (r.Read()) { aId = r.GetInt64(0); aQty = r.GetInt64(1); aNotes = r.GetString(2); }
             }
@@ -808,6 +919,15 @@ public static class DatabaseBackupService
             cmd.CommandText = $"INSERT INTO main.{Q(table)} ({colList}) SELECT {colList} FROM src.{Q(table)} WHERE rowid = @rid";
             cmd.Parameters.AddWithValue("@rid", b.Rowid);
             cmd.ExecuteNonQuery();
+            if (mainHasQuality && srcHasQuality)
+            {
+                // 足した行の品質を揃えた書き方にする (b の値が揃っていなかったとき。揃えられない値は b のまま)
+                using var upd = conn.CreateCommand();
+                upd.Transaction = tx;
+                upd.CommandText = $"UPDATE main.{Q(table)} SET quality_json = @qj WHERE rowid = last_insert_rowid()";
+                upd.Parameters.AddWithValue("@qj", b.Quality);
+                upd.ExecuteNonQuery();
+            }
             added++;
         }
         return added;
@@ -949,11 +1069,23 @@ public static class DatabaseBackupService
     }
 
     // b の表に列があるか
-    private static bool SourceColumnExists(SqliteConnection conn, SqliteTransaction tx, string table, string column)
+    internal static bool SourceColumnExists(SqliteConnection conn, SqliteTransaction tx, string table, string column)
     {
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = $"PRAGMA src.table_info({Q(table)})";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            if (string.Equals(r.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    // a (main) の表にその列があるか (SourceColumnExists の main 側)
+    internal static bool MainColumnExists(SqliteConnection conn, SqliteTransaction tx, string table, string column)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"PRAGMA main.table_info({Q(table)})";
         using var r = cmd.ExecuteReader();
         while (r.Read())
             if (string.Equals(r.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return true;
@@ -1142,7 +1274,8 @@ public static class DatabaseBackupService
                 quantity INTEGER DEFAULT 1,
                 usable INTEGER DEFAULT 1,
                 notes TEXT DEFAULT '',
-                added_at TEXT DEFAULT (datetime('now','localtime'))
+                added_at TEXT DEFAULT (datetime('now','localtime')),
+                quality_json TEXT DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS ship_loadouts (
                 ship_key TEXT NOT NULL,
@@ -1208,6 +1341,10 @@ public static class DatabaseBackupService
         // 旧スキーマ (cargocapacity 列なし) の ship_matrix に列を追加する (HangarService.MigrateShipMatrixSchema と同じ)。
         // バックアップ側にある Ship Matrix の積載量を取り込めるようにするため
         HangarService.MigrateShipMatrixSchema(conn);
+
+        // 旧スキーマ (quality_json 列なし) の my_components に列を追加する (HangarService.MigrateMyComponentsSchema と同じ)。
+        // バックアップ・同期の相手の自作品の品質を取り込めるようにするため
+        HangarService.MigrateMyComponentsSchema(conn);
     }
 
     public static async Task ImportAsync(string backupPath, string translationDbPath, string indexDbPath,

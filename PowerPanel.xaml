@@ -1,0 +1,140 @@
+<UserControl x:Class="StarCitizenJapaneseTextCreater.PowerPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:StarCitizenJapaneseTextCreater">
+    <!-- ［船舶管理］の［電力管理］: 船の部品に電力のピップを割り振ったときの、出力の残り・冷却剤・シールド・武器の DPS を見る。
+         所持船は［装備］の現在の装備を最初の部品にする (この画面で部品を替えても ship_loadouts には書かない。割り当ても保存しない)。
+         計算は GameDataQueryService.Power.cs (PowerMath / PowerMathShip) -->
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="2*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <WrapPanel Grid.Row="0" Margin="0,0,0,6">
+            <RadioButton x:Name="rbOwnedShips" Content="所持船" GroupName="powerShipSource" IsChecked="True" VerticalAlignment="Center" Margin="0,0,8,0" Checked="ShipSource_Changed"/>
+            <RadioButton x:Name="rbAllShips" Content="全船" GroupName="powerShipSource" VerticalAlignment="Center" Margin="0,0,8,0" Checked="ShipSource_Changed"/>
+            <ComboBox x:Name="cmbShip" Width="320" VerticalAlignment="Center" Margin="0,0,16,0" DisplayMemberPath="Display" SelectionChanged="Ship_Changed">
+                <ComboBox.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <VirtualizingStackPanel/>
+                    </ItemsPanelTemplate>
+                </ComboBox.ItemsPanel>
+            </ComboBox>
+            <TextBlock Text="部品の候補:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+            <RadioButton x:Name="rbOwnedParts" Content="所持コンポーネント" GroupName="powerPartSource" IsChecked="True" VerticalAlignment="Center" Margin="0,0,8,0" Checked="PartSource_Changed"/>
+            <RadioButton x:Name="rbAllParts" Content="全部品" GroupName="powerPartSource" VerticalAlignment="Center" Margin="0,0,16,0" Checked="PartSource_Changed"/>
+            <Button Content="全部最小" Click="AllMin_Click" Padding="12,4" Margin="0,0,8,0"/>
+            <Button Content="全部最大" Click="AllMax_Click" Padding="12,4" Margin="0,0,8,0"/>
+            <Button Content="読み直す" Click="Reload_Click" Padding="12,4" Margin="0,0,8,0" ToolTip="［装備］の現在の装備・所持コンポーネントを読み直す"/>
+            <TextBlock x:Name="txtStatus" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
+        </WrapPanel>
+
+        <!-- 要約 -->
+        <Border Grid.Row="1" BorderBrush="#DDD" BorderThickness="1" Padding="8,4" Margin="0,0,0,6" Background="#FAFAFA">
+            <StackPanel>
+                <WrapPanel>
+                    <TextBlock x:Name="txtOutput" FontWeight="Bold" Margin="0,0,16,0" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="txtAllocated" FontWeight="Bold" Margin="0,0,16,0" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="txtRemaining" FontWeight="Bold" Margin="0,0,16,0" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="txtCoolant" Margin="0,0,16,0" VerticalAlignment="Center"/>
+                </WrapPanel>
+                <WrapPanel Margin="0,2,0,0">
+                    <TextBlock x:Name="txtShield" Margin="0,0,16,0" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="txtWeapons" Margin="0,0,16,0" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="txtQuantum" Margin="0,0,16,0" VerticalAlignment="Center" Foreground="#666"/>
+                </WrapPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- 部品の表 -->
+        <DataGrid x:Name="dgParts" Grid.Row="2" AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False"
+                  SelectionMode="Single" GridLinesVisibility="Horizontal" AlternatingRowBackground="#FAFAFA" FontSize="12"
+                  HeadersVisibility="Column" HorizontalScrollBarVisibility="Auto" IsReadOnly="True">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="搭載枠" Binding="{Binding PortDisplay}" Width="150"/>
+                <DataGridTextColumn Header="種別" Binding="{Binding TypeDisplay}" Width="100"/>
+                <DataGridTemplateColumn Header="部品" Width="300">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <Grid>
+                                <ComboBox ItemsSource="{Binding Candidates}" SelectedItem="{Binding SelectedCandidate, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          DisplayMemberPath="Display" Visibility="{Binding CandidateVisibility}" VerticalAlignment="Center"/>
+                                <TextBlock Text="{Binding FixedText}" Visibility="{Binding FixedTextVisibility}" VerticalAlignment="Center" FontWeight="Bold"/>
+                            </Grid>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+                <DataGridTemplateColumn Header="品質" Width="110">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding QualityText}" VerticalAlignment="Center" Margin="0,0,4,0" FontFamily="Consolas"/>
+                                <Button Content="入力" Padding="6,0" Click="EditQuality_Click" Visibility="{Binding QualityButtonVisibility}"
+                                        ToolTip="材料の枠ごとの品質 (0〜1000) を入れる (この画面だけ。保存しない)"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+                <DataGridTemplateColumn Header="割り当て" Width="130">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <Grid VerticalAlignment="Center">
+                                <StackPanel Orientation="Horizontal" Visibility="{Binding PipsVisibility}">
+                                    <Button Content="−" Width="22" Click="PipMinus_Click" IsEnabled="{Binding CanMinus}"/>
+                                    <TextBlock Text="{Binding PipsText}" Width="40" TextAlignment="Center" VerticalAlignment="Center" FontFamily="Consolas" FontWeight="Bold"/>
+                                    <Button Content="＋" Width="22" Click="PipPlus_Click" IsEnabled="{Binding CanPlus}"/>
+                                </StackPanel>
+                                <CheckBox Content="オン" IsChecked="{Binding IsOn, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Visibility="{Binding OnOffVisibility}" VerticalAlignment="Center"/>
+                            </Grid>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+                <DataGridTextColumn Header="最小〜最大" Binding="{Binding RangeText}" Width="80"/>
+                <DataGridTextColumn Header="段階" Binding="{Binding StageText}" Width="70"/>
+                <DataGridTextColumn Header="結果" Binding="{Binding ResultText}" Width="260"/>
+                <DataGridTextColumn Header="注" Binding="{Binding NoteText}" Width="*">
+                    <DataGridTextColumn.ElementStyle>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Foreground" Value="#666"/>
+                            <Setter Property="ToolTip" Value="{Binding NoteText}"/>
+                        </Style>
+                    </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <TextBlock Grid.Row="3" Text="武器" FontWeight="Bold" Margin="0,8,0,4"/>
+        <DataGrid x:Name="dgWeapons" Grid.Row="4" AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False" IsReadOnly="True"
+                  SelectionMode="Single" GridLinesVisibility="Horizontal" AlternatingRowBackground="#FAFAFA" FontSize="12"
+                  HeadersVisibility="Column" HorizontalScrollBarVisibility="Auto">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="武器" Binding="{Binding Name}" Width="220"/>
+                <DataGridTextColumn Header="種別" Binding="{Binding Kind}" Width="110"/>
+                <DataGridTextColumn Header="1発のダメージ" Binding="{Binding PerShot}" Width="100"/>
+                <DataGridTextColumn Header="連射速度 (発/分)" Binding="{Binding Rate}" Width="100"/>
+                <DataGridTextColumn Header="バースト DPS" Binding="{Binding Burst}" Width="110"/>
+                <DataGridTextColumn Header="弾薬容量" Binding="{Binding Ammo}" Width="80"/>
+                <DataGridTextColumn Header="武器再生 /秒" Binding="{Binding Regen}" Width="80"/>
+                <DataGridTextColumn Header="待ち (秒)" Binding="{Binding Wait}" Width="70"/>
+                <DataGridTextColumn Header="1 周 (秒)" Binding="{Binding Cycle}" Width="70"/>
+                <DataGridTextColumn Header="サステイン DPS" Binding="{Binding Sustain}" Width="110"/>
+                <DataGridTextColumn Header="撃ち切るまで (秒)" Binding="{Binding Empty}" Width="110"/>
+                <DataGridTextColumn Header="注" Binding="{Binding Note}" Width="*">
+                    <DataGridTextColumn.ElementStyle>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Foreground" Value="#666"/>
+                            <Setter Property="ToolTip" Value="{Binding Note}"/>
+                        </Style>
+                    </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <TextBlock Grid.Row="5" Margin="0,6,0,0" Foreground="#666" FontSize="11" TextWrapping="Wrap" x:Name="txtFootnote"/>
+    </Grid>
+</UserControl>

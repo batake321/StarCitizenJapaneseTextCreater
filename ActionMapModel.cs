@@ -19,6 +19,18 @@ public class ActionMapData
     // 「js1/js2 の入れ替え」を奇数回行い、まだ保存していない (保存時に options の instance 1 と 2 を交換する)
     public bool JoystickInstancesSwapPending { get; set; }
 
+    // 保存データの actionmaps.xml の機器の定義 (options type="joystick" の instance 1 / 2 ごとの見分け。ActionMapParser.GetJoystickDefinitionParts)。
+    //   ファイルに今書いてある向き (まだ保存していない js1/js2 の入れ替えは含まない)。options が無ければ "-"
+    public string JoystickDefinition1 { get; set; } = "-";
+    public string JoystickDefinition2 { get; set; } = "-";
+
+    // 機器の定義の指紋 (表示の入れ替え・手で選んだ js 番号の記録の鍵)。ファイルに今書いてある向きのもの
+    public string FileJoystickFingerprint => ActionMapParser.MakeJoystickFingerprint(JoystickDefinition1, JoystickDefinition2);
+
+    // js1/js2 の入れ替えを actionmaps.xml に保存した後に呼ぶ (ファイルの instance 1 と 2 が入れ替わったので、定義も入れ替える)
+    public void SwapJoystickDefinitionsAfterSave() =>
+        (JoystickDefinition1, JoystickDefinition2) = (JoystickDefinition2, JoystickDefinition1);
+
     // js 番号 (1/2) に対応する options。表示の入れ替え中は instance (3 - js) のもの
     public JoystickDeviceOption? GetJoystickOptionForJs(int js)
     {
@@ -68,8 +80,48 @@ public class ActionMapData
         return true;
     }
 
+    // 手で選んだ js 番号 (options から決められない機器のもの): 機器のキー (GetDeviceKey) → instance (1 / 2)。
+    //   options の instance と同じ扱い: 表示の入れ替え中は js = 3 - instance、js1/js2 の入れ替えで 1↔2 を交換する
+    public Dictionary<string, int> ManualJoystickInstances { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    // 手で選んだ js 番号が変わったとき (呼び出し元が保存フォルダごとに覚える)
+    public event Action? ManualJoystickInstancesChanged;
+
+    // 機器のキー: Windows の機器 ID (NonRoamableId) があればそれ、無ければ "VID:PID" (16 進 4 桁)
+    public static string GetDeviceKey(string? deviceId, ushort vendorId, ushort productId) =>
+        !string.IsNullOrEmpty(deviceId) ? deviceId : $"{vendorId:X4}:{productId:X4}";
+
+    // 押した機器の js 番号。options から決まればそれ (manual = false)、決まらなければ手で選んだ番号 (manual = true)。どちらも無ければ false
+    public bool TryResolveJsForDevice(ushort vendorId, ushort productId, string? deviceId, out int js, out bool manual)
+    {
+        manual = false;
+        if (TryGetJsForDevice(vendorId, productId, out js)) return true;
+        if (ManualJoystickInstances.TryGetValue(GetDeviceKey(deviceId, vendorId, productId), out var instance) && (instance == 1 || instance == 2))
+        {
+            js = JoystickDisplaySwapped ? 3 - instance : instance;
+            manual = true;
+            return true;
+        }
+        js = 0;
+        return false;
+    }
+
+    // 「この機器は js◯」を手で選ぶ (その機器の分だけを入れる。ほかの機器の記録は変えない)
+    public void SetManualJsForDevice(ushort vendorId, ushort productId, string? deviceId, int js)
+    {
+        if (js != 1 && js != 2) return;
+        var instance = JoystickDisplaySwapped ? 3 - js : js;
+        var key = GetDeviceKey(deviceId, vendorId, productId);
+        ManualJoystickInstances[key] = instance;
+        ManualJoystickInstancesChanged?.Invoke();
+    }
+
     // 「js1/js2 の入れ替え」: 全 action の Joystick1 と Joystick2 の値を js1_↔js2_ を付け替えて交換し、
-    //   options の instance 1 / 2 の情報もメモリ上で交換する (ファイルの options は保存時に交換)
+    //   js1 / js2 の activationMode も交換する (割り当てに付けたまま移す)。
+    //   既定の割り当て (DefaultJoystick1 / 2) も同じく交換する (［既定値に戻す］は入れ替えた後の既定を入れる)。
+    //   ゲームの既定 (GameDefaultJoystick1 / 2。保存で rebind を書くかを決める値) は交換しない (ゲームは defaultProfile の既定を番号どおりに使うため)。
+    //   options の instance 1 / 2 の情報と、手で選んだ js 番号もメモリ上で交換する (ファイルの options は保存時に交換)。
+    //   2 回行うと元に戻る
     public void SwapJoystick1And2Bindings()
     {
         foreach (var b in Categories.SelectMany(c => c.Actions))
@@ -78,13 +130,33 @@ public class ActionMapData
             var j2 = b.Joystick2;
             b.Joystick1 = SwapJsPrefix(j2);
             b.Joystick2 = SwapJsPrefix(j1);
+            (b.Joystick1ActivationMode, b.Joystick2ActivationMode) = (b.Joystick2ActivationMode, b.Joystick1ActivationMode);
+            b.SwapJoystickDefaults();
         }
         foreach (var o in JoystickOptions)
         {
             if (o.Instance == 1) o.Instance = 2;
             else if (o.Instance == 2) o.Instance = 1;
         }
+        foreach (var key in ManualJoystickInstances.Keys.ToList())
+        {
+            var inst = ManualJoystickInstances[key];
+            if (inst == 1 || inst == 2) ManualJoystickInstances[key] = 3 - inst;
+        }
         JoystickInstancesSwapPending = !JoystickInstancesSwapPending;
+        if (ManualJoystickInstances.Count > 0) ManualJoystickInstancesChanged?.Invoke();
+    }
+
+    // 保存フォルダの actionmaps.xml が「js1/js2 の入れ替え」を保存したものであるとき (エディターが記録から決める)、読み込み直後に呼ぶ:
+    //   既定の割り当て (DefaultJoystick1 / 2) と既定のモード (js1 / js2 の activationMode) だけを左右入れ替える
+    //   (今の割り当て・options・手で選んだ js 番号・保存待ちの印は変えない。ゲームの既定 GameDefaultJoystick1 / 2 も変えない)
+    public void SwapJoystickDefaultsForSavedSwap()
+    {
+        foreach (var b in Categories.SelectMany(c => c.Actions))
+        {
+            b.SwapJoystickDefaults();
+            (b.Joystick1ActivationMode, b.Joystick2ActivationMode) = (b.Joystick2ActivationMode, b.Joystick1ActivationMode);
+        }
     }
 
     internal static string SwapJsPrefix(string value)
@@ -111,6 +183,18 @@ public class JoystickDeviceOption
     public bool HasVidPid { get; set; }
     public ushort VendorId { get; set; }
     public ushort ProductId { get; set; }
+
+    // 機器の見分け (元の js1 の機器の記録に使う): Product の GUID から VID/PID が取れれば "VID:PID" (16 進 4 桁)、
+    //   取れなければ GUID そのもの (大文字)、GUID も無ければ null
+    public string? DeviceIdentity
+    {
+        get
+        {
+            if (HasVidPid) return $"{VendorId:X4}:{ProductId:X4}";
+            var m = System.Text.RegularExpressions.Regex.Match(Product ?? "", @"\{[^}]*\}");
+            return m.Success ? m.Value.ToUpperInvariant() : null;
+        }
+    }
 
     // GUID を除いて前後の空白を落とした名前 (例 "VKBsim Gladiator EVO L")
     public string Name => System.Text.RegularExpressions.Regex.Replace(Product ?? "", @"\{[^}]*\}", "").Trim();
@@ -240,8 +324,9 @@ public class ActionBinding : INotifyPropertyChanged
         }
     }
 
-    public bool HasAnyBinding => !string.IsNullOrEmpty(Keyboard) || !string.IsNullOrEmpty(Mouse) ||
-                                  !string.IsNullOrEmpty(Gamepad) || !string.IsNullOrEmpty(Joystick1) || !string.IsNullOrEmpty(Joystick2);
+    // 割り当て解除 ("js1_ " など) は割り当て無しとして数える
+    public bool HasAnyBinding => InputCodeHelper.IsAssigned(Keyboard) || InputCodeHelper.IsAssigned(Mouse) ||
+                                  InputCodeHelper.IsAssigned(Gamepad) || InputCodeHelper.IsAssigned(Joystick1) || InputCodeHelper.IsAssigned(Joystick2);
 
     // Default bindings (from defaultProfile.xml) - stored separately for reset
     //   既定値もゲームの形に直して持つ (「既定値に戻す」で書かれる値もゲームの形になる)
@@ -249,8 +334,30 @@ public class ActionBinding : INotifyPropertyChanged
     public string DefaultKeyboard { get => _defaultKeyboard; set => _defaultKeyboard = InputCodeHelper.ToGameForm(value, "kb1_"); }
     public string DefaultMouse { get => _defaultMouse; set => _defaultMouse = InputCodeHelper.ToGameForm(value, "mo1_"); }
     public string DefaultGamepad { get => _defaultGamepad; set => _defaultGamepad = InputCodeHelper.ToGameForm(value, "gp1_"); }
-    public string DefaultJoystick1 { get => _defaultJoystick1; set => _defaultJoystick1 = InputCodeHelper.ToGameForm(value, "js1_"); }
-    public string DefaultJoystick2 { get => _defaultJoystick2; set => _defaultJoystick2 = InputCodeHelper.ToGameForm(value, "js2_"); }
+    //   DefaultJoystick1 / 2 に代入すると、ゲームの既定 (GameDefaultJoystick1 / 2) にも同じ値が入る (読み込み時)
+    public string DefaultJoystick1 { get => _defaultJoystick1; set => _defaultJoystick1 = _gameDefaultJoystick1 = InputCodeHelper.ToGameForm(value, "js1_"); }
+    public string DefaultJoystick2 { get => _defaultJoystick2; set => _defaultJoystick2 = _gameDefaultJoystick2 = InputCodeHelper.ToGameForm(value, "js2_"); }
+
+    // ゲームの既定 (defaultProfile のまま。「js1/js2 の入れ替え」でも変えない)。
+    //   ゲームは rebind の無い機能に defaultProfile の既定を js 番号どおりに使うので、保存で rebind を書くかはこの値と比べて決める
+    private string _gameDefaultJoystick1 = "", _gameDefaultJoystick2 = "";
+    public string GameDefaultJoystick1 => _gameDefaultJoystick1;
+    public string GameDefaultJoystick2 => _gameDefaultJoystick2;
+
+    // 「js1/js2 の入れ替え」: 既定の割り当て (DefaultJoystick1 / 2) を js1_↔js2_ を付け替えて交換する (ゲームの既定は変えない)
+    internal void SwapJoystickDefaults()
+    {
+        var d1 = _defaultJoystick1;
+        var d2 = _defaultJoystick2;
+        _defaultJoystick1 = ActionMapData.SwapJsPrefix(d2);
+        _defaultJoystick2 = ActionMapData.SwapJsPrefix(d1);
+    }
+
+    // 保存で rebind を書く必要があるか (今の値がゲームの既定と違う機器がある)。
+    //   js1 / js2 は入れ替えた既定ではなくゲームの既定と比べる
+    internal bool DiffersFromGameDefault =>
+        Keyboard != DefaultKeyboard || Mouse != DefaultMouse || Gamepad != DefaultGamepad ||
+        Joystick1 != GameDefaultJoystick1 || Joystick2 != GameDefaultJoystick2;
 
     public bool IsModified => Keyboard != DefaultKeyboard || Mouse != DefaultMouse ||
                               Gamepad != DefaultGamepad ||
@@ -416,6 +523,7 @@ public static class ActionMapParser
                 var doc = XDocument.Load(saveOverridePath);
                 ApplyUserOverrides(doc, data);
                 ParseJoystickOptions(doc, data);
+                (data.JoystickDefinition1, data.JoystickDefinition2) = GetJoystickDefinitionParts(doc);
             }
             catch (Exception ex)
             {
@@ -721,23 +829,25 @@ public static class ActionMapParser
 
         foreach (var cat in data.Categories)
         {
-            var modifiedActions = cat.Actions.Where(a => a.IsModified).ToList();
+            // js1 / js2 は入れ替えた既定ではなくゲームの既定と比べる (DiffersFromGameDefault)
+            var modifiedActions = cat.Actions.Where(a => a.DiffersFromGameDefault).ToList();
             if (modifiedActions.Count == 0) continue;
 
             var am = new XElement("actionmap", new XAttribute("name", cat.Name));
             foreach (var action in modifiedActions)
             {
                 var el = new XElement("action", new XAttribute("name", action.ActionName));
-                if (!string.IsNullOrEmpty(action.Keyboard) && action.Keyboard != action.DefaultKeyboard)
-                    el.Add(new XElement("rebind", new XAttribute("input", action.Keyboard)));
-                if (!string.IsNullOrEmpty(action.Mouse) && action.Mouse != action.DefaultMouse)
-                    el.Add(new XElement("rebind", new XAttribute("input", action.Mouse)));
-                if (!string.IsNullOrEmpty(action.Gamepad) && action.Gamepad != action.DefaultGamepad)
-                    el.Add(new XElement("rebind", new XAttribute("input", action.Gamepad)));
-                if (action.Joystick1 != action.DefaultJoystick1)
-                    el.Add(new XElement("rebind", new XAttribute("input", action.Joystick1 ?? "")));
-                if (action.Joystick2 != action.DefaultJoystick2)
-                    el.Add(new XElement("rebind", new XAttribute("input", action.Joystick2 ?? "")));
+                // キーボード・マウス・パッド: 既定と違えば書く。値が空なら割り当て解除としてゲームの書式 ("kb1_ " など) で書く
+                if (action.Keyboard != action.DefaultKeyboard)
+                    el.Add(new XElement("rebind", new XAttribute("input", string.IsNullOrWhiteSpace(action.Keyboard) ? "kb1_ " : action.Keyboard)));
+                if (action.Mouse != action.DefaultMouse)
+                    el.Add(new XElement("rebind", new XAttribute("input", string.IsNullOrWhiteSpace(action.Mouse) ? "mo1_ " : action.Mouse)));
+                if (action.Gamepad != action.DefaultGamepad)
+                    el.Add(new XElement("rebind", new XAttribute("input", string.IsNullOrWhiteSpace(action.Gamepad) ? "gp1_ " : action.Gamepad)));
+                if (action.Joystick1 != action.GameDefaultJoystick1)
+                    el.Add(new XElement("rebind", new XAttribute("input", string.IsNullOrWhiteSpace(action.Joystick1) ? "js1_ " : action.Joystick1)));
+                if (action.Joystick2 != action.GameDefaultJoystick2)
+                    el.Add(new XElement("rebind", new XAttribute("input", string.IsNullOrWhiteSpace(action.Joystick2) ? "js2_ " : action.Joystick2)));
                 if (el.HasElements)
                     am.Add(el);
             }
@@ -747,6 +857,57 @@ public static class ActionMapParser
 
         root.Add(profiles);
         new XDocument(root).Save(outputPath);
+    }
+
+    // ===== 機器の定義の指紋 =====
+    //   options type="joystick" の instance 1 / 2 ごとに、その instance の options 要素 (文書の順) を 1 つずつ、機器を見分ける値だけにして ";" でつなぐ:
+    //     Product に GUID ({...}) があれば "g:" + GUID (大文字)
+    //     GUID が無ければ "p:" + Product の属性の文字 (前後の空白を除き、途中の連続する空白を 1 つにまとめたもの)
+    //     Product も無ければ "-" (見分けられない)
+    //   軸の設定などの子要素や、ほかの属性は入れない (ゲームが軸の設定を書き換えても指紋が変わらないように)。
+    //   その instance の要素が無い、またはどの要素も見分けられないときは "-"。
+    //   instance 属性を使わないので、js1/js2 の入れ替えを保存したファイルの定義は、元の定義の 1 と 2 を入れ替えたものになる
+    internal static (string Def1, string Def2) GetJoystickDefinitionParts(XDocument doc)
+    {
+        var root = doc.Root;
+        if (root == null) return ("-", "-");
+        var profiles = root.Element("ActionProfiles") ?? root;
+        var opts = profiles.Elements("options").Where(o => (string?)o.Attribute("type") == "joystick").ToList();
+        string Part(string instance)
+        {
+            var tokens = opts.Where(o => ((string?)o.Attribute("instance"))?.Trim() == instance)
+                .Select(o =>
+                {
+                    // 前後の空白を除き、途中の連続する空白を 1 つにまとめる
+                    var product = System.Text.RegularExpressions.Regex.Replace(((string?)o.Attribute("Product"))?.Trim() ?? "", @"\s+", " ");
+                    var m = System.Text.RegularExpressions.Regex.Match(product, @"\{[^}]*\}");
+                    if (m.Success) return "g:" + m.Value.ToUpperInvariant();
+                    return product.Length > 0 ? "p:" + product : "-";
+                })
+                .ToList();
+            return tokens.Count == 0 || tokens.All(t => t == "-") ? "-" : string.Join(";", tokens);
+        }
+        return (Part("1"), Part("2"));
+    }
+
+    // 定義 1 / 2 から指紋を作る ("fp:" + SHA-256 の 16 進。記録の JSON の鍵に使う)
+    public static string MakeJoystickFingerprint(string def1, string def2)
+    {
+        var bytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"1={def1}|2={def2}"));
+        return "fp:" + Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    // 保存フォルダの actionmaps.xml から指紋を作る (古い形の記録の移し替え用)。ファイルが無い・読めなければ null
+    public static string? ComputeJoystickFingerprintForSave(string savePath)
+    {
+        try
+        {
+            var path = Path.Combine(savePath, "Profiles", "default", "actionmaps.xml");
+            if (!File.Exists(path)) return null;
+            var (d1, d2) = GetJoystickDefinitionParts(XDocument.Load(path));
+            return MakeJoystickFingerprint(d1, d2);
+        }
+        catch { return null; }
     }
 
     // <options type="joystick" instance="N" Product="..."> を読む
@@ -788,8 +949,9 @@ public static class ActionMapParser
     // 既存の actionmaps.xml を読み、<options>・<modifiers> などはそのまま残して、各 action の rebind だけを書き換える。
     //   各 action・各機器 (kb1/mo1/gp1/js1/js2) について:
     //     既存の rebind (input の本体入力の機器接頭辞が同じもの。複数あれば最後のもの) があれば input 属性だけ新しい値にする
+    //     (複数あったときは、書き換えた最後の 1 本より前の同じ機器の rebind を消す)
     //     (js3 以降の rebind はどの欄とも一致しないので触らない)
-    //     無ければ、値が既定値と違うときだけ rebind を追加する (actionmap / action 要素が無ければ作る)
+    //     無ければ、値が既定値 (js1 / js2 はゲームの既定) と違うときだけ rebind を追加する (actionmap / action 要素が無ければ作る)
     //   swapJoystickInstances = true なら <options type="joystick"> の instance="1" と "2" を交換する
     public static void SaveMergedOverrides(ActionMapData data, string path, bool swapJoystickInstances)
     {
@@ -799,12 +961,18 @@ public static class ActionMapParser
 
         // js1/js2 の入れ替え: メモリ上の値と同じく、ファイルの rebind の input も js1_↔js2_ を付け替える
         //   (activationMode などの属性を、その割り当てに付けたまま移すため)
+        //   <modifiers> の中の要素の input も同じ規則で付け替える (中身が空なら何もしない)
         if (swapJoystickInstances)
         {
             foreach (var rb in profiles.Elements("actionmap").Elements("action").Elements("rebind"))
             {
                 var input = (string?)rb.Attribute("input");
                 if (input != null) rb.SetAttributeValue("input", ActionMapData.SwapJsPrefix(input));
+            }
+            foreach (var mod in profiles.Elements("modifiers").Descendants())
+            {
+                var input = (string?)mod.Attribute("input");
+                if (input != null) mod.SetAttributeValue("input", ActionMapData.SwapJsPrefix(input));
             }
         }
 
@@ -826,19 +994,25 @@ public static class ActionMapParser
                     ("kb1_", action.Keyboard, action.DefaultKeyboard),
                     ("mo1_", action.Mouse, action.DefaultMouse),
                     ("gp1_", action.Gamepad, action.DefaultGamepad),
-                    ("js1_", action.Joystick1, action.DefaultJoystick1),
-                    ("js2_", action.Joystick2, action.DefaultJoystick2),
+                    // js1 / js2 は入れ替えた既定ではなくゲームの既定と比べる (ゲームは rebind の無い機能に defaultProfile の既定を番号どおりに使う)
+                    ("js1_", action.Joystick1, action.GameDefaultJoystick1),
+                    ("js2_", action.Joystick2, action.GameDefaultJoystick2),
                 };
 
                 foreach (var (prefix, value, def) in slots)
                 {
-                    var existing = actEl?.Elements("rebind")
-                        .LastOrDefault(r => InputCodeHelper.GetMainDevicePrefix((string?)r.Attribute("input") ?? "") == prefix);
-                    if (existing != null)
+                    // 同じ機器の rebind が 2 本以上あれば、最後の 1 本を書き換え、それより前の rebind は消す
+                    var sameDevice = actEl?.Elements("rebind")
+                        .Where(r => InputCodeHelper.GetMainDevicePrefix((string?)r.Attribute("input") ?? "") == prefix)
+                        .ToList();
+                    var existing = sameDevice?.LastOrDefault();
+                    if (sameDevice != null && existing != null)
                     {
                         var fv = ToFileInputValue(value ?? "", prefix);
                         if (fv == null) continue;
                         existing.SetAttributeValue("input", fv);
+                        foreach (var old in sameDevice.Take(sameDevice.Count - 1))
+                            old.Remove();
                     }
                     else
                     {
@@ -971,6 +1145,11 @@ public static class InputCodeHelper
         var m = PrefixRegex.Match(t);
         return m.Success ? t[m.Length..].Trim() : t;
     }
+
+    // 割り当てがあるか。空、割り当て解除 (接頭辞と空白だけ。"js1_ " など)、
+    //   修飾キーだけで本体入力が無いもの ("js1_rctrl+ " など。最後の '+' より後ろが接頭辞と空白を除くと空) なら false
+    public static bool IsAssigned(string? value) =>
+        !string.IsNullOrEmpty(value) && StripDevicePrefix(value.Split('+')[^1]).Length > 0;
 
     // "js3_" 以降のジョイスティック接頭辞か
     public static bool IsJoystick3OrLater(string? prefix) =>

@@ -447,6 +447,7 @@ public class TradeService
     private void InitDb(SqliteConnection db)
     {
         db.Open();
+        SqliteWal.EnsureOn(db);   // 新しく作った trade_cache.db も WAL にする (もう WAL なら問い合わせ 1 回だけ)
         using var cmd = db.CreateCommand();
         cmd.CommandText = """
             CREATE TABLE IF NOT EXISTS trade_prices (

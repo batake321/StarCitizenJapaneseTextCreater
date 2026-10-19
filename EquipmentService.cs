@@ -59,26 +59,48 @@ public class EquipmentService : IDisposable
 
     // item_index.size 列の有無 (再抽出前の旧 DB には無い。読み取り専用接続なので ALTER はここでは行わない)
     private readonly bool _hasItemIndexSize;
+    // item_index.name_key 列 (名前の訳のキー) の有無 (前の版で構築した DB には無い。無ければプレースホルダは名前だけで判定する)
+    private readonly bool _hasItemIndexNameKey;
     // ship_ports の min_size / max_size / port_types 列、item_ports 表の有無 (インデックスの作り直し前の DB には無い)
     private readonly bool _hasShipPortSizes;
     private readonly bool _hasItemPorts;
 
     public EquipmentService(string gamedataCacheDbPath) : this(gamedataCacheDbPath, loadPriceCache: true) { }
 
+    // 読むだけの口 (equipment_cache.db を開かない。購入場所は引けない)。［電力管理］と［装備］の表の裏の読み込みが裏のスレッドで使う
+    // (［装備］の口 _hangarEquip とは別の接続)。
+    // throwIfBusy: DB が使用中 (SQLITE_BUSY / LOCKED) で読めなかったとき、空・既定の値にして覚える代わりに投げる
+    // (裏の読み込みが待って読み直すため。列の有無・既定の装備の集合・今の名前・性能の欄。WeaponDamageKindLabel はいつも投げる)
+    public static EquipmentService OpenReadOnly(string gamedataCacheDbPath, bool throwIfBusy = false) => new(gamedataCacheDbPath, loadPriceCache: false, throwIfBusy);
+
     // loadPriceCache: false なら equipment_cache.db (購入場所の覚え) を開かない (入れられる品の索引を裏で作るときの、読むだけの口)
-    private EquipmentService(string gamedataCacheDbPath, bool loadPriceCache)
+    private EquipmentService(string gamedataCacheDbPath, bool loadPriceCache, bool throwIfBusy = false)
     {
+        _throwIfBusy = throwIfBusy;
         _gamedataDbPath = gamedataCacheDbPath;
-        _conn = new SqliteConnection($"Data Source={gamedataCacheDbPath};Mode=ReadOnly");
+        _conn = new TrackedSqliteConnection($"Data Source={gamedataCacheDbPath};Mode=ReadOnly");
         _conn.Open();
-        _hasItemIndexSize = HasColumn("item_index", "size");
-        _hasShipPortSizes = HasColumn("ship_ports", "max_size") && HasColumn("ship_ports", "min_size") && HasColumn("ship_ports", "port_types");
-        _hasItemPorts = HasColumn("item_ports", "max_size");
+        try
+        {
+            _hasItemIndexSize = HasColumn("item_index", "size");
+            _hasItemIndexNameKey = HasColumn("item_index", "name_key");
+            _hasShipPortSizes = HasColumn("ship_ports", "max_size") && HasColumn("ship_ports", "min_size") && HasColumn("ship_ports", "port_types");
+            _hasItemPorts = HasColumn("item_ports", "max_size");
+        }
+        catch
+        {
+            _conn.Dispose();   // 使用中で投げたとき (throwIfBusy) は接続を残さない
+            throw;
+        }
         _cacheDbPath = Path.Combine(Path.GetDirectoryName(gamedataCacheDbPath) ?? ".", "equipment_cache.db");
         if (!loadPriceCache) return;
         InitCacheDb();
         ReloadPriceIndex();
     }
+
+    private readonly bool _throwIfBusy;
+    // 握りつぶす所で使う: この口が throwIfBusy で、使用中の失敗なら投げる (true)
+    private bool RethrowBusy(Exception ex) => _throwIfBusy && GameDataQueryService.IsBusy(ex);
 
     private bool HasColumn(string table, string column)
     {
@@ -90,13 +112,13 @@ public class EquipmentService : IDisposable
             while (reader.Read())
                 if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return true;
         }
-        catch { }
+        catch (Exception ex) when (!RethrowBusy(ex)) { }
         return false;
     }
 
     private void InitCacheDb()
     {
-        using var db = new SqliteConnection($"Data Source={_cacheDbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_cacheDbPath}");
         db.Open();
         using var cmd = db.CreateCommand();
         cmd.CommandText = @"CREATE TABLE IF NOT EXISTS uex_item_prices (
@@ -130,14 +152,29 @@ public class EquipmentService : IDisposable
         return categories;
     }
 
-    // 表示名が未ローカライズのプレースホルダ (item_index.name "<= PLACEHOLDER =>" / items.name "@LOC_PLACEHOLDER") または空
-    private static bool IsPlaceholderName(string? name)
+    // 表示名が未ローカライズのプレースホルダまたは空か。key は名前の訳のキー (item_index.name_key。無ければ null)。
+    //   キーで: LOC_PLACEHOLDER (item_index.name_key) / @LOC_PLACEHOLDER (items.name にはキーがそのまま入っている)
+    //   名前で: LOC_PLACEHOLDER の訳。英語 "<= PLACEHOLDER =>"、日本語 "<= プレースホルダー =>" (どちらも global.ini の LOC_PLACEHOLDER の値で確認。
+    //     item_index.name は訳で付け直されるので、日本語の訳が入っていることがある)
+    private static bool IsPlaceholderName(string? name, string? key = null)
     {
         var n = (name ?? "").Trim();
         return n.Length == 0
             || n.Equals("<= PLACEHOLDER =>", StringComparison.Ordinal)
-            || n.Equals("@LOC_PLACEHOLDER", StringComparison.Ordinal);
+            || n.Equals("<= プレースホルダー =>", StringComparison.Ordinal)
+            || IsPlaceholderKey(n)
+            || IsPlaceholderKey(key);
     }
+
+    private static bool IsPlaceholderKey(string? key)
+    {
+        var k = (key ?? "").Trim();
+        if (k.StartsWith('@')) k = k[1..];
+        return k.Equals("LOC_PLACEHOLDER", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // item_index の name_key を読む式 (列が無い DB では NULL)
+    private string NameKeyExpr => _hasItemIndexNameKey ? "name_key" : "NULL";
 
     // item_index の武器 (WeaponGun) は Size 列が無いので record_name の "_S{n}" (末尾または "_" の前。大文字小文字無視) から補完する。
     // 例: BEHR_LaserCannon_S3 → 3、RSI_BallisticCannon_S5_Meteor_Bespoke → 5、POWR_AEGS_S01_Regulus → 1。表記が無ければ 0。
@@ -153,7 +190,7 @@ public class EquipmentService : IDisposable
 
     // itemType (items.item_type) で絞った装備一覧。"WeaponGun" は item_index から (Grade 無し。Size は record_name から補完。sizeFilter は適用しない)。
     // 表示名は item_index.name を優先し、無ければ items.name (GetItemByRecord と同じ解決)。
-    // 表示名がプレースホルダ ("<= PLACEHOLDER =>" / "@LOC_PLACEHOLDER") または空のものは候補から除外する
+    // 表示名がプレースホルダ (IsPlaceholderName: 英語・日本語の訳、キー LOC_PLACEHOLDER) または空のものは候補から除外する
     public List<EquipmentItem> GetShipComponents(string itemType, string? search = null, int? sizeFilter = null)
     {
         if (itemType == WeaponGunType) return GetShipWeapons(search);
@@ -201,7 +238,8 @@ public class EquipmentService : IDisposable
                 ComponentType = reader.IsDBNull(6) ? "" : reader.GetString(6),
                 ComponentJson = reader.IsDBNull(7) ? "" : reader.GetString(7),
             };
-            if (IsPlaceholderName(item.Name)) continue;
+            // 名前の訳 (item_index.name) か、キーのまま入っている items.name でプレースホルダを判定する
+            if (IsPlaceholderName(item.Name) || IsPlaceholderKey(rawName)) continue;
             ParseStats(item);
             items.Add(item);
         }
@@ -220,7 +258,7 @@ public class EquipmentService : IDisposable
             conditions.Add("(name LIKE @q OR manufacturer LIKE @q OR record_name LIKE @q)");
             cmd.Parameters.AddWithValue("@q", $"%{search}%");
         }
-        cmd.CommandText = $"SELECT record_name, name, item_type, sub_type, manufacturer FROM item_index WHERE {string.Join(" AND ", conditions)} ORDER BY name, record_name";
+        cmd.CommandText = $"SELECT record_name, name, item_type, sub_type, manufacturer, {NameKeyExpr} FROM item_index WHERE {string.Join(" AND ", conditions)} ORDER BY name, record_name";
         using var reader = cmd.ExecuteReader();
 
         var items = new List<EquipmentItem>();
@@ -230,7 +268,7 @@ public class EquipmentService : IDisposable
             var rec = reader.IsDBNull(0) ? "" : reader.GetString(0);
             var name = reader.IsDBNull(1) ? "" : reader.GetString(1);
             // プレースホルダ名の行を先に落としてから重複排除する (同一 record に実名行があれば拾えるように)
-            if (rec.Length == 0 || IsPlaceholderName(name)) continue;
+            if (rec.Length == 0 || IsPlaceholderName(name, reader.IsDBNull(5) ? null : reader.GetString(5))) continue;
             if (!seen.Add(rec)) continue;
             items.Add(new EquipmentItem
             {
@@ -295,7 +333,7 @@ public class EquipmentService : IDisposable
         var rows = new List<EquipmentItem>();
         using (var cmd = _conn.CreateCommand())
         {
-            cmd.CommandText = $"SELECT record_name, name, item_type, sub_type, manufacturer, {sizeExpr} FROM item_index WHERE item_type IN ('Turret', 'WeaponMount')";
+            cmd.CommandText = $"SELECT record_name, name, item_type, sub_type, manufacturer, {sizeExpr}, {NameKeyExpr} FROM item_index WHERE item_type IN ('Turret', 'WeaponMount')";
             using var reader = cmd.ExecuteReader();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             while (reader.Read())
@@ -303,7 +341,7 @@ public class EquipmentService : IDisposable
                 var rec = reader.IsDBNull(0) ? "" : reader.GetString(0);
                 var name = reader.IsDBNull(1) ? "" : reader.GetString(1);
                 var type = reader.IsDBNull(2) ? "" : reader.GetString(2);
-                if (rec.Length == 0 || IsPlaceholderName(name)) continue;
+                if (rec.Length == 0 || IsPlaceholderName(name, reader.IsDBNull(6) ? null : reader.GetString(6))) continue;
                 var isMount = IsMountRecord(rec);
                 if (category == WeaponMountType ? !isMount : (isMount || type != TurretType)) continue;
                 if (!seen.Add(rec)) continue;
@@ -374,7 +412,7 @@ public class EquipmentService : IDisposable
             using var reader = cmd.ExecuteReader();
             while (reader.Read()) set.Add(RecordBaseName(reader.GetString(0)));
         }
-        catch (SqliteException) { }
+        catch (SqliteException ex) when (!RethrowBusy(ex)) { }
         return _defaultEquipRecords[key] = set;
     }
 
@@ -398,7 +436,7 @@ public class EquipmentService : IDisposable
                 set.Add(reader.GetString(1));
             }
         }
-        catch (SqliteException) { }
+        catch (SqliteException ex) when (!RethrowBusy(ex)) { }
         return _defaultEquipPortTypes = d;
     }
 
@@ -431,7 +469,7 @@ public class EquipmentService : IDisposable
                     byShip[ship] = (byShip.TryGetValue(ship, out var n) ? n : 0) + reader.GetInt32(2);
                 }
             }
-            catch (SqliteException) { }
+            catch (SqliteException ex) when (!RethrowBusy(ex)) { }
         }
         return _defaultEquipShips = counts.ToDictionary(
             kv => kv.Key,
@@ -763,13 +801,13 @@ public class EquipmentService : IDisposable
             cmd.Parameters.AddWithValue("@q", $"%{search}%");
         }
         var sizeExpr = _hasItemIndexSize ? "COALESCE(size, 0)" : "0";
-        cmd.CommandText = $"SELECT record_name, name, item_type, sub_type, manufacturer, {sizeExpr} FROM item_index WHERE {string.Join(" AND ", conditions)} ORDER BY name, record_name";
+        cmd.CommandText = $"SELECT record_name, name, item_type, sub_type, manufacturer, {sizeExpr}, {NameKeyExpr} FROM item_index WHERE {string.Join(" AND ", conditions)} ORDER BY name, record_name";
         var items = new List<EquipmentItem>();
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
             var name = reader.IsDBNull(1) ? "" : reader.GetString(1);
-            if (IsPlaceholderName(name)) continue;
+            if (IsPlaceholderName(name, reader.IsDBNull(6) ? null : reader.GetString(6))) continue;
             var rec = reader.GetString(0);
             var indexSize = reader.IsDBNull(5) ? 0 : reader.GetInt32(5);
             items.Add(new EquipmentItem
@@ -790,7 +828,7 @@ public class EquipmentService : IDisposable
     // "_SCItem" の有無を反転したもの (+前置) の順に照合する。
     // 表示名は items.name がローカライズキー (@item_Name...) のため、同 record の item_index.name を優先し、無ければ items.name。
     // items に無く item_index にだけある record (船舶武器など) は名前・種別 (+ record_name の "_S{n}" から補完した Size。Grade = 0) で返す。
-    // 表示名がプレースホルダ ("<= PLACEHOLDER =>" / "@LOC_PLACEHOLDER") または空のときは null にせず record 名を表示名にする。解決できなければ null
+    // 表示名がプレースホルダ (IsPlaceholderName) または空のときは null にせず record 名を表示名にする。解決できなければ null
     private readonly Dictionary<string, EquipmentItem?> _itemByRecordCache = new(StringComparer.Ordinal);
 
     public EquipmentItem? GetItemByRecord(string record)
@@ -837,7 +875,7 @@ public class EquipmentService : IDisposable
                 }
             }
         }
-        catch (SqliteException) { return null; }   // item_index を読めない (覚えず、次にもう一度引く)
+        catch (SqliteException ex) when (!RethrowBusy(ex)) { return null; }   // item_index を読めない (覚えず、次にもう一度引く)
         _currentItemNameCache[key] = result;
         return result;
     }
@@ -1143,7 +1181,7 @@ public class EquipmentService : IDisposable
         {
             try
             {
-                using var db = new SqliteConnection($"Data Source={_cacheDbPath}");
+                using var db = new TrackedSqliteConnection($"Data Source={_cacheDbPath}");
                 db.Open();
                 using var cmd = db.CreateCommand();
                 cmd.CommandText = "INSERT OR REPLACE INTO uex_prefetch_state (id, fetched_at) VALUES (1, @t)";
@@ -1160,7 +1198,7 @@ public class EquipmentService : IDisposable
     // プリフェッチ 1 カテゴリ分をまとめて保存する。そのカテゴリに出てきた item_name の行だけ入れ替える
     private void SavePrefetchedCategory(List<(string itemName, string location, double price)> rows)
     {
-        using var db = new SqliteConnection($"Data Source={_cacheDbPath}");
+        using var db = new TrackedSqliteConnection($"Data Source={_cacheDbPath}");
         db.Open();
         using var tx = db.BeginTransaction();
 
@@ -1203,7 +1241,7 @@ public class EquipmentService : IDisposable
     {
         try
         {
-            using var db = new SqliteConnection($"Data Source={_cacheDbPath};Mode=ReadOnly");
+            using var db = new TrackedSqliteConnection($"Data Source={_cacheDbPath};Mode=ReadOnly");
             db.Open();
 
             var index = new Dictionary<string, List<(string Location, double Price)>>(StringComparer.OrdinalIgnoreCase);
@@ -1245,7 +1283,7 @@ public class EquipmentService : IDisposable
             var transPath = Path.Combine(Path.GetDirectoryName(_cacheDbPath) ?? ".", "translations.db");
             if (!File.Exists(transPath)) return map;
 
-            using var db = new SqliteConnection($"Data Source={transPath};Mode=ReadOnly");
+            using var db = new TrackedSqliteConnection($"Data Source={transPath};Mode=ReadOnly");
             db.Open();
             using var cmd = db.CreateCommand();
             cmd.CommandText = "SELECT key, english FROM translations WHERE key LIKE 'item_Name%' AND english IS NOT NULL AND english <> ''";
@@ -1308,7 +1346,7 @@ public class EquipmentService : IDisposable
     {
         try
         {
-            using var db = new SqliteConnection($"Data Source={_cacheDbPath};Mode=ReadOnly");
+            using var db = new TrackedSqliteConnection($"Data Source={_cacheDbPath};Mode=ReadOnly");
             db.Open();
             using var cmd = db.CreateCommand();
             cmd.CommandText = "SELECT location, price, fetched_at FROM uex_item_prices WHERE item_name = @n ORDER BY price";
@@ -1417,7 +1455,7 @@ public class EquipmentService : IDisposable
     {
         try
         {
-            using var db = new SqliteConnection($"Data Source={_cacheDbPath}");
+            using var db = new TrackedSqliteConnection($"Data Source={_cacheDbPath}");
             db.Open();
             using var tx = db.BeginTransaction();
 
@@ -1453,7 +1491,9 @@ public class EquipmentService : IDisposable
 
     // 武器のダメージの種類で分けた名前 (装備タブの表の種別の欄)。［船舶戦闘］の「ダメージの種類」と同じ判定
     // (GameDataQueryService.WeaponDamageTypesOf) で、物理 → 実弾武器、エネルギー → エネルギー武器、ディストーション → ディストーション武器。
-    // 種類が複数なら「・」でつなぐ (例 エネルギー・ディストーション武器)。ダメージが無い・読めないときは ""
+    // 種類が複数なら「・」でつなぐ (例 エネルギー・ディストーション武器)。ダメージが無い・読めないときは ""。
+    // 読めなかったとき ("" を返す) は覚えず、次に呼ばれたときにもう一度読む。DB が使用中 (SQLITE_BUSY / LOCKED) なら投げる
+    // (［電力管理］は待って読み直す。［装備］の呼び出し元は受け止めて "" にする)
     private readonly string _gamedataDbPath;
     private GameDataQueryService? _damageQuery;
     private bool _damageQueryFailed;
@@ -1461,27 +1501,29 @@ public class EquipmentService : IDisposable
     private static readonly (string Key, string Label)[] WeaponDamageLabels =
         [("Physical", "実弾"), ("Energy", "エネルギー"), ("Distortion", "ディストーション"), ("Thermal", "熱"), ("Biochemical", "生化学"), ("Stun", "スタン")];
 
-    public string WeaponDamageKindLabel(string? record)
+    // cachedOnly: 覚えた名前だけ返し、覚えていなければ読まずに "" (1 回の描き直しで一度「使用中」が出た後に、残りを待たないため)
+    public string WeaponDamageKindLabel(string? record, bool cachedOnly = false)
     {
         var key = (record ?? "").Trim();
         if (key.Length == 0) return "";
         if (_weaponKindCache.TryGetValue(key, out var cached)) return cached;
+        if (cachedOnly) return "";
         var label = "";
         try
         {
             if (_damageQuery == null && !_damageQueryFailed)
             {
                 try { _damageQuery = new GameDataQueryService(_gamedataDbPath); }
+                catch (Exception ex) when (GameDataQueryService.IsBusy(ex)) { throw; }   // 使用中は「開けない」と覚えない
                 catch { _damageQueryFailed = true; }
             }
-            if (_damageQuery != null)
-            {
-                var types = _damageQuery.WeaponDamageTypesOf(key);
-                var parts = WeaponDamageLabels.Where(t => types.Contains(t.Key)).Select(t => t.Label).ToList();
-                if (parts.Count > 0) label = string.Join("・", parts) + "武器";
-            }
+            if (_damageQuery == null) return "";   // 開けない: 覚えない
+            var types = _damageQuery.WeaponDamageTypesOf(key);
+            var parts = WeaponDamageLabels.Where(t => types.Contains(t.Key)).Select(t => t.Label).ToList();
+            if (parts.Count > 0) label = string.Join("・", parts) + "武器";
         }
-        catch { label = ""; }
+        catch (Exception ex) when (GameDataQueryService.IsBusy(ex)) { throw; }
+        catch { return ""; }   // 読めなかった: 覚えずに次にもう一度読む
         _weaponKindCache[key] = label;
         return label;
     }
@@ -1525,11 +1567,13 @@ public class EquipmentService : IDisposable
                 if (_damageQuery == null && !_damageQueryFailed)
                 {
                     try { _damageQuery = new GameDataQueryService(_gamedataDbPath); }
+                    catch (Exception ex) when (RethrowBusy(ex)) { throw; }   // 使用中は「開けない」と覚えない
                     catch { _damageQueryFailed = true; }
                 }
                 if (_damageQuery != null) label = _damageQuery.ComponentPerfOf(key, type);
             }
         }
+        catch (Exception ex) when (RethrowBusy(ex)) { throw; }   // 使用中: 覚えずに投げる (裏の読み込みが待って読み直す)
         catch { label = ""; }
         _perfCache[cacheKey] = label;
         return label;
