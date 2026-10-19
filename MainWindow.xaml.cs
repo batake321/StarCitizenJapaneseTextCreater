@@ -193,6 +193,8 @@ public partial class MainWindow : Window
 
         // PC 間の同期 (MainWindow.Sync.cs): 起動時の取り込み → 書き出しと、ゲーム起動・ゲーム中・ゲーム終了の見回り
         InitSync();
+        // 自動更新 (MainWindow.Update.cs): 起動したときと毎日の時刻の確かめ
+        InitAutoUpdate();
     }
 
     private void PopulateChannels()
@@ -1758,6 +1760,7 @@ public partial class MainWindow : Window
         App.Config.ArmisticeSoundPath = txtArmisticeSoundPath.Text.Trim();
         App.Config.ArrivalSoundPath = txtArrivalSoundPath.Text.Trim();
         App.Config.SyncFolder = txtSyncFolder.Text.Trim();
+        SaveAutoUpdateSettings();
         App.Config.UexApiKey = txtUexApiKey.Text.Trim();
         if (double.TryParse(txtMissionFontSize.Text.Trim(), out var fs) && fs >= 8 && fs <= 30)
         {
@@ -4354,6 +4357,9 @@ public partial class MainWindow : Window
         try
         {
             _syncTimer?.Stop();
+            _updateTimer?.Stop();
+            // 自動更新の窓が開いていれば閉じる (開いたままだと、主の窓を閉じてもアプリが終わらない。× と同じく「次回更新時に知らせる」になる)
+            try { _updateWindow?.Close(); } catch { }
             var baseTitle = Title;
             try { Title = $"{baseTitle} - 終了しています…"; } catch { }
             // 閉じる処理の間は窓の中を押せなくする (インデックス構築などを始められないように)
@@ -4441,6 +4447,8 @@ public partial class MainWindow : Window
     {
         if (e.Cancel) return;
         _sessionEnding = true;
+        // サインアウト・シャットダウンのときは、自動更新の入れ替えを始めない (次の起動でまた聞く。取ったファイルは使い回す)
+        AppUpdater.PendingOnExit = null;
         _exiting = true;
         var workDir = WorkDir;
         void LogFile(string s) { try { if (!string.IsNullOrEmpty(workDir)) App.AppendStartupLog(workDir, s); } catch { } }

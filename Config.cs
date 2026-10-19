@@ -66,6 +66,10 @@ public class AppConfig
 
     // PC 間の同期: 個人データの書き出し・取り込みに使う共有フォルダ (空なら同期しない)
     public string SyncFolder { get; set; } = "";
+
+    // 自動更新: 起動したときと毎日 AutoUpdateTime (HH:mm) に、新しい版を確かめる (AppUpdater)
+    public bool AutoUpdateEnabled { get; set; } = true;
+    public string AutoUpdateTime { get; set; } = "08:00";
 }
 
 public class TranslationConfig

@@ -164,12 +164,27 @@ public class MissionService : IDisposable
 
         // 評判の範囲の表示名: 範囲のレコード (SReputationScopeParams) の displayName の語を翻訳で引く (日本語 → 英語)
         var scopes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (rec, key) in ScopeDisplayKeys)
+        string? Lookup(string key)
         {
-            if (_transDict != null && _transDict.TryGetValue(key, out var ja) && !string.IsNullOrEmpty(ja)) scopes[rec] = ja;
-            else if (_enDict != null && _enDict.TryGetValue(key, out var en) && !string.IsNullOrEmpty(en)) scopes[rec] = en;
+            if (_transDict != null && _transDict.TryGetValue(key, out var ja) && !string.IsNullOrEmpty(ja)) return ja;
+            if (_enDict != null && _enDict.TryGetValue(key, out var en) && !string.IsNullOrEmpty(en)) return en;
+            return null;
         }
+        foreach (var (rec, key) in ScopeDisplayKeys)
+            if (Lookup(key) is { } n) scopes[rec] = n;
+        // displayName の語に訳が無い範囲は、代わりの語 (ScopeFallbackKeys)
+        foreach (var (rec, key) in ScopeFallbackKeys)
+            if (!scopes.ContainsKey(rec) && Lookup(key) is { } n) scopes[rec] = n;
         _scopeNames = scopes;
+
+        var standings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (rec, key) in StandingDisplayKeys)
+            if (Lookup(key) is { } n) standings[rec] = n;
+        _standingNames = standings;
+        var stances = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (word, key) in new[] { ("neutral", "mobiGlas_Reputation_Stance_Neutral"), ("ally", "mobiGlas_Reputation_Stance_Ally"), ("hostile", "mobiGlas_Reputation_Stance_Hostile") })
+            if (Lookup(key) is { } n) stances[word] = n;
+        _stanceWords = stances;
     }
 
     // 評判の範囲の表示名 (レコード名 → 名前)。FormatScope の手書きの対応より先に使う
@@ -218,6 +233,108 @@ public class MissionService : IDisposable
         ("reputationscope_fpscombat_xenothreat", "mobiglas_ui_Mercenary"),
         ("reputationscope_fpscombat_roughandready", "mobiglas_ui_Mercenary"),
         ("reputationscope_fpscombat_headhunter", "mobiglas_ui_Mercenary"),
+    };
+
+    // displayName の語に訳が無い範囲 (global.ini にも translations.db にも無い) の代わりの語。ゲームの訳の言い方に合わせて次から決めた:
+    //   艦船での戦闘 (shipcombat と勢力ごとの shipcombat_*): Hints_Ship_Combat_Title の「艦船での戦闘」(Ship Combat)
+    //   FPS 戦闘 (fpscombat): 勢力ごとの fpscombat_* の displayName の mobiglas_ui_Mercenary「傭兵」
+    //   worker: 勢力ごとの worker_roughandready の displayName の RepScope_HiredMuscle_Name「肉体労働者」
+    //   racing_headhunter: mobiglas_ui_Race「レース」
+    private static readonly (string Record, string Key)[] ScopeFallbackKeys =
+    {
+        ("reputationscope_shipcombat", "Hints_Ship_Combat_Title"),
+        ("reputationscope_shipcombat_roughandready", "Hints_Ship_Combat_Title"),
+        ("reputationscope_shipcombat_headhunters", "Hints_Ship_Combat_Title"),
+        ("reputationscope_shipcombat_xenothreat", "Hints_Ship_Combat_Title"),
+        ("reputationscope_fpscombat", "mobiglas_ui_Mercenary"),
+        ("reputationscope_worker", "RepScope_HiredMuscle_Name"),
+        ("reputationscope_racing_headhunter", "mobiglas_ui_Race"),
+    };
+
+    // 評判の段階の表示名 (段階のレコード名 → 名前)。FormatStanding の手書きの対応より先に使う
+    private static Dictionary<string, string>? _standingNames;
+    // 好感度の段階 (reputationstanding_affinity_neutral_020 など。displayName が @LOC_PLACEHOLDER か訳の無い語) に使う、
+    // ゲームの立場の語 (mobiGlas_Reputation_Stance_Neutral「中立」・_Ally「同盟」・_Hostile「敵対」)
+    private static Dictionary<string, string>? _stanceWords;
+
+    // 段階のレコード名 → displayName の語。Data.p4k の libs/foundry/records/reputation/standings/ の段階のうち、
+    // 契約の raw_json から参照されるもの (displayName が @LOC_* のものは入れない) を写したもの
+    private static readonly (string Record, string Key)[] StandingDisplayKeys =
+    {
+        ("reputationstanding_affinity_ally_025", "RepStanding_MissionGiver_Default_Liked_Name"),
+        ("reputationstanding_affinity_ally_100", "RepStanding_MissionGiver_Default_Exalted_Name"),
+        ("reputationstanding_affinity_neutral_000", "RepStanding_MissionGiver_Default_Neutral_Name"),
+        ("reputationstanding_assassination_assosciate", "RepStanding_Assassination_Rank2"),
+        ("reputationstanding_assassination_captain", "RepStanding_Assassination_Rank4"),
+        ("reputationstanding_assassination_counsel", "RepStanding_Assassination_Rank5"),
+        ("reputationstanding_assassination_noteligible", "RepStanding_NotEligible"),
+        ("reputationstanding_assassination_outsider", "RepStanding_Assassination_Rank0"),
+        ("reputationstanding_assassination_rookie", "RepStanding_Assassination_Rank1"),
+        ("reputationstanding_assassination_soldier", "RepStanding_Assassination_Rank3"),
+        ("reputationstanding_assassination_underboss", "RepStanding_Assassination_Rank6"),
+        ("reputationstanding_bounty_agent", "RepStanding_Bounty_Rank3"),
+        ("reputationstanding_bounty_agent_bountyhuntersguild", "RepStanding_Bounty_MidLevel_Name"),
+        ("reputationstanding_bounty_applicant", "RepStanding_Bounty_Rank0"),
+        ("reputationstanding_bounty_applicant_bountyhuntersguild", "RepStanding_Bounty_Applicant_Name"),
+        ("reputationstanding_bounty_junior", "RepStanding_Bounty_Rank2"),
+        ("reputationstanding_bounty_junior_bountyhuntersguild", "RepStanding_Bounty_Junior_Name"),
+        ("reputationstanding_bounty_masteragent", "RepStanding_Bounty_Rank6"),
+        ("reputationstanding_bounty_masteragent_bountyhuntersguild", "RepStanding_Bounty_LegendaryBountyHunter_Name"),
+        ("reputationstanding_bounty_probation", "RepStanding_Bounty_Rank1"),
+        ("reputationstanding_bounty_probation_bountyhuntersguild", "RepStanding_Bounty_Probation_Name"),
+        ("reputationstanding_bounty_senior", "RepStanding_Bounty_Rank4"),
+        ("reputationstanding_bounty_senior_bountyhuntersguild", "RepStanding_Bounty_Senior_Name"),
+        ("reputationstanding_bounty_veteranagent", "RepStanding_Bounty_Rank5"),
+        ("reputationstanding_bounty_veteranagent_bountyhuntersguild", "RepStanding_Bounty_MasterBountyHunter_Name"),
+        ("reputationstanding_courier_rank0", "RepStanding_Courier_Rank0"),
+        ("reputationstanding_courier_rank1", "RepStanding_Courier_Rank1"),
+        ("reputationstanding_courier_rank2", "RepStanding_Courier_Rank2"),
+        ("reputationstanding_emergency_noteligible", "RepStanding_NotEligible"),
+        ("reputationstanding_factionrep_allied_border", "RepScope_Contractor_Rank0"),
+        ("reputationstanding_factionrep_negativerep", "mobiGlas_Reputation_Stance_Hostile"),
+        ("reputationstanding_factionrep_rank0", "mobiGlas_Reputation_Stance_Neutral"),
+        ("reputationstanding_factionrep_rank1", "RepScope_Contractor_Rank1"),
+        ("reputationstanding_factionrep_rank2", "RepScope_Contractor_Rank2"),
+        ("reputationstanding_factionrep_rank3", "RepScope_Contractor_Rank3"),
+        ("reputationstanding_factionrep_rank4", "RepScope_Contractor_Rank4"),
+        ("reputationstanding_factionrep_rank5", "RepScope_Contractor_Rank5"),
+        ("reputationstanding_factionrep_rank6", "RepScope_Contractor_Rank6"),
+        ("reputationstanding_hauling_rank0", "RepStanding_TransportGuild_Rank0"),
+        ("reputationstanding_hauling_rank1", "RepStanding_TransportGuild_Rank1"),
+        ("reputationstanding_hauling_rank2", "RepStanding_TransportGuild_Rank2"),
+        ("reputationstanding_hauling_rank3", "RepStanding_TransportGuild_Rank3"),
+        ("reputationstanding_hauling_rank4", "RepStanding_TransportGuild_Rank4"),
+        ("reputationstanding_hauling_rank5", "RepStanding_TransportGuild_Rank5"),
+        ("reputationstanding_hauling_rank6", "RepStanding_TransportGuild_Rank6"),
+        ("reputationstanding_hiredmuscle_noteligible", "RepStanding_NotEligible"),
+        ("reputationstanding_hiredmuscle_rank0", "RepStanding_Rank0"),
+        ("reputationstanding_hiredmuscle_rank1", "RepStanding_Rank1"),
+        ("reputationstanding_missionproviderrep_battaglia_rank0", "mg_battaglia_RepScope_Rank0"),
+        ("reputationstanding_missionproviderrep_battaglia_rank1", "mg_battaglia_RepScope_Rank1"),
+        ("reputationstanding_missionproviderrep_battaglia_rank2", "mg_battaglia_RepScope_Rank2"),
+        ("reputationstanding_missionproviderrep_battaglia_rank3", "mg_battaglia_RepScope_Rank3"),
+        ("reputationstanding_missionproviderrep_battaglia_rank4", "mg_battaglia_RepScope_Rank4"),
+        ("reputationstanding_missionproviderrep_battaglia_rank5", "mg_battaglia_RepScope_Rank5"),
+        ("reputationstanding_npc_reliability_fireable", "RepStanding_MissionGiver_Default_Disliked_Name"),
+        ("reputationstanding_racing_ship_rank0", "RacingRep_Ship_Rank0"),
+        ("reputationstanding_racing_ship_rank1", "RacingRep_Ship_Rank1"),
+        ("reputationstanding_racing_ship_rank2", "RacingRep_Ship_Rank2"),
+        ("reputationstanding_racing_ship_rank3", "RacingRep_Ship_Rank3"),
+        ("reputationstanding_racing_ship_rank4", "RacingRep_Ship_Rank4"),
+        ("reputationstanding_racing_ship_rank5", "RacingRep_Ship_Rank5"),
+        ("reputationstanding_racing_ship_rank6", "RacingRep_Ship_Rank6"),
+        ("reputationstanding_racing_ship_rank7", "RacingRep_Ship_Rank7"),
+        ("reputationstanding_security_rank0", "RepStanding_Security_Rank0"),
+        ("reputationstanding_security_rank1", "RepStanding_Security_Rank1"),
+        ("reputationstanding_security_rank2", "RepStanding_Security_Rank2"),
+        ("reputationstanding_security_rank3", "RepStanding_Security_Rank3"),
+        ("reputationstanding_security_rank4", "RepStanding_Security_Rank4"),
+        ("reputationstanding_security_rank5", "RepStanding_Security_Rank5"),
+        ("reputationstanding_security_rank6", "RepStanding_Security_Rank6"),
+        ("reputationstanding_shipcombat_rank0_headhunters", "RepStanding_Rank0"),
+        ("reputationstanding_shipcombat_rank6_headhunters", "RepStanding_Rank6"),
+        ("reputationstanding_wikelo_001", "RepStanding_Barter_Rank1_Name"),
+        ("reputationstanding_wikelo_002", "RepStanding_Barter_Rank2_Name"),
     };
 
     public string? TransLoadError { get; private set; }
@@ -749,7 +866,9 @@ public class MissionService : IDisposable
             }
 
             // Reward details
-            if (rv.TryGetProperty("missionReward", out var reward))
+            // 値が null の要素 (例 PU_EliminateSpecific_Caves の reputationRequirements: null) に TryGetProperty すると例外になり、
+            // 後ろの評判の報酬などを読まずに終わるので、どれも Object のときだけ読む
+            if (rv.TryGetProperty("missionReward", out var reward) && reward.ValueKind == JsonValueKind.Object)
             {
                 entry.RewardBase = GetDouble(reward, "reward");
                 entry.RewardBonusMax = GetDouble(reward, "max");
@@ -758,7 +877,7 @@ public class MissionService : IDisposable
             entry.BuyInAmount = GetDouble(rv, "missionBuyInAmount");
 
             // Deadline
-            if (rv.TryGetProperty("missionDeadline", out var deadline))
+            if (rv.TryGetProperty("missionDeadline", out var deadline) && deadline.ValueKind == JsonValueKind.Object)
             {
                 entry.CompletionTimeMinutes = GetDouble(deadline, "missionCompletionTime");
                 entry.AutoEnd = GetBool(deadline, "missionAutoEnd");
@@ -777,9 +896,9 @@ public class MissionService : IDisposable
             entry.NotForRelease = GetBool(rv, "notForRelease");
 
             // Wanted level prerequisites
-            if (rv.TryGetProperty("reputationPrerequisites", out var repPre))
+            if (rv.TryGetProperty("reputationPrerequisites", out var repPre) && repPre.ValueKind == JsonValueKind.Object)
             {
-                if (repPre.TryGetProperty("wantedLevel", out var wl))
+                if (repPre.TryGetProperty("wantedLevel", out var wl) && wl.ValueKind == JsonValueKind.Object)
                 {
                     entry.WantedLevelMin = GetDouble(wl, "minValue");
                     entry.WantedLevelMax = GetDouble(wl, "maxValue");
@@ -787,12 +906,13 @@ public class MissionService : IDisposable
             }
 
             // Reputation requirements
-            if (rv.TryGetProperty("reputationRequirements", out var repReq))
+            if (rv.TryGetProperty("reputationRequirements", out var repReq) && repReq.ValueKind == JsonValueKind.Object)
             {
                 if (repReq.TryGetProperty("expression", out var expr) && expr.ValueKind == JsonValueKind.Array)
                 {
                     foreach (var req in expr.EnumerateArray())
                     {
+                        if (req.ValueKind != JsonValueKind.Object) continue;
                         entry.RepRequirements.Add(new ReputationRequirement
                         {
                             Faction = ExtractFileName(GetString(req, "factionReputation")),
@@ -826,7 +946,7 @@ public class MissionService : IDisposable
                 int idx = 0;
                 foreach (var resultEntry in repRewards.EnumerateArray())
                 {
-                    if (resultEntry.TryGetProperty("reputationAmounts", out var amounts) && amounts.ValueKind == JsonValueKind.Array)
+                    if (resultEntry.ValueKind == JsonValueKind.Object && resultEntry.TryGetProperty("reputationAmounts", out var amounts) && amounts.ValueKind == JsonValueKind.Array)
                     {
                         var list = idx == 0 ? entry.SuccessRepRewards
                                  : idx == 2 ? entry.AbandonRepRewards
@@ -836,6 +956,7 @@ public class MissionService : IDisposable
                         {
                             foreach (var amt in amounts.EnumerateArray())
                             {
+                                if (amt.ValueKind != JsonValueKind.Object) continue;
                                 list.Add(new ReputationRewardInfo
                                 {
                                     Faction = ExtractFileName(GetString(amt, "factionReputation")),
@@ -1002,19 +1123,47 @@ public class MissionService : IDisposable
         if (root.TryGetProperty("_Contract_", out var contract) && contract.ValueKind == JsonValueKind.Object)
         {
             if (GetBool(contract, "notForRelease")) entry.NotForRelease = true;
+            // 受注条件の評判: additionalPrerequisites[] の ContractPrerequisite_Reputation (勢力・範囲・minStanding〜maxStanding。
+            // exclude が真なら、その段階の間にいると受けられない)。subContracts の中は読まない (報酬と同じ)
+            if (contract.TryGetProperty("additionalPrerequisites", out var pres) && pres.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var pre in pres.EnumerateArray())
+                {
+                    if (pre.ValueKind != JsonValueKind.Object || GetString(pre, "_Type_") != "ContractPrerequisite_Reputation") continue;
+                    entry.RepRequirements.Add(new ReputationRequirement
+                    {
+                        Faction = ExtractFileName(GetString(pre, "factionReputation")),
+                        Scope = ExtractFileName(GetString(pre, "scope")),
+                        Standing = ExtractFileName(GetString(pre, "minStanding")),
+                        MaxStanding = ExtractFileName(GetString(pre, "maxStanding")),
+                        Exclude = GetBool(pre, "exclude"),
+                        IsRange = true,
+                    });
+                }
+            }
             // contractResults.timeToComplete は分単位
             if (contract.TryGetProperty("contractResults", out var results) && results.ValueKind == JsonValueKind.Object)
             {
                 entry.CompletionTimeMinutes = GetDouble(results, "timeToComplete");
 
-                // 評判の報酬: contractResults.contractResults[] の ContractResult_LegacyReputation。
+                // 評判の報酬: contractResults.contractResults[] の ContractResult_LegacyReputation (量のレコードあり) と
+                // ContractResult_CalculatedReputation (量のレコードが無く、ゲームが契約の内容から計算する。勢力と範囲だけを持つ)。
                 // missionResults (bool 5 個) の並びは MBE 行の missionResultReputationRewards と同じとみなす (成功 = 0, 放棄 = 2, 失敗 = 3)。subContracts の中は読まない
                 if (results.TryGetProperty("contractResults", out var resultList) && resultList.ValueKind == JsonValueKind.Array)
                 {
                     foreach (var cr in resultList.EnumerateArray())
                     {
-                        if (cr.ValueKind != JsonValueKind.Object || GetString(cr, "_Type_") != "ContractResult_LegacyReputation") continue;
-                        if (!cr.TryGetProperty("contractResultReputationAmounts", out var amt) || amt.ValueKind != JsonValueKind.Object) continue;
+                        if (cr.ValueKind != JsonValueKind.Object) continue;
+                        var crType = GetString(cr, "_Type_");
+                        JsonElement amt;
+                        bool calculated;
+                        if (crType == "ContractResult_LegacyReputation")
+                        {
+                            if (!cr.TryGetProperty("contractResultReputationAmounts", out amt) || amt.ValueKind != JsonValueKind.Object) continue;
+                            calculated = false;
+                        }
+                        else if (crType == "ContractResult_CalculatedReputation") { amt = cr; calculated = true; }
+                        else continue;
                         if (!cr.TryGetProperty("missionResults", out var flags) || flags.ValueKind != JsonValueKind.Array) continue;
                         int idx = 0;
                         foreach (var flag in flags.EnumerateArray())
@@ -1028,7 +1177,8 @@ public class MissionService : IDisposable
                             {
                                 Faction = ExtractFileName(GetString(amt, "factionReputation")),
                                 Scope = ExtractFileName(GetString(amt, "reputationScope")),
-                                Amount = ExtractFileName(GetString(amt, "reward")),
+                                Amount = calculated ? "" : ExtractFileName(GetString(amt, "reward")),
+                                Calculated = calculated,
                             });
                             idx++;
                         }
@@ -1254,7 +1404,15 @@ public class MissionService : IDisposable
                 var faction = FormatFaction(req.Faction);
                 var scope = FormatScope(req.Scope);
                 var standing = FormatStanding(req.Standing);
-                lines.Add($"  {faction} [{scope}]: {standing} {FormatComparison(req.Comparison)}");
+                if (!req.IsRange)
+                {
+                    lines.Add($"  {faction} [{scope}]: {standing} {FormatComparison(req.Comparison)}");
+                    continue;
+                }
+                // CG 行の受注条件 (段階の範囲)。上限がその範囲のいちばん上の段階 (rank6。例 factionrep_rank6・shipcombat_rank6_headhunters) なら「以上」だけ
+                var top = string.IsNullOrEmpty(req.MaxStanding) || TopRankRegex.IsMatch(req.MaxStanding);
+                var range = top ? $"{standing} 以上" : $"{standing} 以上 {FormatStanding(req.MaxStanding)} 以下";
+                lines.Add(req.Exclude ? $"  {faction} [{scope}]: {range}のときは受けられない" : $"  {faction} [{scope}]: {range}");
             }
         }
 
@@ -1279,7 +1437,7 @@ public class MissionService : IDisposable
             lines.Add("■ レピュテーション報酬 (成功時)");
             foreach (var rr in m.SuccessRepRewards)
             {
-                var amount = FormatRepAmount(rr.Amount);
+                var amount = FormatRepAmount(rr);
                 lines.Add($"  {FormatFaction(rr.Faction)} [{FormatScope(rr.Scope)}]: {amount}");
             }
         }
@@ -1290,7 +1448,7 @@ public class MissionService : IDisposable
             lines.Add("■ レピュテーション変動 (失敗時)");
             foreach (var rr in m.FailRepRewards)
             {
-                var amount = FormatRepAmount(rr.Amount);
+                var amount = FormatRepAmount(rr);
                 lines.Add($"  {FormatFaction(rr.Faction)} [{FormatScope(rr.Scope)}]: {amount}");
             }
         }
@@ -1597,8 +1755,21 @@ public class MissionService : IDisposable
         };
     }
 
+    private static readonly System.Text.RegularExpressions.Regex AffinityStandingRegex =
+        new(@"^reputationstanding_affinity_(neutral|ally|hostile)_(\d+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    private static readonly System.Text.RegularExpressions.Regex TopRankRegex =
+        new(@"_rank6(_|$)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
     private static string FormatStanding(string s)
     {
+        // 段階のレコードの displayName をゲームの訳で (StandingDisplayKeys)
+        if (_standingNames != null && !string.IsNullOrEmpty(s) && _standingNames.TryGetValue(s, out var gameName)) return gameName;
+        // 好感度の段階 (displayName が仮の文字・訳の無い語): 立場の語と値 (例 affinity_neutral_020 → 中立 20)
+        var am = AffinityStandingRegex.Match(s ?? "");
+        if (am.Success && _stanceWords != null && _stanceWords.TryGetValue(am.Groups[1].Value, out var stance))
+            return $"{stance} {int.Parse(am.Groups[2].Value)}";
+        s ??= "";
         if (s.StartsWith("reputationstanding_")) s = s["reputationstanding_".Length..];
         var parts = s.Split('_');
         if (parts.Length >= 2)
@@ -1622,6 +1793,9 @@ public class MissionService : IDisposable
         "EqualTo" => "と等しい",
         _ => c,
     };
+
+    // 評判の量の文。量がゲームの計算で決まるもの (ContractResult_CalculatedReputation) は「+ (量は計算で決まる)」
+    private static string FormatRepAmount(ReputationRewardInfo r) => r.Calculated ? "+ (量は計算で決まる)" : FormatRepAmount(r.Amount);
 
     private static string FormatRepAmount(string a)
     {
@@ -1909,20 +2083,23 @@ public class MissionService : IDisposable
         // 一覧の「カテゴリ」列
         public string Category => CategoryOf(this);
         // 一覧の「評判」列: 成功時の評判 ("組織 量" を ", " でつなぐ。無ければ "")
-        // 成功時の評判の一覧の文。範囲が 2 種類以上ある契約だけ各項目に「 (範囲)」を付ける。
-        // 組合・範囲・量が全部同じ項目は 1 つにまとめる
+        // 成功時の評判の一覧の文。範囲が「評判」(factionreputationscope。ゲームの評判の画面のいちばん上の値) 以外の項目は、
+        // 1 種類でもいつも「 (範囲)」を付ける (肉体労働者・暗殺などだけが上がる契約を、評判が上がる契約と見分けられるように)。
+        // 範囲が 2 種類以上ある契約は、評判の項目にも「 (範囲)」を付ける。組合・範囲・量が全部同じ項目は 1 つにまとめる
         public string SuccessRepSummary
         {
             get
             {
-                var withScope = SuccessRepRewards.Select(r => r.Scope).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1;
+                var several = SuccessRepRewards.Select(r => r.Scope).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1;
+                bool WithScope(ReputationRewardInfo r) => !string.IsNullOrEmpty(r.Scope)
+                    && (several || !r.Scope.Equals("factionreputationscope", StringComparison.OrdinalIgnoreCase));
                 return string.Join(", ", SuccessRepRewards
-                    .Select(r => $"{FormatFaction(r.Faction)} {FormatRepAmount(r.Amount)}".TrimEnd() + (withScope ? $" ({FormatScope(r.Scope)})" : ""))
+                    .Select(r => $"{FormatFaction(r.Faction)} {FormatRepAmount(r)}".TrimEnd() + (WithScope(r) ? $" ({FormatScope(r.Scope)})" : ""))
                     .Distinct(StringComparer.Ordinal));
             }
         }
         // 成功時に評判が上がる (量が + のものが 1 つでもある)。一覧の行を薄い緑にする
-        public bool GivesReputation => SuccessRepRewards.Any(r => FormatRepAmount(r.Amount).StartsWith("+"));
+        public bool GivesReputation => SuccessRepRewards.Any(r => FormatRepAmount(r).StartsWith("+"));
 
         public string DisplayReward =>
             RewardBase > 0 ? $"{RewardBase:N0}"
@@ -2048,6 +2225,10 @@ public class MissionService : IDisposable
         public string Scope { get; set; } = "";
         public string Comparison { get; set; } = "";
         public string Standing { get; set; } = "";
+        // CG 行の受注条件 (ContractPrerequisite_Reputation): Standing〜MaxStanding の範囲。Exclude なら、その範囲にいると受けられない
+        public string MaxStanding { get; set; } = "";
+        public bool Exclude { get; set; }
+        public bool IsRange { get; set; }
     }
 
     public class ReputationRewardInfo
@@ -2055,6 +2236,8 @@ public class MissionService : IDisposable
         public string Faction { get; set; } = "";
         public string Scope { get; set; } = "";
         public string Amount { get; set; } = "";
+        // 量のレコードが無く、ゲームが契約の内容から計算する (ContractResult_CalculatedReputation)
+        public bool Calculated { get; set; }
     }
 
     public class SpawnGroupInfo

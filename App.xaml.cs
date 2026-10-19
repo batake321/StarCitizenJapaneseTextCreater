@@ -119,6 +119,8 @@ public partial class App : Application
         // 閉じるときは作業フォルダの WAL の DB をチェックポイントして -wal を空にする (DB の本体だけで中身がそろうように。
         // release.ps1 が D:\temp の DB の本体を同梱するときなど)。ほかの接続が読んでいて最後までできなくても、次に開いたときに -wal から読める
         Exit += (_, _) => CheckpointWorkDbs();
+        // 自動更新の［終了して更新］: 閉じる処理とチェックポイントの後に、入れ替えのプログラムを起動する (サインアウト・シャットダウンのときは起動しない)
+        Exit += (_, _) => AppUpdater.LaunchPendingOnExit();
         TaskScheduler.UnobservedTaskException += (_, args) =>
         {
             WriteUnhandledLog($"[例外] 待たれなかったタスクの例外 (アプリは続けます): {args.Exception}");
@@ -228,6 +230,56 @@ public partial class App : Application
         ExitAfterFatalError(1);
     }
 
+    // 自動更新の入れ替え (runner) の最中なら「更新を入れています…」の小さな窓を出して、終わるまで待つ (上限 UpdateWaitLimit)。
+    // そのあと、途中で切れた入れ替えの印が残っていれば続きを起動する (そのときは false を返し、このプロセスは終わる。入れ替えの後に起動し直される)。
+    // 上限まで待っても終わらなければ知らせて false
+    internal static readonly TimeSpan UpdateWaitLimit = TimeSpan.FromMinutes(10);
+    private static bool WaitForUpdateAndRecover()
+    {
+        try
+        {
+            if (AppUpdater.IsUpdating())
+            {
+                var done = false;
+                var finished = false;
+                var waiter = new Thread(() => { finished = AppUpdater.WaitUpdateFinished(UpdateWaitLimit); done = true; }) { IsBackground = true };
+                waiter.Start();
+                var w = new Window
+                {
+                    Title = UpdateTexts.UpdatingTitle, Width = 360, Height = 120, ResizeMode = ResizeMode.NoResize,
+                    WindowStartupLocation = WindowStartupLocation.CenterScreen, Topmost = true,
+                    Content = new System.Windows.Controls.TextBlock { Text = UpdateTexts.UpdatingMessage, Margin = new Thickness(16), TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center },
+                };
+                w.Show();
+                var frame = new System.Windows.Threading.DispatcherFrame();
+                var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+                timer.Tick += (_, _) => { if (done) { timer.Stop(); frame.Continue = false; } };
+                timer.Start();
+                System.Windows.Threading.Dispatcher.PushFrame(frame);
+                w.Close();
+                if (!finished)
+                {
+                    System.Windows.MessageBox.Show(UpdateTexts.UpdatingTimeout, UpdateTexts.UpdatingTitle, System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
+                    return false;
+                }
+            }
+            // 途中で切れた入れ替えの続き。もう runner が動いていれば (Busy)、終わるのを待ってから見直す
+            for (int round = 0; round < 3; round++)
+            {
+                var r = AppUpdater.ResumeInterruptedIfAny();
+                if (r == AppUpdater.ResumeStart.Launched) return false;
+                if (r == AppUpdater.ResumeStart.None) return true;
+                if (!AppUpdater.WaitUpdateFinished(UpdateWaitLimit))
+                {
+                    System.Windows.MessageBox.Show(UpdateTexts.UpdatingTimeout, UpdateTexts.UpdatingTitle, System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
+                    return false;
+                }
+            }
+            return true;
+        }
+        catch { return true; }
+    }
+
     // 続けられない例外のあとで終わる。二重起動の防止の Mutex を先に手放して閉じる
     //   (手放せなくても、プロセスが終わればハンドルは閉じられる)
     private static void ExitAfterFatalError(int exitCode)
@@ -259,6 +311,37 @@ public partial class App : Application
             return;
         }
 
+        // 自動更新の入れ替え (AppUpdater.LaunchApply が update\runner の写しから起動する)。アプリが終わるのを待って入れ替え、失敗したら戻す
+        if (e.Args.Length >= 2 && e.Args[0] == "--apply-update")
+        {
+            Environment.Exit(AppUpdater.RunApply(e.Args[1]));
+            return;
+        }
+        // 自動更新の入れ替えが途中で切れていたときの続き (WaitForUpdateAndRecover が update\runner から起動する)
+        if (e.Args.Length >= 2 && e.Args[0] == "--resume-update")
+        {
+            Environment.Exit(AppUpdater.ResumeApply(e.Args[1], fromRunOnce: e.Args.Skip(2).Contains("--runonce"), restart: e.Args.Skip(2).Contains("--restart")));
+            return;
+        }
+
+        // release.ps1 から: 同梱の DB の差分を作る (--make-db-delta <前の版の DB> <今の版の DB> <差分の出力>)。結果は標準出力と終了コード
+        if (e.Args.Length >= 4 && e.Args[0] == "--make-db-delta")
+        {
+            Console.OutputEncoding = System.Text.Encoding.UTF8;
+            try
+            {
+                DbDelta.Default.Create(e.Args[1], e.Args[2], e.Args[3]);
+                Console.WriteLine($"OK: {DbDelta.Default.Name} {new FileInfo(e.Args[3]).Length}");
+                Environment.Exit(0);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"NG: {ex.Message}");
+                Environment.Exit(1);
+            }
+            return;
+        }
+
         if (e.Args.Length >= 2 && e.Args[0] == "--export-backup")
         {
             _exportingBackup = true;   // この途中の例外は、記録してから失敗の終了コードで終わる
@@ -280,6 +363,13 @@ public partial class App : Application
 
         // 二重起動を防ぐ: 2 つ起動すると、ゲームログの音・読み上げが 2 回ずれて重なり、同じ DB に 2 つから書き込む。
         // すでに起動していれば、そのウィンドウを前に出して、こちらは終わる
+        // 自動更新の入れ替えの最中なら終わるまで待ち、途中で切れた入れ替えが残っていれば続ける (二重起動の確かめより前)
+        if (!WaitForUpdateAndRecover())
+        {
+            Environment.Exit(0);
+            return;
+        }
+
         _singleInstance = new System.Threading.Mutex(true, SingleInstanceMutexName, out var createdNew);
         if (!createdNew)
         {

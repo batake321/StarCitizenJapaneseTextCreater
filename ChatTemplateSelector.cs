@@ -68,7 +68,7 @@ public class ChatTemplateSelector : DataTemplateSelector
 
     private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder().Build();
 
-    private static FlowDocument MarkdownToFlowDocument(string markdown, bool isError)
+    internal static FlowDocument MarkdownToFlowDocument(string markdown, bool isError)
     {
         var doc = new FlowDocument
         {

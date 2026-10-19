@@ -2387,6 +2387,23 @@
                             </Grid>
                         </GroupBox>
 
+                        <!-- 自動更新 (AppUpdater / MainWindow.Update.cs): 起動したときと毎日の時刻に新しい版を確かめ、差分だけを取って入れ替える -->
+                        <GroupBox Header="自動更新" Margin="0,0,0,8">
+                            <StackPanel Margin="8">
+                                <StackPanel Orientation="Horizontal" Margin="0,4">
+                                    <CheckBox x:Name="chkAutoUpdate" Content="自動更新" VerticalAlignment="Center"
+                                              ToolTip="起動したときと毎日の時刻に、新しい版があるか確かめます。新しい版があれば、ダウンロードの前に聞きます。「設定を保存」で有効になります"/>
+                                    <TextBlock Text="毎日の時刻:" VerticalAlignment="Center" Margin="16,0,6,0"/>
+                                    <TextBox x:Name="txtAutoUpdateTime" Width="60" VerticalAlignment="Center" ToolTip="HH:mm (例 08:00)。この時刻を過ぎたら、その日に 1 回確かめます"/>
+                                    <Button Content="更新を確認" Click="UpdateCheck_Click" Padding="14,4" Margin="16,0,0,0"
+                                            ToolTip="今すぐ新しい版があるか確かめます (自動更新が切でも使えます)"/>
+                                </StackPanel>
+                                <TextBlock x:Name="txtUpdateStatus" TextWrapping="Wrap" Foreground="#666" Margin="0,4,0,0"/>
+                                <TextBlock TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontSize="12"
+                                           Text="新しい版が出ると、変わったファイルだけを取って入れ替えます (同梱の DB は、できれば前の版との差分だけを取ります)。作業フォルダの DB と個人データには触りません。インストール先に書き込めないとき (Program Files など) や、新しい .NET が必要なときは、手で入れるよう知らせます。"/>
+                            </StackPanel>
+                        </GroupBox>
+
                         <Button Content="設定を保存" Click="SaveSettings_Click" Style="{StaticResource ActionButton}"
                                 FontWeight="Bold" HorizontalAlignment="Left"/>
                     </StackPanel>
