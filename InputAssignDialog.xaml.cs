@@ -131,7 +131,7 @@ public partial class InputAssignDialog : Window
             "確認", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
             return;
 
-        // 割り当て解除はゲームの解除の書き方 (機器の接頭辞 + 空白。"js1_ " など) で持つ (押した直後から「（解除）」と出る)
+        // 割り当て解除はゲームの解除の書き方 (機器の接頭辞 + 空白。"js1_ " など) で持つ (画面には空で出る。保存するとこの書き方でファイルに書く)
         var clearValue = _deviceType switch
         {
             "mouse" => "mo1_ ",

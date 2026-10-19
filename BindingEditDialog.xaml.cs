@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 
 namespace StarCitizenJapaneseTextCreater;
 
@@ -7,7 +8,9 @@ public partial class BindingEditDialog : Window
 {
     private readonly ActionBinding _original;
     private readonly ActionMapData _data;   // js 番号の対応と、他の機能の一覧に使う (binding.Owner)
-    private string _editTarget = "keyboard";
+    // 選んでいる機器の欄 ("keyboard" / "mouse" / "gamepad" / "joystick1" / "joystick2")。"" = まだ選んでいない
+    //   (開いた直後は選んでいない。欄をクリックするか［設定］を押すと選ぶ)
+    private string _editTarget = "";
 
     // 物理コントローラー / HOTAS の押下の待ち受け (ダイアログを開いている間)
     private GameControllerInput? _controllerInput;
@@ -108,7 +111,7 @@ public partial class BindingEditDialog : Window
         lblJoystick2.Text = $"HOTAS {_data.GetJsSideLabel(2)}:";
 
         UpdateFields();
-        ShowKeyList("keyboard");
+        ShowKeyList("");   // 開いた直後は、どの欄も選んでいない (［クリア］は押せない)
 
         try
         {
@@ -141,6 +144,65 @@ public partial class BindingEditDialog : Window
         txtJoystickR.Text = InputDisplayHelper.FormatInputJa(_joystick1);
         txtJoystickL.Text = InputDisplayHelper.FormatInputJa(_joystick2);
         chkLongPress.IsChecked = _isLongPress;
+        UpdateSelectedInputText();
+    }
+
+    // 選んでいる機器 (_editTarget) の今の値 (編集中のコピー)
+    private string CurrentTargetValue() => _editTarget switch
+    {
+        "keyboard" => _keyboard,
+        "mouse" => _mouse,
+        "gamepad" => _gamepad,
+        "joystick1" => _joystick1,
+        "joystick2" => _joystick2,
+        _ => "",
+    };
+
+    // 下の枠の「設定: …」の行: 選んでいる機器の今の値を出す (割り当てが無い・解除したときは「なし」。欄を選んでいなければ出さない)
+    private void UpdateSelectedInputText()
+    {
+        if (_editTarget.Length == 0)
+        {
+            txtSelectedInput.Text = "";
+            return;
+        }
+        var v = CurrentTargetValue();
+        var ja = InputDisplayHelper.FormatInputJa(v);
+        txtSelectedInput.Text = ja.Length > 0 ? $"設定: {ja}  ({v})" : "設定: なし";
+    }
+
+    // 選んでいる欄に赤い枠を付ける (選んでいない欄は元の見た目)。［クリア］は欄を選んでいるときだけ押せる
+    private void UpdateTargetHighlight()
+    {
+        var rows = new (string Target, TextBox Box)[]
+        {
+            ("keyboard", txtKeyboard),
+            ("mouse", txtMouse),
+            ("gamepad", txtGamepad),
+            ("joystick1", txtJoystickR),
+            ("joystick2", txtJoystickL),
+        };
+        foreach (var (target, box) in rows)
+        {
+            if (target == _editTarget)
+            {
+                box.BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(229, 57, 53));
+                box.BorderThickness = new Thickness(3);
+            }
+            else
+            {
+                box.ClearValue(Control.BorderBrushProperty);
+                box.ClearValue(Control.BorderThicknessProperty);
+            }
+        }
+        btnClear.IsEnabled = _editTarget.Length > 0;
+    }
+
+    // 欄をクリック (または Tab で移る) して選ぶ: その欄の［設定］を押したときと同じ
+    private void Field_GotKeyboardFocus(object sender, System.Windows.Input.KeyboardFocusChangedEventArgs e)
+    {
+        if (sender is FrameworkElement el && el.Tag is string target && target != _editTarget)
+            ShowKeyList(target);
     }
 
     private void ShowKeyList(string target)
@@ -154,7 +216,7 @@ public partial class BindingEditDialog : Window
             "gamepad" => "ゲームパッド入力を選択",
             "joystick1" => $"HOTAS {_data.GetJsSideLabel(1)} 入力を選択 ({_data.GetJsHeading(1)})",
             "joystick2" => $"HOTAS {_data.GetJsSideLabel(2)} 入力を選択 ({_data.GetJsHeading(2)})",
-            _ => "入力を選択"
+            _ => "入力を選択 (上の「現在のバインド」の欄をクリックして、機器を選んでください)"
         };
 
         lstKeys.ItemsSource = target switch
@@ -164,8 +226,12 @@ public partial class BindingEditDialog : Window
             "gamepad" => GamepadKeys,
             "joystick1" => JoystickKeysBase,
             "joystick2" => JoystickKeysBase,
-            _ => KeyboardKeys
+            _ => null,   // 欄を選んでいないときは一覧を出さない
         };
+        // 前の機器で選んだ項目の選択を外す (js1 と js2 は同じ一覧なので、外さないと前の選択が残り、同じ項目を選び直せない)
+        lstKeys.SelectedItem = null;
+        UpdateSelectedInputText();
+        UpdateTargetHighlight();
     }
 
     private void SetKeyboard_Click(object sender, RoutedEventArgs e) => ShowKeyList("keyboard");
@@ -176,7 +242,7 @@ public partial class BindingEditDialog : Window
 
     private void Key_Selected(object sender, SelectionChangedEventArgs e)
     {
-        if (lstKeys.SelectedItem is not InputItem item) return;
+        if (lstKeys.SelectedItem is not InputItem item || _editTarget.Length == 0) return;
 
         var inputValue = _editTarget switch
         {
@@ -197,8 +263,7 @@ public partial class BindingEditDialog : Window
             case "joystick2": _joystick2 = inputValue; break;
         }
 
-        UpdateFields();
-        txtSelectedInput.Text = $"設定: {InputDisplayHelper.FormatInputJa(inputValue)}  ({inputValue})";
+        UpdateFields();   // 下の枠の「設定: …」も、選んでいる機器の今の値で出し直す
     }
 
     // 編集中の機器に合わない修飾キーのチェックは選べないようにする (無効にしたチェックは外す)。
@@ -253,6 +318,8 @@ public partial class BindingEditDialog : Window
         string deviceType;
         string deviceLabel;
         string baseValue;
+        // 機器の名前: js 番号が分かっていれば actionmaps.xml の options の名前 (Product から GUID を除いたもの)、無ければ Windows の名前
+        var deviceName = e.DisplayName;
         HideJsChoice();
         if (e.Kind == GameControllerKind.Gamepad)
         {
@@ -267,7 +334,7 @@ public partial class BindingEditDialog : Window
                 _pendingPress = null;
                 txtPressInput.Text = $"押された入力: {e.DisplayName} — {e.InputCode}";
                 txtPressCurrent.Text = "どの js 番号か判別できません";
-                txtPressOthers.Text = "";
+                ClearPressOthers();
                 btnPressApply.IsEnabled = false;
                 ShowJsChoice(e);
                 pnlPressConfirm.Visibility = Visibility.Visible;
@@ -278,6 +345,8 @@ public partial class BindingEditDialog : Window
                 ? $"HOTAS {_data.GetJsSideLabel(js)} (js{js}・手で選んだ番号)"
                 : $"HOTAS {_data.GetJsSideLabel(js)} (js{js})";
             baseValue = $"js{js}_{e.InputCode}";
+            var optionName = _data.GetJsProductName(js);
+            if (!string.IsNullOrEmpty(optionName)) deviceName = optionName;
             // 手で選んだ番号のときは、選び直せるように選択の欄も出す
             if (manual) ShowJsChoice(e);
         }
@@ -297,18 +366,16 @@ public partial class BindingEditDialog : Window
             .Where(a => !ReferenceEquals(a, _original))
             .ToList();
 
-        txtPressInput.Text = $"押された入力: {e.DisplayName} ({deviceLabel}) — {InputDisplayHelper.FormatInputJa(value)}  ({value})";
-        // 割り当て解除 (接頭辞と空白だけ。"js1_ " など) は、ほかの表示と同じく「（解除）」だけを出す
+        txtPressInput.Text = $"押された入力: {deviceName} ({deviceLabel}) — {InputDisplayHelper.FormatInputJa(value)}  ({value})";
+        // 割り当て解除 (接頭辞と空白だけ。"js1_ " など) は、割り当てが無いときと同じく「なし」と出す (「（解除）」は出さない)
         var currentCleared = !string.IsNullOrEmpty(current) &&
                              current.Split('+').All(p => InputCodeHelper.StripDevicePrefix(p).Length == 0);
-        txtPressCurrent.Text = string.IsNullOrEmpty(current)
+        txtPressCurrent.Text = string.IsNullOrEmpty(current) || currentCleared
             ? $"この機能の{deviceLabel}の今の割り当て: なし"
-            : currentCleared
-                ? $"この機能の{deviceLabel}の今の割り当て: {InputDisplayHelper.FormatInputJa(current)}"
-                : $"この機能の{deviceLabel}の今の割り当て: {InputDisplayHelper.FormatInputJa(current)}  ({current})";
-        txtPressOthers.Text = others.Count == 0
-            ? "この入力を使っている他の機能: なし"
-            : "この入力を使っている他の機能:\n" + string.Join("\n", others.Select(a => $"・{a.DisplayName}  ({a.CategoryDisplayName})"));
+            : $"この機能の{deviceLabel}の今の割り当て: {InputDisplayHelper.FormatInputJa(current)}  ({current})";
+        _lastOthers = others;
+        _lastOthersDevice = deviceType;
+        RenderPressOthers();
         btnPressApply.IsEnabled = true;
         _pendingPress = (deviceType, value);
         pnlPressConfirm.Visibility = Visibility.Visible;
@@ -324,8 +391,7 @@ public partial class BindingEditDialog : Window
             case "joystick1": _joystick1 = p.Value; break;
             case "joystick2": _joystick2 = p.Value; break;
         }
-        UpdateFields();
-        txtSelectedInput.Text = $"設定: {InputDisplayHelper.FormatInputJa(p.Value)}  ({p.Value})";
+        UpdateFields();   // 「設定: …」は選んでいる機器の今の値 (押した機器が選んでいる機器と違っても、その機器の値は出さない)
         HidePressConfirm();
     }
 
@@ -375,9 +441,11 @@ public partial class BindingEditDialog : Window
         UpdateFields();
     }
 
-    // 割り当て解除: ゲームの解除の書き方 (機器の接頭辞 + 空白。"kb1_ "、"js1_ " など) で持つ (押した直後から「（解除）」と出る)
+    // 割り当て解除: ゲームの解除の書き方 (機器の接頭辞 + 空白。"kb1_ "、"js1_ " など) で持つ (画面には空で出る。保存するとこの書き方でファイルに書く)
+    //   選んでいる欄 (赤い枠) の割り当てを消す。欄を選んでいなければ何もしない (［クリア］は押せない)
     private void Clear_Click(object sender, RoutedEventArgs e)
     {
+        if (_editTarget.Length == 0) return;
         switch (_editTarget)
         {
             case "keyboard": _keyboard = "kb1_ "; break;
@@ -389,8 +457,133 @@ public partial class BindingEditDialog : Window
         UpdateFields();
     }
 
+    // ===== この入力を使っている他の機能の［変更］［削除］ =====
+    //   その場では変えず、予定として持つ (行に「→ 削除」「→ ボタン5 に変更」と出す)。［OK］で確定し、［キャンセル］では捨てる。
+    //   予定は行の［取消］で取り消せる。確認欄を閉じても予定は残る (下に件数を出す)
+    private readonly Dictionary<(ActionBinding Action, string DeviceType), string> _otherPlans = new();
+    private List<ActionBinding> _lastOthers = new();
+    private string _lastOthersDevice = "";
+
+    private static string GetDeviceValue(ActionBinding a, string deviceType) => deviceType switch
+    {
+        "gamepad" => a.Gamepad,
+        "joystick1" => a.Joystick1,
+        "joystick2" => a.Joystick2,
+        _ => "",
+    };
+
+    private static void SetDeviceValue(ActionBinding a, string deviceType, string value)
+    {
+        switch (deviceType)
+        {
+            case "gamepad": a.Gamepad = value; break;
+            case "joystick1": a.Joystick1 = value; break;
+            case "joystick2": a.Joystick2 = value; break;
+        }
+    }
+
+    // 解除の書き方 (機器の接頭辞 + 空白)
+    private static string ClearValueFor(string deviceType) => deviceType switch
+    {
+        "gamepad" => "gp1_ ",
+        "joystick1" => "js1_ ",
+        "joystick2" => "js2_ ",
+        _ => "",
+    };
+
+    private void ClearPressOthers()
+    {
+        _lastOthers = new();
+        _lastOthersDevice = "";
+        txtPressOthers.Text = "";
+        pnlPressOthers.Children.Clear();
+    }
+
+    private void RenderPressOthers()
+    {
+        pnlPressOthers.Children.Clear();
+        txtPressOthers.Text = _lastOthers.Count == 0 ? "この入力を使っている他の機能: なし" : "この入力を使っている他の機能:";
+        foreach (var a in _lastOthers)
+        {
+            var key = (a, _lastOthersDevice);
+            var row = new Grid { Margin = new Thickness(0, 1, 0, 1) };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var text = new TextBlock { TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
+            text.Inlines.Add(new System.Windows.Documents.Run($"・{a.DisplayName}  ({a.CategoryDisplayName})"));
+            bool planned = _otherPlans.TryGetValue(key, out var plan);
+            if (planned)
+            {
+                var planText = InputCodeHelper.IsAssigned(plan) ? $"  → {InputDisplayHelper.FormatInputJa(plan ?? "")} に変更" : "  → 削除";
+                text.Inlines.Add(new System.Windows.Documents.Run(planText)
+                {
+                    Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(216, 67, 21)),
+                    FontWeight = FontWeights.Bold,
+                });
+            }
+            Grid.SetColumn(text, 0);
+            row.Children.Add(text);
+
+            var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(6, 0, 0, 0) };
+            var btnChange = new Button { Content = "変更", Padding = new Thickness(8, 1, 8, 1), Margin = new Thickness(0, 0, 4, 0) };
+            btnChange.Click += (_, _) => ChangeOther(a, _lastOthersDevice);
+            var btnDelete = new Button { Content = "削除", Padding = new Thickness(8, 1, 8, 1), Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(211, 47, 47)) };
+            btnDelete.Click += (_, _) => { _otherPlans[(a, _lastOthersDevice)] = ClearValueFor(_lastOthersDevice); RenderPressOthers(); };
+            buttons.Children.Add(btnChange);
+            buttons.Children.Add(btnDelete);
+            if (planned)
+            {
+                var btnUndo = new Button { Content = "取消", Padding = new Thickness(8, 1, 8, 1), Margin = new Thickness(4, 0, 0, 0), ToolTip = "この機能の変更・削除の予定を取り消します" };
+                btnUndo.Click += (_, _) => { _otherPlans.Remove((a, _lastOthersDevice)); RenderPressOthers(); };
+                buttons.Children.Add(btnUndo);
+            }
+            Grid.SetColumn(buttons, 1);
+            row.Children.Add(buttons);
+            pnlPressOthers.Children.Add(row);
+        }
+        UpdateOtherPlansText();
+    }
+
+    private void UpdateOtherPlansText()
+    {
+        if (_otherPlans.Count == 0)
+        {
+            txtOtherPlans.Visibility = Visibility.Collapsed;
+            return;
+        }
+        txtOtherPlans.Text = $"ほかの機能の変更・削除の予定: {_otherPlans.Count} 件 (［OK］で確定し、［キャンセル］で取り消します)";
+        txtOtherPlans.Visibility = Visibility.Visible;
+    }
+
+    // ［変更］: 割り当てるボタンを押してもらう窓を開く。［反映］なら予定にする (今の割り当てと同じなら予定を外す)
+    private void ChangeOther(ActionBinding a, string deviceType)
+    {
+        var original = GetDeviceValue(a, deviceType);
+        // この窓の押下の待ち受けは止める (変更の窓が自分で待ち受ける。閉じたら、その後に押した入力から再び受ける)
+        _controllerInput?.Stop();
+        bool? result;
+        string? newValue;
+        try
+        {
+            var dlg = new ReassignInputDialog(_data, a, deviceType, original) { Owner = this };
+            result = dlg.ShowDialog();
+            newValue = dlg.NewValue;
+        }
+        finally
+        {
+            try { _controllerInput?.Start(); } catch (Exception) { }
+        }
+        if (result != true || newValue == null) return;
+        if (newValue == original) _otherPlans.Remove((a, deviceType));
+        else _otherPlans[(a, deviceType)] = newValue;
+        RenderPressOthers();
+    }
+
     private void Ok_Click(object sender, RoutedEventArgs e)
     {
+        // ほかの機能の［変更］［削除］の予定を確定する
+        foreach (var ((action, deviceType), value) in _otherPlans)
+            SetDeviceValue(action, deviceType, value);
         _original.Keyboard = _keyboard;
         _original.Mouse = _mouse;
         _original.Gamepad = _gamepad;
@@ -408,4 +601,201 @@ public class InputItem
     public string Display { get; set; }
     public string Value { get; set; }
     public InputItem(string display, string value) { Display = display; Value = value; }
+}
+
+// 「割り当ての変更」の窓: ほかの機能の割り当てを、押したボタン (同じ機器) に変える。
+//   押したボタン・ハットと、その入力が割り当て済みの機能を出す。［反映］で NewValue を返す (修飾キーは元の割り当てのものを引き継ぐ)。
+//   押下の待ち受けはバインディング編集と同じ GameControllerInput。js 番号を決められない機器は「この機器は: js1 / js2」で選ぶ
+public sealed class ReassignInputDialog : Window
+{
+    private readonly ActionMapData _data;
+    private readonly ActionBinding _target;
+    private readonly string _deviceType;     // "gamepad" / "joystick1" / "joystick2"
+    private readonly List<string> _modifiers; // 元の割り当ての修飾キー (接頭辞なしの部分。"rctrl"、"shoulderl" など)
+    private GameControllerInput? _input;
+    private GameControllerInputEventArgs? _choicePress;
+
+    private readonly TextBlock _txtPressed;
+    private readonly TextBlock _txtAssigned;
+    private readonly TextBlock _txtWarn;
+    private readonly WrapPanel _pnlChoice;
+    private readonly Button _btnChoice1;
+    private readonly Button _btnChoice2;
+    private readonly Button _btnApply;
+    private string? _pendingValue;
+
+    // ［反映］で閉じたときの新しい割り当て (ゲームの形)。それ以外は null
+    public string? NewValue { get; private set; }
+
+    public ReassignInputDialog(ActionMapData data, ActionBinding target, string deviceType, string originalValue)
+    {
+        _data = data;
+        _target = target;
+        _deviceType = deviceType;
+        var bodies = (originalValue ?? "").Split('+').Select(InputCodeHelper.StripDevicePrefix).Where(x => x.Length > 0).ToList();
+        _modifiers = InputCodeHelper.IsAssigned(originalValue) ? bodies.Take(bodies.Count - 1).ToList() : bodies;
+
+        Title = "割り当ての変更";
+        SizeToContent = SizeToContent.WidthAndHeight;
+        ResizeMode = ResizeMode.NoResize;
+        WindowStartupLocation = WindowStartupLocation.CenterOwner;
+
+        var root = new StackPanel { Margin = new Thickness(16), MinWidth = 420, MaxWidth = 560 };
+        root.Children.Add(new TextBlock
+        {
+            Text = $"「{target.DisplayName}」を割り当てるボタンを押してください。",
+            FontWeight = FontWeights.Bold,
+            FontSize = 14,
+            TextWrapping = TextWrapping.Wrap,
+        });
+        var origJa = InputDisplayHelper.FormatInputJa(originalValue ?? "");
+        root.Children.Add(new TextBlock
+        {
+            Text = $"機器: {DeviceLabel()}    今の割り当て: {(origJa.Length > 0 ? origJa : "なし")}" +
+                   (_modifiers.Count > 0 ? $"    (修飾キー {string.Join(" + ", _modifiers.Select(m => InputDisplayHelper.FormatInputJa(Prefix + m)))} は引き継ぎます)" : ""),
+            Foreground = new SolidColorBrush(Color.FromRgb(102, 102, 102)),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 4, 0, 0),
+        });
+
+        _pnlChoice = new WrapPanel { Margin = new Thickness(0, 8, 0, 0), Visibility = Visibility.Collapsed };
+        _pnlChoice.Children.Add(new TextBlock { Text = "どの js 番号か判別できません。この機器は:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) });
+        _btnChoice1 = new Button { Content = "js1", Padding = new Thickness(8, 2, 8, 2), Margin = new Thickness(0, 0, 4, 0) };
+        _btnChoice1.Click += (_, _) => ChooseJs(1);
+        _btnChoice2 = new Button { Content = "js2", Padding = new Thickness(8, 2, 8, 2) };
+        _btnChoice2.Click += (_, _) => ChooseJs(2);
+        _pnlChoice.Children.Add(_btnChoice1);
+        _pnlChoice.Children.Add(_btnChoice2);
+        root.Children.Add(_pnlChoice);
+
+        _txtWarn = new TextBlock { Foreground = new SolidColorBrush(Color.FromRgb(211, 47, 47)), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0), Visibility = Visibility.Collapsed };
+        root.Children.Add(_txtWarn);
+
+        var box = new Border
+        {
+            Background = new SolidColorBrush(Color.FromRgb(255, 253, 231)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(251, 192, 45)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(4),
+            Padding = new Thickness(8),
+            Margin = new Thickness(0, 10, 0, 0),
+        };
+        var boxPanel = new StackPanel();
+        _txtPressed = new TextBlock { Text = "(まだ押されていません)", FontWeight = FontWeights.Bold, TextWrapping = TextWrapping.Wrap };
+        _txtAssigned = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) };
+        boxPanel.Children.Add(_txtPressed);
+        boxPanel.Children.Add(new ScrollViewer { MaxHeight = 140, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = _txtAssigned });
+        box.Child = boxPanel;
+        root.Children.Add(box);
+
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 14, 0, 0) };
+        _btnApply = new Button { Content = "反映", Padding = new Thickness(16, 4, 16, 4), Margin = new Thickness(0, 0, 8, 0), IsEnabled = false, FontWeight = FontWeights.Bold };
+        _btnApply.Click += (_, _) =>
+        {
+            if (_pendingValue == null) return;
+            NewValue = _pendingValue;
+            DialogResult = true;
+        };
+        var btnCancel = new Button { Content = "中止", Padding = new Thickness(12, 4, 12, 4), IsCancel = true };
+        buttons.Children.Add(_btnApply);
+        buttons.Children.Add(btnCancel);
+        root.Children.Add(buttons);
+        Content = root;
+
+        Loaded += (_, _) =>
+        {
+            try
+            {
+                _input = new GameControllerInput();
+                _input.InputPressed += Input_Pressed;
+                _input.Start();
+            }
+            catch (Exception)
+            {
+                _input?.Dispose();
+                _input = null;
+                _txtWarn.Text = "コントローラーの入力を受け取れません。［中止］で閉じてください。";
+                _txtWarn.Visibility = Visibility.Visible;
+            }
+        };
+        Closed += (_, _) =>
+        {
+            if (_input == null) return;
+            _input.InputPressed -= Input_Pressed;
+            _input.Dispose();
+            _input = null;
+        };
+    }
+
+    private int TargetJs => _deviceType == "joystick2" ? 2 : 1;
+    private string Prefix => _deviceType switch { "gamepad" => "gp1_", "joystick2" => "js2_", _ => "js1_" };
+
+    private string DeviceLabel() => _deviceType == "gamepad"
+        ? "ゲームパッド"
+        : $"HOTAS {_data.GetJsSideLabel(TargetJs)} (js{TargetJs})";
+
+    private void Input_Pressed(object? sender, GameControllerInputEventArgs e)
+    {
+        _txtWarn.Visibility = Visibility.Collapsed;
+        string deviceName = e.DisplayName;
+        if (_deviceType == "gamepad")
+        {
+            if (e.Kind != GameControllerKind.Gamepad)
+            {
+                ShowWarn($"別の機器の入力です。{DeviceLabel()} のボタンを押してください。");
+                return;
+            }
+        }
+        else
+        {
+            if (e.Kind != GameControllerKind.Joystick)
+            {
+                ShowWarn($"別の機器の入力です。{DeviceLabel()} のボタンを押してください。");
+                return;
+            }
+            if (!_data.TryResolveJsForDevice(e.VendorId, e.ProductId, e.DeviceId, out var js, out _))
+            {
+                _choicePress = e;
+                _btnChoice1.Content = $"js1 (HOTAS {_data.GetJsSideLabel(1)})";
+                _btnChoice2.Content = $"js2 (HOTAS {_data.GetJsSideLabel(2)})";
+                _pnlChoice.Visibility = Visibility.Visible;
+                return;
+            }
+            _pnlChoice.Visibility = Visibility.Collapsed;
+            if (js != TargetJs)
+            {
+                ShowWarn($"別のスティック (HOTAS {_data.GetJsSideLabel(js)} (js{js})) の入力です。{DeviceLabel()} のボタンを押してください。");
+                return;
+            }
+            var optionName = _data.GetJsProductName(js);
+            if (!string.IsNullOrEmpty(optionName)) deviceName = optionName;
+        }
+
+        var value = InputCodeHelper.ToGameForm(Prefix + string.Join("+", _modifiers.Append(e.InputCode)), Prefix);
+        _pendingValue = value;
+        _btnApply.IsEnabled = true;
+        _txtPressed.Text = $"{deviceName} — {InputDisplayHelper.FormatInputJa(value)} ({value})";
+        var allActions = _data.Categories.SelectMany(c => c.Actions).ToList();
+        var assigned = MouseLayoutPanel.FindBindingsForInput(allActions, value, _deviceType)
+            .Where(a => !ReferenceEquals(a, _target))
+            .ToList();
+        _txtAssigned.Text = assigned.Count == 0
+            ? "割り当て済みの機能: なし"
+            : "割り当て済みの機能:\n" + string.Join("\n", assigned.Select(a => $"・{a.DisplayName}  ({a.CategoryDisplayName})"));
+    }
+
+    private void ShowWarn(string message)
+    {
+        _txtWarn.Text = message;
+        _txtWarn.Visibility = Visibility.Visible;
+    }
+
+    // 選んだ番号を覚えて (ActionMapData。保存はエディターが行う)、同じ押下で続ける
+    private void ChooseJs(int js)
+    {
+        if (_choicePress is not { } press) return;
+        _data.SetManualJsForDevice(press.VendorId, press.ProductId, press.DeviceId, js);
+        _pnlChoice.Visibility = Visibility.Collapsed;
+        Input_Pressed(this, press);
+    }
 }

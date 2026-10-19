@@ -86,13 +86,33 @@
                                 <TextBlock Text="カテゴリ" FontWeight="Bold" Padding="8,6" Background="#FAFAFA"/>
                                 <ListBox x:Name="lstCategories" Grid.Row="1" BorderThickness="0"
                                          SelectionChanged="CategoryList_Changed">
+                                    <ListBox.ItemContainerStyle>
+                                        <!-- 水色は項目の中の Border で塗る (契約タブのカテゴリ一覧と同じ作り。ListBoxItem の Background は選択中・マウスが乗ったとき既定の色で上書きされるため)。
+                                             余白は既定の ListBoxItem の Padding (4,1) を Border に移して見た目を揃える -->
+                                        <Style TargetType="ListBoxItem">
+                                            <Setter Property="Padding" Value="0"/>
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                        </Style>
+                                    </ListBox.ItemContainerStyle>
                                     <ListBox.ItemTemplate>
                                         <DataTemplate>
-                                            <StackPanel Orientation="Horizontal" Margin="2">
-                                                <TextBlock Text="{Binding DisplayName}" VerticalAlignment="Center"/>
-                                                <TextBlock Text="{Binding ActionCount}" Foreground="#888" Margin="6,0,0,0"
-                                                           VerticalAlignment="Center" FontSize="11"/>
-                                            </StackPanel>
+                                            <!-- 右の表で選んだ機能のカテゴリは水色 (選択中の項目でも水色) -->
+                                            <Border Padding="4,1">
+                                                <Border.Style>
+                                                    <Style TargetType="Border">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsHighlighted}" Value="True">
+                                                                <Setter Property="Background" Value="#B3E5FC"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                                <StackPanel Orientation="Horizontal" Margin="2">
+                                                    <TextBlock Text="{Binding DisplayName}" VerticalAlignment="Center"/>
+                                                    <TextBlock Text="{Binding ActionCount}" Foreground="#888" Margin="6,0,0,0"
+                                                               VerticalAlignment="Center" FontSize="11"/>
+                                                </StackPanel>
+                                            </Border>
                                         </DataTemplate>
                                     </ListBox.ItemTemplate>
                                 </ListBox>
@@ -105,6 +125,7 @@
                                   SelectionMode="Single" GridLinesVisibility="Horizontal"
                                   AlternationCount="2" FontSize="13"
                                   MouseDoubleClick="DgActions_DoubleClick"
+                                  SelectionChanged="DgActions_SelectionChanged"
                                   RowHeight="32">
                             <DataGrid.RowStyle>
                                 <Style TargetType="DataGridRow">
@@ -115,6 +136,11 @@
                                         <DataTrigger Binding="{Binding IsModified}" Value="True">
                                             <Setter Property="Background" Value="#FFF8E1"/>
                                             <Setter Property="FontWeight" Value="SemiBold"/>
+                                        </DataTrigger>
+                                        <!-- スティック・ゲームパッドで押した入力が割り当ててある行 (HOTAS タブの押した行の強調と同じオレンジの枠) -->
+                                        <DataTrigger Binding="{Binding IsPressHighlighted}" Value="True">
+                                            <Setter Property="BorderBrush" Value="#FF6F00"/>
+                                            <Setter Property="BorderThickness" Value="2"/>
                                         </DataTrigger>
                                     </Style.Triggers>
                                 </Style>
@@ -232,7 +258,15 @@
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <TextBlock x:Name="txtStatus" VerticalAlignment="Center" Foreground="#666"/>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock x:Name="txtStatus" VerticalAlignment="Center" Foreground="#666"/>
+                    <!-- ［機能別］タブで、js 番号を判別できない機器 (と手で選んだ機器) を押したときだけ出す: 「この機器は js◯」を選ぶ -->
+                    <StackPanel x:Name="pnlFuncJsChoice" Orientation="Horizontal" Visibility="Collapsed" VerticalAlignment="Center" Margin="8,0,0,0">
+                        <TextBlock Text="この機器は:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <Button x:Name="btnFuncJs1" Content="js1" Click="FuncJs1_Click" Padding="8,1" Margin="0,0,4,0"/>
+                        <Button x:Name="btnFuncJs2" Content="js2" Click="FuncJs2_Click" Padding="8,1"/>
+                    </StackPanel>
+                </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal">
                     <Button Content="保存" Click="SaveApply_Click" Padding="16,4" Margin="0,0,4,0"
                             FontWeight="Bold" Background="#4CAF50" Foreground="White"/>

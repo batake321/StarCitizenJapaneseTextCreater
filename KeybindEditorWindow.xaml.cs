@@ -26,12 +26,15 @@ public partial class KeybindEditorWindow : Window
         _gamePath = gamePath ?? "";
         _savePath = savePath ?? "";
         Title = $"キーバインド エディタ — {Path.GetFileName(savePath)}";
-        hotasPanel.DisplaySwapChanged = swapped => SaveDisplaySwapSetting(_data.FileJoystickFingerprint, swapped);
+        hotasPanel.DisplaySwapChanged = _ => SaveCurrentStickSides();   // ［表示の入れ替え］で HOTAS の左右の選択を変えたら覚える
         hotasPanel.ClearOriginalJs1Requested = ClearOriginalJs1Record;   // ［記録を消す］(元の js1 の機器)
         hotasPanel.InstanceSwapped = () => UpdateOriginalJs1Status();   // ［js1/js2 の入れ替え］を押したら、保存待ちを含めて判定の表示を書き直す
+        hotasPanel.StickSidesSetupRequested = () => RunStickSideDialog(showHowToChange: false);   // ［左右を設定…］: 保存済みの選択があっても開く
         LoadData();
         StartControllerInput();
         Closed += (_, _) => StopControllerInput();
+        // 画面が出てから、HOTAS の左右をまだ選んでいなければ聞く (スティックが 2 本以上あるときだけ)
+        ContentRendered += (_, _) => AskStickSidesIfNeeded();
     }
 
     private void StartControllerInput()
@@ -83,18 +86,161 @@ public partial class KeybindEditorWindow : Window
         {
             gamepadPanel.HighlightInput(e.InputCode);
         }
+        else if (tabMain.SelectedIndex == 0)
+        {
+            // ［機能別］タブ: 押した入力が割り当ててある機能の行へ移る
+            HandleFunctionTabPress(e);
+        }
     }
 
-    // ===== 「表示の入れ替え」の設定 (機器の定義の指紋ごと) =====
-    //   保存フォルダの中には置かない (フォルダ内の全ファイルがゲームへコピーされるため。また「ゲームから保存」の上書きはフォルダを消さずに写すので古い記録が残る)。
-    //   作業フォルダ直下の JSON に {機器の定義の指紋 ("fp:..."、ActionMapData.FileJoystickFingerprint): true} で覚える。
-    //   指紋が同じファイルなら、コピー・取込・同じ名前での作り直しでも同じ記録が効き、上書きで機器の定義が変われば古い記録は効かない。
-    //   古い形 ({保存フォルダのフルパス(小文字): true}。ed6aa15 から) の鍵は、読み込むときに、その保存フォルダの actionmaps.xml の指紋へ移し替える
-    //   (actionmaps.xml が無い・読めない保存フォルダの鍵は捨てる)
-    private static string DisplaySwapSettingsPath =>
-        Path.Combine(App.Config.WorkingDirectory ?? "", "keybind_hotas_display_swap.json");
+    // ===== ［機能別］タブで押した入力の機能へ移る =====
+    //   押した入力 (js1_button22・gp1_a など) が本体の入力として入っている割り当ての行を全部オレンジの枠で目立たせ、その 1 つを選んで見える所へ出す。
+    //   並びは修飾キー無しが先、その次に修飾キー付き (それぞれ表の元の並び)。同じ入力を続けて押すたびに次の行へ移る。
+    //   行が絞り込みで見えないときは、絞り込み (検索・カテゴリ・入力の種類) を外してから移る。
+    //   状態の欄に、何件のうち何件目か (割り当てが無ければ「この入力の割り当てはありません」) を出す。
+    //   js 番号を決められない機器は、HOTAS タブと同じく「この機器は js◯」を手で選ぶ
+    private List<ActionBinding> _pressMatches = new();
+    private string? _pressMatchKey;        // 前に押した入力 (ゲームの形)。同じなら次の行へ
+    private int _pressMatchIndex;
+    private string _baseStatus = "";       // ApplyFilter が出した件数の文 (押した入力の知らせはその後ろに付ける)
+    private GameControllerInputEventArgs? _funcJsChoicePress;
 
-    // ===== 作業フォルダ直下の記録の JSON (表示の入れ替え・手で選んだ js 番号) の読み込み =====
+    private static string GetDeviceValue(ActionBinding a, string deviceType) => deviceType switch
+    {
+        "gamepad" => a.Gamepad,
+        "joystick1" => a.Joystick1,
+        "joystick2" => a.Joystick2,
+        _ => "",
+    };
+
+    // 割り当て v が、押した入力 (機器の接頭辞 prefix、部分コード code) を本体の入力として持つか。hasModifiers = 修飾キー付きか
+    private static bool MatchesPressed(string v, string prefix, string code, out bool hasModifiers)
+    {
+        hasModifiers = false;
+        if (!InputCodeHelper.IsAssigned(v)) return false;
+        if (InputCodeHelper.GetMainDevicePrefix(v) != prefix) return false;
+        var parts = v.Split('+');
+        if (!string.Equals(InputCodeHelper.StripDevicePrefix(parts[^1]), code, StringComparison.OrdinalIgnoreCase)) return false;
+        hasModifiers = parts.Length > 1;
+        return true;
+    }
+
+    private void HandleFunctionTabPress(GameControllerInputEventArgs e)
+    {
+        HideFuncJsChoice();
+        string prefix, deviceType, deviceName = e.DisplayName;
+        if (e.Kind == GameControllerKind.Gamepad)
+        {
+            prefix = "gp1_";
+            deviceType = "gamepad";
+        }
+        else
+        {
+            if (!_data.TryResolveJsForDevice(e.VendorId, e.ProductId, e.DeviceId, out var js, out var manual))
+            {
+                txtStatus.Text = $"{_baseStatus}  |  {e.DisplayName} {e.InputCode}: どの js 番号か判別できません";
+                ShowFuncJsChoice(e);
+                return;
+            }
+            prefix = $"js{js}_";
+            deviceType = $"joystick{js}";
+            var optionName = _data.GetJsProductName(js);
+            if (!string.IsNullOrEmpty(optionName)) deviceName = optionName;
+            if (manual) ShowFuncJsChoice(e);   // 手で選んだ番号のときは、選び直せるように出す
+        }
+
+        var full = prefix + e.InputCode;
+        var label = $"{deviceName} — {InputDisplayHelper.FormatInputJa(full)} ({full})";
+        var matches = _allActions
+            .Select(a => (Action: a, Ok: MatchesPressed(GetDeviceValue(a, deviceType), prefix, e.InputCode, out var mods), Mods: mods))
+            .Where(x => x.Ok)
+            .OrderBy(x => x.Mods ? 1 : 0)   // 修飾キー無しが先 (OrderBy は同じ順位の中の並びを変えない)
+            .Select(x => x.Action)
+            .ToList();
+
+        foreach (var a in _pressMatches) a.IsPressHighlighted = false;
+        if (matches.Count == 0)
+        {
+            _pressMatches = new();
+            _pressMatchKey = null;
+            txtStatus.Text = $"{_baseStatus}  |  {label}: この入力の割り当てはありません";
+            return;
+        }
+
+        bool same = _pressMatchKey == full && _pressMatches.SequenceEqual(matches);
+        _pressMatchIndex = same ? (_pressMatchIndex + 1) % matches.Count : 0;
+        _pressMatchKey = full;
+        _pressMatches = matches;
+        foreach (var a in matches) a.IsPressHighlighted = true;
+
+        var target = matches[_pressMatchIndex];
+        if (!_filteredActions.Contains(target))
+        {
+            // 絞り込みで見えないので、絞り込みを外す (検索を空、カテゴリを全部、入力の種類を全入力)
+            txtSearch.Text = "";
+            cmbCategory.SelectedIndex = 0;
+            cmbInputFilter.SelectedIndex = 0;
+            ApplyFilter();
+        }
+        dgActions.SelectedItem = target;
+        dgActions.ScrollIntoView(target);
+        txtStatus.Text = $"{_baseStatus}  |  {label}: {matches.Count} 件中 {_pressMatchIndex + 1} 件目 ({target.DisplayName})";
+    }
+
+    private void ShowFuncJsChoice(GameControllerInputEventArgs e)
+    {
+        _funcJsChoicePress = e;
+        btnFuncJs1.Content = $"js1 (HOTAS {_data.GetJsSideLabel(1)})";
+        btnFuncJs2.Content = $"js2 (HOTAS {_data.GetJsSideLabel(2)})";
+        pnlFuncJsChoice.Visibility = Visibility.Visible;
+    }
+
+    private void HideFuncJsChoice()
+    {
+        _funcJsChoicePress = null;
+        pnlFuncJsChoice.Visibility = Visibility.Collapsed;
+    }
+
+    private void FuncJs1_Click(object sender, RoutedEventArgs e) => ChooseFuncJs(1);
+    private void FuncJs2_Click(object sender, RoutedEventArgs e) => ChooseFuncJs(2);
+
+    // 選んだ js 番号を覚えて (保存は ManualJoystickInstancesChanged で行う)、同じ押下で移り直す
+    private void ChooseFuncJs(int js)
+    {
+        if (_funcJsChoicePress is not { } press) return;
+        _data.SetManualJsForDevice(press.VendorId, press.ProductId, press.DeviceId, js);
+        HandleFunctionTabPress(press);
+    }
+
+    // 右の表で選んだ機能のカテゴリを、左のカテゴリの一覧で水色にして見える所へ出す (カテゴリの選択・絞り込みは変えない。契約タブと同じ作り)
+    private CategoryItem? _highlightedCategory;
+    private void DgActions_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        CategoryItem? item = null;
+        if (dgActions.SelectedItem is ActionBinding a && lstCategories.ItemsSource is IEnumerable<CategoryItem> items)
+            item = items.FirstOrDefault(i => i.Name == a.CategoryName);
+        if (!ReferenceEquals(_highlightedCategory, item) && _highlightedCategory != null)
+            _highlightedCategory.IsHighlighted = false;
+        _highlightedCategory = item;
+        if (item == null) return;
+        item.IsHighlighted = true;
+        lstCategories.ScrollIntoView(item);
+    }
+
+    // ===== HOTAS の左右の選択 (機器の定義の指紋ごと) =====
+    //   「js1 = 左手・js2 = 右手」か「js1 = 右手・js2 = 左手」かを、利用者が選ぶ (機器の名前からは決めない。actionmaps.xml は変えない)。
+    //   保存フォルダの中には置かない (フォルダ内の全ファイルがゲームへコピーされるため。また「ゲームから保存」の上書きはフォルダを消さずに写すので古い記録が残る)。
+    //   作業フォルダ直下の JSON に {機器の定義の指紋 ("fp:..."、ActionMapData.FileJoystickFingerprint): "js1-left" か "js1-right"} で覚える。
+    //   値は、その指紋の actionmaps.xml の js 番号での向き (まだ保存していない js1/js2 の入れ替えがあれば戻した向き) で書く。
+    //   指紋が同じファイルなら、コピー・取込・同じ名前での作り直しでも同じ記録が効き、上書きで機器の定義が変われば古い記録は効かない。
+    //   前の版の「表示の入れ替え」の記録 (keybind_hotas_display_swap.json) は、物理スティックと js 番号の対応を入れ替えるもので意味が違うので読まない
+    private static string StickSideSettingsPath =>
+        Path.Combine(App.Config.WorkingDirectory ?? "", "keybind_hotas_stick_side.json");
+
+    private const string StickSideJs1Left = "js1-left";
+    private const string StickSideJs1Right = "js1-right";
+
+    // ===== 作業フォルダ直下の記録の JSON (HOTAS の左右・手で選んだ js 番号・元の js1 の機器) の読み込み =====
     //   無ければ空。壊れている (JSON として読めない・中身が null) ときは、黙って上書きしないよう
     //   「<名前>.broken-<日時>」に名前を変えて残してから空として扱い、利用者に 1 回だけ知らせる (AppConfigLoader と同じ作り)。
     //   別名にできない (別のプロセスが開いている等) ときは控えを複製する。控えも作れないときは、この起動中はそのファイルに書かない。
@@ -165,7 +311,7 @@ public partial class KeybindEditorWindow : Window
     // 記録を書けなかったことを、保存のたびにその場で知らせる (読み込みのときの 1 回だけの知らせとは別)。
     //   effect: 何の記録を保存できなかったかと、エディターを開き直すとどうなるか
     private const string SettingsNotWritableReason = "記録のファイルが壊れていて元のファイルの控えを作れないか、ファイルを読めないため、上書きしませんでした。";
-    private const string DisplaySwapEffect = "表示の入れ替えの設定を保存できませんでした。\nエディターを開き直すと、今回の表示の入れ替えの設定は使われません。";
+    private const string StickSideEffect = "HOTAS の左右の選択を保存できませんでした。\nエディターを開き直すと、今回選んだ左右は使われません (左右をもう一度聞きます)。";
     private const string DeviceJsEffect = "手で選んだ js 番号を保存できませんでした。\nエディターを開き直すと、今回選んだ js 番号は使われません。";
 
     private static void NotifySettingsWriteFailed(string effect, string path, string reason) =>
@@ -179,86 +325,80 @@ public partial class KeybindEditorWindow : Window
 
     private const string FingerprintKeyPrefix = "fp:";
 
-    // 読み込んで、古い形の鍵 (保存フォルダのパス) を指紋へ移し替える。移し替えたら書き戻す (書けなくても、この読み込みでは移し替えた形を使う)
-    private static Dictionary<string, bool> LoadDisplaySwapSettings(out bool canWrite)
+    private static Dictionary<string, string> LoadStickSideSettings(out bool canWrite)
     {
-        canWrite = TryLoadSettingsJson<Dictionary<string, bool>>(DisplaySwapSettingsPath, "表示の入れ替え", out var settings);
-        var legacy = settings.Keys.Where(k => !k.StartsWith(FingerprintKeyPrefix, StringComparison.Ordinal)).ToList();
-        if (legacy.Count == 0) return settings;
-        foreach (var oldKey in legacy)
-        {
-            var value = settings[oldKey];
-            settings.Remove(oldKey);
-            if (!value) continue;
-            var fp = ActionMapParser.ComputeJoystickFingerprintForSave(oldKey);
-            if (fp != null) settings[fp] = true;   // actionmaps.xml が無い・読めない保存フォルダの分は捨てる
-        }
-        if (canWrite)
-        {
-            try
-            {
-                // 書き戻す前に、元のファイルを「<名前>.pre-migration」として 1 回だけ控えに残す (控えが既にあれば作らない)。
-                //   控えを作れなければ書き戻さずに知らせる (この読み込みでは移し替えた形を使う)
-                var preMigration = DisplaySwapSettingsPath + ".pre-migration";
-                if (!File.Exists(preMigration))
-                {
-                    try
-                    {
-                        File.Copy(DisplaySwapSettingsPath, preMigration, overwrite: false);
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                    {
-                        // 知らせは起動中 1 回 (保存のたびの「保存できませんでした」は SaveDisplaySwapSetting が出す)。
-                        //   書けないものとして返す (読み込むたびに移し替えた形を使い、控えも作り直してみる)
-                        NotifySettingsOnce(DisplaySwapSettingsPath + "|pre-migration",
-                            $"表示の入れ替えの記録を新しい形に移し替える前の控えを作れなかったため、記録のファイルを書き換えません:\n{preMigration}\n\n{ex.Message}\n\n" +
-                            "移し替えた形は、読み込むたびにメモリの上だけで使います。");
-                        canWrite = false;
-                        return settings;
-                    }
-                }
-                File.WriteAllText(DisplaySwapSettingsPath,
-                    System.Text.Json.JsonSerializer.Serialize(settings, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
-            }
-            catch (Exception ex)
-            {
-                // 移し替えの書き戻しに失敗した知らせは起動中 1 回だけ (書き戻せなかったことは、保存のたびの「保存できませんでした」で伝わる)
-                NotifySettingsOnce(DisplaySwapSettingsPath + "|migration-write",
-                    $"{DisplaySwapEffect}\n\n表示の入れ替えの記録を新しい形に移し替えて書き戻せませんでした。\n{ex.Message}\n\n記録のファイル:\n{DisplaySwapSettingsPath}");
-            }
-        }
+        canWrite = TryLoadSettingsJson<Dictionary<string, string>>(StickSideSettingsPath, "HOTAS の左右", out var settings);
         return settings;
     }
 
-    private static bool LoadDisplaySwapSetting(string fingerprint)
+    // 指紋の記録: true = js1 が左手、false = js1 が右手、null = 選んでいない (記録が無い・読めない値)
+    private static bool? LoadStickSideSetting(string fingerprint)
     {
         try
         {
-            return LoadDisplaySwapSettings(out _).TryGetValue(fingerprint, out var v) && v;
+            if (!LoadStickSideSettings(out _).TryGetValue(fingerprint, out var v)) return null;
+            return v switch
+            {
+                StickSideJs1Left => true,
+                StickSideJs1Right => false,
+                _ => null,
+            };
         }
-        catch { return false; }
+        catch { return null; }
     }
 
-    private static void SaveDisplaySwapSetting(string fingerprint, bool swapped)
+    private static void SaveStickSideSetting(string fingerprint, bool js1IsLeft)
     {
         try
         {
-            var settings = LoadDisplaySwapSettings(out var canWrite);
+            var settings = LoadStickSideSettings(out var canWrite);
             if (!canWrite)
             {
                 // 壊れた元のファイルを控え無しで上書きしない・読めなかったファイルに書かない。書けなかったことは保存のたびに知らせる
-                NotifySettingsWriteFailed(DisplaySwapEffect, DisplaySwapSettingsPath, SettingsNotWritableReason);
+                NotifySettingsWriteFailed(StickSideEffect, StickSideSettingsPath, SettingsNotWritableReason);
                 return;
             }
-            if (swapped) settings[fingerprint] = true;
-            else if (!settings.Remove(fingerprint)) return;   // 記録が無く、外すものも無ければファイルに触れない
-            File.WriteAllText(DisplaySwapSettingsPath,
+            settings[fingerprint] = js1IsLeft ? StickSideJs1Left : StickSideJs1Right;
+            File.WriteAllText(StickSideSettingsPath,
                 System.Text.Json.JsonSerializer.Serialize(settings, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         }
         catch (Exception ex)
         {
-            NotifySettingsWriteFailed(DisplaySwapEffect, DisplaySwapSettingsPath, ex.Message);
+            NotifySettingsWriteFailed(StickSideEffect, StickSideSettingsPath, ex.Message);
         }
+    }
+
+    // 今の左右の選択を、今のファイルの指紋の記録として書く (まだ保存していない js1/js2 の入れ替えがあれば、向きを戻した値で書く)
+    private void SaveCurrentStickSides()
+    {
+        _data.StickSidesChosen = true;
+        var js1IsLeftInFile = _data.JoystickInstancesSwapPending ? !_data.Js1IsLeft : _data.Js1IsLeft;
+        SaveStickSideSetting(_data.FileJoystickFingerprint, js1IsLeftInFile);
+    }
+
+    // HOTAS の左右をまだ選んでいない機器の定義で、options の joystick が 2 本以上あれば、左右を聞く (StickSideDialog)。
+    //   ［OK］なら覚えて、変え方を知らせる。［中止］・窓を閉じたときは覚えず、今回は今の既定 (js1 = 左手・js2 = 右手) で表示する (次に開いたときにまた聞く)
+    private bool _stickSidesAsked;
+    private void AskStickSidesIfNeeded()
+    {
+        if (_stickSidesAsked) return;
+        _stickSidesAsked = true;
+        if (_data.StickSidesChosen || _data.JoystickOptions.Count < 2) return;
+        RunStickSideDialog(showHowToChange: true);
+    }
+
+    // 「HOTAS の左右」の窓を開く。［OK］なら選択を覚えて表を出し直す (showHowToChange なら変え方も知らせる)。［中止］・閉じたときは何も変えない
+    private void RunStickSideDialog(bool showHowToChange)
+    {
+        var dlg = new StickSideDialog(_data) { Owner = this };
+        if (dlg.ShowDialog() != true || dlg.Js1IsLeft is not bool js1IsLeft) return;
+        _data.Js1IsLeft = js1IsLeft;
+        SaveCurrentStickSides();
+        dgActions.Items.Refresh();
+        ApplyFilter();
+        hotasPanel.UpdateBindingTables();
+        if (showHowToChange)
+            MessageBox.Show("あとで［HOTAS］タブの［左右を設定…］（ボタンを押して設定し直す）か［表示の入れ替え］（左右を反転する）で変えられます。", "HOTAS の左右", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     // ===== 「js1/js2 の入れ替え」の判定: 元の js1 の機器の記録 (保存フォルダによらず 1 つ) =====
@@ -549,12 +689,12 @@ public partial class KeybindEditorWindow : Window
     }
 
     // js1/js2 の入れ替えを actionmaps.xml に保存した後に呼ぶ: ファイルの instance が入れ替わって指紋が変わったので、
-    //   機器の定義を入れ替え、表示の入れ替えと手で選んだ js 番号の記録を新しい指紋のほうにも書く
-    //   (手で選んだ js 番号は、保存で番号も入れ替わったメモリの値のまま書く)。入れ替えていない元の指紋の記録はそのまま残す
+    //   機器の定義を入れ替え、HOTAS の左右の選択と手で選んだ js 番号の記録を新しい指紋のほうにも書く
+    //   (どちらも、保存で番号も入れ替わったメモリの値のまま書く。左右は選んでいるときだけ)。入れ替えていない元の指紋の記録はそのまま残す
     private void MoveFingerprintRecordsAfterSwapSave()
     {
         _data.SwapJoystickDefinitionsAfterSave();
-        SaveDisplaySwapSetting(_data.FileJoystickFingerprint, _data.JoystickDisplaySwapped);
+        if (_data.StickSidesChosen) SaveStickSideSetting(_data.FileJoystickFingerprint, _data.Js1IsLeft);
         SaveDeviceJsSetting();
     }
 
@@ -570,7 +710,10 @@ public partial class KeybindEditorWindow : Window
             _data = new ActionMapData();
         }
 
-        _data.JoystickDisplaySwapped = LoadDisplaySwapSetting(_data.FileJoystickFingerprint);
+        // HOTAS の左右: 選んだ記録があればそれ、無ければ js1 = 左手・js2 = 右手 (画面が出た後に聞く。AskStickSidesIfNeeded)
+        var stickSide = LoadStickSideSetting(_data.FileJoystickFingerprint);
+        _data.Js1IsLeft = stickSide ?? true;
+        _data.StickSidesChosen = stickSide.HasValue;
         // 元の js1 の機器の記録から見て入れ替え済みの保存データなら、既定の割り当て・既定のモードを左右入れ替えて使う
         _defaultsSwappedForSavedSwap = IsSavedSwapByOriginalJs1();
         if (_defaultsSwappedForSavedSwap) _data.SwapJoystickDefaultsForSavedSwap();
@@ -676,7 +819,8 @@ public partial class KeybindEditorWindow : Window
 
         var modified = _allActions.Count(a => a.IsModified);
         var unbound = _allActions.Count(a => !a.HasAnyBinding);
-        txtStatus.Text = $"全{_allActions.Count}件 | 表示{_filteredActions.Count}件 | 変更{modified}件 | 未割当{unbound}件";
+        _baseStatus = $"全{_allActions.Count}件 | 表示{_filteredActions.Count}件 | 変更{modified}件 | 未割当{unbound}件";
+        txtStatus.Text = _baseStatus;
     }
 
     private void Search_Changed(object sender, TextChangedEventArgs e) => ApplyFilter();
@@ -1051,9 +1195,224 @@ public partial class KeybindEditorWindow : Window
         s.Contains(',') || s.Contains('"') ? $"\"{s.Replace("\"", "\"\"")}\"" : s;
 }
 
-public class CategoryItem
+public class CategoryItem : System.ComponentModel.INotifyPropertyChanged
 {
     public string Name { get; set; } = "";
     public string DisplayName { get; set; } = "";
     public string ActionCount { get; set; } = "";
+
+    // 右の表で選んだ機能のカテゴリとして水色にするか (左のカテゴリの一覧)
+    private bool _isHighlighted;
+    public bool IsHighlighted
+    {
+        get => _isHighlighted;
+        set
+        {
+            if (_isHighlighted == value) return;
+            _isHighlighted = value;
+            PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(IsHighlighted)));
+        }
+    }
+
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+}
+
+// 「HOTAS の左右」の窓: 左スティックのボタンを押してもらい、押されたスティックを左手として表示の左右を決める
+//   (表示だけの選択。actionmaps.xml の js1・js2 は変えない)。窓の中では js1 = Stick1、js2 = Stick2 と呼ぶ。
+//   押下の待ち受けはエディターと同じ GameControllerInput、js 番号は ActionMapData.TryResolveJsForDevice で決める。
+//   決められない機器のボタンが押されたら「このスティックは: [Stick1] [Stick2]」で選べる (エディターの「この機器は js◯」と同じく覚える)
+public sealed class StickSideDialog : Window
+{
+    private readonly ActionMapData _data;
+    private GameControllerInput? _input;
+    private int? _leftJs;                                   // 左手のスティックの js 番号 (最初のボタンが押されるまで null)
+    private GameControllerInputEventArgs? _choicePress;     // js 番号を決められなかった押下
+    private int? _lastPressedJs;                            // 最後に押されたスティック (枠を光らせる)
+
+    private readonly TextBlock _txtConfirm;
+    private readonly Grid _frames;
+    private readonly StackPanel _pnlChoice;
+    private readonly TextBlock _txtChoice;
+    private readonly Button _btnSwap;
+    private readonly Button _btnOk;
+
+    // ［OK］で閉じたときの選択 (true = js1 が左手)。それ以外は null
+    public bool? Js1IsLeft { get; private set; }
+
+    public StickSideDialog(ActionMapData data)
+    {
+        _data = data;
+        Title = "HOTAS の左右";
+        SizeToContent = SizeToContent.WidthAndHeight;
+        ResizeMode = ResizeMode.NoResize;
+        WindowStartupLocation = WindowStartupLocation.CenterOwner;
+
+        var root = new StackPanel { Margin = new Thickness(16), MinWidth = 460 };
+        root.Children.Add(new TextBlock
+        {
+            Text = "左スティックのボタンをどれか押してください。",
+            FontSize = 15,
+            FontWeight = FontWeights.Bold,
+        });
+        root.Children.Add(new TextBlock
+        {
+            Text = "押したスティックを左手のスティックとして表示します (表示の左右だけが変わり、ファイルは変わりません)。",
+            TextWrapping = TextWrapping.Wrap,
+            MaxWidth = 460,
+            Margin = new Thickness(0, 4, 0, 0),
+        });
+        root.Children.Add(new TextBlock
+        {
+            Text = "スティックを接続していないときは［中止］を押してください (あとで［HOTAS］タブの［左右を設定…］で設定できます)。",
+            TextWrapping = TextWrapping.Wrap,
+            MaxWidth = 460,
+            Foreground = new SolidColorBrush(Color.FromRgb(102, 102, 102)),
+            Margin = new Thickness(0, 4, 0, 0),
+        });
+
+        // js 番号を決められなかったときの選択 (エディターの「この機器は: js1 / js2」と同じ)
+        _txtChoice = new TextBlock { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
+        _pnlChoice = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0), Visibility = Visibility.Collapsed };
+        _pnlChoice.Children.Add(_txtChoice);
+        var btnStick1 = new Button { Content = "Stick1", Padding = new Thickness(8, 2, 8, 2), Margin = new Thickness(0, 0, 4, 0) };
+        btnStick1.Click += (_, _) => ChooseStick(1);
+        var btnStick2 = new Button { Content = "Stick2", Padding = new Thickness(8, 2, 8, 2) };
+        btnStick2.Click += (_, _) => ChooseStick(2);
+        _pnlChoice.Children.Add(btnStick1);
+        _pnlChoice.Children.Add(btnStick2);
+        root.Children.Add(_pnlChoice);
+
+        // 左右の枠 (最初のボタンが押されてから出す)
+        _frames = new Grid { Margin = new Thickness(0, 12, 0, 0), Visibility = Visibility.Collapsed };
+        _frames.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        _frames.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(12) });
+        _frames.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        root.Children.Add(_frames);
+
+        _txtConfirm = new TextBlock
+        {
+            Text = "左右のスティックのボタンを押して確認してください。",
+            Margin = new Thickness(0, 8, 0, 0),
+            Visibility = Visibility.Collapsed,
+        };
+        root.Children.Add(_txtConfirm);
+
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 16, 0, 0) };
+        _btnSwap = new Button { Content = "入れ替え", Padding = new Thickness(12, 4, 12, 4), Margin = new Thickness(0, 0, 8, 0), IsEnabled = false };
+        _btnSwap.Click += (_, _) => { if (_leftJs is int l) { _leftJs = 3 - l; BuildFrames(); } };
+        _btnOk = new Button { Content = "OK", Padding = new Thickness(20, 4, 20, 4), Margin = new Thickness(0, 0, 8, 0), IsEnabled = false, FontWeight = FontWeights.Bold };
+        _btnOk.Click += (_, _) =>
+        {
+            if (_leftJs is not int l) return;
+            Js1IsLeft = l == 1;
+            DialogResult = true;
+        };
+        var btnCancel = new Button { Content = "中止", Padding = new Thickness(12, 4, 12, 4), IsCancel = true };
+        buttons.Children.Add(_btnSwap);
+        buttons.Children.Add(_btnOk);
+        buttons.Children.Add(btnCancel);
+        root.Children.Add(buttons);
+
+        Content = root;
+
+        Loaded += (_, _) =>
+        {
+            try
+            {
+                _input = new GameControllerInput();
+                _input.InputPressed += Input_Pressed;
+                _input.Start();
+            }
+            catch (Exception)
+            {
+                // 待ち受けを始められない環境では押下を待てない (［中止］で閉じられる)
+                _input?.Dispose();
+                _input = null;
+            }
+        };
+        Closed += (_, _) =>
+        {
+            if (_input == null) return;
+            _input.InputPressed -= Input_Pressed;
+            _input.Dispose();
+            _input = null;
+        };
+    }
+
+    private void Input_Pressed(object? sender, GameControllerInputEventArgs e)
+    {
+        if (e.Kind != GameControllerKind.Joystick) return;   // ゲームパッドは使わない
+        if (!_data.TryResolveJsForDevice(e.VendorId, e.ProductId, e.DeviceId, out var js, out _))
+        {
+            // js 番号を決められない: Stick1 / Stick2 を選んでもらう
+            _choicePress = e;
+            _txtChoice.Text = $"どのスティックか分かりません ({e.DisplayName})。このスティックは:";
+            _pnlChoice.Visibility = Visibility.Visible;
+            return;
+        }
+        _choicePress = null;
+        _pnlChoice.Visibility = Visibility.Collapsed;
+        if (_leftJs == null)
+        {
+            _leftJs = js;   // 最初に押されたスティックを左手にする
+            _btnSwap.IsEnabled = true;
+            _btnOk.IsEnabled = true;
+            _frames.Visibility = Visibility.Visible;
+            _txtConfirm.Visibility = Visibility.Visible;
+        }
+        _lastPressedJs = js;
+        BuildFrames();
+    }
+
+    // 選んだ番号を覚えて (ActionMapData。保存はエディターが行う)、同じ押下で続ける
+    private void ChooseStick(int js)
+    {
+        if (_choicePress is not { } press) return;
+        _data.SetManualJsForDevice(press.VendorId, press.ProductId, press.DeviceId, js);
+        Input_Pressed(this, press);
+    }
+
+    // 左右の枠を作り直す (左 = 左手のスティック)。最後に押されたスティックの枠を光らせる (HOTAS タブの押した行の強調と同じオレンジ)
+    private void BuildFrames()
+    {
+        _frames.Children.Clear();
+        if (_leftJs is not int left) return;
+        AddFrame(left, 0);
+        AddFrame(3 - left, 2);
+    }
+
+    private void AddFrame(int js, int column)
+    {
+        var name = _data.GetJsProductName(js);
+        var panel = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
+        panel.Children.Add(new TextBlock
+        {
+            Text = $"Stick{js}",
+            FontSize = 16,
+            FontWeight = FontWeights.Bold,
+            HorizontalAlignment = HorizontalAlignment.Center,
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = string.IsNullOrEmpty(name) ? "(名前なし)" : name,
+            FontSize = 11,
+            Foreground = new SolidColorBrush(Color.FromRgb(102, 102, 102)),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+            TextAlignment = TextAlignment.Center,
+        });
+        bool lit = _lastPressedJs == js;
+        var frame = new Border
+        {
+            Child = panel,
+            Padding = new Thickness(12, 10, 12, 10),
+            MinHeight = 60,
+            Background = new SolidColorBrush(lit ? Color.FromRgb(255, 243, 224) : Colors.White),
+            BorderBrush = new SolidColorBrush(lit ? Color.FromRgb(255, 111, 0) : Color.FromRgb(200, 200, 200)),
+            BorderThickness = new Thickness(lit ? 3 : 1),
+            CornerRadius = new CornerRadius(4),
+        };
+        Grid.SetColumn(frame, column);
+        _frames.Children.Add(frame);
+    }
 }

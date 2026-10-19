@@ -16,7 +16,9 @@
                 <CheckBox x:Name="chkRShift" Content="右Shift" Margin="0,0,20,0" VerticalAlignment="Center" Checked="Modifier_Changed" Unchecked="Modifier_Changed"/>
                 <TextBlock x:Name="txtInfo" VerticalAlignment="Center" Foreground="#666" FontSize="12"/>
                 <Button Content="表示の入れ替え" Click="DisplaySwap_Click" Padding="8,2" Margin="16,0,4,0" VerticalAlignment="Center"
-                        ToolTip="アプリ内の 物理スティック↔js 番号 の対応と左右の表示を入れ替えます (ファイルは変わりません)"/>
+                        ToolTip="HOTAS の左右の選択 (js1 = 左手・js2 = 右手 か、js1 = 右手・js2 = 左手 か) を入れ替えます (表示だけで、ファイルは変わりません)"/>
+                <Button Content="左右を設定…" Click="StickSidesSetup_Click" Padding="8,2" Margin="0,0,4,0" VerticalAlignment="Center"
+                        ToolTip="左右のスティックのボタンを押して、HOTAS の左右を設定し直します"/>
                 <Button Content="js1/js2 の入れ替え" Click="InstanceSwap_Click" Padding="8,2" Margin="0,0,8,0" VerticalAlignment="Center"
                         ToolTip="全ての機能の js1 と js2 の割り当てを入れ替えます (保存時に actionmaps.xml に反映)"/>
                 <TextBlock x:Name="txtPressInfo" VerticalAlignment="Center" Foreground="#D32F2F" FontSize="12"/>
@@ -57,7 +59,7 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <!-- HOTAS L - 左列 (js 番号は Product 名と表示の入れ替えで決まる) -->
+            <!-- HOTAS L - 左列 (js 番号は利用者の左右の選択で決まる。［表示の入れ替え］で変えられる) -->
             <Border Grid.Column="0" BorderBrush="#DDD" BorderThickness="0,0,1,0">
                 <Grid>
                     <Grid.RowDefinitions>

@@ -36,27 +36,27 @@
                 </Grid.ColumnDefinitions>
 
                 <TextBlock Text="キーボード:" Grid.Row="0" VerticalAlignment="Center" FontWeight="Bold" Margin="0,4"/>
-                <TextBox x:Name="txtKeyboard" Grid.Row="0" Grid.Column="1" Margin="0,4" IsReadOnly="True"
+                <TextBox x:Name="txtKeyboard" Tag="keyboard" GotKeyboardFocus="Field_GotKeyboardFocus" Cursor="Hand" ToolTip="クリックして選ぶ (赤い枠が付きます。下の「入力を選択」がこの機器に切り替わり、［クリア］でこの欄の割り当てを消せます)" Grid.Row="0" Grid.Column="1" Margin="0,4" IsReadOnly="True"
                          Background="#F8F8F8" FontFamily="Consolas"/>
                 <Button Content="設定" Grid.Row="0" Grid.Column="2" Margin="4,4,0,4" Click="SetKeyboard_Click"/>
 
                 <TextBlock Text="マウス:" Grid.Row="1" VerticalAlignment="Center" FontWeight="Bold" Margin="0,4"/>
-                <TextBox x:Name="txtMouse" Grid.Row="1" Grid.Column="1" Margin="0,4" IsReadOnly="True"
+                <TextBox x:Name="txtMouse" Tag="mouse" GotKeyboardFocus="Field_GotKeyboardFocus" Cursor="Hand" ToolTip="クリックして選ぶ (赤い枠が付きます。下の「入力を選択」がこの機器に切り替わり、［クリア］でこの欄の割り当てを消せます)" Grid.Row="1" Grid.Column="1" Margin="0,4" IsReadOnly="True"
                          Background="#F8F8F8" FontFamily="Consolas"/>
                 <Button Content="設定" Grid.Row="1" Grid.Column="2" Margin="4,4,0,4" Click="SetMouse_Click"/>
 
                 <TextBlock Text="ゲームパッド:" Grid.Row="2" VerticalAlignment="Center" FontWeight="Bold" Margin="0,4"/>
-                <TextBox x:Name="txtGamepad" Grid.Row="2" Grid.Column="1" Margin="0,4" IsReadOnly="True"
+                <TextBox x:Name="txtGamepad" Tag="gamepad" GotKeyboardFocus="Field_GotKeyboardFocus" Cursor="Hand" ToolTip="クリックして選ぶ (赤い枠が付きます。下の「入力を選択」がこの機器に切り替わり、［クリア］でこの欄の割り当てを消せます)" Grid.Row="2" Grid.Column="1" Margin="0,4" IsReadOnly="True"
                          Background="#E3F2FD" FontFamily="Consolas"/>
                 <Button Content="設定" Grid.Row="2" Grid.Column="2" Margin="4,4,0,4" Click="SetGamepad_Click"/>
 
                 <TextBlock x:Name="lblJoystick1" Text="HOTAS R:" Grid.Row="3" VerticalAlignment="Center" FontWeight="Bold" Margin="0,4"/>
-                <TextBox x:Name="txtJoystickR" Grid.Row="3" Grid.Column="1" Margin="0,4" IsReadOnly="True"
+                <TextBox x:Name="txtJoystickR" Tag="joystick1" GotKeyboardFocus="Field_GotKeyboardFocus" Cursor="Hand" ToolTip="クリックして選ぶ (赤い枠が付きます。下の「入力を選択」がこの機器に切り替わり、［クリア］でこの欄の割り当てを消せます)" Grid.Row="3" Grid.Column="1" Margin="0,4" IsReadOnly="True"
                          Background="#FFF3E0" FontFamily="Consolas"/>
                 <Button Content="設定" Grid.Row="3" Grid.Column="2" Margin="4,4,0,4" Click="SetJoystickR_Click"/>
 
                 <TextBlock x:Name="lblJoystick2" Text="HOTAS L:" Grid.Row="4" VerticalAlignment="Center" FontWeight="Bold" Margin="0,4"/>
-                <TextBox x:Name="txtJoystickL" Grid.Row="4" Grid.Column="1" Margin="0,4" IsReadOnly="True"
+                <TextBox x:Name="txtJoystickL" Tag="joystick2" GotKeyboardFocus="Field_GotKeyboardFocus" Cursor="Hand" ToolTip="クリックして選ぶ (赤い枠が付きます。下の「入力を選択」がこの機器に切り替わり、［クリア］でこの欄の割り当てを消せます)" Grid.Row="4" Grid.Column="1" Margin="0,4" IsReadOnly="True"
                          Background="#FFF3E0" FontFamily="Consolas"/>
                 <Button Content="設定" Grid.Row="4" Grid.Column="2" Margin="4,4,0,4" Click="SetJoystickL_Click"/>
 
@@ -127,8 +127,10 @@
                         <Button x:Name="btnPressJs1" Content="js1" Click="PressJs1_Click" Padding="8,2" Margin="0,0,4,0"/>
                         <Button x:Name="btnPressJs2" Content="js2" Click="PressJs2_Click" Padding="8,2"/>
                     </WrapPanel>
-                    <ScrollViewer MaxHeight="72" VerticalScrollBarVisibility="Auto" Margin="0,4,0,0">
-                        <TextBlock x:Name="txtPressOthers" TextWrapping="Wrap"/>
+                    <!-- この入力を使っている他の機能: 1 機能 1 行。各行の右に［変更］［削除］(予定があれば［取消］) -->
+                    <TextBlock x:Name="txtPressOthers" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                    <ScrollViewer MaxHeight="110" VerticalScrollBarVisibility="Auto">
+                        <StackPanel x:Name="pnlPressOthers"/>
                     </ScrollViewer>
                 </StackPanel>
                 <StackPanel Grid.Column="1" VerticalAlignment="Top" Margin="8,0,0,0">
@@ -139,11 +141,19 @@
         </Border>
 
         <!-- Buttons -->
-        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button Content="デフォルトに戻す" Click="ResetDefault_Click" Padding="12,6" Margin="0,0,8,0"/>
-            <Button Content="クリア" Click="Clear_Click" Padding="12,6" Margin="0,0,8,0"/>
-            <Button Content="OK" Click="Ok_Click" Padding="20,6" FontWeight="Bold" IsDefault="True"/>
-            <Button Content="キャンセル" Click="Cancel_Click" Padding="12,6" Margin="8,0,0,0" IsCancel="True"/>
+        <StackPanel Grid.Row="4" Margin="0,12,0,0">
+            <TextBlock Text="割り当てを削除するときは、消したい機器の欄をクリックして選び（赤い枠が付きます）、［クリア］を押してください。"
+                       TextWrapping="Wrap" Foreground="#666" Margin="0,0,0,6"/>
+            <!-- ほかの機能の［変更］［削除］の予定 (［OK］で確定、［キャンセル］で取り消し) -->
+            <TextBlock x:Name="txtOtherPlans" TextWrapping="Wrap" Foreground="#D84315" Margin="0,0,0,6" Visibility="Collapsed"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="デフォルトに戻す" Click="ResetDefault_Click" Padding="12,6" Margin="0,0,8,0"/>
+                <Button x:Name="btnClear" Content="クリア" Click="Clear_Click" Padding="12,6" Margin="0,0,8,0" IsEnabled="False"
+                        ToolTipService.ShowOnDisabled="True"
+                        ToolTip="選んでいる欄 (赤い枠) の割り当てを消します。消したい機器の欄をクリックして選んでから押してください。"/>
+                <Button Content="OK" Click="Ok_Click" Padding="20,6" FontWeight="Bold" IsDefault="True"/>
+                <Button Content="キャンセル" Click="Cancel_Click" Padding="12,6" Margin="8,0,0,0" IsCancel="True"/>
+            </StackPanel>
         </StackPanel>
     </Grid>
 </Window>

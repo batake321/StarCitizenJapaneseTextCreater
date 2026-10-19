@@ -13,8 +13,13 @@ public class ActionMapData
     // actionmaps.xml の <options type="joystick" instance="N" Product="..."> (読み込んだ保存データのもの)
     public List<JoystickDeviceOption> JoystickOptions { get; set; } = new();
 
-    // 「表示の入れ替え」(アプリ側だけ): true なら 物理スティック↔js 番号 の対応と左右表示を入れ替える
-    public bool JoystickDisplaySwapped { get; set; }
+    // HOTAS の左右の表示 (アプリ側だけ。actionmaps.xml は変えない): true = js1 が左手・js2 が右手、false = js1 が右手・js2 が左手。
+    //   機器の名前からは決めない。利用者の選択 (エディターが機器の定義の指紋ごとに覚える) で決め、選んでいないときは true。
+    //   js1/js2 の入れ替えをすると、物理スティックの左右が変わらないよう反転する
+    public bool Js1IsLeft { get; set; } = true;
+
+    // 利用者が左右を選んだか (記録から読んだ、または今回選んだ)。選んでいなければ、エディターを開いたときに聞く
+    public bool StickSidesChosen { get; set; }
 
     // 「js1/js2 の入れ替え」を奇数回行い、まだ保存していない (保存時に options の instance 1 と 2 を交換する)
     public bool JoystickInstancesSwapPending { get; set; }
@@ -24,19 +29,16 @@ public class ActionMapData
     public string JoystickDefinition1 { get; set; } = "-";
     public string JoystickDefinition2 { get; set; } = "-";
 
-    // 機器の定義の指紋 (表示の入れ替え・手で選んだ js 番号の記録の鍵)。ファイルに今書いてある向きのもの
+    // 機器の定義の指紋 (HOTAS の左右の選択・手で選んだ js 番号の記録の鍵)。ファイルに今書いてある向きのもの
     public string FileJoystickFingerprint => ActionMapParser.MakeJoystickFingerprint(JoystickDefinition1, JoystickDefinition2);
 
     // js1/js2 の入れ替えを actionmaps.xml に保存した後に呼ぶ (ファイルの instance 1 と 2 が入れ替わったので、定義も入れ替える)
     public void SwapJoystickDefinitionsAfterSave() =>
         (JoystickDefinition1, JoystickDefinition2) = (JoystickDefinition2, JoystickDefinition1);
 
-    // js 番号 (1/2) に対応する options。表示の入れ替え中は instance (3 - js) のもの
-    public JoystickDeviceOption? GetJoystickOptionForJs(int js)
-    {
-        var instance = JoystickDisplaySwapped ? 3 - js : js;
-        return JoystickOptions.FirstOrDefault(o => o.Instance == instance);
-    }
+    // js 番号 (1/2) に対応する options (instance が同じ番号のもの)
+    public JoystickDeviceOption? GetJoystickOptionForJs(int js) =>
+        JoystickOptions.FirstOrDefault(o => o.Instance == js);
 
     // js 番号の Product 名 (GUID を除いたもの)。無ければ ""
     public string GetJsProductName(int js) => GetJoystickOptionForJs(js)?.Name ?? "";
@@ -48,21 +50,8 @@ public class ActionMapData
         return string.IsNullOrEmpty(name) ? $"js{js}" : $"js{js}: {name}";
     }
 
-    // 左側に表示する js 番号 (1 or 2)。Product 名の末尾の L / R から決める。決められなければ従来どおり js2 が左
-    //   (表示の入れ替え中で Product から決められないときは js1 が左)
-    public int LeftJs
-    {
-        get
-        {
-            var s1 = JoystickDeviceOption.GetSide(GetJsProductName(1));
-            var s2 = JoystickDeviceOption.GetSide(GetJsProductName(2));
-            if (s1 == "L" && s2 != "L") return 1;
-            if (s1 == "R" && s2 != "R") return 2;
-            if (s2 == "L" && s1 != "L") return 2;
-            if (s2 == "R" && s1 != "R") return 1;
-            return JoystickDisplaySwapped ? 1 : 2;
-        }
-    }
+    // 左側 (左手) に表示する js 番号 (1 or 2)。利用者の選択 (Js1IsLeft) で決める
+    public int LeftJs => Js1IsLeft ? 1 : 2;
 
     // "L" / "R" (HOTAS L / HOTAS R の表記用)
     public string GetJsSideLabel(int js) => js == LeftJs ? "L" : "R";
@@ -75,13 +64,12 @@ public class ActionMapData
             .Where(o => (o.Instance == 1 || o.Instance == 2) && o.HasVidPid && o.VendorId == vendorId && o.ProductId == productId)
             .ToList();
         if (matches.Count != 1) return false;
-        var instance = matches[0].Instance;
-        js = JoystickDisplaySwapped ? 3 - instance : instance;
+        js = matches[0].Instance;
         return true;
     }
 
     // 手で選んだ js 番号 (options から決められない機器のもの): 機器のキー (GetDeviceKey) → instance (1 / 2)。
-    //   options の instance と同じ扱い: 表示の入れ替え中は js = 3 - instance、js1/js2 の入れ替えで 1↔2 を交換する
+    //   options の instance と同じ扱い: js 番号 = instance、js1/js2 の入れ替えで 1↔2 を交換する
     public Dictionary<string, int> ManualJoystickInstances { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     // 手で選んだ js 番号が変わったとき (呼び出し元が保存フォルダごとに覚える)
@@ -98,7 +86,7 @@ public class ActionMapData
         if (TryGetJsForDevice(vendorId, productId, out js)) return true;
         if (ManualJoystickInstances.TryGetValue(GetDeviceKey(deviceId, vendorId, productId), out var instance) && (instance == 1 || instance == 2))
         {
-            js = JoystickDisplaySwapped ? 3 - instance : instance;
+            js = instance;
             manual = true;
             return true;
         }
@@ -110,9 +98,8 @@ public class ActionMapData
     public void SetManualJsForDevice(ushort vendorId, ushort productId, string? deviceId, int js)
     {
         if (js != 1 && js != 2) return;
-        var instance = JoystickDisplaySwapped ? 3 - js : js;
         var key = GetDeviceKey(deviceId, vendorId, productId);
-        ManualJoystickInstances[key] = instance;
+        ManualJoystickInstances[key] = js;
         ManualJoystickInstancesChanged?.Invoke();
     }
 
@@ -121,6 +108,7 @@ public class ActionMapData
     //   既定の割り当て (DefaultJoystick1 / 2) も同じく交換する (［既定値に戻す］は入れ替えた後の既定を入れる)。
     //   ゲームの既定 (GameDefaultJoystick1 / 2。保存で rebind を書くかを決める値) は交換しない (ゲームは defaultProfile の既定を番号どおりに使うため)。
     //   options の instance 1 / 2 の情報と、手で選んだ js 番号もメモリ上で交換する (ファイルの options は保存時に交換)。
+    //   HOTAS の左右の表示 (Js1IsLeft) も反転する (物理スティックの左右は変わらないので、js 番号の左右を入れ替える)。
     //   2 回行うと元に戻る
     public void SwapJoystick1And2Bindings()
     {
@@ -143,6 +131,7 @@ public class ActionMapData
             var inst = ManualJoystickInstances[key];
             if (inst == 1 || inst == 2) ManualJoystickInstances[key] = 3 - inst;
         }
+        Js1IsLeft = !Js1IsLeft;
         JoystickInstancesSwapPending = !JoystickInstancesSwapPending;
         if (ManualJoystickInstances.Count > 0) ManualJoystickInstancesChanged?.Invoke();
     }
@@ -198,21 +187,6 @@ public class JoystickDeviceOption
 
     // GUID を除いて前後の空白を落とした名前 (例 "VKBsim Gladiator EVO L")
     public string Name => System.Text.RegularExpressions.Regex.Replace(Product ?? "", @"\{[^}]*\}", "").Trim();
-
-    // 名前の最後の語が L / Left なら "L"、R / Right なら "R"、それ以外は null
-    public static string? GetSide(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name)) return null;
-        var tokens = name.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (tokens.Length == 0) return null;
-        var last = tokens[^1].ToUpperInvariant();
-        return last switch
-        {
-            "L" or "LEFT" => "L",
-            "R" or "RIGHT" => "R",
-            _ => null,
-        };
-    }
 }
 
 public class ActionCategory
@@ -288,6 +262,10 @@ public class ActionBinding : INotifyPropertyChanged
     public string Joystick2 { get => _joystick2; set { _joystick2 = InputCodeHelper.ToGameForm(value, "js2_"); OnPropertyChanged(); OnPropertyChanged(nameof(Joystick2Display)); OnPropertyChanged(nameof(Joystick2DisplayJa)); OnPropertyChanged(nameof(HotasDisplay)); } }
     public bool IsLongPress { get => _isLongPress; set { _isLongPress = value; OnPropertyChanged(); } }
 
+    // ［機能別］タブで、スティック・ゲームパッドで押した入力がこの機能に割り当ててあるとき true (行をオレンジの枠で目立たせる。画面だけ)
+    private bool _isPressHighlighted;
+    public bool IsPressHighlighted { get => _isPressHighlighted; set { if (_isPressHighlighted == value) return; _isPressHighlighted = value; OnPropertyChanged(); } }
+
     // Legacy alias (kept for searching/text matching from external services like ChatService).
     public string Joystick => string.IsNullOrEmpty(_joystick1) ? _joystick2 : _joystick1;
     public string JoystickDisplay => HotasDisplay;
@@ -306,12 +284,12 @@ public class ActionBinding : INotifyPropertyChanged
     public string Joystick1DisplayJa => InputDisplayHelper.FormatInputJa(Joystick1);
     public string Joystick2DisplayJa => InputDisplayHelper.FormatInputJa(Joystick2);
     // 画面用 (機能別タブの HOTAS 列・印刷・検索)。"R (js2): ...\nL (js1): ..." の形で日本語表記。
-    //   R/L は js 番号と物理スティックの対応 (Owner) に従う。Owner が無ければ従来どおり js1 = R
+    //   R/L は利用者の選択 (Owner.LeftJs) に従う。Owner が無ければ選んでいないときと同じ js1 = L
     public string HotasDisplay
     {
         get
         {
-            int leftJs = Owner?.LeftJs ?? 2;
+            int leftJs = Owner?.LeftJs ?? 1;
             int rightJs = 3 - leftJs;
             var r = rightJs == 1 ? Joystick1DisplayJa : Joystick2DisplayJa;
             var l = leftJs == 1 ? Joystick1DisplayJa : Joystick2DisplayJa;
@@ -1176,6 +1154,8 @@ public static class InputDisplayHelper
     public static string FormatInput(string input)
     {
         if (string.IsNullOrEmpty(input)) return "";
+        // 割り当て解除 (接頭辞と空白だけ。"js1_ " など) は空 (エクスポート・チャットにも解除の書き方を出さない)
+        if (input.Split('+').All(p => InputCodeHelper.StripDevicePrefix(p).Length == 0)) return "";
 
         var parts = input.Split('+');
         var result = new List<string>();
@@ -1186,14 +1166,14 @@ public static class InputDisplayHelper
         return string.Join(" + ", result);
     }
 
-    // 画面表示用の日本語表記。機器接頭辞は表示しない。割り当て解除 ("js1_ " など) は「（解除）」
+    // 画面表示用の日本語表記。機器接頭辞は表示しない。割り当て解除 ("js1_ " など) は空 (画面には出さない。ファイルへの保存は解除の書き方のまま)
     public static string FormatInputJa(string input)
     {
         if (string.IsNullOrEmpty(input)) return "";
 
         var device = InputCodeHelper.GetMainDevicePrefix(input);
         var bodies = input.Split('+').Select(InputCodeHelper.StripDevicePrefix).ToList();
-        if (bodies.All(b => b.Length == 0)) return device != null ? "（解除）" : "";
+        if (bodies.All(b => b.Length == 0)) return "";
 
         var result = new List<string>();
         foreach (var body in bodies)

@@ -149,11 +149,16 @@ public partial class HotasLayoutPanel : UserControl
         return parts.Count > 0 ? string.Join("+", parts) + "+" : "";
     }
 
-    // 「表示の入れ替え」の設定が変わったときに呼ぶ (呼び出し元が機器の定義の指紋ごとに覚える)
+    // ［表示の入れ替え］で HOTAS の左右の選択を変えたときに呼ぶ (引数は js1 が左手か。呼び出し元が機器の定義の指紋ごとに覚える)
     public Action<bool>? DisplaySwapChanged { get; set; }
 
     // ［js1/js2 の入れ替え］をしたときに呼ぶ (呼び出し元が「元の js1 の機器」の判定の表示を書き直す)
     public Action? InstanceSwapped { get; set; }
+
+    // ［左右を設定…］を押したときに呼ぶ (呼び出し元が「HOTAS の左右」の窓を開き、選択を覚えて表を出し直す)
+    public Action? StickSidesSetupRequested { get; set; }
+
+    private void StickSidesSetup_Click(object sender, RoutedEventArgs e) => StickSidesSetupRequested?.Invoke();
 
     // ［記録を消す］(元の js1 の機器の記録) を押したときに呼ぶ (確かめと記録の書き換えは呼び出し元が行う)
     public Action? ClearOriginalJs1Requested { get; set; }
@@ -208,7 +213,11 @@ public partial class HotasLayoutPanel : UserControl
             if (manual)
             {
                 if (txtPressInfo.Text.Length == 0)
-                    txtPressInfo.Text = $"{e.DisplayName}: 手で選んだ js{js} として表示しています";
+                {
+                    // 機器の名前: js 番号が分かっているので actionmaps.xml の options の名前 (無ければ Windows の名前)
+                    var name = _data.GetJsProductName(js);
+                    txtPressInfo.Text = $"{(string.IsNullOrEmpty(name) ? e.DisplayName : name)}: 手で選んだ js{js} として表示しています";
+                }
                 ShowJsChoice(e);
             }
         }
@@ -315,8 +324,10 @@ public partial class HotasLayoutPanel : UserControl
 
     private void DisplaySwap_Click(object sender, RoutedEventArgs e)
     {
-        _data.JoystickDisplaySwapped = !_data.JoystickDisplaySwapped;
-        DisplaySwapChanged?.Invoke(_data.JoystickDisplaySwapped);
+        // HOTAS の左右の選択 (js1 = 左手・js2 = 右手 ⇔ js1 = 右手・js2 = 左手) を入れ替える (actionmaps.xml は変えない)
+        _data.Js1IsLeft = !_data.Js1IsLeft;
+        _data.StickSidesChosen = true;
+        DisplaySwapChanged?.Invoke(_data.Js1IsLeft);
         UpdateBindingTables();
         _onBindingChanged?.Invoke();   // 機能別タブの HOTAS 列の R/L 表記を更新するため
     }
