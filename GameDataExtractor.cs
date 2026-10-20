@@ -3168,6 +3168,11 @@ public partial class GameDataExtractor : IDisposable
         try { extraCount = await ExtractExtraItemsAsync(dataP4kPath, now, ct, typeMap); }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { StatusChanged?.Invoke($"[品目の追加] 取り込みに失敗しました (起動後に裏で取り直します): {ex.Message}"); }
+        // Step 6c: Wikelo の契約の納品物のゲームデータ上の入手場所 (契約タブの入手場所の欄。ExtractDeliverableSourcesAsync)。対象を契約 (Step 4) の行から決めるので契約の後に行う。
+        // 失敗しても構築は続ける (deliverable_sources は前のまま)。各段の時間は StatusChanged に出る
+        try { await ExtractDeliverableSourcesAsync(dataP4kPath, ct); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { StatusChanged?.Invoke($"[納品物の入手場所] 取り込みに失敗しました (前のデータを残します): {ex.Message}"); }
 
         // Step 7: メタ情報
         step++;
@@ -5606,11 +5611,15 @@ public partial class GameDataExtractor : IDisposable
     //   Illegal     : 契約 boolParamOverrides の Illegal → 生成器 contractParams の Illegal → テンプレート contractDisplayInfo.illegal
     //   パーティ共有: 契約 boolParamOverrides の CanBeShared → 生成器の CanBeShared (無ければ表示しない)
     //   未リリース  : 契約または生成器の notForRelease が true
-    // raw_json は契約の JSON をそのまま "_Contract_" に入れ、補った値 (ローカライズキーとその出どころ) を "_Resolved_" に同梱する
+    // raw_json は契約の JSON をそのまま "_Contract_" に入れ、補った値 (ローカライズキーとその出どころ) を "_Resolved_" に同梱する。
+    // Wikelo のテンプレート (record 名に TheCollector を含む ContractTemplate) を使う契約は、テンプレートの納品物 (BuildTemplateHaulingJson) を
+    // "_TemplateHauling_" に入れる (ほかの契約には入れない)
     internal static List<MissionRow> BuildContractGeneratorRows(string generatorJson, string? templateJson, Dictionary<string, string> locDict)
     {
         // ContractTemplate.<名前> の <名前> 小文字 → contractDisplayInfo (契約の template 参照のファイル名で引く)
         var templates = new Dictionary<string, string>(StringComparer.Ordinal);
+        // ContractTemplate.<名前> の <名前> 小文字 → テンプレートの納品物の JSON (Wikelo のテンプレートで haulingOrders があるものだけ)
+        var templateHauling = new Dictionary<string, string>(StringComparer.Ordinal);
         if (!string.IsNullOrEmpty(templateJson))
         {
             foreach (var block in SplitJsonBlocks(templateJson))
@@ -5622,8 +5631,12 @@ public partial class GameDataExtractor : IDisposable
                     var recordName = root.TryGetProperty("_RecordName_", out var rn) ? rn.GetString() ?? "" : "";
                     if (!recordName.StartsWith("ContractTemplate.")) continue;
                     if (!root.TryGetProperty("_RecordValue_", out var rv)) continue;
+                    var key = recordName["ContractTemplate.".Length..].ToLowerInvariant();
+                    if (recordName.Contains(WikeloTemplateMark, StringComparison.OrdinalIgnoreCase)
+                        && BuildTemplateHaulingJson(recordName, rv) is { } hauling)
+                        templateHauling[key] = hauling;
                     if (!rv.TryGetProperty("contractDisplayInfo", out var di) || di.ValueKind != JsonValueKind.Object) continue;
-                    templates[recordName["ContractTemplate.".Length..].ToLowerInvariant()] = di.GetRawText();
+                    templates[key] = di.GetRawText();
                 }
                 catch { }
             }
@@ -5653,7 +5666,7 @@ public partial class GameDataExtractor : IDisposable
                         {
                             try
                             {
-                                var row = BuildContractRow(generatorRecord, gen, genParams, arrayName, contract, templates, locDict);
+                                var row = BuildContractRow(generatorRecord, gen, genParams, arrayName, contract, templates, templateHauling, locDict);
                                 if (row != null) rows.Add(row);
                             }
                             catch { }
@@ -5666,8 +5679,57 @@ public partial class GameDataExtractor : IDisposable
         return rows;
     }
 
+    // Wikelo の契約のテンプレートの record 名に入っている語 (ContractTemplate.TheCollector_* / ItemResourceGathering_TheCollector など)
+    private const string WikeloTemplateMark = "TheCollector";
+
+    // テンプレートの納品物: objectiveTokens[].objectiveHandler が ObjectiveHandler_Hauling のものの haulingOrders[] を、元の JSON のまま
+    // 出てきた順に "orders" に並べる。HaulingOrder_Property の haulingOrdersProperty ("_PointsTo_:ptr:N") が指す目標の property
+    // (objectiveTokens[].properties[] の "_Pointer_" が ptr:N のもの) の missionVariableName を "propertyVariables" (ptr:N → 名前) に入れる
+    // (契約側の propertyOverrides の missionVariableName と突き合わせるため)。haulingOrders が 1 件も無ければ null
+    //   {"template": record 名, "orders": [...], "propertyVariables": {"ptr:6": "HaulingOverride"}}
+    internal static string? BuildTemplateHaulingJson(string recordName, JsonElement recordValue)
+    {
+        if (!recordValue.TryGetProperty("objectiveTokens", out var tokens) || tokens.ValueKind != JsonValueKind.Array) return null;
+        var orders = new List<JsonElement>();
+        var variables = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var token in tokens.EnumerateArray())
+        {
+            if (token.ValueKind != JsonValueKind.Object) continue;
+            if (token.TryGetProperty("properties", out var props) && props.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var p in props.EnumerateArray())
+                {
+                    if (p.ValueKind != JsonValueKind.Object) continue;
+                    var ptr = GetStr(p, "_Pointer_");
+                    var name = GetStr(p, "missionVariableName");
+                    if (ptr.Length > 0 && name.Length > 0) variables[ptr] = name;
+                }
+            }
+            if (!token.TryGetProperty("objectiveHandler", out var handler) || handler.ValueKind != JsonValueKind.Object) continue;
+            if (GetStr(handler, "_Type_") != "ObjectiveHandler_Hauling") continue;
+            if (!handler.TryGetProperty("haulingOrders", out var list) || list.ValueKind != JsonValueKind.Array) continue;
+            foreach (var o in list.EnumerateArray())
+                if (o.ValueKind == JsonValueKind.Object) orders.Add(o);
+        }
+        if (orders.Count == 0) return null;
+        using var ms = new MemoryStream();
+        using (var w = new Utf8JsonWriter(ms))
+        {
+            w.WriteStartObject();
+            w.WriteString("template", recordName);
+            w.WriteStartArray("orders");
+            foreach (var o in orders) o.WriteTo(w);
+            w.WriteEndArray();
+            w.WriteStartObject("propertyVariables");
+            foreach (var (ptr, name) in variables) w.WriteString(ptr, name);
+            w.WriteEndObject();
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(ms.ToArray());
+    }
+
     private static MissionRow? BuildContractRow(string generatorRecord, JsonElement gen, JsonElement genParams, string arrayName,
-        JsonElement contract, Dictionary<string, string> templates, Dictionary<string, string> locDict)
+        JsonElement contract, Dictionary<string, string> templates, Dictionary<string, string> templateHauling, Dictionary<string, string> locDict)
     {
         if (contract.ValueKind != JsonValueKind.Object) return null;
         var id = GetStr(contract, "id").ToLowerInvariant();
@@ -5677,6 +5739,7 @@ public partial class GameDataExtractor : IDisposable
 
         // テンプレート: "file://.../contracttemplates/xxx.json" の xxx で引く
         JsonDocument? templateDoc = null;
+        string? haulingJson = null;
         var templateRef = GetStr(contract, "template");
         if (!string.IsNullOrEmpty(templateRef))
         {
@@ -5684,6 +5747,7 @@ public partial class GameDataExtractor : IDisposable
             if (name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) name = name[..^".json".Length];
             if (templates.TryGetValue(name.ToLowerInvariant(), out var displayInfoJson))
                 templateDoc = JsonDocument.Parse(displayInfoJson);
+            templateHauling.TryGetValue(name.ToLowerInvariant(), out haulingJson);
         }
         using (templateDoc)
         {
@@ -5780,6 +5844,13 @@ public partial class GameDataExtractor : IDisposable
                 w.WriteString("template", templateRef);
                 w.WriteBoolean("templateFound", templateDoc != null);
                 w.WriteEndObject();
+                // テンプレートの納品物 (Wikelo のテンプレートで haulingOrders があるときだけ)
+                if (haulingJson != null)
+                {
+                    using var hd = JsonDocument.Parse(haulingJson);
+                    w.WritePropertyName("_TemplateHauling_");
+                    hd.RootElement.WriteTo(w);
+                }
                 w.WritePropertyName("_Contract_");
                 contract.WriteTo(w);
                 w.WriteEndObject();

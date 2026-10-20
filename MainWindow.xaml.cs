@@ -161,6 +161,7 @@ public partial class MainWindow : Window
         if (mfs < 8 || mfs > 30) mfs = 14;
         txtMissionFontSize.Text = mfs.ToString();
         txtMissionDetail.FontSize = mfs;
+        txtMissionDeliverableSource.FontSize = mfs;
 
         // Restore trade params
         txtTradeScu.Text = config.TradeScu > 0 ? config.TradeScu.ToString() : "100";
@@ -1766,6 +1767,7 @@ public partial class MainWindow : Window
         {
             App.Config.MissionDetailFontSize = fs;
             txtMissionDetail.FontSize = fs;
+            txtMissionDeliverableSource.FontSize = fs;
         }
         txtGamePath.Text = App.Config.GamePath;
 
@@ -1957,6 +1959,7 @@ public partial class MainWindow : Window
     // 一覧に契約を出す: 同じ名前・カテゴリの契約を 1 行にまとめて DataGrid に入れる (list が null なら一覧を空にする)
     private void SetMissionList(List<MissionService.MissionEntry>? list)
     {
+        ClearMissionDeliverables();
         _currentMissions = list;
         _currentMissionRows = list == null ? null : MissionService.GroupByName(list);
         dgMissions.ItemsSource = _currentMissionRows;
@@ -2288,7 +2291,7 @@ public partial class MainWindow : Window
             var m = _missionService.FindByRecord(records);
             // 見つからなかったときも番号を進めて、待っている古い一覧の操作の結果が「見つかりませんでした」を上書きしないようにする
             // 番号を進めると待っている操作の結果は捨てられるので、その操作が出した「検索中...」も消す
-            if (m == null) { ++_missionListRequest; ++_missionDetailRequest; txtMissionSearchStatus.Text = ""; txtMissionDetail.Text = $"契約が見つかりませんでした ({string.Join(", ", records)})。"; return; }
+            if (m == null) { ++_missionListRequest; ++_missionDetailRequest; ClearMissionDeliverables(); txtMissionSearchStatus.Text = ""; txtMissionDetail.Text = $"契約が見つかりませんでした ({string.Join(", ", records)})。"; return; }
             // 一覧を出す・行を選ぶ経路はすべて番号を進めて、待っている古い一覧の操作の結果を捨てさせる (await の無い分岐も)
             req = ++_missionListRequest;
             txtMissionSearchStatus.Text = "";
@@ -2331,6 +2334,7 @@ public partial class MainWindow : Window
                 dgMissions.SelectedItem = null;
                 ++_missionDetailRequest;   // 待っている「違い」の節を捨てる
                 SetMissionDetail(_missionService.FormatDetail(m));
+                ShowMissionDeliverables(m);
                 return;
             }
             dgMissions.ScrollIntoView(row);
@@ -2340,6 +2344,7 @@ public partial class MainWindow : Window
         {
             if (req != null && req != _missionListRequest) return;
             ++_missionDetailRequest;   // 待っている「違い」の節でこのエラーを上書きしない
+            ClearMissionDeliverables();
             txtMissionDetail.Text = $"詳細表示エラー: {ex.Message}";
         }
     }
@@ -2365,7 +2370,7 @@ public partial class MainWindow : Window
     private void Mission_Selected(object sender, SelectionChangedEventArgs e)
     {
         if (_missionService == null) return;
-        if (dgMissions.SelectedItem is not MissionService.MissionGroup row) { HighlightMissionCategory(null); return; }
+        if (dgMissions.SelectedItem is not MissionService.MissionGroup row) { HighlightMissionCategory(null); ClearMissionDeliverables(); return; }
         // BP タブから開いたときはその契約を代表にする (その行に含まれるときだけ)
         var rep = _missionRepOverride != null && row.Members.Contains(_missionRepOverride) ? _missionRepOverride : row.Representative;
         _missionRepOverride = null;
@@ -2388,9 +2393,11 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            ClearMissionDeliverables();
             txtMissionDetail.Text = $"詳細表示エラー: {ex.Message}";
             return;
         }
+        ShowMissionDeliverables(rep);
         if (row.Members.Count < 2) return;
         try
         {
@@ -2403,6 +2410,80 @@ public partial class MainWindow : Window
             if (req != _missionDetailRequest || !ReferenceEquals(dgMissions.SelectedItem, row)) return;
             SetMissionDetail(detail + $"\n\n■ 違い\n  違いの一覧を作れなかった ({ex.Message})");
         }
+    }
+
+    // Wikelo の納品物の表を作る操作・入手場所を出す操作の番号 (遅れて返った古い結果を画面に入れない)
+    private int _missionDeliverableRequest;
+    private int _missionDeliverableSourceRequest;
+    private const string MissionDeliverableSourceHint = "納品物の行をクリックすると入手場所が表示されます。";
+
+    // 納品物の欄を隠して空にする (待っている操作の結果も捨てる)
+    private void ClearMissionDeliverables()
+    {
+        ++_missionDeliverableRequest;
+        ++_missionDeliverableSourceRequest;
+        pnlMissionDeliverables.Visibility = Visibility.Collapsed;
+        dgMissionDeliverables.ItemsSource = null;
+        txtMissionDeliverableSource.Text = MissionDeliverableSourceHint;
+    }
+
+    // 詳細に出した契約が Wikelo の契約で納品物が 1 件以上あれば、右の欄に納品物の表を出す (無ければ欄を隠す)。
+    // 納品物のある契約どうしで移るときは、ちらつかないように欄を畳まずに中身だけ替える (結果が来るまでは前の中身のまま)
+    private async void ShowMissionDeliverables(MissionService.MissionEntry m)
+    {
+        var svc = _missionService;
+        if (svc == null || !MissionService.IsWikeloContract(m)) { ClearMissionDeliverables(); return; }
+        var req = ++_missionDeliverableRequest;
+        ++_missionDeliverableSourceRequest;   // 前の契約の入手場所の結果は捨てる
+        // 欄が出ているとき (納品物のある契約から移ったとき) は、欄は畳まずに前の契約の行と入手場所を消して読み込み中にする
+        if (pnlMissionDeliverables.Visibility == Visibility.Visible)
+        {
+            dgMissionDeliverables.ItemsSource = null;
+            txtMissionDeliverablesHeader.Text = "納品物 (読み込み中...)";
+            txtMissionDeliverableSource.Text = "";
+        }
+        List<MissionService.DeliverableItem> items;
+        try
+        {
+            items = await Task.Run(() => svc.GetDeliverables(m));
+        }
+        catch (Exception ex)
+        {
+            if (req != _missionDeliverableRequest || !ReferenceEquals(svc, _missionService)) return;
+            ++_missionDeliverableSourceRequest;
+            dgMissionDeliverables.ItemsSource = null;
+            txtMissionDeliverablesHeader.Text = "納品物";
+            txtMissionDeliverableSource.Text = $"納品物を読めなかった ({ex.Message})";
+            pnlMissionDeliverables.Visibility = Visibility.Visible;
+            return;
+        }
+        if (req != _missionDeliverableRequest || !ReferenceEquals(svc, _missionService)) return;
+        if (items.Count == 0) { ClearMissionDeliverables(); return; }
+        ++_missionDeliverableSourceRequest;   // 前の表で選んでいた行の入手場所の結果は捨てる
+        dgMissionDeliverables.ItemsSource = items;
+        txtMissionDeliverablesHeader.Text = $"納品物 ({items.Count} 件)";
+        txtMissionDeliverableSource.Text = MissionDeliverableSourceHint;
+        pnlMissionDeliverables.Visibility = Visibility.Visible;
+    }
+
+    // 納品物の表の行を選んだら、その入手場所を下の欄に出す
+    private async void MissionDeliverable_Selected(object sender, SelectionChangedEventArgs e)
+    {
+        var svc = _missionService;
+        if (svc == null || dgMissionDeliverables.SelectedItem is not MissionService.DeliverableItem d) return;
+        var req = ++_missionDeliverableSourceRequest;
+        txtMissionDeliverableSource.Text = $"{d.Name} の入手場所を調べています...";
+        string text;
+        try
+        {
+            text = await Task.Run(() => svc.FormatDeliverableSources(d));
+        }
+        catch (Exception ex)
+        {
+            text = $"入手場所を出せなかった ({ex.Message})";
+        }
+        if (req != _missionDeliverableSourceRequest || !ReferenceEquals(svc, _missionService)) return;
+        txtMissionDeliverableSource.Text = text;
     }
 
     private void InitChat()

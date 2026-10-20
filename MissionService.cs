@@ -111,10 +111,13 @@ public class MissionService : IDisposable
 
     // ゲームデータ DB (gamedata_cache.db) のあるフォルダ。詳細の「報酬の BP」を［BP］タブと同じ読み方で出すのに使う (BlueprintDetail)
     private readonly string _workDir;
+    // ゲームデータ DB のパス。Wikelo の納品物・入手場所は、この DB を別の接続で開いて読む (裏の処理から呼ぶので _conn を使わない)
+    private readonly string _dbPath;
 
     public MissionService(string dbPath, string? translationDbPath = null)
     {
         _workDir = Path.GetDirectoryName(dbPath) ?? "";
+        _dbPath = dbPath;
         _conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
         _conn.Open();
 
@@ -714,9 +717,15 @@ public class MissionService : IDisposable
     private List<MissionEntry> LoadAllMissions()
     {
         if (_allCache != null) return _allCache;
+        _allCache = ReadAllMissions(_conn);
+        return _allCache;
+    }
 
+    // missions 表の全行を MissionEntry にする (LoadAllMissions の中身。conn で読む。結果は覚えない)
+    private List<MissionEntry> ReadAllMissions(SqliteConnection conn)
+    {
         var list = new List<MissionEntry>();
-        using var cmd = _conn.CreateCommand();
+        using var cmd = conn.CreateCommand();
         cmd.CommandText = _hasWikiColumns
             ? "SELECT record_name, title, title_hud, mission_type, difficulty, mission_giver, location_label, description, reward_min, reward_max, required_reputation, lawfulness_type, jurisdiction, time_limit, raw_json, wiki_title, wiki_faction, wiki_reward, wiki_legality, wiki_enemy_min, wiki_enemy_max, wiki_duration_min FROM missions"
             : "SELECT record_name, title, title_hud, mission_type, difficulty, mission_giver, location_label, description, reward_min, reward_max, required_reputation, lawfulness_type, jurisdiction, time_limit, raw_json FROM missions";
@@ -811,7 +820,6 @@ public class MissionService : IDisposable
 
             list.Add(entry);
         }
-        _allCache = list;
         return list;
     }
 
@@ -1850,45 +1858,62 @@ public class MissionService : IDisposable
 
     // 英語原文 → 日本語訳 の逆引き索引。_enDict の線形走査を置き換える。
     // _enDict の列挙順で最初に見つかったものを採用し、走査版と同じ結果になるようにする。
+    // 索引は初めて使うときに作る。裏の処理 (納品物の報酬の索引で一覧を別に読む経路) と UI 側から同時に呼ばれても、
+    // 作りかけの索引を読まない・二重に作らないように、作成は lock の中で行い、出来上がった 2 つを一度に入れる (入れた後は読むだけ)
+    private readonly object _enIndexLock = new();
+
+    private (Dictionary<string, (string ja, string key)> Exact, Dictionary<string, string> Prefix50) EnsureEnglishIndexes()
+    {
+        lock (_enIndexLock)
+        {
+            if (_enExactIndex == null || _enPrefix50Index == null) BuildEnglishIndexes();
+            return (_enExactIndex!, _enPrefix50Index!);
+        }
+    }
+
+    // lock (_enIndexLock) の中から呼ぶ (EnsureEnglishIndexes)
     private void BuildEnglishIndexes()
     {
-        _enExactIndex = new Dictionary<string, (string ja, string key)>(StringComparer.OrdinalIgnoreCase);
-        _enPrefix50Index = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (_enDict == null || _transDict == null) return;
-
-        foreach (var (key, enVal) in _enDict)
+        var exact = new Dictionary<string, (string ja, string key)>(StringComparer.OrdinalIgnoreCase);
+        var prefix50 = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (_enDict != null && _transDict != null)
         {
-            if (key.StartsWith("@")) continue;
-            if (string.IsNullOrEmpty(enVal)) continue;
-            if (!_transDict.TryGetValue(key, out var ja) || string.IsNullOrEmpty(ja) || !ContainsJapanese(ja)) continue;
-
-            if (!_enExactIndex.ContainsKey(enVal))
-                _enExactIndex[enVal] = (ja, key);
-
-            if (enVal.Length >= 50)
+            foreach (var (key, enVal) in _enDict)
             {
-                var p = enVal[..50];
-                if (!_enPrefix50Index.ContainsKey(p))
-                    _enPrefix50Index[p] = ja;
+                if (key.StartsWith("@")) continue;
+                if (string.IsNullOrEmpty(enVal)) continue;
+                if (!_transDict.TryGetValue(key, out var ja) || string.IsNullOrEmpty(ja) || !ContainsJapanese(ja)) continue;
+
+                if (!exact.ContainsKey(enVal))
+                    exact[enVal] = (ja, key);
+
+                if (enVal.Length >= 50)
+                {
+                    var p = enVal[..50];
+                    if (!prefix50.ContainsKey(p))
+                        prefix50[p] = ja;
+                }
             }
         }
+        _enPrefix50Index = prefix50;
+        _enExactIndex = exact;
     }
 
     private (string ja, string key) ResolveJaByEnglishWithKey(string english)
     {
         if (_enDict == null || _transDict == null || string.IsNullOrEmpty(english)) return ("", "");
-        if (_enExactIndex == null) BuildEnglishIndexes();
-        return _enExactIndex!.TryGetValue(english, out var hit) ? hit : ("", "");
+        var (exact, _) = EnsureEnglishIndexes();
+        return exact.TryGetValue(english, out var hit) ? hit : ("", "");
     }
 
     private string ResolveJaByEnglish(string english)
     {
         if (_enDict == null || _transDict == null || string.IsNullOrEmpty(english)) return "";
-        if (_enExactIndex == null) BuildEnglishIndexes();
-        if (_enExactIndex!.TryGetValue(english, out var hit)) return hit.ja;
+        var (exact, prefix50) = EnsureEnglishIndexes();
+        if (exact.TryGetValue(english, out var hit)) return hit.ja;
 
         // 長文の場合: 先頭50文字で前方一致
-        if (english.Length > 50 && _enPrefix50Index!.TryGetValue(english[..50], out var ja))
+        if (english.Length > 50 && prefix50.TryGetValue(english[..50], out var ja))
             return ja;
 
         return "";
@@ -1950,6 +1975,536 @@ public class MissionService : IDisposable
             if (v.ValueKind == JsonValueKind.False) return false;
         }
         return fallback;
+    }
+
+    // ── Wikelo の契約の納品物 ──
+
+    // 納品物 1 件 (契約タブの納品物の表の 1 行)
+    public sealed class DeliverableItem
+    {
+        // 表の名前: 英語名 (ゲームと同じ)。取れなければ日本語名、それも無ければエンティティのファイル名・資源の record の短い名前
+        public string Name { get; init; } = "";
+        // 表の数: 品は「n」(min と max が違い、どちらも 0 でなければ「min〜max」)、資源は「n SCU」
+        public string Amount { get; init; } = "";
+        public bool IsResource { get; init; }
+        // エンティティのファイル名 (.json を除いたもの) / 資源の record 名の "ResourceType." を除いたもの
+        public string ShortName { get; init; } = "";
+        // item_index の record_name (品が item_index に無ければ "") / 資源は resource_types の record_name (無ければ "")
+        public string Record { get; init; } = "";
+        // item_index の uuid (同じ record の行すべて。店の売り場を引く)
+        public List<string> Uuids { get; init; } = new();
+        // 英語名 (取れなければ "")。UEX・交易の価格を英語名で引く
+        public string NameEn { get; init; } = "";
+        // 英語名が取れず日本語名で代用した
+        public bool NameIsJapanese { get; init; }
+        // 品・資源の表 (item_index / resource_types) に無い
+        public bool NotInIndex { get; init; }
+    }
+
+    // Wikelo の契約か: 分類が wikelo_* (Wikelo - 乗り物 / Wikelo - その他のアイテム)、または raw_json にテンプレートの納品物 (_TemplateHauling_。
+    // Wikelo のテンプレートを使う契約にだけ入れる) がある (導入の契約 TheCollector_Intro / TheCollector_Lunch は分類が collection)
+    public static bool IsWikeloContract(MissionEntry m) =>
+        CleanType(m.MissionType ?? "").StartsWith("wikelo_", StringComparison.Ordinal)
+        || (m.RawJson ?? "").Contains("\"_TemplateHauling_\"", StringComparison.Ordinal);
+
+    // 納品の注文 1 件 (契約側 haulingOrderContent[] / テンプレート側 haulingOrders[] のどちらか)
+    private readonly record struct HaulingPick(bool IsResource, string Ref, double Min, double Max);
+
+    // Wikelo の契約の納品物。Wikelo の契約でない・納品物が無ければ空。
+    //   契約側: _Contract_.paramOverrides.propertyOverrides[] の value.haulingOrderContent[] (missionVariableName ごと。HaulingOverride など)
+    //   テンプレート側: raw_json の "_TemplateHauling_" (インデックス構築で入れる。GameDataExtractor.BuildTemplateHaulingJson) の orders[]
+    //   テンプレート側がある: orders[] を順に読み、HaulingOrder_EntityClass / _Resource はその品、HaulingOrder_Property は
+    //     haulingOrdersProperty が指す property の missionVariableName (propertyVariables。引けなければ HaulingOverride) の契約側の品を入れる。
+    //     テンプレートに HaulingOrder_Property が無ければ、契約側に HaulingOverride があっても使わない
+    //     (ゲームの処理はテンプレートの haulingOrders を使い、上書きは Property の所でだけ取り込む作りと推定)
+    //   テンプレート側が無い (構築し直す前の DB): 契約側の HaulingOverride の品
+    public List<DeliverableItem> GetDeliverables(MissionEntry m)
+    {
+        var result = new List<DeliverableItem>();
+        var picks = ReadDeliverablePicks(m);
+        if (picks.Count == 0) return result;
+
+        using var conn = new SqliteConnection($"Data Source={_dbPath};Mode=ReadOnly;Pooling=False");
+        conn.Open();
+        foreach (var p in picks)
+            result.Add(p.IsResource ? ResolveResourceDeliverable(conn, p) : ResolveEntityDeliverable(conn, p));
+        return result;
+    }
+
+    // 構築 (GameDataExtractor.ExtractDeliverableSourcesAsync) が入手場所を調べる品を決めるのに使う: missions の 1 行の納品物
+    // (資源か, 品はエンティティのファイル名・資源は ResourceType の record 名)。一覧と同じく test の契約は除き (LoadAllMissions と同じ条件)、
+    // 納品物は GetDeliverables と同じ読み方 (ReadDeliverablePicks)
+    internal static List<(bool IsResource, string Ref)> DeliverableRefsForBuild(string recordName, string missionType, string rawJson)
+    {
+        if (recordName.Contains("_test", StringComparison.OrdinalIgnoreCase)) return new();
+        if (recordName.Contains("ReputationTest", StringComparison.OrdinalIgnoreCase)) return new();
+        var m = new MissionEntry { RecordName = recordName, MissionType = missionType, RawJson = rawJson };
+        return ReadDeliverablePicks(m).Select(p => (p.IsResource, p.Ref)).ToList();
+    }
+
+    // GetDeliverables の納品物の読み方 (上の説明)。Wikelo の契約でない・読めない・納品物が無ければ空
+    private static List<HaulingPick> ReadDeliverablePicks(MissionEntry m)
+    {
+        var picks = new List<HaulingPick>();
+        if (!IsWikeloContract(m) || string.IsNullOrEmpty(m.RawJson)) return picks;
+        try
+        {
+            using var doc = JsonDocument.Parse(m.RawJson);
+            var root = doc.RootElement;
+            // 契約側の上書き: missionVariableName → haulingOrderContent[] の品 (同じ名前は先のもの)
+            var overrides = new Dictionary<string, List<HaulingPick>>(StringComparer.Ordinal);
+            if (root.TryGetProperty("_Contract_", out var contract) && contract.ValueKind == JsonValueKind.Object
+                && contract.TryGetProperty("paramOverrides", out var po) && po.ValueKind == JsonValueKind.Object
+                && po.TryGetProperty("propertyOverrides", out var props) && props.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var p in props.EnumerateArray())
+                {
+                    if (p.ValueKind != JsonValueKind.Object) continue;
+                    var name = GetString(p, "missionVariableName");
+                    if (name.Length == 0 || overrides.ContainsKey(name)) continue;
+                    if (!p.TryGetProperty("value", out var v) || v.ValueKind != JsonValueKind.Object) continue;
+                    if (!v.TryGetProperty("haulingOrderContent", out var content) || content.ValueKind != JsonValueKind.Array) continue;
+                    var list = new List<HaulingPick>();
+                    foreach (var c in content.EnumerateArray())
+                        if (ReadHaulingPick(c) is { } hp) list.Add(hp);
+                    overrides[name] = list;
+                }
+            }
+
+            if (root.TryGetProperty("_TemplateHauling_", out var th) && th.ValueKind == JsonValueKind.Object
+                && th.TryGetProperty("orders", out var orders) && orders.ValueKind == JsonValueKind.Array)
+            {
+                var vars = th.TryGetProperty("propertyVariables", out var pv) && pv.ValueKind == JsonValueKind.Object ? pv : default;
+                foreach (var o in orders.EnumerateArray())
+                {
+                    if (o.ValueKind != JsonValueKind.Object) continue;
+                    if (GetString(o, "_Type_") == "HaulingOrder_Property")
+                    {
+                        var ptr = GetString(o, "haulingOrdersProperty");
+                        if (ptr.StartsWith("_PointsTo_:", StringComparison.Ordinal)) ptr = ptr["_PointsTo_:".Length..];
+                        var varName = vars.ValueKind == JsonValueKind.Object ? GetString(vars, ptr) : "";
+                        if (varName.Length == 0) varName = "HaulingOverride";
+                        if (overrides.TryGetValue(varName, out var list)) picks.AddRange(list);
+                        continue;
+                    }
+                    if (ReadHaulingPick(o) is { } hp) picks.Add(hp);
+                }
+            }
+            else if (overrides.TryGetValue("HaulingOverride", out var list))
+            {
+                picks.AddRange(list);
+            }
+        }
+        catch (JsonException) { return new List<HaulingPick>(); }
+        return picks;
+    }
+
+    // 注文 1 件を読む。_Type_ が …_EntityClass なら entityClass のファイル名と minAmount / maxAmount、
+    // …_Resource なら resource の _RecordName_ と minSCU / maxSCU。それ以外 (HaulingOrder_Property など) は null
+    private static HaulingPick? ReadHaulingPick(JsonElement o)
+    {
+        if (o.ValueKind != JsonValueKind.Object) return null;
+        var type = GetString(o, "_Type_");
+        if (type.EndsWith("_EntityClass", StringComparison.Ordinal))
+        {
+            var file = ExtractFileName(GetString(o, "entityClass"));
+            if (file.Length == 0) return null;
+            return new HaulingPick(false, file, GetDouble(o, "minAmount"), GetDouble(o, "maxAmount"));
+        }
+        if (type.EndsWith("_Resource", StringComparison.Ordinal))
+        {
+            if (!o.TryGetProperty("resource", out var res) || res.ValueKind != JsonValueKind.Object) return null;
+            var rec = GetString(res, "_RecordName_");
+            if (rec.Length == 0) return null;
+            return new HaulingPick(true, rec, GetDouble(o, "minSCU"), GetDouble(o, "maxSCU"));
+        }
+        return null;
+    }
+
+    // 数の文字: min と max が違い、どちらも 0 でなければ「min〜max」、ほかは min
+    private static string DeliverableAmount(double min, double max, string unit)
+    {
+        static string F(double v) => v.ToString("#,0.##", System.Globalization.CultureInfo.InvariantCulture);
+        var text = min != max && min != 0 && max != 0 ? $"{F(min)}〜{F(max)}" : F(min);
+        return unit.Length > 0 ? $"{text} {unit}" : text;
+    }
+
+    // 英語名として使える文字か (空・ローカライズキーのまま・仮の文字でない)
+    private static bool UsableName(string s) =>
+        !string.IsNullOrWhiteSpace(s) && !IsLocKey(s) && !s.StartsWith("<=", StringComparison.Ordinal)
+        && !s.Contains("PLACEHOLDER", StringComparison.OrdinalIgnoreCase);
+
+    // 品: item_index の record_name = "EntityClassDefinition." + ファイル名 (大文字小文字無視。［詳細］の GetItemDetailText と同じ照合)。
+    // 英語名は name_key を翻訳 DB の英語で引く。引けなければ日本語名 (name_ja → name)
+    private DeliverableItem ResolveEntityDeliverable(SqliteConnection conn, HaulingPick p)
+    {
+        string record = "", nameKey = "", nameJa = "", name = "";
+        var uuids = new List<string>();
+        try
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT uuid, record_name, COALESCE(name, ''), COALESCE(name_ja, ''), COALESCE(name_key, '') FROM item_index WHERE record_name = @rn COLLATE NOCASE ORDER BY rowid";
+            cmd.Parameters.AddWithValue("@rn", "EntityClassDefinition." + p.Ref);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                uuids.Add(r.GetString(0));
+                if (record.Length > 0) continue;
+                record = r.GetString(1); name = r.GetString(2); nameJa = r.GetString(3); nameKey = r.GetString(4);
+            }
+        }
+        catch (SqliteException) { }
+        var amount = DeliverableAmount(p.Min, p.Max, "");
+        if (record.Length == 0)
+            return new DeliverableItem { Name = p.Ref, Amount = amount, ShortName = p.Ref, NotInIndex = true };
+        var en = nameKey.Length > 0 ? ResolveEn(nameKey).Trim() : "";
+        if (UsableName(en))
+            return new DeliverableItem { Name = en, NameEn = en, Amount = amount, ShortName = p.Ref, Record = record, Uuids = uuids };
+        var ja = UsableName(nameJa) ? nameJa.Trim() : UsableName(name) ? name.Trim() : "";
+        return new DeliverableItem
+        {
+            Name = ja.Length > 0 ? ja : p.Ref, NameIsJapanese = ja.Length > 0, Amount = amount, ShortName = p.Ref, Record = record, Uuids = uuids,
+        };
+    }
+
+    // 資源: resource_types の record_name (例 ResourceType.Quantanium)。英語名は name_en、無ければ name_key を翻訳 DB の英語で引く。
+    // 引けなければ name_key の日本語
+    private DeliverableItem ResolveResourceDeliverable(SqliteConnection conn, HaulingPick p)
+    {
+        var shortName = p.Ref.StartsWith("ResourceType.", StringComparison.Ordinal) ? p.Ref["ResourceType.".Length..] : p.Ref;
+        string record = "", nameKey = "", nameEn = "";
+        try
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT record_name, COALESCE(name_key, ''), COALESCE(name_en, '') FROM resource_types WHERE record_name = @rn COLLATE NOCASE LIMIT 1";
+            cmd.Parameters.AddWithValue("@rn", p.Ref);
+            using var r = cmd.ExecuteReader();
+            if (r.Read()) { record = r.GetString(0); nameKey = r.GetString(1); nameEn = r.GetString(2); }
+        }
+        catch (SqliteException) { }
+        var amount = DeliverableAmount(p.Min, p.Max, "SCU");
+        if (record.Length == 0)
+            return new DeliverableItem { Name = shortName, Amount = amount, IsResource = true, ShortName = shortName, NotInIndex = true };
+        var en = UsableName(nameEn) ? nameEn.Trim() : nameKey.Length > 0 ? ResolveEn(nameKey).Trim() : "";
+        if (UsableName(en))
+            return new DeliverableItem { Name = en, NameEn = en, Amount = amount, IsResource = true, ShortName = shortName, Record = record };
+        var ja = nameKey.Length > 0 ? ResolveJa(nameKey).Trim() : "";
+        return new DeliverableItem
+        {
+            Name = UsableName(ja) ? ja : shortName, NameIsJapanese = UsableName(ja), Amount = amount, IsResource = true, ShortName = shortName, Record = record,
+        };
+    }
+
+    // 契約の報酬の品: エンティティのファイル名 (小文字) → その品を報酬に出す契約 (一覧と同じく test の契約は除く)。初めて使うときに作る
+    private Dictionary<string, List<MissionEntry>>? _rewardMissionsByEntity;
+    private readonly object _rewardIndexLock = new();
+
+    // 報酬の品を読む: _Contract_.contractResults.contractResults[] の ContractResult_Item (entityClass) と
+    // ContractResult_ItemsWeighting の itemAwardStructure[].awards[] の ItemAwardEntityClass (entityClass)。
+    // どちらも missionResults の先頭 (成功) が true のものだけ (subContracts の中は読まない。評判の報酬と同じ)
+    private Dictionary<string, List<MissionEntry>> RewardMissionsByEntity()
+    {
+        lock (_rewardIndexLock)
+        {
+            if (_rewardMissionsByEntity != null) return _rewardMissionsByEntity;
+            var map = new Dictionary<string, List<MissionEntry>>(StringComparer.Ordinal);
+            void Add(string entityClass, MissionEntry m)
+            {
+                var file = ExtractFileName(entityClass).ToLowerInvariant();
+                if (file.Length == 0) return;
+                if (!map.TryGetValue(file, out var list)) map[file] = list = new List<MissionEntry>();
+                if (!list.Contains(m)) list.Add(m);
+            }
+            static bool OnSuccess(JsonElement cr) =>
+                cr.TryGetProperty("missionResults", out var flags) && flags.ValueKind == JsonValueKind.Array
+                && flags.GetArrayLength() > 0 && flags[0].ValueKind == JsonValueKind.True;
+            // 裏の処理から呼ぶので _conn は使わない。読み込み済みの一覧があればそれ、無ければ別の接続で読む (一覧としては覚えない)
+            var all = _allCache;
+            if (all == null)
+            {
+                using var conn = new SqliteConnection($"Data Source={_dbPath};Mode=ReadOnly;Pooling=False");
+                conn.Open();
+                all = ReadAllMissions(conn);
+                foreach (var e in all) ParseRawJson(e);   // 一覧の名前 (ListNameJa / ListNameEn) を埋める
+            }
+            foreach (var m in all)
+            {
+                if (string.IsNullOrEmpty(m.RawJson) || !m.RawJson.Contains("ContractResult_Item", StringComparison.Ordinal)) continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(m.RawJson);
+                    if (!doc.RootElement.TryGetProperty("_Contract_", out var contract) || contract.ValueKind != JsonValueKind.Object) continue;
+                    if (!contract.TryGetProperty("contractResults", out var results) || results.ValueKind != JsonValueKind.Object) continue;
+                    if (!results.TryGetProperty("contractResults", out var list) || list.ValueKind != JsonValueKind.Array) continue;
+                    foreach (var cr in list.EnumerateArray())
+                    {
+                        if (cr.ValueKind != JsonValueKind.Object || !OnSuccess(cr)) continue;
+                        var type = GetString(cr, "_Type_");
+                        if (type == "ContractResult_Item") Add(GetString(cr, "entityClass"), m);
+                        else if (type == "ContractResult_ItemsWeighting"
+                                 && cr.TryGetProperty("itemAwardStructure", out var structure) && structure.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var w in structure.EnumerateArray())
+                            {
+                                if (w.ValueKind != JsonValueKind.Object || !w.TryGetProperty("awards", out var awards) || awards.ValueKind != JsonValueKind.Array) continue;
+                                foreach (var a in awards.EnumerateArray())
+                                    if (a.ValueKind == JsonValueKind.Object && GetString(a, "_Type_") == "ItemAwardEntityClass")
+                                        Add(GetString(a, "entityClass"), m);
+                            }
+                        }
+                    }
+                }
+                catch (JsonException) { }
+            }
+            return _rewardMissionsByEntity = map;
+        }
+    }
+
+    // 納品物の入手場所の文字 (契約タブの納品物の表の行を選んだときに出す):
+    //   品: 店で購入 (item_shop_prices の購入。星系 / 場所 / 店名 / 値段)・UEX (equipment_cache.db の uex_item_prices を英語名で引く)・
+    //       ブループリント (BlueprintDetail.ItemSectionText。材料・その BP を報酬に出す契約)・他の契約の報酬 (RewardMissionsByEntity)
+    //   資源: 交易の購入場所 (trade_cache.db の trade_prices の is_current = 1 で price_buy > 0 の行。ターミナル / 星系 / 値段)
+    //   どれも無ければ「入手場所のデータなし」
+    public string FormatDeliverableSources(DeliverableItem d)
+    {
+        var lines = new List<string>();
+        lines.Add($"■ {d.Name} の入手場所");
+        if (d.NotInIndex) lines.Add(d.IsResource ? "  (資源の表に無い)" : "  (品目の表に無い)");
+        var any = false;
+        if (!d.IsResource)
+        {
+            // 店で購入 (cstone / UEX の保存データ)
+            var hasShopBuys = false;
+            if (d.Uuids.Count > 0)
+            {
+                try
+                {
+                    using var conn = new SqliteConnection($"Data Source={_dbPath};Mode=ReadOnly;Pooling=False");
+                    conn.Open();
+                    var map = ShopPriceStore.LoadMany(conn, d.Uuids);
+                    var buys = d.Uuids.Where(map.ContainsKey).SelectMany(u => map[u])
+                        .Where(r => r.Kind == ShopPriceStore.KindBuy && r.Price.HasValue)
+                        .Select(r => new ShopListing(r.Location, r.Price!.Value, r.Source)).ToList();
+                    if (buys.Count > 0)
+                    {
+                        any = true;
+                        hasShopBuys = true;
+                        lines.Add("");
+                        lines.Add("【店で購入】 星系 / 場所 / 店名 / 値段 (cstone / UEX の保存データ)");
+                        foreach (var s in buys.GroupBy(s => s.Location).Select(g => g.MinBy(s => s.Price)!).OrderBy(s => s.Price).ThenBy(s => s.Location, StringComparer.OrdinalIgnoreCase))
+                            lines.Add("  " + s.Line());
+                    }
+                }
+                catch (SqliteException) { }
+            }
+
+            // UEX (items_prices の保存データ。英語名で照合)。［詳細］タブ (GameDataQueryService.ShopText) と同じく、店の購入が無いときだけ
+            if (!hasShopBuys && d.NameEn.Length > 0)
+            {
+                var uex = LoadUexItemPrices(d.NameEn);
+                if (uex.Count > 0)
+                {
+                    any = true;
+                    lines.Add("");
+                    lines.Add("【UEX】 星系 / 場所 / 店名 / 値段");
+                    foreach (var s in uex.GroupBy(s => s.Location).Select(g => g.MinBy(s => s.Price)!).OrderBy(s => s.Price).ThenBy(s => s.Location, StringComparer.OrdinalIgnoreCase))
+                        lines.Add("  " + s.Line());
+                }
+            }
+
+            // ブループリント (材料・その BP を報酬に出す契約)。表の形 (「| 枠 | 材料 | … |」) は文字の欄で読める行に直す (PlainTableLines)
+            if (d.Record.Length > 0)
+            {
+                string bp;
+                try { bp = BlueprintDetail.ItemSectionText(_workDir, d.Record); }
+                catch (Exception ex) { bp = $"【ブループリント】\n  BP を読み込めなかった ({ex.Message})"; }
+                if (bp.Length > 0)
+                {
+                    any = true;
+                    lines.Add("");
+                    lines.AddRange(PlainTableLines(bp.Replace("\r", "").TrimEnd('\n').Split('\n')));
+                }
+            }
+
+            // 他の契約の報酬
+            if (RewardMissionsByEntity().TryGetValue(d.ShortName.ToLowerInvariant(), out var rewardMissions) && rewardMissions.Count > 0)
+            {
+                var names = rewardMissions.Select(MissionNameForList).Where(n => n.Length > 0)
+                    .Distinct(StringComparer.Ordinal).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+                if (names.Count > 0)
+                {
+                    any = true;
+                    lines.Add("");
+                    lines.Add($"【他の契約の報酬】 {names.Count} 件");
+                    foreach (var n in names) lines.Add($"  - {n}");
+                }
+            }
+        }
+        else if (d.NameEn.Length > 0)
+        {
+            var buys = LoadTradeBuyPrices(d.NameEn);
+            if (buys.Count > 0)
+            {
+                any = true;
+                lines.Add("");
+                lines.Add("【資源の購入場所】 ターミナル / 星系 / 値段 (交易データ)");
+                foreach (var (terminal, system, price) in buys)
+                    lines.Add($"  {terminal} / {(system.Length > 0 ? system : "-")} / {price:N0} aUEC/SCU");
+            }
+        }
+        // ゲームデータからの入手場所 (インデックス構築で作る deliverable_sources。場所が 1 つでもあれば「データなし」にしない)
+        var (gameLines, gameHasPlace) = GameDataSourceLines(d);
+        if (gameHasPlace) any = true;
+        lines.AddRange(gameLines);
+        if (!any)
+        {
+            lines.Add("");
+            lines.Add("入手場所のデータなし");
+        }
+        return string.Join("\n", lines);
+    }
+
+    // ゲームデータからの入手場所の節 (GameDataExtractor.ExtractDeliverableSourcesAsync が作る deliverable_sources)。節の順と見出し
+    private static readonly (string Section, string Header)[] GameDataSourceSections =
+    [
+        (GameDataExtractor.DeliverableSourceSections.Mining, "【ゲームデータ: 採掘・収穫】"),
+        (GameDataExtractor.DeliverableSourceSections.Creature, "【ゲームデータ: 生き物 (惑星の生態)】"),
+        (GameDataExtractor.DeliverableSourceSections.Placed, "【ゲームデータ: 配置】"),
+        (GameDataExtractor.DeliverableSourceSections.Holder, "【ゲームデータ: この品を持つ生き物・NPC の配置】"),
+        (GameDataExtractor.DeliverableSourceSections.Spawn, "【ゲームデータ: 出現 (タグで選ぶ出現の設定)】（推定）"),
+        (GameDataExtractor.DeliverableSourceSections.LootListed, "【ゲームデータ: ルート (表に品が載っている)】"),
+        (GameDataExtractor.DeliverableSourceSections.Loot, "【ゲームデータ: ルート (タグの評価)】（推定）"),
+    ];
+
+    // 品・資源のゲームデータからの入手場所の行と、場所 (惑星・月など・近い場所) が 1 つでもあったか。表が無い (構築し直す前の DB) なら空。
+    // 節ごとに「惑星・月など」(英語名)・「名前の引けない socpak」・「近い場所」(英語名)・「場所まで辿れないもの」(件数と最初の 5 件) を出す
+    private (List<string> Lines, bool HasPlace) GameDataSourceLines(DeliverableItem d)
+    {
+        var lines = new List<string>();
+        var hasPlace = false;
+        var rows = new List<(string Section, string PlaceType, string Name)>();
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={_dbPath};Mode=ReadOnly;Pooling=False");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT section, place_type, name FROM deliverable_sources WHERE target_kind = @k AND target IN (@t1, @t2)";
+            cmd.Parameters.AddWithValue("@k", d.IsResource ? "resource" : "entity");
+            var shortLower = d.ShortName.ToLowerInvariant();
+            cmd.Parameters.AddWithValue("@t1", shortLower);
+            cmd.Parameters.AddWithValue("@t2", d.IsResource ? "resourcetype." + shortLower : shortLower);
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) rows.Add((r.GetString(0), r.GetString(1), r.GetString(2)));
+        }
+        catch (SqliteException) { return (lines, false); }
+        static string Names(IEnumerable<string> names) =>
+            string.Join(", ", names.Distinct(StringComparer.Ordinal).OrderBy(n => n, StringComparer.OrdinalIgnoreCase));
+        foreach (var (section, header) in GameDataSourceSections)
+        {
+            var sec = rows.Where(x => x.Section == section).ToList();
+            if (sec.Count == 0) continue;
+            lines.Add("");
+            lines.Add(header);
+            var planets = sec.Where(x => x.PlaceType == "planet").Select(x => x.Name).ToList();
+            var raw = sec.Where(x => x.PlaceType == "planet_raw").Select(x => x.Name).ToList();
+            var near = sec.Where(x => x.PlaceType == "near").Select(x => x.Name).ToList();
+            var unlocated = sec.Where(x => x.PlaceType == "unlocated").Select(x => x.Name).Distinct(StringComparer.Ordinal)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+            if (planets.Count + raw.Count + near.Count > 0) hasPlace = true;
+            if (planets.Count > 0) lines.Add($"  惑星・月など: {Names(planets)}");
+            if (raw.Count > 0) lines.Add($"  名前の引けない socpak: {Names(raw)}");
+            if (near.Count > 0) lines.Add($"  近い場所: {Names(near)}");
+            if (unlocated.Count > 0)
+            {
+                lines.Add($"  場所まで辿れないもの: {unlocated.Count} 件");
+                foreach (var u in unlocated.Take(5)) lines.Add($"    - {u}");
+                if (unlocated.Count > 5) lines.Add($"    ほか {unlocated.Count - 5} 件");
+            }
+        }
+        return (lines, hasPlace);
+    }
+
+    // 「|」の表の行 (見出しの行・区切りの行 |---|・中身の行) を、文字の欄で読める行にする。表でない行はそのまま。中身は削らない:
+    //   列が 2 つ以上: 中身の行ごとに「  - 見出し1: 値1 / 見出し2: 値2 / …」 (例「  - 枠: … / 材料: Copper / 量: 0.5 SCU / 最低品質: なし」)
+    //   列が 1 つ   : 見出しを「  見出し:」、中身の行を「    - 値」
+    private static List<string> PlainTableLines(IReadOnlyList<string> src)
+    {
+        static bool IsRow(string l) { var t = l.Trim(); return t.Length >= 2 && t.StartsWith('|') && t.EndsWith('|'); }
+        static bool IsSeparator(string l) => System.Text.RegularExpressions.Regex.IsMatch(l, @"^\s*\|(?:\s*:?-+:?\s*\|)+\s*$");
+        static List<string> Cells(string l) { var t = l.Trim(); return t[1..^1].Split('|').Select(c => c.Trim()).ToList(); }
+        var result = new List<string>();
+        for (int i = 0; i < src.Count; i++)
+        {
+            var line = src[i];
+            if (!IsRow(line) || i + 1 >= src.Count || !IsSeparator(src[i + 1])) { result.Add(line); continue; }
+            var indent = line[..(line.Length - line.TrimStart().Length)];
+            var heads = Cells(line);
+            i++;   // 区切りの行
+            if (heads.Count == 1) result.Add($"{indent}{heads[0]}:");
+            while (i + 1 < src.Count && IsRow(src[i + 1]) && !IsSeparator(src[i + 1]))
+            {
+                i++;
+                var cells = Cells(src[i]);
+                if (heads.Count == 1) { result.Add($"{indent}  - {string.Join(" / ", cells)}"); continue; }
+                var parts = cells.Select((c, k) => k < heads.Count ? $"{heads[k]}: {c}" : c);
+                result.Add($"{indent}- {string.Join(" / ", parts)}");
+            }
+        }
+        return result;
+    }
+
+    // 契約の一覧の名前と同じ「日本語名 (英語名)」(日本語が無い・英語と同じなら英語名だけ)
+    private static string MissionNameForList(MissionEntry m)
+    {
+        var ja = m.ListNameJa;
+        var en = m.ListNameEn;
+        if (!string.IsNullOrEmpty(ja) && !string.IsNullOrEmpty(en) && !ja.Equals(en, StringComparison.OrdinalIgnoreCase)) return $"{ja} ({en})";
+        return !string.IsNullOrEmpty(en) ? en : ja ?? "";
+    }
+
+    // equipment_cache.db の uex_item_prices のうち、品目名が nameEn と同じもの (GameDataQueryService.NormalizeItemName で照合)。表が無ければ空
+    private List<ShopListing> LoadUexItemPrices(string nameEn)
+    {
+        var result = new List<ShopListing>();
+        var path = Path.Combine(_workDir, "equipment_cache.db");
+        if (!File.Exists(path)) return result;
+        var key = GameDataQueryService.NormalizeItemName(nameEn);
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT item_name, location, price FROM uex_item_prices";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                if (r.IsDBNull(0) || GameDataQueryService.NormalizeItemName(r.GetString(0)) != key) continue;
+                result.Add(new ShopListing(r.IsDBNull(1) ? "" : r.GetString(1), r.IsDBNull(2) ? 0 : r.GetDouble(2), ShopListing.SourceUexItemsPrices));
+            }
+        }
+        catch (SqliteException) { }
+        return result;
+    }
+
+    // trade_cache.db の trade_prices の今の値 (is_current = 1) で、品名が nameEn (大文字小文字無視) で price_buy > 0 の行 (安い順)。表が無ければ空
+    private List<(string Terminal, string StarSystem, double Price)> LoadTradeBuyPrices(string nameEn)
+    {
+        var result = new List<(string, string, double)>();
+        var path = Path.Combine(_workDir, "trade_cache.db");
+        if (!File.Exists(path)) return result;
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT COALESCE(terminal, ''), COALESCE(star_system, ''), price_buy FROM trade_prices " +
+                              "WHERE is_current = 1 AND price_buy > 0 AND commodity_name = @n COLLATE NOCASE ORDER BY price_buy, terminal";
+            cmd.Parameters.AddWithValue("@n", nameEn.Trim());
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) result.Add((r.GetString(0), r.GetString(1), r.GetDouble(2)));
+        }
+        catch (SqliteException) { }
+        return result;
     }
 
     public void Dispose()
