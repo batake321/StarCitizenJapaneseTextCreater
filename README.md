@@ -28,11 +28,11 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v2.1.2-win-x64.zip (最新 v2.1.2 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.1.2/StarCitizenJapaneseTextCreater-v2.1.2-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v2.1.3-win-x64.zip (最新 v2.1.3 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.1.3/StarCitizenJapaneseTextCreater-v2.1.3-win-x64.zip)**
 >
-> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.1.2-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
+> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.1.3-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
 >
-> **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/19 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.1.2/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/21 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.1.3/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの [日本語化] → [実行] を行ってください。**
 
@@ -51,11 +51,21 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v2.1.2 更新内容
+### 🚀 v2.1.3 更新内容
+
+- **契約タブ: Wikelo の契約の納品物**: Wikelo の契約を選ぶと、詳細の右に納品物の表（名前・数。資源は SCU）を出します。名前はゲームと同じ英語です
+- **納品物の入手場所**: 納品物の行をクリックすると、下に入手場所を出します。店で買える場所と値段（店のデータが無い品は UEX の場所）、資源を買える場所、BP で作るときの材料とその BP をもらえる契約、報酬としてその品をもらえる別の契約、ゲームデータから辿った場所（採掘・収穫・生き物・配置・ルート・敵の出現）です。ルート表やタグから出した場所には「（推定）」が付きます。出る確率や、必ず出るかまでは分かりません
+- インデックス構築で、契約のテンプレート側にある納品物と、ゲームデータからの入手場所を取り込むようにしました。同梱の DB には入っています
+- **v2.1.2 からは自動更新で入れられます**（v2.1.1 以前からは手で入れてください）
+
+<details>
+<summary>v2.1.2 更新内容</summary>
 
 - **自動更新**: 起動したとき（画面が出て 20 秒後）と毎日の時刻（既定 08:00）に新しい版を確かめ、新しい版があれば右下の窓で知らせます（最前面・フォーカスは奪いません）。［終了して更新］で、変わったファイルだけを取って入れ替えます（同梱の大きな DB は前の版からの差分だけ）。作業フォルダの DB と個人データには触りません。設定タブの「自動更新」で入切・時刻を決められ、［更新を確認］でいつでも確かめられます
 - **v2.1.1 以前からは、v2.1.2 を手で入れてください**。自動で更新されるのは、v2.1.2 から次の版へ上げるときからです
 - **契約タブ**: 評判の列に範囲の名前（好感度・肉体労働者・暗殺など）を出すようにしました。古い形の契約 270 件で評判が出ていなかったのを直しました。受注条件の評判を詳細の「レピュテーション要件」に出し、量がゲームの計算で決まる評判も出すようにしました
+
+</details>
 
 <details>
 <summary>v2.1.1 更新内容</summary>
