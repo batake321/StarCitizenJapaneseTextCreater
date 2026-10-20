@@ -2422,9 +2422,31 @@ public partial class MainWindow : Window
     {
         ++_missionDeliverableRequest;
         ++_missionDeliverableSourceRequest;
-        pnlMissionDeliverables.Visibility = Visibility.Collapsed;
+        SetMissionDeliverablesVisible(false);
         dgMissionDeliverables.ItemsSource = null;
         txtMissionDeliverableSource.Text = MissionDeliverableSourceHint;
+    }
+
+    // 納品物の欄の列の幅 (左右の仕切りで動かした幅。初めは詳細と半分ずつ)。隠すときに今の幅を覚え、出すときに戻す
+    private GridLength _missionDeliverablesWidth = new(1, GridUnitType.Star);
+
+    // 納品物の欄と左右の仕切りを出す・隠す。隠すときは列の幅を 0 にして、詳細の文字を全幅で出す
+    private void SetMissionDeliverablesVisible(bool visible)
+    {
+        if (visible == (pnlMissionDeliverables.Visibility == Visibility.Visible)) return;
+        if (visible)
+        {
+            colMissionDeliverables.Width = _missionDeliverablesWidth;
+            splMissionDeliverables.Visibility = Visibility.Visible;
+            pnlMissionDeliverables.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            _missionDeliverablesWidth = colMissionDeliverables.Width;
+            colMissionDeliverables.Width = new GridLength(0);
+            splMissionDeliverables.Visibility = Visibility.Collapsed;
+            pnlMissionDeliverables.Visibility = Visibility.Collapsed;
+        }
     }
 
     // 詳細に出した契約が Wikelo の契約で納品物が 1 件以上あれば、右の欄に納品物の表を出す (無ければ欄を隠す)。
@@ -2454,7 +2476,7 @@ public partial class MainWindow : Window
             dgMissionDeliverables.ItemsSource = null;
             txtMissionDeliverablesHeader.Text = "納品物";
             txtMissionDeliverableSource.Text = $"納品物を読めなかった ({ex.Message})";
-            pnlMissionDeliverables.Visibility = Visibility.Visible;
+            SetMissionDeliverablesVisible(true);
             return;
         }
         if (req != _missionDeliverableRequest || !ReferenceEquals(svc, _missionService)) return;
@@ -2463,7 +2485,7 @@ public partial class MainWindow : Window
         dgMissionDeliverables.ItemsSource = items;
         txtMissionDeliverablesHeader.Text = $"納品物 ({items.Count} 件)";
         txtMissionDeliverableSource.Text = MissionDeliverableSourceHint;
-        pnlMissionDeliverables.Visibility = Visibility.Visible;
+        SetMissionDeliverablesVisible(true);
     }
 
     // 納品物の表の行を選んだら、その入手場所を下の欄に出す
