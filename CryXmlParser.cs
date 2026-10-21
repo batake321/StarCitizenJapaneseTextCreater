@@ -15,6 +15,14 @@ public static class CryXmlParser
         return ParseBinary(data);
     }
 
+    // バイト列の CryXmlB (先頭が "CryXmlB" のもの。.soc の中に埋め込まれたものを切り出して渡す) を読む。先頭が CryXmlB でなければ例外
+    public static XDocument ParseBinaryBytes(byte[] data)
+    {
+        if (data.Length < 8 || Encoding.ASCII.GetString(data, 0, 7) != "CryXmlB")
+            throw new InvalidDataException("CryXmlB ではありません");
+        return ParseBinary(data);
+    }
+
     private static XDocument ParseBinary(byte[] data)
     {
         int offset = 8;

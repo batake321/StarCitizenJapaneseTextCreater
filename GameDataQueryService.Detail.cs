@@ -191,8 +191,9 @@ public partial class GameDataQueryService
             _ => 3,
         };
         static string Pct(double v) => v.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
-        sb.AppendLine("| 場所 | 星系 | 掘り方 | 岩の種類 | 出やすさ | 岩の中の割合 |");
-        sb.AppendLine("|---|---|---|---|---|---|");
+        static string Pct2(double v) => v.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+        sb.AppendLine("| 場所 | 星系 | 掘り方 | 岩の種類 | 出やすさ | 岩の中の割合 | 出やすさ×割合 |");
+        sb.AppendLine("|---|---|---|---|---|---|---|");
         // 場所の列: 名前の順の場所名、続けて番号の付いた小さな場所の種類ごとの件数 (OreSmallPlacePrefixes の順)
         static string PlacesText(IEnumerable<string> places)
         {
@@ -217,11 +218,13 @@ public partial class GameDataQueryService
         {
             var chance = x.Chance.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "%";
             var range = $"{Pct(x.Min)}〜{Pct(x.Max)}%" + (x.Prob < 1 ? $"（入る確率 {Pct(x.Prob * 100)}%）" : "");
-            var line = $"| {Cell(MdEscape(places))} | {Cell(MdEscape(x.System))} | {Cell(MdEscape(x.Method))} | {Cell(MdEscape(x.Rock))} | {Cell(chance)} | {Cell(range)} |";
+            // 出やすさ×割合: 出やすさ (%) × 岩の中の割合 (%) ÷ 100 × 入る確率 (part_probability)。割合の幅に合わせて幅で出す
+            var product = $"{Pct2(x.Chance * x.Min / 100 * x.Prob)}〜{Pct2(x.Chance * x.Max / 100 * x.Prob)}%";
+            var line = $"| {Cell(MdEscape(places))} | {Cell(MdEscape(x.System))} | {Cell(MdEscape(x.Method))} | {Cell(MdEscape(x.Rock))} | {Cell(chance)} | {Cell(range)} | {Cell(product)} |";
             if (seen.Add(line)) sb.AppendLine(line);
         }
         sb.AppendLine();
-        sb.AppendLine("出やすさ＝その場所でその掘り方の岩のうち、この岩が出る割合（ゲームデータの relativeProbability から計算）。");
+        sb.AppendLine("出やすさ＝その場所でその掘り方の岩のうち、この岩が出る割合（ゲームデータの relativeProbability から計算）。出やすさ×割合＝出やすさ × 岩の中の割合（入る確率が 1 未満ならそれも掛ける）。");
         return sb.ToString();
     }
 
@@ -244,8 +247,9 @@ public partial class GameDataQueryService
     //   【装着できるアタッチメント】個人武器の枠ごとに付けられるもの (WeaponAttachmentListText)
     //   【販売場所】保存データ (item_shop_prices) の購入・レンタル、無ければ uexItemPrices (星系 / 場所 / 店名 / 値段 を安い順)
     //   【ブループリント】その品をできる品とする BP (BlueprintDetail.ItemSectionText。BP が無ければ出さない)
+    // shopTree を渡すと、【販売場所】の店の部分を、shop_price_links で店に結べた行だけお店の詳細へのリンク ([[record|表示名]]。DetailLink) にする
     // 品目が無ければ null
-    public string? GetItemDetailText(string recordName, IReadOnlyDictionary<string, List<(string Location, double Price)>>? uexItemPrices = null)
+    public string? GetItemDetailText(string recordName, IReadOnlyDictionary<string, List<(string Location, double Price)>>? uexItemPrices = null, ShopTree? shopTree = null)
     {
         var rec = (recordName ?? "").Trim();
         if (rec.Length == 0) return null;
@@ -365,7 +369,7 @@ public partial class GameDataQueryService
         }
 
         sb.AppendLine();
-        sb.Append(ShopText(uuids, nameEn, uexItemPrices));
+        sb.Append(ShopText(uuids, nameEn, uexItemPrices, shopTree));
 
         // その品をできる品とする BP があれば、末尾に【ブループリント】の節 (［BP］タブと同じ読み方。BP の表が無い・BP が無ければ出さない)。
         // 読み込みが例外になったときは、この節だけを読み込めなかった旨の 1 行にする (【装着できるアタッチメント】と同じ)
@@ -760,8 +764,9 @@ public partial class GameDataQueryService
     }
 
     // 販売場所。保存データ (item_shop_prices) の購入・レンタルがあればそれ、購入が無ければ UEX の items_prices (英語名で引く)。
-    // 購入は「星系 / 場所 / 店名 / 値段」を安い順に (ShopListing)、レンタルは「売り場 / 日数 / 値段」
-    private string ShopText(List<string> uuids, string nameEn, IReadOnlyDictionary<string, List<(string Location, double Price)>>? uexItemPrices)
+    // 購入は「星系 / 場所 / 店名 / 値段」を安い順に (ShopLine)、レンタルは「売り場 / 日数 / 値段」。
+    // 店名・売り場は、shop_price_links で店に結べたものだけお店の詳細へのリンクにする (ShopTree.FindShopRecord)
+    private string ShopText(List<string> uuids, string nameEn, IReadOnlyDictionary<string, List<(string Location, double Price)>>? uexItemPrices, ShopTree? tree)
     {
         var sb = new StringBuilder();
         sb.AppendLine("【販売場所】");
@@ -783,13 +788,13 @@ public partial class GameDataQueryService
         {
             sb.AppendLine($"  購入 ({source}): 星系 / 場所 / 店名 / 値段");
             foreach (var s in buys.GroupBy(s => s.Location).Select(g => g.MinBy(s => s.Price)!).OrderBy(s => s.Price).ThenBy(s => s.Location, StringComparer.OrdinalIgnoreCase))
-                sb.AppendLine("  " + s.Line());
+                sb.AppendLine("  " + ShopLine(s, tree));
         }
         var rents = rows.Where(r => r.Kind == ShopPriceStore.KindRent && r.Price.HasValue).OrderBy(r => r.Price).ToList();
         if (rents.Count > 0)
         {
             sb.AppendLine("  レンタル: 売り場 / 日数 / 値段");
-            foreach (var r in rents) sb.AppendLine($"  {r.Location} / {r.RentDays}日 / {r.Price!.Value:N0} aUEC");
+            foreach (var r in rents) sb.AppendLine($"  {ShopCell(r.Location, tree?.FindShopRecord(r.Source, r.Location))} / {r.RentDays}日 / {r.Price!.Value:N0} aUEC");
         }
         if (buys.Count == 0 && rents.Count == 0)
         {
@@ -799,6 +804,26 @@ public partial class GameDataQueryService
         }
         return sb.ToString();
     }
+
+    // 【販売場所】の購入の 1 行「星系 / 場所 / 店名 / 値段 aUEC」(ShopListing.Line と同じ形。店名はリンクにできればリンク)。
+    // 分けられない形 (UEX の船の店。「Vantage HUR-L1」のように店名と場所が 1 つの名前) は、見出しの 4 列に合わせて星系・場所を「-」にし、店名の列に売り場の文字を入れる
+    private static string ShopLine(ShopListing s, ShopTree? tree)
+    {
+        var price = $"{s.Price:N0} aUEC";
+        var record = tree?.FindShopRecord(s.Source, s.Location);
+        return s.Parts() is { } x
+            ? $"{x.System} / {(x.Place.Length > 0 ? x.Place : "-")} / {ShopCell(x.Shop, record)} / {price}"
+            : $"- / - / {ShopCell(s.Location, record)} / {price}";
+    }
+
+    // 「A / B / C」の行の店の列。record があればリンク (表示名の " / " は列の区切りと重ならないよう "/" にする)
+    private static string ShopCell(string name, string? record) =>
+        record == null ? name : DetailLink(record, name.Replace(" / ", "/"));
+
+    // ［詳細］タブの詳細の文字の中のリンク「[[record|表示名]]」(record は URL エンコードする。DetailHtml がリンクに、文字の欄では表示名だけにする)。
+    // 表示名の "|" は "/" に、改行は空白にする
+    public static string DetailLink(string record, string display) =>
+        $"[[{Uri.EscapeDataString(record)}|{(display ?? "").Replace("|", "/").Replace('\r', ' ').Replace('\n', ' ')}]]";
 
     // ［詳細］タブの分類「船舶」の品目。船・車両の一覧は比べるツール (CompareShips) と同じ規則で作る:
     //   ships と item_index にある record のうち、英語名 (name_en) が空・"@" で始まる・"<=" で始まるもの (テンプレート等) を除き、
@@ -1006,4 +1031,477 @@ public partial class GameDataQueryService
                 return t.EndsWith('*') ? itemType.StartsWith(t[..^1], StringComparison.Ordinal) : t.Equals(itemType, StringComparison.Ordinal);
             }))
             .SelectMany(c => c.UexCategoryIds ?? []).Distinct().ToArray();
+
+    // ===== お店・ステーション・星系 (［詳細］タブ) =====
+
+    // 星図の場所 (starmap_locations)・ゲームの店 (game_shops)・店と DB の価格の紐づけ (shop_price_links) を読み、［詳細］タブで使う形 (ShopTree) にする。
+    // 店の売っている物は、紐づけた価格の名前 (item_shop_prices の location・trade_cache.db の trade_prices の terminal) の DB の価格から作る。
+    // 表が無い (インデックス構築前・前の版の DB) なら空の ShopTree (IsEmpty)
+    public ShopTree BuildShopTree(string tradeDbPath)
+    {
+        var tree = new ShopTree();
+        try
+        {
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT record_name, name_en, type, parent_record, system FROM starmap_locations";
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) tree.AddLocation(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4));
+            }
+            tree.LinkLocations();
+            // 店。franchise_name (franchise の英語名) の列が無い前の形の表では、表の name をそのまま使う (franchise の名前があるものとして扱う)
+            bool hasFranchiseName;
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('game_shops') WHERE name = 'franchise_name'";
+                hasFranchiseName = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) > 0;
+            }
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = hasFranchiseName
+                    ? "SELECT shop_id, name, inventory_type, location_record, entity_name, franchise_name FROM game_shops"
+                    : "SELECT shop_id, name, inventory_type, location_record, entity_name, name FROM game_shops";
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) tree.AddShop(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetString(5).Length > 0);
+            }
+            // 店の売り場の出どころ (場所だけ結んだ価格の店の名前を決めるため: cstone は location の最後の段、uex は名前そのもの)
+            var itemSource = new Dictionary<string, string>(StringComparer.Ordinal);
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT DISTINCT location, source FROM item_shop_prices WHERE location <> ''";
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) itemSource.TryAdd(r.GetString(0), r.IsDBNull(1) ? "" : r.GetString(1));
+            }
+            // 紐づけ。前の形の表 (location_record の列が無い) なら、店まで結んだものだけ読む (次の起動で作り直される)
+            bool hasLocationColumn;
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('shop_price_links') WHERE name = 'location_record'";
+                hasLocationColumn = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) > 0;
+            }
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = hasLocationColumn
+                    ? "SELECT shop_id, source, price_key, location_record FROM shop_price_links"
+                    : "SELECT shop_id, source, price_key, '' FROM shop_price_links";
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    var source = r.GetString(1);
+                    var key = r.GetString(2);
+                    var dataName = source == "item"
+                        ? (itemSource.TryGetValue(key, out var src) && src == "cstone" ? key.Split(" - ")[^1].Trim() : key.Trim())
+                        : key.Trim();
+                    tree.AddLink(r.GetString(0), source, key, r.GetString(3), dataName);
+                }
+            }
+            tree.ApplyDataNames();
+        }
+        catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { return new ShopTree(); }
+        if (tree.IsEmpty) return tree;
+
+        // 紐づけた店の売り場の価格 (購入・レンタル) と品目の名前・種類
+        var itemKeys = tree.LinkedItemKeys;
+        var rows = new List<(string Uuid, string Kind, string Location, double Price, int? RentDays)>();
+        if (itemKeys.Count > 0)
+        {
+            try
+            {
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "SELECT uuid, kind, location, price, rent_days FROM item_shop_prices WHERE kind IN (@b, @r) AND price IS NOT NULL";
+                cmd.Parameters.AddWithValue("@b", ShopPriceStore.KindBuy);
+                cmd.Parameters.AddWithValue("@r", ShopPriceStore.KindRent);
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    var location = r.IsDBNull(2) ? "" : r.GetString(2);
+                    if (!itemKeys.Contains(location)) continue;
+                    rows.Add((r.GetString(0), r.GetString(1), location, r.GetDouble(3), r.IsDBNull(4) ? null : r.GetInt32(4)));
+                }
+            }
+            catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
+        }
+        var itemInfo = new Dictionary<string, (string Record, string Name, string Type)>(StringComparer.OrdinalIgnoreCase);
+        if (rows.Count > 0)
+        {
+            var need = new HashSet<string>(rows.Select(x => x.Uuid), StringComparer.OrdinalIgnoreCase);
+            using var loc = new LocReader(_translationsDbPath);
+            try
+            {
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = """
+                    SELECT x.uuid, x.record_name, COALESCE(x.name, ''), COALESCE(x.item_type, ''), COALESCE(i.name, '')
+                    FROM item_index x LEFT JOIN items i ON i.record_name = x.record_name
+                    WHERE x.uuid IN (SELECT uuid FROM item_shop_prices)
+                    """;
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    var uuid = r.GetString(0);
+                    if (!need.Contains(uuid) || itemInfo.ContainsKey(uuid)) continue;
+                    var rec = r.GetString(1);
+                    var shortName = rec.StartsWith("EntityClassDefinition.", StringComparison.Ordinal) ? rec["EntityClassDefinition.".Length..] : rec;
+                    itemInfo[uuid] = (rec, ResolveItemNameEn(r.GetString(4), r.GetString(2), loc) ?? shortName, DetailTypeLabel(r.GetString(3)));
+                }
+            }
+            catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
+        }
+        foreach (var x in rows)
+            tree.AddItemPrice(x.Location, x.Uuid, itemInfo.TryGetValue(x.Uuid, out var info) ? info : ("", x.Uuid, ""), x.Kind, x.Price, x.RentDays);
+
+        // 紐づけたコモディティの端末の価格 (trade_cache.db は読み取り専用で開く)
+        var terminals = tree.LinkedTradeKeys;
+        if (terminals.Count > 0 && File.Exists(tradeDbPath))
+        {
+            var resourceByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var x in OreService.LoadResources(DbPath, _translationsDbPath))
+                if (!string.IsNullOrWhiteSpace(x.NameEn)) resourceByName.TryAdd(x.NameEn.Trim(), x.RecordName);
+            try
+            {
+                using var tc = new SqliteConnection($"Data Source={tradeDbPath};Mode=ReadOnly");
+                tc.Open();
+                using var cmd = tc.CreateCommand();
+                cmd.CommandText = "SELECT terminal, COALESCE(commodity_name, ''), COALESCE(price_buy, 0), COALESCE(price_sell, 0) FROM trade_prices WHERE is_current = 1";
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    var terminal = r.GetString(0);
+                    if (!terminals.Contains(terminal)) continue;
+                    var name = r.GetString(1).Trim();
+                    tree.AddTradePrice(terminal, name, resourceByName.TryGetValue(name, out var res) ? res : "", r.GetDouble(2), r.GetDouble(3));
+                }
+            }
+            catch (SqliteException) { }
+        }
+        return tree;
+    }
+
+    // 木の中のお店・場所・星系の詳細の文字 (［詳細］タブ。GetItemDetailText と同じ形で、リンクは DetailLink)。record が木に無ければ null
+    public static string? ShopTreeDetailText(ShopTree tree, string record)
+    {
+        if (tree.ShopsByRecord.TryGetValue(record, out var shop)) return ShopDetailText(shop);
+        if (tree.NodesByRecord.TryGetValue(record, out var node)) return node.IsStar ? SystemDetailText(node) : PlaceDetailText(node);
+        return null;
+    }
+
+    // 根の Star から node までの道筋「Stanton > ArcCorp > Area18」(各段はリンク)
+    private static string PathLinks(ShopTreeNode node)
+    {
+        var chain = new List<ShopTreeNode>();
+        for (var n = node; n != null; n = n.Parent) chain.Add(n);
+        chain.Reverse();
+        return string.Join(" > ", chain.Select(n => DetailLink(n.Record, n.Name)));
+    }
+
+    // お店の詳細: 【基本】名前・種類・星系、【場所】星系から店の場所までの道筋、【売っている物】紐づけた DB の価格の表 (品名の順)
+    private static string ShopDetailText(ShopTreeShop shop)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("【基本】");
+        sb.AppendLine($"  名前: {shop.Name}");
+        sb.AppendLine($"  種類: {shop.Kind}");
+        sb.AppendLine($"  星系: {shop.Location.System}");
+        sb.AppendLine();
+        sb.AppendLine("【場所】");
+        sb.AppendLine(PathLinks(shop.Location));
+        sb.AppendLine();
+        sb.AppendLine("【売っている物】");
+        if (shop.Items.Count == 0 && shop.Commodities.Count == 0)
+        {
+            sb.AppendLine("販売データが紐づいていません。");
+            return sb.ToString();
+        }
+        if (shop.Items.Count > 0)
+        {
+            var items = shop.Items.Values.OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase).ThenBy(i => i.Record, StringComparer.OrdinalIgnoreCase).ToList();
+            var hasBuy = items.Any(i => i.Buy.HasValue);
+            var hasRent = items.Any(i => i.Rents.Count > 0);
+            // 購入とレンタルが両方ある店は列を分ける (購入 / レンタル)。どちらかだけなら、その列だけ
+            sb.AppendLine("| 品名 | 種類 |" + (hasBuy ? (hasRent ? " 購入 |" : " 価格 |") : "") + (hasRent ? " レンタル |" : ""));
+            sb.AppendLine("|---|---|" + (hasBuy ? "---|" : "") + (hasRent ? "---|" : ""));
+            // 品名・種類・値段がすべて同じ行 (UEX の船の店では、同じ船の AI 用などの複製の record にも同じ値段の行がある) は 1 行にまとめ、
+            // リンク先は record 名の短いもの (分類「船舶」の代表の選び方と同じ) にする
+            var lines = items.Select(i => (i.Record, i.Name, i.Type,
+                Buy: i.Buy is { } b ? $"{b:N0} aUEC" : "-",
+                Rent: i.Rents.Count > 0
+                    ? string.Join(" / ", i.Rents.Distinct().OrderBy(r => r.Days ?? int.MaxValue).ThenBy(r => r.Price).Select(r => $"{(r.Days is { } d ? $"{d}日 " : "")}{r.Price:N0} aUEC"))
+                    : "-"));
+            foreach (var g in lines.GroupBy(r => (r.Name, r.Type, r.Buy, r.Rent)))
+            {
+                var rec = g.Select(r => r.Record).Where(r => r.Length > 0).OrderBy(r => r.Length).ThenBy(r => r, StringComparer.OrdinalIgnoreCase).FirstOrDefault() ?? "";
+                var line = $"| {NameCell(rec, g.Key.Name)} | {Cell(MdEscape(g.Key.Type))} |";
+                if (hasBuy) line += $" {g.Key.Buy} |";
+                if (hasRent) line += $" {g.Key.Rent} |";
+                sb.AppendLine(line);
+            }
+        }
+        if (shop.Commodities.Count > 0)
+        {
+            if (shop.Items.Count > 0) sb.AppendLine();
+            static string P(double v) => v > 0 ? $"{v:N0} aUEC" : "-";
+            sb.AppendLine("| 品名 | 買値 | 売値 |");
+            sb.AppendLine("|---|---|---|");
+            foreach (var c in shop.Commodities.Distinct().OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
+                sb.AppendLine($"| {NameCell(c.ResourceRecord, c.Name)} | {P(c.Buy)} | {P(c.Sell)} |");
+        }
+        return sb.ToString();
+    }
+
+    // 表の品名のセル: record があれば詳細へのリンク、無ければ文字のまま
+    private static string NameCell(string record, string name) =>
+        record.Length > 0 ? DetailLink(record, name) : Cell(MdEscape(name));
+
+    // 場所の詳細: 【基本】名前・種類・星系、【場所】親の道筋、【この中の場所】子 (種類ごと)、【お店】この場所の店
+    private static string PlaceDetailText(ShopTreeNode node)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("【基本】");
+        sb.AppendLine($"  名前: {node.Name}");
+        sb.AppendLine($"  種類: {node.TypeLabel}");
+        sb.AppendLine($"  星系: {node.System}");
+        sb.AppendLine();
+        sb.AppendLine("【場所】");
+        sb.AppendLine(node.Parent != null ? PathLinks(node.Parent) : "(なし)");
+        sb.AppendLine();
+        sb.AppendLine("【この中の場所】");
+        AppendChildPlaces(sb, node);
+        sb.AppendLine();
+        sb.AppendLine("【お店】");
+        AppendShops(sb, node);
+        return sb.ToString();
+    }
+
+    // 星系の詳細: 【基本】名前、【場所】根の Star の直下の場所 (種類ごと)、【お店】根の Star の店
+    private static string SystemDetailText(ShopTreeNode node)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("【基本】");
+        sb.AppendLine($"  名前: {node.System}");
+        sb.AppendLine();
+        sb.AppendLine("【場所】");
+        AppendChildPlaces(sb, node);
+        sb.AppendLine();
+        sb.AppendLine("【お店】");
+        AppendShops(sb, node);
+        return sb.ToString();
+    }
+
+    // 子の場所の表 (種類 | 名前 (リンク))。種類の順 (ShopTree.TypeOrder)、同じ種類は名前の順。無ければ「(なし)」
+    private static void AppendChildPlaces(StringBuilder sb, ShopTreeNode node)
+    {
+        if (node.Children.Count == 0) { sb.AppendLine("(なし)"); return; }
+        sb.AppendLine("| 種類 | 名前 |");
+        sb.AppendLine("|---|---|");
+        foreach (var c in node.Children.OrderBy(c => ShopTree.TypeOrder(c.Type)).ThenBy(c => c.TypeLabel, StringComparer.Ordinal)
+                     .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase).ThenBy(c => c.RecordName, StringComparer.Ordinal))
+            sb.AppendLine($"| {Cell(MdEscape(c.TypeLabel))} | {DetailLink(c.Record, c.Name)} |");
+    }
+
+    // この場所の店の表 (店名 (リンク) | 種類。名前の順)。無ければ「(なし)」
+    private static void AppendShops(StringBuilder sb, ShopTreeNode node)
+    {
+        if (node.Shops.Count == 0) { sb.AppendLine("(なし)"); return; }
+        sb.AppendLine("| 店名 | 種類 |");
+        sb.AppendLine("|---|---|");
+        foreach (var s in node.Shops.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase).ThenBy(s => s.Id, StringComparer.Ordinal))
+            sb.AppendLine($"| {DetailLink(s.Record, s.Name)} | {Cell(MdEscape(s.Kind))} |");
+    }
+}
+
+// ［詳細］タブのお店・ステーション・星系 (GameDataQueryService.BuildShopTree)。作った後は読むだけ (別のスレッドから読んでよい)
+public sealed class ShopTree
+{
+    // 詳細の record の頭 (既存の record (EntityClassDefinition.… / ResourceType.… / uuid) と重ならない)。
+    // Shop:<game_shops.shop_id>、Place:<starmap_locations.record_name>、System:<星系の名前 (根の Star の英語名)>、
+    // PriceShop:<source>|<price_key> (場所だけ結べた価格の行だけで作った店。shop_price_links の shop_id が空の行)
+    public const string ShopPrefix = "Shop:", PlacePrefix = "Place:", SystemPrefix = "System:", PriceShopPrefix = "PriceShop:";
+    // 店の種類 (game_shops.inventory_type が ITEM / COMMODITY)
+    public const string KindEquipment = "装備の店", KindTerminal = "コモディティの端末";
+
+    public static bool IsTreeRecord(string? record) =>
+        record != null && (record.StartsWith(ShopPrefix, StringComparison.Ordinal) || record.StartsWith(PlacePrefix, StringComparison.Ordinal)
+                           || record.StartsWith(SystemPrefix, StringComparison.Ordinal) || record.StartsWith(PriceShopPrefix, StringComparison.Ordinal));
+
+    // 星図の種類 (StarMapObjectType の name) の日本語名。ゲームの訳 (Markers_Subtext_… の日本語) があるものはそれ、無いものはアプリで付けた名前。表に無い種類は英語のまま
+    private static readonly Dictionary<string, string> TypeLabels = new(StringComparer.Ordinal)
+    {
+        ["Star"] = "星",
+        ["Planet"] = "惑星",
+        ["Moon"] = "衛星",
+        ["LandingZone"] = "居住地",
+        ["Manmade"] = "人工",
+        ["Manmade_VisibleOnInteraction"] = "人工 (近づくと表示)",
+        ["JumpPoint"] = "ジャンプポイント",
+        ["Outpost"] = "前哨基地",
+        ["Outpost_InvalidQT"] = "前哨基地 (QT 不可)",
+        ["PointOfInterest"] = "注目地点",
+        ["Asteroid"] = "小惑星",
+        ["Asteroid_ValidQT"] = "小惑星 (QT 可)",
+        ["Anomaly"] = "異常域",
+        ["NavPoint"] = "航行ポイント",
+        ["QuantumTracePoint"] = "量子トレースポイント",
+        ["CardinalPoint"] = "方位点",
+        ["YouAreHere"] = "現在地",
+        ["SolarSystem"] = "星系",
+    };
+    private static readonly string[] TypeOrderList =
+        ["Planet", "Moon", "LandingZone", "Manmade", "Manmade_VisibleOnInteraction", "JumpPoint", "Outpost", "Outpost_InvalidQT", "PointOfInterest",
+         "Asteroid", "Asteroid_ValidQT", "Anomaly", "NavPoint", "QuantumTracePoint", "CardinalPoint", "YouAreHere"];
+    public static string TypeLabel(string type) => TypeLabels.TryGetValue(type, out var ja) ? ja : type;
+    public static int TypeOrder(string type) { var i = Array.IndexOf(TypeOrderList, type); return i >= 0 ? i : TypeOrderList.Length; }
+    // 分類「ステーション」に入れる種類 (このほかに、店が 1 つ以上ある場所も入れる)
+    public static readonly HashSet<string> StationTypes = new(StringComparer.Ordinal) { "Manmade", "Manmade_VisibleOnInteraction", "LandingZone" };
+
+    private readonly Dictionary<string, ShopTreeNode> _byStarmapRecord = new(StringComparer.Ordinal);
+    public Dictionary<string, ShopTreeShop> ShopsByRecord { get; } = new(StringComparer.Ordinal);
+    public Dictionary<string, ShopTreeNode> NodesByRecord { get; } = new(StringComparer.Ordinal);
+    // 価格の名前 → 店の record (shop_price_links)。item: item_shop_prices.location、trade: trade_prices.terminal
+    private readonly Dictionary<string, string> _itemLinks = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _tradeLinks = new(StringComparer.Ordinal);
+
+    public bool IsEmpty => _byStarmapRecord.Count == 0;
+    // 根の Star (星系)
+    public IEnumerable<ShopTreeNode> Systems => _byStarmapRecord.Values.Where(n => n.IsStar);
+    // 根の Star 以外の場所すべて
+    public IEnumerable<ShopTreeNode> Places => _byStarmapRecord.Values.Where(n => !n.IsStar);
+    public IEnumerable<ShopTreeShop> Shops => ShopsByRecord.Values;
+    public HashSet<string> LinkedItemKeys => new(_itemLinks.Keys, StringComparer.Ordinal);
+    public HashSet<string> LinkedTradeKeys => new(_tradeLinks.Keys, StringComparer.Ordinal);
+
+    public void AddLocation(string record, string name, string type, string parent, string system)
+    {
+        var isStar = parent.Length == 0 && type == "Star";
+        var node = new ShopTreeNode(isStar ? SystemPrefix + system : PlacePrefix + record, record, name, type, TypeLabel(type), parent, system, isStar);
+        _byStarmapRecord[record] = node;
+        NodesByRecord[node.Record] = node;
+    }
+
+    // 親子をつなぐ (AddLocation を全部終えてから呼ぶ)
+    public void LinkLocations()
+    {
+        foreach (var n in _byStarmapRecord.Values)
+            if (n.ParentRecord.Length > 0 && _byStarmapRecord.TryGetValue(n.ParentRecord, out var p)) { n.Parent = p; p.Children.Add(n); }
+    }
+
+    // hasFranchiseName: 名前が franchise の英語名か (false なら Entity 名から作った名前。ApplyDataNames で販売データの店名に替えることがある)
+    public void AddShop(string shopId, string name, string inventoryType, string location, string entityName, bool hasFranchiseName)
+    {
+        if (!_byStarmapRecord.TryGetValue(location, out var node)) return;
+        // ITEM / COMMODITY 以外 (ゲームデータに INVALID・空のものがある) は「不明 (値)」
+        var kind = inventoryType.Equals("COMMODITY", StringComparison.OrdinalIgnoreCase) ? KindTerminal
+            : inventoryType.Equals("ITEM", StringComparison.OrdinalIgnoreCase) ? KindEquipment
+            : inventoryType.Length > 0 ? $"不明 ({inventoryType})" : "不明";
+        var s = new ShopTreeShop(shopId, name, kind, node, entityName, ShopPrefix) { HasFranchiseName = hasFranchiseName };
+        ShopsByRecord[s.Record] = s;
+        node.Shops.Add(s);
+    }
+
+    // 紐づけ 1 行。shopId があればそのゲームの店に結ぶ。shopId が空 (場所だけ結べた価格) なら、その価格の行だけの店
+    // (record は PriceShop:<source>|<price_key>、名前は「販売データの店名（販売データ）」、種類は item なら装備の店・trade ならコモディティの端末) を
+    // 結んだ場所 (locationRecord) に作って結ぶ
+    public void AddLink(string shopId, string source, string priceKey, string locationRecord, string dataShopName)
+    {
+        if (source is not ("item" or "trade")) return;
+        string record;
+        if (shopId.Length > 0)
+        {
+            record = ShopPrefix + shopId;
+            if (!ShopsByRecord.ContainsKey(record)) return;
+        }
+        else
+        {
+            if (!_byStarmapRecord.TryGetValue(locationRecord, out var node)) return;
+            var s = new ShopTreeShop($"{source}|{priceKey}", $"{dataShopName}（販売データ）", source == "item" ? KindEquipment : KindTerminal, node, "", PriceShopPrefix);
+            record = s.Record;
+            if (!ShopsByRecord.TryAdd(record, s)) return;
+            node.Shops.Add(s);
+        }
+        if (source == "item") { if (!_itemLinks.TryAdd(priceKey, record)) return; }
+        else if (!_tradeLinks.TryAdd(priceKey, record)) return;
+        if (shopId.Length > 0) ShopsByRecord[record].LinkedDataNames.Add(dataShopName);
+    }
+
+    // 店の表示名: franchise の英語名があればそれ。無い店で、店まで結べた価格のキーが 1 つだけなら、その販売データの店名
+    // (cstone は location の最後の段、trade は端末名、uex は名前)。それ以外は Entity 名から作った名前のまま。AddLink を全部終えてから呼ぶ
+    public void ApplyDataNames()
+    {
+        foreach (var s in ShopsByRecord.Values)
+            if (!s.HasFranchiseName && s.LinkedDataNames.Count == 1 && s.LinkedDataNames[0].Length > 0) s.Name = s.LinkedDataNames[0];
+    }
+
+    public void AddItemPrice(string location, string uuid, (string Record, string Name, string Type) info, string kind, double price, int? rentDays)
+    {
+        if (_itemLinks.TryGetValue(location, out var rec) && ShopsByRecord.TryGetValue(rec, out var shop)) shop.AddItem(uuid, info, kind, price, rentDays);
+    }
+
+    public void AddTradePrice(string terminal, string name, string resourceRecord, double buy, double sell)
+    {
+        if (_tradeLinks.TryGetValue(terminal, out var rec) && ShopsByRecord.TryGetValue(rec, out var shop))
+            shop.Commodities.Add(new ShopTreeShop.Commodity(name, resourceRecord, buy, sell));
+    }
+
+    // 品目の詳細の販売場所の行の店の record (shop_price_links で結べたものだけ。結べなければ null)。
+    //   cstone / uex: 売り場の文字 (item_shop_prices.location) で引く
+    //   UEX の items_prices (「星系 > … > 端末名」): 最後の段 (端末名) をコモディティの端末の名前 (trade_prices.terminal) として引く
+    public string? FindShopRecord(string source, string location)
+    {
+        if (source is "cstone" or "uex") return _itemLinks.TryGetValue(location ?? "", out var r) ? r : null;
+        if (source != ShopListing.SourceUexItemsPrices) return null;
+        var segs = (location ?? "").Split(" > ");
+        var terminal = segs[^1].Trim();
+        return terminal.Length > 0 && _tradeLinks.TryGetValue(terminal, out var t) ? t : null;
+    }
+}
+
+// 星図の場所 1 つ (starmap_locations の 1 行)。Record は詳細の record (根の Star は System:<星系>、ほかは Place:<record 名>)
+public sealed class ShopTreeNode(string record, string recordName, string name, string type, string typeLabel, string parentRecord, string system, bool isStar)
+{
+    public string Record { get; } = record;
+    public string RecordName { get; } = recordName;
+    public string Name { get; } = name;
+    public string Type { get; } = type;
+    public string TypeLabel { get; } = typeLabel;
+    public string ParentRecord { get; } = parentRecord;
+    public string System { get; } = system;
+    public bool IsStar { get; } = isStar;
+    public ShopTreeNode? Parent { get; set; }
+    public List<ShopTreeNode> Children { get; } = new();
+    public List<ShopTreeShop> Shops { get; } = new();
+}
+
+// ゲームの店 1 つ (game_shops の 1 行)、または場所だけ結べた価格の行だけで作った店 (recordPrefix が PriceShop:)。Items / Commodities は紐づけた DB の価格
+public sealed class ShopTreeShop(string id, string name, string kind, ShopTreeNode location, string entityName, string recordPrefix)
+{
+    public string Id { get; } = id;
+    // 表示名 (ShopTree.ApplyDataNames で販売データの店名に替えることがある)
+    public string Name { get; set; } = name;
+    // 名前が franchise の英語名か / 店まで結べた価格のキーの販売データの店名 (キーごとに 1 つ)
+    public bool HasFranchiseName { get; init; } = true;
+    public List<string> LinkedDataNames { get; } = new();
+    public string Kind { get; } = kind;
+    public ShopTreeNode Location { get; } = location;
+    public string EntityName { get; } = entityName;
+    public string Record => recordPrefix + Id;
+
+    // 店の売り場の品目 (uuid ごと)。Buy は購入の値段 (同じ品目に複数あれば安いほう)、Rents はレンタルの (日数, 値段)
+    public sealed class Item(string record, string name, string type)
+    {
+        public string Record { get; } = record;
+        public string Name { get; } = name;
+        public string Type { get; } = type;
+        public double? Buy { get; set; }
+        public List<(int? Days, double Price)> Rents { get; } = new();
+    }
+    public Dictionary<string, Item> Items { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    // コモディティの端末の品目。ResourceRecord は品名が resource_types の英語名と同じ資源の record 名 (無ければ "")
+    public sealed record Commodity(string Name, string ResourceRecord, double Buy, double Sell);
+    public List<Commodity> Commodities { get; } = new();
+
+    public void AddItem(string uuid, (string Record, string Name, string Type) info, string kind, double price, int? rentDays)
+    {
+        if (!Items.TryGetValue(uuid, out var item)) Items[uuid] = item = new Item(info.Record, info.Name, info.Type);
+        if (kind == ShopPriceStore.KindBuy) item.Buy = item.Buy is { } b ? Math.Min(b, price) : price;
+        else if (kind == ShopPriceStore.KindRent) item.Rents.Add((rentDays, price));
+    }
 }

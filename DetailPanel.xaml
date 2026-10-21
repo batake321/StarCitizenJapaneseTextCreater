@@ -18,6 +18,9 @@
 
         <DockPanel Grid.Row="0" Margin="0,0,0,6">
             <TextBlock Text="名前" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <!-- 前の状態 (分類・種類・サイズ・名前の欄・リスト・選んでいる行・詳細) に戻る。履歴は最大 10 件 (DetailPanel.PushHistory) -->
+            <Button x:Name="btnBack" DockPanel.Dock="Right" Content="戻る" Padding="10,2" Margin="8,0,0,0" IsEnabled="False"
+                    Click="BtnBack_Click" ToolTip="前に表示していた状態に戻ります"/>
             <TextBlock x:Name="txtStatus" DockPanel.Dock="Right" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
             <TextBox x:Name="txtQuery" FontSize="14" TextChanged="TxtQuery_TextChanged" PreviewKeyDown="TxtQuery_PreviewKeyDown"
                      ToolTip="名前の一部 (英語・日本語・record 名) を入力するとリストを絞り込みます。↓ でリストへ、Enter で最初の品目を開きます"/>

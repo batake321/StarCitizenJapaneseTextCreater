@@ -30,8 +30,10 @@ public static class DatabaseBackupService
     // starmap_names: 星図の場所のレコード名 → 表示名の翻訳キー (［ゲームログ］の場所名。インデックス構築で作る)
     // deliverable_sources: Wikelo の契約の納品物のゲームデータ上の入手場所 (［契約］タブの納品物の入手場所。インデックス構築で作る)
     // ore_locations: 資源の採掘できる場所 (［詳細］タブの資源の【採掘できる場所】。インデックス構築で作る)
+    // starmap_locations / game_shops / shop_price_links: 星図の場所・ゲームの店・店と DB の価格の紐づけ (［詳細］タブのお店・ステーション・星系。インデックス構築で作る)
     private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache", "item_shop_prices", "ammo_params", "item_variants", "player_damage_params", "item_ports", "item_port_labels",
-        "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount", "resource_types", "blueprints", "blueprint_materials", "blueprint_pools", "blueprint_modifiers", "starmap_names", "deliverable_sources", "ore_locations"];
+        "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount", "resource_types", "blueprints", "blueprint_materials", "blueprint_pools", "blueprint_modifiers", "starmap_names", "deliverable_sources", "ore_locations",
+        "starmap_locations", "game_shops", "shop_price_links"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
     // ore_stock / commodity_trades / mining_log: ［鉱石］タブの在庫・売買の記録・採掘の記録 (個人データ。OreService)
     // my_gear: 所持個人装備、game_log_imports: ［ゲームログ］の行を所持・在庫に入れた印 (個人データ。HangarService)

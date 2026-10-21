@@ -72,6 +72,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        // 窓が前面に来たら「<版> <チャンネル> を読み取る」ボタンの表示を更新する (build_manifest.id を読むだけ)
+        Activated += (_, _) => UpdateExtractButton();
         // 船の積載量 (SCU) の共通の関数 (ゲームデータ → UEX → Ship Matrix) が使う作業ディレクトリと UEX の船データ
         ShipCargo.Configure(() => WorkDir, _tradeService);
         ShipCargo.Resolved += OnShipCargoResolved;
@@ -177,6 +179,7 @@ public partial class MainWindow : Window
         });
 
         PopulateChannels();
+        UpdateExtractButton();
         UpdateBackendSummary();
         UpdateDbPathDisplay();
         RefreshProfileLists();
@@ -204,9 +207,17 @@ public partial class MainWindow : Window
         cmbChannel.SelectionChanged -= Channel_Changed;
         cmbChannel.Items.Clear();
 
-        var channels = App.DetectGameChannels();
-        foreach (var ch in channels)
-            cmbChannel.Items.Add(Path.GetFileName(ch));
+        // 検出したチャンネルに、LIVE と PTU を必ず加える (検出されなかったものは末尾に LIVE → PTU の順)。
+        // GamePath の親フォルダの下にそのフォルダと Data.p4k が無いチャンネルは、灰色で選べないようにする
+        var names = App.DetectGameChannels().Select(ch => Path.GetFileName(ch)).ToList();
+        foreach (var must in PatchButtonState.FixedChannels)
+            if (!names.Contains(must, StringComparer.OrdinalIgnoreCase)) names.Add(must);
+        var parentDir = SafeGetDirectoryName(App.Config.GamePath);
+        foreach (var name in names)
+        {
+            var usable = parentDir != null && File.Exists(Path.Combine(parentDir, name, "Data.p4k"));
+            cmbChannel.Items.Add(new ComboBoxItem { Content = name, IsEnabled = usable });
+        }
 
         if (cmbChannel.Items.Count > 0)
         {
@@ -214,7 +225,7 @@ public partial class MainWindow : Window
             var idx = -1;
             for (int i = 0; i < cmbChannel.Items.Count; i++)
             {
-                if (cmbChannel.Items[i]?.ToString() == currentChannel)
+                if (ChannelNameOf(cmbChannel.Items[i]) == currentChannel)
                 { idx = i; break; }
             }
             cmbChannel.SelectedIndex = idx >= 0 ? idx : 0;
@@ -223,9 +234,25 @@ public partial class MainWindow : Window
         cmbChannel.SelectionChanged += Channel_Changed;
     }
 
+    // cmbChannel の項目 (ComboBoxItem。Content がチャンネル名) からチャンネル名を取る
+    private static string? ChannelNameOf(object? item) => (item as ComboBoxItem)?.Content as string;
+
+    private static string? SafeGetDirectoryName(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        try { return Path.GetDirectoryName(path.Trim()); }
+        catch { return null; }
+    }
+
     private void Channel_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (cmbChannel.SelectedItem is not string channel) return;
+        Channel_ChangedCore();
+        UpdateExtractButton();
+    }
+
+    private void Channel_ChangedCore()
+    {
+        if (ChannelNameOf(cmbChannel.SelectedItem) is not string channel) return;
         var gamePath = txtGamePath.Text.Trim();
         var parent = Path.GetDirectoryName(gamePath);
         if (parent != null && Directory.Exists(parent))
@@ -452,7 +479,64 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void Extract_Click(object sender, RoutedEventArgs e) => await RunPipeline("extract");
+    private async void Extract_Click(object sender, RoutedEventArgs e)
+    {
+        // ボタンに書いてあるチャンネルが今選んでいるものと違えば、先にそのチャンネルに切り替える (Channel_Changed が GamePath を変える)
+        if (_extractTargetChannel is string target
+            && !string.Equals(ChannelNameOf(cmbChannel.SelectedItem), target, StringComparison.OrdinalIgnoreCase))
+        {
+            var item = cmbChannel.Items.Cast<object>()
+                .FirstOrDefault(i => string.Equals(ChannelNameOf(i), target, StringComparison.OrdinalIgnoreCase));
+            // 灰色 (Data.p4k が無い) の項目へは切り替えない
+            if (item is ComboBoxItem { IsEnabled: true }) cmbChannel.SelectedItem = item;
+        }
+        await RunPipeline("extract");
+        UpdateExtractButton();
+    }
+
+    // 「<版> <チャンネル> を読み取る」ボタンに出しているチャンネル (版が読めず「新しいパッチを読み取る」のときは null)
+    private string? _extractTargetChannel;
+
+    // 翻訳タブの読み取りボタンの文字と色を、LIVE・PTU の build_manifest.id と読み込み済みの版の記録から決める
+    private void UpdateExtractButton()
+    {
+        try
+        {
+            var state = PatchButtonState.Compute(
+                SafeGetDirectoryName(App.Config.GamePath),
+                ChannelNameOf(cmbChannel.SelectedItem),
+                App.Config.ExtractedBuildChangeNum,
+                Path.Combine(WorkDir, "gamedata_cache.db"));
+            _extractTargetChannel = state.Channel;
+            btnExtract.Content = state.Label;
+            if (state.IsNew)
+            {
+                btnExtract.Background = System.Windows.Media.Brushes.Yellow;
+                btnExtract.Foreground = System.Windows.Media.Brushes.Black;
+            }
+            else
+            {
+                btnExtract.ClearValue(BackgroundProperty);
+                btnExtract.ClearValue(ForegroundProperty);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"読み取りボタンの表示を更新できませんでした: {ex.Message}");
+        }
+    }
+
+    // 「新しいパッチを読み取る」の取り込みが成功したとき、読んだチャンネルの版の文字と変更番号を設定に残して保存する
+    private void RecordExtractedBuild(string gamePath)
+    {
+        var (version, changeNum, branch) = GameDataExtractor.ReadBuildManifestFile(Path.Combine(gamePath, "build_manifest.id"));
+        if (string.IsNullOrEmpty(changeNum)) return;
+        App.Config.ExtractedBuildVersion = PatchButtonState.VersionText(branch, version) ?? "";
+        App.Config.ExtractedBuildChangeNum = changeNum;
+        SaveConfigToFile();
+        Log($"読み込み済みの版を記録しました: {App.Config.ExtractedBuildVersion} (変更番号 {changeNum})");
+    }
+
     private async void Translate_Click(object sender, RoutedEventArgs e) => await RunPipeline("translate");
     private async void Apply_Click(object sender, RoutedEventArgs e)
     {
@@ -511,6 +595,9 @@ public partial class MainWindow : Window
 
         // ［実行］で書き出したゲーム用 ini の値 (品目名を今の訳に合わせるときに使い回す。書き出さなかったときは null)
         Dictionary<string, string>? appliedMerged = null;
+        // 「新しいパッチを読み取る」で global.ini を translations.db に取り込めたか (取り込めたら読んだチャンネルの版を記録する)
+        var extractImported = false;
+        var extractGamePath = App.Config.GamePath;
         try
         {
             await Task.Run(async () =>
@@ -535,6 +622,7 @@ public partial class MainWindow : Window
                         Log($"  English: {english.Count:N0} entries, Japanese: {japanese.Count:N0} entries");
                         using var db = new TranslationDatabase(DbPath);
                         db.ImportFromIni(english, japanese);
+                        if (command == "extract") extractImported = true;
                     }
 
                     Dispatcher.Invoke(RefreshEditor);
@@ -689,6 +777,7 @@ public partial class MainWindow : Window
                 SetProgress(100, "完了");
                 Log("--- 完了 ---");
             });
+            if (extractImported) RecordExtractedBuild(extractGamePath);
         }
         catch (OperationCanceledException)
         {
@@ -1831,6 +1920,8 @@ public partial class MainWindow : Window
                 App.Config.TabOrder,
                 App.Config.LastTab,
                 App.Config.SyncFolder,
+                App.Config.ExtractedBuildVersion,
+                App.Config.ExtractedBuildChangeNum,
             };
 
             var json = JsonSerializer.Serialize(config, new JsonSerializerOptions
@@ -2606,8 +2697,11 @@ public partial class MainWindow : Window
                     var needsBlueprints = extractor.NeedsBlueprints();
                     var needsStarmap = extractor.NeedsStarmapNames();
                     var needsExtra = extractor.NeedsExtraItems();
-                    var needsOre = extractor.NeedsOreLocations();
-                    if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints && !needsStarmap && !needsExtra && !needsOre) return (0, 0, 0, 0, 0, 0, (string?)null);
+                    // 星図の場所・ゲームの店の表 (starmap_locations / game_shops。［詳細］タブのお店) も同じ Step 6c で作るので、無ければ一緒に作る
+                    var needsOre = extractor.NeedsOreLocations() || extractor.NeedsShopTables();
+                    // 店と DB の価格の紐づけ (shop_price_links) だけが無い・前の形なら、それだけを作る (Data.p4k は読まない)
+                    var needsShopLinks = !needsOre && extractor.NeedsShopPriceLinks();
+                    if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints && !needsStarmap && !needsExtra && !needsOre && !needsShopLinks) return (0, 0, 0, 0, 0, 0, (string?)null);
                     if (GameDataExtractor.IsIndexBuildRunning) return (0, 0, 0, 0, 0, 0, "インデックス構築・装備データの再抽出が走っている");
                     ct.ThrowIfCancellationRequested();
                     int cargo = 0, resources = 0, blueprints = 0, starmap = 0, extra = 0, ore = 0;
@@ -2699,6 +2793,21 @@ public partial class MainWindow : Window
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
                             Log($"[採掘できる場所] 作れませんでした (次の起動でまた試します): {ex.Message}");
+                        }
+                    }
+                    if (needsShopLinks)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        try
+                        {
+                            Log("[お店] 店と DB の価格の紐づけ (shop_price_links) がまだ無い・前の形なので作ります");
+                            extractor.StatusChanged += Log;
+                            try { extractor.RebuildShopPriceLinks(); }
+                            finally { extractor.StatusChanged -= Log; }
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            Log($"[お店] 店と DB の価格の紐づけを作れませんでした (次の起動でまた試します): {ex.Message}");
                         }
                     }
                     return (cargo, resources, blueprints, starmap, extra, ore, (string?)null);
@@ -9680,5 +9789,93 @@ public class UiTextWriter : TextWriter
     {
         _write((_buffer.Length > 0 ? _buffer.ToString() : "") + (value ?? ""));
         _buffer.Clear();
+    }
+}
+
+// 翻訳タブの読み取りボタン (btnExtract) の表示を決める。
+// 版の文字は build_manifest.id の Branch の末尾の「数字.数字.数字」("sc-alpha-4.10.2" → "4.10.2")。取れなければ Version の頭の「数字.数字」。
+// GamePath の親フォルダの下の LIVE・PTU の変更番号 (RequestedP4ChangeNum) が、読み込み済みの変更番号 (設定の記録。無ければ
+// gamedata_cache.db の gamedata_meta.build_p4_change_num) より大きければ新しい版とする。比べる値が無ければ新しいとはしない
+internal static class PatchButtonState
+{
+    internal const string DefaultLabel = "新しいパッチを読み取る";
+
+    // チャンネルのリストに必ず並べる・新しい版を確かめるチャンネル (この順。両方が新しく、選んでいるのがどちらでもなければ LIVE)
+    internal static readonly string[] FixedChannels = ["LIVE", "PTU"];
+
+    // Label: ボタンの文字。Channel: ボタンに書いたチャンネル (版が読めず既定の文字のときは null)。IsNew: 新しい版 (背景を黄色にする)
+    internal sealed record State(string Label, string? Channel, bool IsNew);
+
+    internal static string? VersionText(string? branch, string? version)
+    {
+        if (!string.IsNullOrEmpty(branch))
+        {
+            // 末尾でなくてもよい ("sc-alpha-4.10.0-hotfix" → 4.10.0)
+            var m = Regex.Match(branch, @"(\d+\.\d+\.\d+)");
+            if (m.Success) return m.Groups[1].Value;
+        }
+        if (!string.IsNullOrEmpty(version))
+        {
+            var m = Regex.Match(version, @"^(\d+\.\d+)");
+            if (m.Success) return m.Groups[1].Value;
+        }
+        return null;
+    }
+
+    // チャンネルのフォルダの build_manifest.id から、版の文字と変更番号を読む (読めなければ null)
+    internal static (string? VersionText, long? ChangeNum) ReadChannel(string? parentDir, string? channel)
+    {
+        if (string.IsNullOrEmpty(parentDir) || string.IsNullOrEmpty(channel)) return (null, null);
+        var (version, changeNum, branch) = GameDataExtractor.ReadBuildManifestFile(Path.Combine(parentDir, channel, "build_manifest.id"));
+        return (VersionText(branch, version), long.TryParse(changeNum, out var n) ? n : null);
+    }
+
+    // gamedata_cache.db の gamedata_meta.build_p4_change_num (読み取り専用で開く。無い・読めなければ null)
+    internal static long? ReadGamedataChangeNum(string gamedataDbPath)
+    {
+        try
+        {
+            if (!File.Exists(gamedataDbPath)) return null;
+            using var db = new SqliteConnection($"Data Source={gamedataDbPath};Mode=ReadOnly");
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT value FROM gamedata_meta WHERE key = @k";
+            cmd.Parameters.AddWithValue("@k", GameDataExtractor.BuildChangeNumMetaKey);
+            return long.TryParse(cmd.ExecuteScalar() as string, out var n) ? n : null;
+        }
+        catch { return null; }
+    }
+
+    internal static State Compute(string? parentDir, string? selectedChannel, string? recordedChangeNum, string gamedataDbPath)
+    {
+        // 読み込み済みの変更番号: 設定の記録 → 無ければ gamedata_meta → それも無ければ比べない (新しいとはしない)
+        long? baseline = long.TryParse(recordedChangeNum, out var rec) ? rec : ReadGamedataChangeNum(gamedataDbPath);
+
+        var newer = new List<(string Channel, string Version)>();
+        if (baseline is long b)
+        {
+            foreach (var ch in FixedChannels)
+            {
+                // GamePath の親の下に Data.p4k が無いチャンネル (リストで灰色の項目) は候補に入れない
+                if (string.IsNullOrEmpty(parentDir) || !File.Exists(Path.Combine(parentDir, ch, "Data.p4k"))) continue;
+                var (ver, num) = ReadChannel(parentDir, ch);
+                if (num is long n && n > b && ver != null) newer.Add((ch, ver));
+            }
+        }
+
+        if (newer.Count > 0)
+        {
+            var pick = newer.FirstOrDefault(x => string.Equals(x.Channel, selectedChannel, StringComparison.OrdinalIgnoreCase));
+            if (pick.Channel == null)
+                pick = newer.FirstOrDefault(x => x.Channel == "LIVE");
+            if (pick.Channel == null)
+                pick = newer[0];
+            return new State($"{pick.Version} {pick.Channel} を読み取る", pick.Channel, true);
+        }
+
+        var (selVer, _) = ReadChannel(parentDir, selectedChannel);
+        return selVer != null
+            ? new State($"{selVer} {selectedChannel} を読み取る", selectedChannel, false)
+            : new State(DefaultLabel, null, false);
     }
 }

@@ -70,6 +70,11 @@ public class AppConfig
     // 自動更新: 起動したときと毎日 AutoUpdateTime (HH:mm) に、新しい版を確かめる (AppUpdater)
     public bool AutoUpdateEnabled { get; set; } = true;
     public string AutoUpdateTime { get; set; } = "08:00";
+
+    // 「新しいパッチを読み取る」で最後に取り込んだゲームの版 (読んだチャンネルの build_manifest.id の Branch の末尾 例 "4.10.2") と
+    // 変更番号 (RequestedP4ChangeNum 例 "12913470")。空なら記録なし (新しい版かどうかは gamedata_meta.build_p4_change_num と比べる)
+    public string ExtractedBuildVersion { get; set; } = "";
+    public string ExtractedBuildChangeNum { get; set; } = "";
 }
 
 public class TranslationConfig

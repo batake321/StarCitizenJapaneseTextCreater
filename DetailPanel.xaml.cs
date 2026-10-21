@@ -17,7 +17,12 @@ namespace StarCitizenJapaneseTextCreater;
 //     分類が 船舶武器 / 船舶装備 / 個人武器 / 個人装備: ［船舶戦闘］［船舶装備］［個人戦闘］［個人装備］の表と同じ品目
 //       (GetShipWeaponTable / GetShipGearTable / GetPersonalWeaponTable / GetPersonalGearTable) を、種類・サイズ・名前 (部分一致) で絞り込む。
 //       種類・サイズの選択肢はその品目から作る (個人武器・個人装備のサイズは空のリスト)
+//     分類が お店 / ステーション / 星系: インデックス構築で作る星図の場所・ゲームの店の表と、店に紐づけた DB の価格 (GameDataQueryService.BuildShopTree) の店・場所・星系。
+//       詳細は record が "Shop:" / "Place:" / "System:" で始まるもの (GameDataQueryService.ShopTreeDetailText)
 //   リストで選ぶと詳細を出す。名前の欄で ↓ を押すとリストへ、Enter でリストの最初の品目を開く
+//   詳細の中のリンク ([[record|表示名]]。DetailHtml が scjt://detail/… の <a> にする) を押すと、その record の詳細を開く
+//   戻る: リストで選んで詳細が変わったとき・リンクで移ったとき・外からの要求 (Request / RequestList / RequestSearch)・分類を変えたときに、
+//     移る前の状態を履歴 (最大 10 件) に積み、［戻る］でその状態をそのまま出す
 //   表の名前のダブルクリック: DetailPanel.Request(record, 名前) → MainWindow が［詳細］タブに切り替えて ShowItem を呼ぶ
 //   record が決まらないとき (船舶管理の船の一覧の船名): DetailPanel.RequestSearch(名前) → MainWindow が［詳細］タブに切り替えて ShowSearch を呼ぶ
 // DB (gamedata_cache.db) は読み取り専用で開く。販売場所は保存データ (cstone / UEX) で出し、無ければ UEX の値段を裏で取ってから出し直す
@@ -44,6 +49,9 @@ public partial class DetailPanel : UserControl
     private const string CategoryShipWeapon = "船舶武器", CategoryShipGear = "船舶装備", CategoryPersonalWeapon = "個人武器", CategoryPersonalGear = "個人装備";
     // 鉱石: 採掘で取れる資源とその精錬後、鉱石・鉱物・金属などの group の資源 (GameDataQueryService.GetOreCategoryResources)。種類は group、サイズは使わない
     private const string CategoryOre = "鉱石";
+    // お店・ステーション・星系: 星図の場所 (starmap_locations)・ゲームの店 (game_shops)・店と DB の価格の紐づけ (shop_price_links) から作る (GameDataQueryService.BuildShopTree)。
+    // サイズは使わない。行の作り方は TreeCategoryRows
+    private const string CategoryShop = "お店", CategoryStation = "ステーション", CategorySystem = "星系";
     private const string AnyValue = "(すべて)";
     private const string LoadingText = "読み込み中...";
 
@@ -68,7 +76,8 @@ public partial class DetailPanel : UserControl
     public DetailPanel()
     {
         InitializeComponent();
-        cmbCategory.ItemsSource = new[] { CategoryAll, CategoryShip, CategoryShipWeapon, CategoryShipGear, CategoryPersonalWeapon, CategoryPersonalGear, CategoryOre };
+        cmbCategory.ItemsSource = new[] { CategoryAll, CategoryShip, CategoryShipWeapon, CategoryShipGear, CategoryPersonalWeapon, CategoryPersonalGear, CategoryOre,
+                                          CategoryShop, CategoryStation, CategorySystem };
         _suppressSearch = true;
         cmbCategory.SelectedIndex = 0;
         _suppressSearch = false;
@@ -98,6 +107,7 @@ public partial class DetailPanel : UserControl
     private async Task ReloadAfterNamesChangedAsync()
     {
         _categoryRows.Clear();
+        _shopTreeTask = null;   // お店・場所の覚え (売っている物の品目名) も作り直す
         var category = cmbCategory.SelectedItem as string ?? CategoryAll;
         if (category != CategoryAll)
         {
@@ -115,6 +125,54 @@ public partial class DetailPanel : UserControl
     }
 
     private static string DbPath() => Path.Combine(WorkDir(), "gamedata_cache.db");
+    private static string TradeDbPath() => Path.Combine(WorkDir(), "trade_cache.db");
+
+    // ===== お店・ステーション・星系 =====
+
+    // お店・場所・星系 (ShopTree。一度作ったら覚えておく。品目名が作り直されたら捨てる)。作るのは裏のスレッド
+    private Task<ShopTree?>? _shopTreeTask;
+
+    // お店・場所・星系。gamedata_cache.db が無ければ null (表が無ければ空の ShopTree)。作るのに失敗したら覚えを捨てて例外を投げる (次に呼んだときに作り直す)
+    private async Task<ShopTree?> GetShopTreeAsync()
+    {
+        var task = _shopTreeTask ??= BuildShopTreeAsync();
+        try { return await task; }
+        catch
+        {
+            if (ReferenceEquals(_shopTreeTask, task)) _shopTreeTask = null;
+            throw;
+        }
+    }
+
+    private static Task<ShopTree?> BuildShopTreeAsync()
+    {
+        var db = DbPath();
+        var trade = TradeDbPath();
+        return Task.Run(() =>
+        {
+            if (!File.Exists(db)) return (ShopTree?)null;
+            using var q = GameDataQueryService.OpenReadOnly(db);
+            return q.BuildShopTree(trade);
+        });
+    }
+
+    // 分類「お店」「ステーション」「星系」の行 (名前の順)
+    //   お店: game_shops 全部と、場所だけ結べた価格の店 (名前は「販売データの店名（販売データ）」)。種類は店の種類、表示は「名前 (場所の名前)」
+    //   ステーション: 星図の場所のうち、種類が Manmade・Manmade_VisibleOnInteraction・LandingZone のもの、または店が 1 つ以上あるもの。
+    //     種類は星図の種類の日本語名、表示は「名前 (親の名前)」
+    //   星系: 根の Star (Stanton / Pyro / Nyx)
+    private static List<ListItem> TreeCategoryRows(ShopTree tree, string category)
+    {
+        IEnumerable<ListItem> rows = category switch
+        {
+            CategoryShop => tree.Shops.Select(s => new ListItem(s.Record, s.Name, s.Kind, 0, $"{s.Name} ({s.Location.Name})")),
+            CategoryStation => tree.Places.Where(p => ShopTree.StationTypes.Contains(p.Type) || p.Shops.Count > 0)
+                .Select(p => new ListItem(p.Record, p.Name, p.TypeLabel, 0, p.Parent != null ? $"{p.Name} ({p.Parent.Name})" : p.Name)),
+            CategorySystem => tree.Systems.Select(s => new ListItem(s.Record, s.System, "", 0, s.System)),
+            _ => Enumerable.Empty<ListItem>(),
+        };
+        return rows.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).ThenBy(r => r.Display, StringComparer.OrdinalIgnoreCase).ToList();
+    }
 
     // ===== WebView2 =====
 
@@ -132,8 +190,18 @@ public partial class DetailPanel : UserControl
             core.Settings.AreDevToolsEnabled = false;
             core.Settings.IsStatusBarEnabled = false;
             core.Settings.IsZoomControlEnabled = true;
-            // 中身は自分で作った HTML だけ。利用者の操作でほかへ移る・新しい窓を開くことはさせない
-            core.NavigationStarting += (_, e) => { if (e.IsUserInitiated) e.Cancel = true; };
+            // 中身は自分で作った HTML だけ。利用者の操作でほかへ移る・新しい窓を開くことはさせない。
+            // 詳細の中のリンク (scjt://detail/<URL エンコードした record>。DetailHtml) は移動を止めて、その record の詳細を開く (戻るの履歴に積む)
+            core.NavigationStarting += (_, e) =>
+            {
+                if (DetailHtml.TryParseLink(e.Uri, out var record))
+                {
+                    e.Cancel = true;
+                    Dispatcher.BeginInvoke(() => OpenLink(record));
+                    return;
+                }
+                if (e.IsUserInitiated) e.Cancel = true;
+            };
             core.NewWindowRequested += (_, e) => e.Handled = true;
             webDetail.DefaultBackgroundColor = System.Drawing.Color.White;
             _webReady = true;
@@ -161,7 +229,7 @@ public partial class DetailPanel : UserControl
     // 詳細の文字 (GetItemDetailText の形) を出す。WebView2 では Markdown の表にして HTML で、使えなければ文字のまま
     private void ShowDetail(string text)
     {
-        txtDetail.Text = text;
+        txtDetail.Text = DetailHtml.StripLinks(text);   // 文字の欄ではリンクは表示名だけ
         txtDetail.ScrollToHome();
         if (_webFailed) return;
         var html = DetailHtml.FromDetailText(text);
@@ -175,6 +243,7 @@ public partial class DetailPanel : UserControl
     // record が無ければ名前で検索し、名前が同じ (大文字小文字無視) 候補、無ければ最初の候補を出す
     public async void ShowItem(string? record, string name)
     {
+        PushHistory(CaptureState());
         _searchTimer.Stop();
         SetQueryAndCategoryAll(name);
         try
@@ -184,13 +253,13 @@ public partial class DetailPanel : UserControl
             if (record == null)
             {
                 var pick = items?.FirstOrDefault(c => c.Name.Equals(name.Trim(), StringComparison.OrdinalIgnoreCase)) ?? items?.FirstOrDefault();
-                if (pick == null) { _detailVersion++; ShowDetail($"「{name}」が見つかりませんでした。"); return; }
+                if (pick == null) { _detailVersion++; _detailRecord = null; ShowDetail($"「{name}」が見つかりませんでした。"); return; }
                 record = pick.Record;
                 SelectInList(record);
             }
             await LoadDetailAsync(record);
         }
-        catch (Exception ex) { ShowDetail($"詳細を出せませんでした: {ex.Message}"); txtStatus.Text = ""; }
+        catch (Exception ex) { _detailRecord = null; ShowDetail($"詳細を出せませんでした: {ex.Message}"); txtStatus.Text = ""; }
     }
 
     // 候補の一覧 (RequestList) をリストに並べ、selectIndex の候補を選んだ状態にして詳細を出す。名前の欄・分類は ShowItem と同じ扱い
@@ -204,6 +273,7 @@ public partial class DetailPanel : UserControl
         var distinct = items.Where(x => !string.IsNullOrWhiteSpace(x.Record)).DistinctBy(x => x.Record, StringComparer.OrdinalIgnoreCase).ToList();
         if (distinct.Count == 0) return;
         if (string.IsNullOrWhiteSpace(pick.Record)) pick = distinct[0];
+        PushHistory(CaptureState());
         _searchTimer.Stop();
         SetQueryAndCategoryAll(pick.Name);
         try
@@ -228,13 +298,15 @@ public partial class DetailPanel : UserControl
             SetList(list, selectRecord: pick.Record);
             await LoadDetailAsync(pick.Record);
         }
-        catch (Exception ex) { ShowDetail($"詳細を出せませんでした: {ex.Message}"); txtStatus.Text = ""; }
+        catch (Exception ex) { _detailRecord = null; ShowDetail($"詳細を出せませんでした: {ex.Message}"); txtStatus.Text = ""; }
     }
 
     // 名前欄に name を入れて検索し、リストを出す (品目は開かない)。下の詳細欄の前の品目は消す
     public async void ShowSearch(string name)
     {
+        PushHistory(CaptureState());
         _detailVersion++;
+        _detailRecord = null;
         ShowDetail("");
         _searchTimer.Stop();
         SetQueryAndCategoryAll(name);
@@ -252,6 +324,90 @@ public partial class DetailPanel : UserControl
         _suppressSearch = false;
     }
 
+    // ===== リンク・戻る =====
+
+    // 詳細の中のリンク (DetailHtml の scjt://detail/…) で record の詳細を開く。移る前の状態を戻るの履歴に積む (同じ詳細へのリンクなら積まない)。
+    // 分類・リストはそのまま。リストにその record の行があれば選んだ状態にし、無ければ選択を外す
+    private async void OpenLink(string record)
+    {
+        if (string.IsNullOrWhiteSpace(record)) return;
+        if (!string.Equals(record, _detailRecord, StringComparison.OrdinalIgnoreCase)) PushHistory(CaptureState());
+        SelectInList(record);
+        try { await LoadDetailAsync(record); }
+        catch (Exception ex) { _detailRecord = null; ShowDetail($"詳細を出せませんでした: {ex.Message}"); txtStatus.Text = ""; }
+    }
+
+    // 戻るの履歴の 1 件: 分類・種類 (選択肢・選んでいるもの・使えるか)・サイズ (同じ)・名前の欄・リストの中身・選んでいる行・表示している詳細の record
+    private sealed record HistoryState(string Category, List<string> KindChoices, string? Kind, bool KindEnabled,
+        List<string> SizeChoices, string? Size, bool SizeEnabled, string Query, List<ListItem> Items, ListItem? Selected, string? DetailRecord);
+
+    private const int HistoryMax = 10;
+    private readonly List<HistoryState> _history = new();
+    // 表示している詳細の record (LoadDetailAsync で決まる。見つからない・空の表示なら null)
+    private string? _detailRecord;
+
+    // 今の状態。category を渡すとその分類 (分類を変えた直後に、変える前の分類で積むため)、
+    // useSelectedOverride が true なら選んでいる行は selected (リストで選び直した直後に、選ぶ前の行で積むため)
+    private HistoryState CaptureState(string? category = null, ListItem? selected = null, bool useSelectedOverride = false) => new(
+        category ?? cmbCategory.SelectedItem as string ?? CategoryAll,
+        (cmbKind.ItemsSource as IEnumerable<string>)?.ToList() ?? new List<string>(), cmbKind.SelectedItem as string, cmbKind.IsEnabled,
+        (cmbSize.ItemsSource as IEnumerable<string>)?.ToList() ?? new List<string>(), cmbSize.SelectedItem as string, cmbSize.IsEnabled,
+        txtQuery.Text,
+        (lstCandidates.ItemsSource as List<ListItem>)?.ToList() ?? new List<ListItem>(),
+        useSelectedOverride ? selected : lstCandidates.SelectedItem as ListItem,
+        _detailRecord);
+
+    // 履歴に積む (最大 10 件。超えたら古いものから捨てる)
+    private void PushHistory(HistoryState state)
+    {
+        _history.Add(state);
+        while (_history.Count > HistoryMax) _history.RemoveAt(0);
+        btnBack.IsEnabled = _history.Count > 0;
+    }
+
+    // 最後に積んだ状態をそのまま出す (リストは作り直さずに覚えた中身を出し、検索は走らせない)。戻る操作そのものは積まない
+    private async void BtnBack_Click(object sender, RoutedEventArgs e)
+    {
+        if (_history.Count == 0) return;
+        var s = _history[^1];
+        _history.RemoveAt(_history.Count - 1);
+        btnBack.IsEnabled = _history.Count > 0;
+
+        _searchTimer.Stop();
+        _categoryVersion++;   // 読み込み中の分類があっても、その結果で種類・サイズ・リストを作り直さない
+        _searchVersion++;     // 進行中の検索の結果でリストを差し替えない
+        _suppressSearch = true;
+        try
+        {
+            cmbCategory.SelectedItem = s.Category;
+            cmbKind.ItemsSource = s.KindChoices;
+            cmbKind.SelectedItem = s.Kind;
+            cmbKind.IsEnabled = s.KindEnabled;
+            cmbSize.ItemsSource = s.SizeChoices;
+            cmbSize.SelectedItem = s.Size;
+            cmbSize.IsEnabled = s.SizeEnabled;
+            txtQuery.Text = s.Query;
+        }
+        finally { _suppressSearch = false; }
+        SetList(s.Items);
+        _suppressSelection = true;
+        try { lstCandidates.SelectedItem = s.Selected; }
+        finally { _suppressSelection = false; }
+        ShowStatus(s.Category == CategoryAll ? (s.Query.Trim().Length == 0 ? "" : s.Items.Count > 0 ? $"候補 {s.Items.Count} 件" : "候補なし") : $"{s.Items.Count} 件");
+
+        Task detail;
+        if (s.DetailRecord == null) { _detailVersion++; _detailRecord = null; ShowDetail(""); detail = Task.CompletedTask; }
+        else detail = LoadDetailAsync(s.DetailRecord);
+
+        // 分類の品目の覚えが無い (品目名の作り直しで捨てた) ときは、後で種類・名前を変えたときに絞り込めるように読み込んでおく (リストは変えない)
+        if (s.Category != CategoryAll && !_categoryRows.ContainsKey(s.Category))
+        {
+            try { await LoadCategoryAsync(s.Category); } catch { }
+        }
+        try { await detail; }
+        catch (Exception ex) { _detailRecord = null; ShowDetail($"詳細を出せませんでした: {ex.Message}"); txtStatus.Text = ""; }
+    }
+
     // ===== リスト =====
 
     private void TxtQuery_TextChanged(object sender, TextChangedEventArgs e)
@@ -264,6 +420,8 @@ public partial class DetailPanel : UserControl
     private async void CmbCategory_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressSearch) return;
+        // 分類を変える前の状態を戻るの履歴に積む (分類は変える前のもの。種類・サイズ・リストはまだ前の分類のまま)
+        if (e.RemovedItems.Count > 0 && e.RemovedItems[0] is string previousCategory) PushHistory(CaptureState(category: previousCategory));
         _searchTimer.Stop();
         var category = cmbCategory.SelectedItem as string ?? CategoryAll;
         var version = ++_categoryVersion;
@@ -354,6 +512,16 @@ public partial class DetailPanel : UserControl
     private async Task<List<ListItem>?> LoadCategoryAsync(string category)
     {
         if (_categoryRows.TryGetValue(category, out var cached)) return cached;
+        // お店・ステーション・星系は ShopTree から作る (item_index は使わない)。gamedata_cache.db が無ければ null
+        if (category is CategoryShop or CategoryStation or CategorySystem)
+        {
+            // 表 (starmap_locations 等) はインデックス構築で作るので、無ければ「インデックスが未構築です」と同じ扱い
+            var tree = await GetShopTreeAsync();
+            if (tree == null || tree.IsEmpty) return null;
+            var treeRows = TreeCategoryRows(tree, category);
+            _categoryRows[category] = treeRows;
+            return treeRows;
+        }
         var db = DbPath();
         var rows = await Task.Run(() =>
         {
@@ -487,16 +655,19 @@ public partial class DetailPanel : UserControl
     private void LstCandidates_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressSelection) return;
-        if (lstCandidates.SelectedItem is ListItem item) Open(item);
+        // 選ぶ前の状態 (選んでいた行は外れた行) を覚えておき、詳細が変わるときに戻るの履歴に積む (Open)
+        var before = CaptureState(selected: e.RemovedItems.Count > 0 ? e.RemovedItems[0] as ListItem : null, useSelectedOverride: true);
+        if (lstCandidates.SelectedItem is ListItem item) Open(item, before);
     }
 
     private void LstCandidates_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Enter && lstCandidates.SelectedItem is ListItem item) { Open(item); e.Handled = true; }
+        if (e.Key == Key.Enter && lstCandidates.SelectedItem is ListItem item) { Open(item, CaptureState()); e.Handled = true; }
     }
 
-    // リストの品目の詳細を出す (名前の欄は変えない。変えるとリストの絞り込みが変わるため)。record が無ければ名前で引き直す
-    private async void Open(ListItem item)
+    // リストの品目の詳細を出す (名前の欄は変えない。変えるとリストの絞り込みが変わるため)。record が無ければ名前で引き直す。
+    // 出す詳細が今の詳細と違えば、before (選ぶ前の状態) を戻るの履歴に積む
+    private async void Open(ListItem item, HistoryState before)
     {
         try
         {
@@ -505,18 +676,22 @@ public partial class DetailPanel : UserControl
             {
                 var found = await SearchAllAsync(item.Name);
                 record = found?.FirstOrDefault(c => c.Name.Equals(item.Name, StringComparison.OrdinalIgnoreCase))?.Record ?? found?.FirstOrDefault()?.Record ?? "";
-                if (record.Length == 0) { _detailVersion++; ShowDetail($"「{item.Name}」が見つかりませんでした。"); return; }
+                if (record.Length == 0) { PushHistory(before); _detailVersion++; _detailRecord = null; ShowDetail($"「{item.Name}」が見つかりませんでした。"); return; }
             }
+            if (!string.Equals(record, _detailRecord, StringComparison.OrdinalIgnoreCase)) PushHistory(before);
             await LoadDetailAsync(record);
         }
-        catch (Exception ex) { ShowDetail($"詳細を出せませんでした: {ex.Message}"); txtStatus.Text = ""; }
+        catch (Exception ex) { _detailRecord = null; ShowDetail($"詳細を出せませんでした: {ex.Message}"); txtStatus.Text = ""; }
     }
 
     // ===== 詳細 =====
 
+    // 品目・資源の詳細、またはお店・場所・星系の詳細 (record が "Shop:" / "Place:" / "System:" で始まるもの。ShopTree.IsTreeRecord) を出す。
+    // 品目の詳細の【販売場所】の店は、shop_price_links で店に結べた行だけお店の詳細へのリンクにする (ShopTree を作れなければリンク無し)
     private async Task LoadDetailAsync(string record)
     {
         var version = ++_detailVersion;
+        _detailRecord = record;
         var status = txtStatus.Text;
         if (status == LoadingText) status = "";   // 前の読み込みの「読み込み中...」は戻さない
         // 本来の表示は、ほかに進行中の読み込みが無ければ今の表示。進行中の読み込みがあれば、その読み込みの結果 (覚えてあるもの) のまま
@@ -526,14 +701,20 @@ public partial class DetailPanel : UserControl
         string? text;
         string itemType = "";
         string? error = null;
+        var isTreeRecord = ShopTree.IsTreeRecord(record);
+        ShopTree? tree = null;
         _loadingCount++;
         try
         {
+            // お店・場所・星系 (その詳細と、販売場所のリンクに使う)。品目の詳細では、木を作れなくても詳細はリンク無しで出す
+            try { tree = await GetShopTreeAsync(); }
+            catch when (!isTreeRecord) { tree = null; }
             (text, itemType) = await Task.Run(() =>
             {
+                if (isTreeRecord) return (tree != null ? GameDataQueryService.ShopTreeDetailText(tree, record) : null, "");
                 if (!File.Exists(db)) return ((string?)null, "");
                 using var q = GameDataQueryService.OpenReadOnly(db);
-                return (q.GetItemDetailText(record), q.ItemTypeOf(record));
+                return (q.GetItemDetailText(record, shopTree: tree), q.ItemTypeOf(record));
             });
         }
         catch (Exception ex) { text = null; error = $"読み込めませんでした: {ex.Message}"; }
@@ -542,7 +723,12 @@ public partial class DetailPanel : UserControl
         // 最後の読み込みなら「読み込み中...」を本来の表示に戻す。ほかの読み込み (分類・詳細) がまだ進行中なら、その「読み込み中...」を残す
         RestoreStatusIfIdle();
         if (version != _detailVersion) return;
-        if (text == null) { ShowDetail(File.Exists(db) ? "品目が見つかりませんでした。" : "gamedata_cache.db がありません (設定タブの［インデックス構築］)"); return; }
+        if (text == null)
+        {
+            ShowDetail(!File.Exists(db) ? "gamedata_cache.db がありません (設定タブの［インデックス構築］)"
+                : isTreeRecord ? "お店・場所が見つかりませんでした。" : "品目が見つかりませんでした。");
+            return;
+        }
         ShowDetail(text);
 
         // 保存データに購入の売り場が無ければ、UEX の値段 (チャット・表と同じ取得・キャッシュ) を取ってから出し直す
@@ -556,7 +742,7 @@ public partial class DetailPanel : UserControl
             var again = await Task.Run(() =>
             {
                 using var q = GameDataQueryService.OpenReadOnly(db);
-                return q.GetItemDetailText(record, uex);
+                return q.GetItemDetailText(record, uex, tree);
             });
             if (version != _detailVersion || again == null) return;
             ShowDetail(again);
@@ -576,6 +762,32 @@ internal static class DetailHtml
 {
     private static readonly Markdig.MarkdownPipeline Pipeline = Markdig.MarkdownExtensions.UsePipeTables(new Markdig.MarkdownPipelineBuilder()).Build();
     private static readonly Regex KeyValueRegex = new(@"^([^:：|]{1,30}?)[:：]\s+(.+)$");
+
+    // 詳細の文字の中のリンク「[[record|表示名]]」(GameDataQueryService.DetailLink。record は URL エンコード済みで、使う文字は英数字と - _ . ~ %)。
+    // 表示名の終わりは、後ろに "]" が続かない "]]" (表示名が "]" で終わるとき、例 "CSR-RP [軍1C]" でも切れないように)
+    private static readonly Regex LinkRegex = new(@"\[\[([A-Za-z0-9%._~\-]+)\|(.*?)\]\](?!\])");
+    private const string LinkScheme = "scjt://detail/";
+
+    // 文字の欄 (WebView2 が使えないとき) 用: リンクを表示名だけにする
+    public static string StripLinks(string text) => LinkRegex.Replace(text ?? "", m => m.Groups[2].Value);
+
+    // WebView2 の移動先がリンク (scjt://detail/<URL エンコードした record>) なら record を返す
+    public static bool TryParseLink(string? uri, out string record)
+    {
+        record = "";
+        if (uri == null || !uri.StartsWith(LinkScheme, StringComparison.OrdinalIgnoreCase)) return false;
+        try { record = Uri.UnescapeDataString(uri[LinkScheme.Length..].TrimEnd('/')); }
+        catch { return false; }
+        return record.Length > 0;
+    }
+
+    // リンク 1 つを HTML の <a> にする (表示名は Markdown の記号を打ち消して入れる。href は URL エンコード済みの record なので、そのまま入れてよい)
+    private static string LinkHtml(string encodedRecord, string displayMarkdown) =>
+        $"<a href=\"{LinkScheme}{encodedRecord}\">{displayMarkdown}</a>";
+
+    // 「|」で始まる行 (元から Markdown の表) の中のリンクを <a> にする (リンクの外はそのまま)
+    private static string TableLineLinks(string line) =>
+        LinkRegex.Replace(line, m => LinkHtml(m.Groups[1].Value, Escape(m.Groups[2].Value)));
 
     public static string FromDetailText(string text) => Wrap(Markdig.Markdown.ToHtml(ToMarkdown(text ?? ""), Pipeline));
 
@@ -626,7 +838,7 @@ internal static class DetailHtml
                 FlushKv(); FlushPara();
                 // 元から Markdown の表 (中身は数値と単位、船の既定の装備)。全角空白は文字参照にする
                 // (Markdig は表のセルの前後の全角空白を消すので、既定の装備の入れ子の字下げ「　└」が消えないように。見た目は同じ全角空白)
-                md.AppendLine(t.Replace("\u3000", "&#12288;"));
+                md.AppendLine(TableLineLinks(t.Replace("\u3000", "&#12288;")));
                 inTable = true;
                 continue;
             }
@@ -669,8 +881,27 @@ internal static class DetailHtml
     private static bool IsSlashRow(string t, int count) =>
         t.Length > 0 && !t.StartsWith('|') && !t.StartsWith('【') && !KeyValueRegex.IsMatch(t) && SplitSlash(t).Count == count;
 
-    // 文字を Markdown に入れる: ミッションタブと同じ変換をし、強調は色の付いた span にする。記号は \ で打ち消す (Markdown の書式にしない)
+    // 文字を Markdown に入れる: ミッションタブと同じ変換をし、強調は色の付いた span にする。記号は \ で打ち消す (Markdown の書式にしない)。
+    // リンク「[[record|表示名]]」は <a> にする (表示名にも同じ変換をする)
     private static string Inline(string s)
+    {
+        if (LinkRegex.IsMatch(s))
+        {
+            var sbl = new StringBuilder();
+            int pos = 0;
+            foreach (Match m in LinkRegex.Matches(s))
+            {
+                if (m.Index > pos) sbl.Append(InlineText(s[pos..m.Index]));
+                sbl.Append(LinkHtml(m.Groups[1].Value, InlineText(m.Groups[2].Value)));
+                pos = m.Index + m.Length;
+            }
+            if (pos < s.Length) sbl.Append(InlineText(s[pos..]));
+            return sbl.ToString();
+        }
+        return InlineText(s);
+    }
+
+    private static string InlineText(string s)
     {
         var sb = new StringBuilder();
         foreach (var (chunk, emphasis) in MissionDisplayText.Parse(s))

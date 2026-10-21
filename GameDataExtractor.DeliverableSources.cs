@@ -222,6 +222,11 @@ public partial class GameDataExtractor
                     StatusChanged?.Invoke($"[採掘できる場所] 書き込めませんでした (前のデータを残します): {ex.Message}");
                 }
             }
+            // 6b. 星図の場所 (starmap_locations) とゲームの店 (game_shops)、それと DB の価格との紐づけ (shop_price_links)。
+            // 失敗しても納品物の入手場所は続ける (表は前のまま)
+            try { WriteShopTables(dcb, soc, loc); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { StatusChanged?.Invoke($"[お店] 星図の場所・店の表を作れませんでした (前のデータを残します): {ex.Message}"); }
             if (!hasTargets) return 0;
             using (var tx = _db!.BeginTransaction())
             {
@@ -390,6 +395,66 @@ public partial class GameDataExtractor
         return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
     }
 
+    // インデックスを構築した DB で、星図の場所 (starmap_locations)・ゲームの店 (game_shops) の表がまだ無い・前の形か (前の版で構築した DB)。
+    // 無ければ起動後に RebuildOreLocationsAsync (Step 6c) で作る (ore_locations と同じ扱い)
+    public bool NeedsShopTables()
+    {
+        EnsureDb();
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM item_index) AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (@a, @b)) < 2";
+        cmd.Parameters.AddWithValue("@a", ShopTables.StarmapLocationsTable);
+        cmd.Parameters.AddWithValue("@b", ShopTables.GameShopsTable);
+        // 前の形の game_shops (franchise_name の列が無い) も作り直す
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0 || ShopTables.ShopsTableLacksFranchiseNameColumn(_db);
+    }
+
+    // ゲームの店の表 (game_shops) はあるが、DB の価格との紐づけ (shop_price_links) の表がまだ無い・前の形か。そうなら起動後に RebuildShopPriceLinks で作る
+    public bool NeedsShopPriceLinks()
+    {
+        EnsureDb();
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @a) AND NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @b)";
+        cmd.Parameters.AddWithValue("@a", ShopTables.GameShopsTable);
+        cmd.Parameters.AddWithValue("@b", ShopTables.ShopPriceLinksTable);
+        // 前の形の表 (場所の列 location_record が無い) も作り直す
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0 || ShopTables.LinksTableLacksLocationColumn(_db);
+    }
+
+    // DB の価格 (item_shop_prices・trade_cache.db の trade_prices) とゲームの店の紐づけ (shop_price_links) を作り直す。紐づけた価格の名前の数を返す
+    public int RebuildShopPriceLinks()
+    {
+        EnsureDb();
+        var tradeDb = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(DbPath)) ?? ".", "trade_cache.db");
+        var r = ShopTables.RebuildLinks(_db!, tradeDb);
+        StatusChanged?.Invoke(r.Summary);
+        return r.Linked;
+    }
+
+    // Step 6c の中で、星図の場所とゲームの店を作って表を入れ替え、紐づけを作り直す。作れた行が 0 行なら前の行を残す (表が無ければ空で作る)
+    private void WriteShopTables(DeliverableDcb dcb, DeliverableSocpaks soc, Dictionary<string, string>? loc)
+    {
+        var sw = Stopwatch.StartNew();
+        var starmap = ShopTables.BuildStarmap(dcb, loc);
+        var (shops, shopStats) = ShopTables.BuildShops(dcb, soc, starmap, loc);
+        using (var ddl = _db!.CreateCommand())
+        {
+            ddl.CommandText = ShopTables.StarmapLocationsDdl + ShopTables.GameShopsDdl + ShopTables.ShopPriceLinksDdl;
+            ddl.ExecuteNonQuery();
+        }
+        if (starmap.Count == 0) StatusChanged?.Invoke("[お店] 星図の場所を 1 行も作れませんでした (前のデータを残します)");
+        else ShopTables.WriteStarmap(_db!, starmap);
+        if (shops.Count == 0)
+        {
+            StatusChanged?.Invoke("[お店] 店を 1 行も作れませんでした (前のデータを残します)");
+            // 前の形の表 (列が足りない) が残るなら、新しい形の空の表にする (次の起動で補完が毎回走らないように)
+            ShopTables.ReplaceOldFormatTables(_db!);
+        }
+        else ShopTables.WriteShops(_db!, shops);
+        StatusChanged?.Invoke($"[お店] 星図の場所 {starmap.Count} 行・店 {shops.Count} 行 ({shopStats})。時間 {sw.Elapsed.TotalSeconds:F1}秒");
+        var tradeDb = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(DbPath)) ?? ".", "trade_cache.db");
+        StatusChanged?.Invoke(ShopTables.RebuildLinks(_db!, tradeDb).Summary);
+    }
+
     // 採掘できる場所 (ore_locations) を作る。DCB と socpak の読み込みが納品物の入手場所 (Step 6c) と同じなので、Step 6c をそのまま走らせて
     // deliverable_sources と ore_locations を一緒に作り直す。起動後に裏で一度だけ呼ばれる (MainWindow: NeedsOreLocations のとき)。
     // 構築・再抽出と同時に走っても作業フォルダがぶつからないよう、取り出し先は別の名前 (dcb_tmp_orelocations / deliverable_tmp_orelocations) にする。
@@ -419,9 +484,12 @@ public partial class GameDataExtractor
             if (IsIndexBuildRunning) return 0;
             using (var ddl = _db!.CreateCommand())
             {
-                ddl.CommandText = OreLocationsDdl;
+                // 星図の場所・店・紐づけの表も、作れなかったときは空で作る (次の起動で走り直さないように。ore_locations と同じ扱い)
+                ddl.CommandText = OreLocationsDdl + ShopTables.StarmapLocationsDdl + ShopTables.GameShopsDdl + ShopTables.ShopPriceLinksDdl;
                 ddl.ExecuteNonQuery();
             }
+            // 店・紐づけの表が前の形 (列が足りない) のまま残っていれば、新しい形の空の表にする (作り直しが失敗しても、次の起動で補完が毎回走らないように)
+            ShopTables.ReplaceOldFormatTables(_db);
             using var cnt = _db.CreateCommand();
             cnt.CommandText = "SELECT COUNT(*) FROM ore_locations";
             return Convert.ToInt32(cnt.ExecuteScalar() ?? 0L);
@@ -832,6 +900,9 @@ public partial class GameDataExtractor
         // 子の socpak → (それを置く Entity のある親の socpak, その Entity の StarMapObject)。ChildStarMap と同じ組を、どの親の中の組かを残して持つ
         // (資源の採掘できる場所 (FindOreLocations) で、別の星系の親に置かれた組を除くのに使う。ChildStarMap の使い方は変えない)
         public Dictionary<string, HashSet<(string Parent, string Smo)>> ChildStarMapFrom { get; } = new(StringComparer.Ordinal);
+        // socpak → その中の .soc にある店 (Entity EntityClass="SCShop" と、その EntityComponentShop (__type="SShopComponentParams") の属性)。
+        // ［詳細］タブのお店 (game_shops。ShopTables.Build) に使う
+        public Dictionary<string, List<SocShop>> Shops { get; } = new(StringComparer.Ordinal);
         public int SocpakCount { get; private set; }
         public int BadCount { get; private set; }
 
@@ -848,7 +919,7 @@ public partial class GameDataExtractor
             using var zip = new ZipArchive(fs, ZipArchiveMode.Read);
             // 読む (順に) と調べる (並列に) を分ける。socpak は無圧縮で入っているので、entry をそのまま読んで中の zip を開く (一時ファイルは作らない)
             var queue = new System.Collections.Concurrent.BlockingCollection<(string Rel, byte[] Data)>(boundedCapacity: 8);
-            var results = new System.Collections.Concurrent.ConcurrentBag<(string Rel, HashSet<string> Records, HashSet<string>? Kids, List<(string Planet, HashSet<string> Creatures)> Ale, List<(string Child, string Smo)> ChildSmo)>();
+            var results = new System.Collections.Concurrent.ConcurrentBag<(string Rel, HashSet<string> Records, HashSet<string>? Kids, List<(string Planet, HashSet<string> Creatures)> Ale, List<(string Child, string Smo)> ChildSmo, List<SocShop> Shops)>();
             int bad = 0;
             var workers = Enumerable.Range(0, Math.Max(1, Environment.ProcessorCount - 1)).Select(_ => Task.Run(() =>
             {
@@ -886,8 +957,9 @@ public partial class GameDataExtractor
             catch (AggregateException) when (ct.IsCancellationRequested) { ct.ThrowIfCancellationRequested(); }
             s.SocpakCount = count;
             s.BadCount = bad;
-            foreach (var (rel, records, kids, ale, childSmo) in results)
+            foreach (var (rel, records, kids, ale, childSmo, shops) in results)
             {
+                if (shops.Count > 0) s.Shops[rel] = shops;
                 foreach (var (child, smo) in childSmo)
                 {
                     if (!s.ChildStarMap.TryGetValue(child, out var cs)) s.ChildStarMap[child] = cs = new HashSet<string>(StringComparer.Ordinal);
@@ -912,8 +984,9 @@ public partial class GameDataExtractor
             return s;
         }
 
-        private static (string Rel, HashSet<string> Records, HashSet<string>? Kids, List<(string Planet, HashSet<string> Creatures)> Ale, List<(string Child, string Smo)> ChildSmo) ScanOne(string rel, byte[] data, DeliverableDcb dcb)
+        private static (string Rel, HashSet<string> Records, HashSet<string>? Kids, List<(string Planet, HashSet<string> Creatures)> Ale, List<(string Child, string Smo)> ChildSmo, List<SocShop> Shops) ScanOne(string rel, byte[] data, DeliverableDcb dcb)
         {
+            var shops = new List<SocShop>();
             var records = new HashSet<string>(StringComparer.Ordinal);
             var kids = new HashSet<string>(StringComparer.Ordinal);
             var ale = new List<(string, HashSet<string>)>();
@@ -933,6 +1006,9 @@ public partial class GameDataExtractor
                 var text = Encoding.Latin1.GetString(bytes);
                 var lower = iname.ToLowerInvariant();
                 var isEntxml = lower.EndsWith(".entxml", StringComparison.Ordinal);
+                // .soc の中の店 (SCShop)。店の属性の入った CryXmlB だけを読む
+                if (lower.EndsWith(".soc", StringComparison.Ordinal) && text.Contains("SShopComponentParams", StringComparison.Ordinal))
+                    shops.AddRange(ReadSocShops(bytes, text));
                 // entxml の中の StarMapObject の uuid (子の socpak との組に使う)
                 List<string>? entSmos = null;
                 foreach (Match m in UuidRegex.Matches(text))
@@ -989,9 +1065,40 @@ public partial class GameDataExtractor
                     catch (Exception) { }   // 調査と同じく、JSON として読めない .ale は飛ばす (socpak のほかの中身は使う)
                 }
             }
-            return (rel, records, kids, ale, childSmo);
+            return (rel, records, kids, ale, childSmo, shops);
+        }
+
+        // .soc のバイト列から店を読む。.soc には CryXmlB がいくつも埋め込まれているので、"CryXmlB" の位置で切り分け、
+        // "SShopComponentParams" を含むものだけを CryXmlParser で読んで、Entity (EntityClass="SCShop") の名前・EntityCryGUID と、
+        // その中の EntityComponentShop (__type="SShopComponentParams") の franchise・shopInventoryType を取る。読めない CryXmlB は飛ばす
+        internal static List<SocShop> ReadSocShops(byte[] bytes, string latin1)
+        {
+            var list = new List<SocShop>();
+            var starts = new List<int>();
+            for (int at = latin1.IndexOf("CryXmlB", StringComparison.Ordinal); at >= 0; at = latin1.IndexOf("CryXmlB", at + 7, StringComparison.Ordinal))
+                starts.Add(at);
+            for (int i = 0; i < starts.Count; i++)
+            {
+                var a = starts[i];
+                var z = i + 1 < starts.Count ? starts[i + 1] : bytes.Length;
+                if (latin1.IndexOf("SShopComponentParams", a, z - a, StringComparison.Ordinal) < 0) continue;
+                System.Xml.Linq.XDocument doc;
+                try { doc = CryXmlParser.ParseBinaryBytes(bytes[a..z]); }
+                catch { continue; }
+                foreach (var ent in doc.Descendants("Entity"))
+                {
+                    if ((string?)ent.Attribute("EntityClass") != "SCShop") continue;
+                    var comp = ent.Descendants("EntityComponentShop").FirstOrDefault(c => (string?)c.Attribute("__type") == "SShopComponentParams");
+                    list.Add(new SocShop((string?)ent.Attribute("Name") ?? "", (string?)ent.Attribute("EntityCryGUID") ?? "",
+                        (string?)comp?.Attribute("franchise") ?? "", (string?)comp?.Attribute("shopInventoryType") ?? ""));
+                }
+            }
+            return list;
         }
     }
+
+    // .soc の中の店 1 つ (Entity の Name・EntityCryGUID、EntityComponentShop の franchise (ShopFranchise の uuid)・shopInventoryType (ITEM / COMMODITY))
+    internal readonly record struct SocShop(string EntityName, string Guid, string Franchise, string InventoryType);
 
     // ── 照合 (調査の t11_all.py。ルート表の評価は t2b_eval.py、出現の設定は t8_spawn.py) ──
     internal sealed class DeliverableSourceFinder
@@ -2061,5 +2168,549 @@ public partial class GameDataExtractor
             JsonValueKind.Number => v.GetDouble() != 0,
             _ => true,
         };
+    }
+
+    // ── ［詳細］タブのお店・ステーション・星系の表 (Step 6c で作る。ore_locations と同じ扱い) ──
+    //   starmap_locations: 星図の場所 (DCB の StarMapObject)。根の Star まで辿れるものだけ
+    //   game_shops: ゲームの店 (socpak の .soc の SCShop)。場所 × ショップ socpak × SCShop で 1 行 (同じショップ socpak が複数の場所で使い回されるため)
+    //   shop_price_links: DB の価格 (item_shop_prices の location・trade_cache.db の trade_prices の terminal) とゲームの店の紐づけ
+    internal static class ShopTables
+    {
+        internal const string StarmapLocationsTable = "starmap_locations", GameShopsTable = "game_shops", ShopPriceLinksTable = "shop_price_links";
+
+        // record_name: StarMapObject の record 名。uuid: _RecordId_。name_en: 英語名 (name の訳キーを英語の global.ini で引き、無ければ ",P" を付けて引き直す。
+        //   引けない・PLACEHOLDER・UNINITIALIZED なら record 名の "StarMapObject." の後ろ)。type: StarMapObjectType の name (例 Planet)。
+        // parent_record: parent の StarMapObject の record 名 (根は '')。system: 根の Star の英語名 (Stanton / Pyro / Nyx)
+        internal const string StarmapLocationsDdl = """
+
+            CREATE TABLE IF NOT EXISTS starmap_locations (
+                record_name TEXT PRIMARY KEY,
+                uuid TEXT NOT NULL,
+                name_en TEXT NOT NULL,
+                type TEXT NOT NULL,
+                parent_record TEXT NOT NULL,
+                system TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_starmap_locations_parent ON starmap_locations(parent_record);
+            """;
+
+        // shop_id: location_record + "|" + socpak + "|" + SCShop の EntityCryGUID (無ければ Entity 名)。entity_name: SCShop の Entity 名 (例 SCShop_Admin_lt_base_g)。
+        // name: franchise (ShopFranchise) の localizedName の英語名。無ければ Entity 名から作る (NameFromEntity)。franchise_record: ShopFranchise の record 名 (無ければ '')。
+        // franchise_name: franchise の英語名 (無ければ '')。画面の店の名前を決めるのに使う (GameDataQueryService.BuildShopTree)。
+        // inventory_type: shopInventoryType (ITEM / COMMODITY)。location_record: ショップ socpak から親の socpak を辿って最初に当たる StarMapObject。socpak: ショップ socpak
+        internal const string GameShopsDdl = """
+
+            CREATE TABLE IF NOT EXISTS game_shops (
+                shop_id TEXT PRIMARY KEY,
+                entity_name TEXT NOT NULL,
+                name TEXT NOT NULL,
+                franchise_record TEXT NOT NULL,
+                franchise_name TEXT NOT NULL DEFAULT '',
+                inventory_type TEXT NOT NULL,
+                location_record TEXT NOT NULL,
+                socpak TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_game_shops_location ON game_shops(location_record);
+            """;
+
+        // source: 'item' (item_shop_prices.location) / 'trade' (trade_prices.terminal)。price_key: その文字そのもの。match: どの決まりで結んだか。
+        // shop_id: 結んだゲームの店 (店が 1 つに決まらず場所だけ結んだものは '' で、match は 'location')。location_record: 結んだ場所 (StarMapObject の record 名)
+        internal const string ShopPriceLinksDdl = """
+
+            CREATE TABLE IF NOT EXISTS shop_price_links (
+                shop_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                price_key TEXT NOT NULL,
+                match TEXT NOT NULL,
+                location_record TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (source, price_key, shop_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_shop_price_links_shop ON shop_price_links(shop_id);
+            """;
+
+        internal readonly record struct StarmapRow(string Record, string Uuid, string Name, string Type, string Parent, string System);
+        internal readonly record struct ShopRow(string ShopId, string EntityName, string Name, string FranchiseRecord, string FranchiseName, string InventoryType, string Location, string Socpak);
+
+        private static string ShortRecord(string rn) { var dot = rn.IndexOf('.'); return dot >= 0 ? rn[(dot + 1)..] : rn; }
+
+        // 訳キーの英語 (キーそのもの、無ければ ",P" を付けたもの)。使えない文字 (PLACEHOLDER・UNINITIALIZED・空) なら null
+        private static string? English(Dictionary<string, string>? loc, string key)
+        {
+            if (loc == null || key.Length == 0) return null;
+            if (loc.TryGetValue(key, out var en) && OreService.EnglishText(en) is { } a) return a;
+            if (loc.TryGetValue(key + ",P", out var enP) && OreService.EnglishText(enP) is { } b) return b;
+            return null;
+        }
+
+        // 星図の場所 (根の Star まで辿れるものだけ)
+        public static List<StarmapRow> BuildStarmap(DeliverableDcb dcb, Dictionary<string, string>? loc)
+        {
+            var keys = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var (rn, key) in dcb.StarMapNameKeys) keys.TryAdd(rn, key);
+            var uuidOf = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var (id, rn) in dcb.IdToRecord) if (rn.StartsWith("StarMapObject.", StringComparison.Ordinal)) uuidOf.TryAdd(rn, id);
+            string? ParentOf(string rn) =>
+                dcb.StarMapParentRel.TryGetValue(rn, out var prel) && dcb.RelLowerToRecord.TryGetValue(prel, out var prn)
+                && prn.StartsWith("StarMapObject.", StringComparison.Ordinal) && prn != rn ? prn : null;
+            string TypeOf(string rn) => dcb.StarMapTypeId.TryGetValue(rn, out var ty) && dcb.StarMapTypeNames.TryGetValue(ty, out var tn) ? tn : "";
+            string NameOf(string rn) => (keys.TryGetValue(rn, out var k) ? English(loc, k) : null) ?? ShortRecord(rn);
+            var rows = new List<StarmapRow>();
+            foreach (var rn in dcb.RecordToFile.Keys.Where(r => r.StartsWith("StarMapObject.", StringComparison.Ordinal)).OrderBy(r => r, StringComparer.Ordinal))
+            {
+                // 根まで辿る (輪になっていたら入れない)
+                string cur = rn;
+                var seen = new HashSet<string>(StringComparer.Ordinal) { rn };
+                bool loop = false;
+                while (ParentOf(cur) is { } p)
+                {
+                    if (!seen.Add(p)) { loop = true; break; }
+                    cur = p;
+                }
+                if (loop || TypeOf(cur) != "Star") continue;
+                rows.Add(new StarmapRow(rn, uuidOf.TryGetValue(rn, out var u) ? u : "", NameOf(rn), TypeOf(rn), ParentOf(rn) ?? "", NameOf(cur)));
+            }
+            return rows;
+        }
+
+        // 店の名前を Entity 名から作る (franchise の名前の無い店): "_" で区切り、"SCShop"・"Entity"・"Shop" の語を除いた残りの語を全部空白でつなぐ
+        // (例 SCShop_Pyro_RestStop_Rund_Admin → "Pyro RestStop Rund Admin"、SCShop_H_Pharmacy_Levski → "H Pharmacy Levski")。
+        // 語が残らない (Entity 名がただの "SCShop" など) ときは、ショップ socpak のファイル名 (拡張子なし)
+        internal static string NameFromEntity(string entityName, string socpak)
+        {
+            var words = entityName.Split('_', StringSplitOptions.RemoveEmptyEntries)
+                .Where(w => !w.Equals("SCShop", StringComparison.OrdinalIgnoreCase) && !w.Equals("Entity", StringComparison.OrdinalIgnoreCase) && !w.Equals("Shop", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (words.Count > 0) return string.Join(' ', words);
+            var file = Path.GetFileNameWithoutExtension(socpak);
+            return file.Length > 0 ? file : entityName;
+        }
+
+        // ゲームの店。ショップ socpak から親の socpak を辿り、子の socpak を置く Entity に書かれた StarMapObject (ChildStarMapFrom の、その親の中の組) に当たったら、
+        // その道はそこで止めて場所にする。場所が星図の場所 (starmap) に無い・どの道でも当たらない店は入れない (件数を返す)
+        public static (List<ShopRow> Rows, string Stats) BuildShops(DeliverableDcb dcb, DeliverableSocpaks soc, List<StarmapRow> starmap, Dictionary<string, string>? loc)
+        {
+            var known = new HashSet<string>(starmap.Select(r => r.Record), StringComparer.Ordinal);
+            var franchiseCache = new Dictionary<string, (string Record, string? Name)>(StringComparer.OrdinalIgnoreCase);
+            (string Record, string? Name) Franchise(string uuid)
+            {
+                if (uuid.Length == 0) return ("", null);
+                if (franchiseCache.TryGetValue(uuid, out var c)) return c;
+                string rec = "", key = "";
+                if (dcb.IdToRecord.TryGetValue(uuid.ToLowerInvariant(), out var rn) && rn.StartsWith("ShopFranchise.", StringComparison.Ordinal))
+                {
+                    rec = rn;
+                    if (dcb.RecordToFile.TryGetValue(rn, out var rel) && dcb.ReadText(rel) is { } text)
+                    {
+                        try
+                        {
+                            using var doc = JsonDocument.Parse(text);
+                            if (doc.RootElement.TryGetProperty("_RecordValue_", out var rv) && rv.ValueKind == JsonValueKind.Object
+                                && rv.TryGetProperty("localizedName", out var ln) && ln.ValueKind == JsonValueKind.String)
+                                key = (ln.GetString() ?? "").TrimStart('@');
+                        }
+                        catch (JsonException) { }
+                    }
+                }
+                return franchiseCache[uuid] = (rec, English(loc, key));
+            }
+            List<string> LocationsOf(string socpak)
+            {
+                var result = new List<string>();
+                var visited = new HashSet<string>(StringComparer.Ordinal);
+                var stack = new Stack<string>();
+                stack.Push(socpak);
+                while (stack.Count > 0)
+                {
+                    var x = stack.Pop();
+                    if (!visited.Add(x) || !soc.Parents.TryGetValue(x, out var parents)) continue;
+                    soc.ChildStarMapFrom.TryGetValue(x, out var placed);
+                    foreach (var p in parents.OrderBy(v => v, StringComparer.Ordinal))
+                    {
+                        var smos = placed?.Where(t => t.Parent == p && known.Contains(t.Smo)).Select(t => t.Smo).Distinct().OrderBy(v => v, StringComparer.Ordinal).ToList();
+                        if (smos is { Count: > 0 }) { foreach (var smo in smos) if (!result.Contains(smo)) result.Add(smo); }
+                        else stack.Push(p);
+                    }
+                }
+                return result;
+            }
+            var rows = new Dictionary<string, ShopRow>(StringComparer.Ordinal);
+            int unlocated = 0, socpaksUnlocated = 0, noFranchise = 0;
+            foreach (var (socpak, shops) in soc.Shops.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+            {
+                var locs = LocationsOf(socpak);
+                if (locs.Count == 0) { unlocated += shops.Count; socpaksUnlocated++; continue; }
+                foreach (var shop in shops)
+                {
+                    var (frRec, frName) = Franchise(shop.Franchise);
+                    if (frName == null) noFranchise++;
+                    var name = frName ?? NameFromEntity(shop.EntityName, socpak);
+                    foreach (var l in locs)
+                    {
+                        var id = $"{l}|{socpak}|{(shop.Guid.Length > 0 ? shop.Guid : shop.EntityName)}";
+                        rows.TryAdd(id, new ShopRow(id, shop.EntityName, name, frRec, frName ?? "", shop.InventoryType, l, socpak));
+                    }
+                }
+            }
+            var stats = $"店のある socpak {soc.Shops.Count} 件・店 {soc.Shops.Values.Sum(v => v.Count)} 件 (場所の分からない店 {unlocated} 件 / socpak {socpaksUnlocated} 件。franchise の名前の無い店 {noFranchise} 件)";
+            return (rows.Values.OrderBy(r => r.ShopId, StringComparer.Ordinal).ToList(), stats);
+        }
+
+        public static void WriteStarmap(SqliteConnection db, List<StarmapRow> rows)
+        {
+            using var tx = db.BeginTransaction();
+            using (var del = db.CreateCommand()) { del.Transaction = tx; del.CommandText = StarmapLocationsDdl + "DELETE FROM starmap_locations;"; del.ExecuteNonQuery(); }
+            using (var ins = db.CreateCommand())
+            {
+                ins.Transaction = tx;
+                ins.CommandText = "INSERT OR IGNORE INTO starmap_locations(record_name,uuid,name_en,type,parent_record,system) VALUES(@r,@u,@n,@t,@p,@s)";
+                var pR = ins.Parameters.Add("@r", SqliteType.Text); var pU = ins.Parameters.Add("@u", SqliteType.Text); var pN = ins.Parameters.Add("@n", SqliteType.Text);
+                var pT = ins.Parameters.Add("@t", SqliteType.Text); var pP = ins.Parameters.Add("@p", SqliteType.Text); var pS = ins.Parameters.Add("@s", SqliteType.Text);
+                foreach (var r in rows)
+                {
+                    pR.Value = r.Record; pU.Value = r.Uuid; pN.Value = r.Name; pT.Value = r.Type; pP.Value = r.Parent; pS.Value = r.System;
+                    ins.ExecuteNonQuery();
+                }
+            }
+            tx.Commit();
+        }
+
+        // game_shops に franchise_name の列が無い (前の形の表) か
+        internal static bool ShopsTableLacksFranchiseNameColumn(SqliteConnection db)
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('game_shops')";
+            if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0) return false;   // 表が無い
+            cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('game_shops') WHERE name = 'franchise_name'";
+            return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0;
+        }
+
+        public static void WriteShops(SqliteConnection db, List<ShopRow> rows)
+        {
+            var dropOld = ShopsTableLacksFranchiseNameColumn(db);
+            using var tx = db.BeginTransaction();
+            using (var del = db.CreateCommand())
+            {
+                del.Transaction = tx;
+                // 前の形の表 (franchise_name の列が無い) は作り直す
+                if (dropOld) { del.CommandText = "DROP TABLE game_shops;"; del.ExecuteNonQuery(); }
+                del.CommandText = GameShopsDdl + "DELETE FROM game_shops;";
+                del.ExecuteNonQuery();
+            }
+            using (var ins = db.CreateCommand())
+            {
+                ins.Transaction = tx;
+                ins.CommandText = "INSERT OR IGNORE INTO game_shops(shop_id,entity_name,name,franchise_record,franchise_name,inventory_type,location_record,socpak) VALUES(@i,@e,@n,@f,@fn,@t,@l,@s)";
+                var pI = ins.Parameters.Add("@i", SqliteType.Text); var pE = ins.Parameters.Add("@e", SqliteType.Text); var pN = ins.Parameters.Add("@n", SqliteType.Text);
+                var pF = ins.Parameters.Add("@f", SqliteType.Text); var pT = ins.Parameters.Add("@t", SqliteType.Text); var pL = ins.Parameters.Add("@l", SqliteType.Text);
+                var pS = ins.Parameters.Add("@s", SqliteType.Text);
+                var pFn = ins.Parameters.Add("@fn", SqliteType.Text);
+                foreach (var r in rows)
+                {
+                    pFn.Value = r.FranchiseName;
+                    pI.Value = r.ShopId; pE.Value = r.EntityName; pN.Value = r.Name; pF.Value = r.FranchiseRecord; pT.Value = r.InventoryType; pL.Value = r.Location; pS.Value = r.Socpak;
+                    ins.ExecuteNonQuery();
+                }
+            }
+            tx.Commit();
+        }
+
+        // ── 紐づけ (shop_price_links) ──
+        // 名前の正規化: 小文字にし、英数字 (a-z 0-9) 以外を除く
+        internal static string Norm(string s)
+        {
+            var sb = new StringBuilder(s.Length);
+            foreach (var ch in s.ToLowerInvariant()) if (ch is >= 'a' and <= 'z' or >= '0' and <= '9') sb.Append(ch);
+            return sb.ToString();
+        }
+
+        // 紐づけの結果。Unmatched は結べなかった価格の名前 (source, price_key, 理由)。
+        // ItemShop / TradeShop は店まで結べた数、ItemLocation / TradeLocation は場所だけ結べた数 (店が 1 つに決まらなかったもの)
+        // Written が false なら何も書き換えていない (NotWrittenReason にその理由)。TradeKept は trade_cache.db を読めず、trade の行だけ前を残したこと
+        internal sealed record LinkResult(int ItemTotal, int ItemShop, int ItemLocation, int TradeTotal, int TradeShop, int TradeLocation,
+            List<(string Source, string Key, string Reason)> Unmatched, bool Written, string NotWrittenReason = "", bool TradeKept = false)
+        {
+            public int Linked => ItemShop + ItemLocation + TradeShop + TradeLocation;
+            public string Summary => Written
+                ? $"[お店] 価格の紐づけ: 店の売り場 {ItemTotal} 種類のうち 店まで {ItemShop}・場所まで {ItemLocation}・結べない {ItemTotal - ItemShop - ItemLocation}、"
+                  + (TradeKept ? "コモディティの端末は trade_cache.db を読めないので前の紐づけを残しました"
+                               : $"コモディティの端末 {TradeTotal} 種類のうち 店まで {TradeShop}・場所まで {TradeLocation}・結べない {TradeTotal - TradeShop - TradeLocation}")
+                : $"[お店] 価格の紐づけ: {NotWrittenReason}ので作りませんでした (前のデータを残します)";
+        }
+
+        // 前方一致に使う短いほうの名前の最小の長さ (正規化した文字数)。短い名前 (例 "a") がほかの名前の頭に当たるのを避ける
+        private const int MinPrefixLength = 4;
+
+        // 場所だけ結んだ行の match
+        internal const string MatchLocation = "location";
+
+        // 店・紐づけの表が前の形 (game_shops に franchise_name、shop_price_links に location_record の列が無い) なら DROP し、新しい形の空の表を作る。
+        // 補完の作り直しが失敗した・店が 0 行だったときに呼ぶ (次の起動で NeedsShopTables / NeedsShopPriceLinks が真にならないように)
+        internal static void ReplaceOldFormatTables(SqliteConnection db)
+        {
+            var dropShops = ShopsTableLacksFranchiseNameColumn(db);
+            var dropLinks = LinksTableLacksLocationColumn(db);
+            using var cmd = db.CreateCommand();
+            if (dropShops) { cmd.CommandText = "DROP TABLE game_shops;"; cmd.ExecuteNonQuery(); }
+            if (dropLinks) { cmd.CommandText = "DROP TABLE shop_price_links;"; cmd.ExecuteNonQuery(); }
+            cmd.CommandText = GameShopsDdl + ShopPriceLinksDdl;
+            cmd.ExecuteNonQuery();
+        }
+
+        // 紐づけの表を新しい形にする: 無ければ作り、前の形 (location_record の列が無い) なら列を足す (前の行は残す。location_record は '')
+        internal static void MigrateLinksTable(SqliteConnection db)
+        {
+            var lacks = LinksTableLacksLocationColumn(db);
+            using var cmd = db.CreateCommand();
+            if (lacks) { cmd.CommandText = "ALTER TABLE shop_price_links ADD COLUMN location_record TEXT NOT NULL DEFAULT '';"; cmd.ExecuteNonQuery(); }
+            cmd.CommandText = ShopPriceLinksDdl;
+            cmd.ExecuteNonQuery();
+        }
+
+        // shop_price_links に location_record の列が無い (前の形の表) か
+        internal static bool LinksTableLacksLocationColumn(SqliteConnection db)
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('shop_price_links')";
+            if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0) return false;   // 表が無い
+            cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('shop_price_links') WHERE name = 'location_record'";
+            return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0;
+        }
+
+        // DB の価格とゲームの店を結んで shop_price_links を入れ替える。trade_cache.db は読み取り専用で開く (無ければ trade は 0 件)。
+        // 決まり (どれも、1 つに決まらないもの・当たらないものは結ばない):
+        //   星系: 価格の名前の星系 (cstone は先頭の段、trade は star_system、uex は名前の末尾の括弧) と starmap_locations.system が同じ (uex で括弧が無ければ全星系)
+        //   場所: 子孫を含めて店が 1 つ以上ある場所 (Star を除く) だけを候補にし、区切りの名前を深い段から順に、その星系の候補の名前と正規化して
+        //     完全一致 → 前方一致 (どちらかがもう一方の頭。短いほうが 4 文字以上) で照らし、1 つに決まった最初の段の場所
+        //     (候補が複数でも、そのうち 1 つがほかの候補全部の祖先なら、その祖先)
+        //   店: その場所と子孫の場所の店を、店の名前の部分と正規化して、名前が完全一致 → Entity 名の語が完全一致 → 名前が含む → Entity 名が含む の順に照らし、
+        //     1 つに決まった店 (MatchShop)。trade は COMMODITY の店だけを見る
+        //   場所は決まったが店が 1 つに決まらないものは、場所で結ぶ (shop_id は ''、location_record に場所、match は 'location')
+        // 紐づけの表は最初に新しい形にする (下の早い return でも、次の起動で NeedsShopPriceLinks が真にならないように)。
+        // trade_cache.db が無い・読めないときは trade の行だけ前を残し、作れた紐づけが全体で 0 行なら前を全部残す
+        public static LinkResult RebuildLinks(SqliteConnection db, string tradeDbPath)
+        {
+            MigrateLinksTable(db);
+            var locs = new Dictionary<string, (string Name, string Type, string Parent, string System)>(StringComparer.Ordinal);
+            var shops = new List<(string Id, string Name, string Inv, string Loc, string Entity)>();
+            try
+            {
+                using (var cmd = db.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT record_name, name_en, type, parent_record, system FROM starmap_locations";
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read()) locs[r.GetString(0)] = (r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4));
+                }
+                using (var cmd = db.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT shop_id, name, inventory_type, location_record, entity_name FROM game_shops";
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read()) shops.Add((r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4)));
+                }
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode == 1) { }   // 表が無い
+            if (shops.Count == 0 || locs.Count == 0) return new LinkResult(0, 0, 0, 0, 0, 0, new(), false, "店の表が空な");
+
+            var children = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            foreach (var (rn, l) in locs)
+            {
+                if (l.Parent.Length == 0) continue;
+                if (!children.TryGetValue(l.Parent, out var list)) children[l.Parent] = list = new List<string>();
+                list.Add(rn);
+            }
+            var shopsByLoc = shops.GroupBy(s => s.Loc, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+            List<(string Id, string Name, string Inv, string Loc, string Entity)> ShopsUnder(string place)
+            {
+                var result = new List<(string, string, string, string, string)>();
+                var stack = new Stack<string>();
+                stack.Push(place);
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                while (stack.Count > 0)
+                {
+                    var x = stack.Pop();
+                    if (!seen.Add(x)) continue;
+                    if (shopsByLoc.TryGetValue(x, out var here)) result.AddRange(here);
+                    if (children.TryGetValue(x, out var ks)) foreach (var k in ks) stack.Push(k);
+                }
+                return result;
+            }
+            // 場所の候補: 子孫を含めて店が 1 つ以上ある場所 (店のある場所から根へ辿った場所すべて)
+            var withShops = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var loc in shopsByLoc.Keys)
+                for (string? cur = loc; cur != null && cur.Length > 0 && withShops.Add(cur);)
+                    cur = locs.TryGetValue(cur, out var l) ? l.Parent : null;
+            var placeNames = locs.Where(kv => kv.Value.Type != "Star" && withShops.Contains(kv.Key))
+                .Select(kv => (Record: kv.Key, kv.Value.System, Norm: Norm(kv.Value.Name))).Where(x => x.Norm.Length > 0).ToList();
+            var systems = new HashSet<string>(locs.Values.Select(l => l.System), StringComparer.OrdinalIgnoreCase);
+
+            // 場所: segs は深い段から順。system が null なら全星系。各段で完全一致 → 前方一致の順に照らし、
+            // 候補が 1 つならそれ、複数でも、そのうち 1 つがほかの候補全部の祖先 (parent を辿って当たる) ならその祖先に決める
+            bool IsAncestor(string anc, string rn)
+            {
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                for (var cur = locs.TryGetValue(rn, out var l0) ? l0.Parent : ""; cur.Length > 0 && seen.Add(cur); cur = locs.TryGetValue(cur, out var l) ? l.Parent : "")
+                    if (cur == anc) return true;
+                return false;
+            }
+            string? Decide(List<(string Record, string System, string Norm)> hits)
+            {
+                if (hits.Count == 1) return hits[0].Record;
+                if (hits.Count < 2) return null;
+                var roots = hits.Where(a => hits.All(b => b.Record == a.Record || IsAncestor(a.Record, b.Record))).ToList();
+                return roots.Count == 1 ? roots[0].Record : null;
+            }
+            (string Record, string How)? ResolvePlace(string? system, IEnumerable<string> segs)
+            {
+                var pool = system == null ? placeNames : placeNames.Where(p => p.System.Equals(system, StringComparison.OrdinalIgnoreCase)).ToList();
+                foreach (var seg in segs)
+                {
+                    var n = Norm(seg);
+                    if (n.Length == 0) continue;
+                    var exact = pool.Where(p => p.Norm == n).ToList();
+                    if (exact.Count > 0)
+                    {
+                        if (Decide(exact) is { } e) return (e, exact.Count == 1 ? "場所:完全一致" : "場所:完全一致(祖先)");
+                        continue;
+                    }
+                    var prefix = pool.Where(p => Math.Min(p.Norm.Length, n.Length) >= MinPrefixLength && (p.Norm.StartsWith(n, StringComparison.Ordinal) || n.StartsWith(p.Norm, StringComparison.Ordinal))).ToList();
+                    if (Decide(prefix) is { } pr) return (pr, prefix.Count == 1 ? "場所:前方一致" : "場所:前方一致(祖先)");
+                }
+                return null;
+            }
+            // 店: 候補の中で、次の順に照らして 1 つに決まった店
+            //   1. 名前 (game_shops.name) が完全一致  2. Entity 名を "_" で区切った語のどれかが完全一致  3. 名前が含む (片方が片方を含む)  4. Entity 名が含む
+            (string Id, string How)? MatchShop(List<(string Id, string Name, string Inv, string Loc, string Entity)> cands, string label)
+            {
+                var n = Norm(label);
+                if (n.Length == 0 || cands.Count == 0) return null;
+                static bool Contains(string field, string n) => Norm(field) is { Length: > 0 } cn && (cn.Contains(n, StringComparison.Ordinal) || n.Contains(cn, StringComparison.Ordinal));
+                var steps = new (Func<(string Id, string Name, string Inv, string Loc, string Entity), bool> Hit, string How)[]
+                {
+                    (c => Norm(c.Name) == n, "店:名前が完全一致"),
+                    (c => c.Entity.Split('_', StringSplitOptions.RemoveEmptyEntries).Any(w => Norm(w) == n), "店:Entity 名の語が完全一致"),
+                    (c => Contains(c.Name, n), "店:名前が含む"),
+                    (c => Contains(c.Entity, n), "店:Entity 名が含む"),
+                };
+                foreach (var (hit, how) in steps)
+                {
+                    var found = cands.Where(hit).ToList();
+                    if (found.Count == 1) return (found[0].Id, how);
+                }
+                return null;
+            }
+
+            var links = new List<(string ShopId, string Source, string Key, string Match, string Location)>();
+            var unmatched = new List<(string Source, string Key, string Reason)>();
+            int itemShop = 0, itemLoc = 0, tradeShop = 0, tradeLoc = 0;
+
+            // 店の売り場 (item_shop_prices の購入・レンタルの location)
+            var itemKeys = new List<(string Location, string Source)>();
+            try
+            {
+                using var cmd = db.CreateCommand();
+                cmd.CommandText = "SELECT DISTINCT location, source FROM item_shop_prices WHERE kind IN (@b, @r) AND location <> ''";
+                cmd.Parameters.AddWithValue("@b", ShopPriceStore.KindBuy);
+                cmd.Parameters.AddWithValue("@r", ShopPriceStore.KindRent);
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) itemKeys.Add((r.GetString(0), r.GetString(1)));
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode == 1) { }
+            var itemDistinct = itemKeys.Select(k => k.Location).Distinct(StringComparer.Ordinal).Count();
+            var itemDone = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var (location, source) in itemKeys)
+            {
+                if (!itemDone.Add(location)) continue;
+                (string Record, string How)? place;
+                string label;
+                if (source == "cstone")
+                {
+                    var t = location.Split(" - ").Select(x => x.Trim()).ToList();
+                    if (t.Count < 2) { unmatched.Add(("item", location, "形が「星系 - … - 店」でない")); continue; }
+                    var head = t[0].Split(" > ").Select(x => x.Trim()).ToList();
+                    place = ResolvePlace(head[0], head.Skip(1).Concat(t.Skip(1).Take(t.Count - 2)).Reverse().ToList());
+                    label = t[^1];
+                }
+                else if (source == "uex")
+                {
+                    // 船の店 ("Vantage ARC-L1"・"Traveler Nyx Gateway (Stanton)")。末尾の括弧が星系の名前ならその星系。名前の後ろの部分 (語を前から 1 つずつ外したもの。長い順) を場所として照らす
+                    var name = location.Trim();
+                    string? system = null;
+                    var m = Regex.Match(name, @"^(.*?)\s*\(([^()]+)\)\s*$");
+                    if (m.Success && systems.Contains(m.Groups[2].Value.Trim())) { system = m.Groups[2].Value.Trim(); name = m.Groups[1].Value.Trim(); }
+                    var words = name.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    place = null;
+                    int k = 1;
+                    for (; k < words.Length && place == null; k++) place = ResolvePlace(system, [string.Join(' ', words[k..])]);
+                    label = string.Join(' ', words[..(k - 1)]);
+                }
+                else { unmatched.Add(("item", location, "出どころが cstone / uex でない")); continue; }
+                if (place == null) { unmatched.Add(("item", location, "場所が 1 つに決まらない")); continue; }
+                var cands = ShopsUnder(place.Value.Record).Where(s => !s.Inv.Equals("COMMODITY", StringComparison.OrdinalIgnoreCase)).ToList();
+                var hitShop = MatchShop(cands, label);
+                if (hitShop != null) { links.Add((hitShop.Value.Id, "item", location, place.Value.How + "," + hitShop.Value.How, place.Value.Record)); itemShop++; }
+                else { links.Add(("", "item", location, MatchLocation, place.Value.Record)); itemLoc++; }
+            }
+
+            // コモディティの端末 (trade_prices の is_current = 1 の terminal)
+            var terminals = new List<(string Terminal, string City, string Outpost, string Moon, string Planet, string System)>();
+            var tradeOk = File.Exists(tradeDbPath);
+            if (tradeOk)
+            {
+                try
+                {
+                    using var tc = new SqliteConnection($"Data Source={tradeDbPath};Mode=ReadOnly");
+                    tc.Open();
+                    using var cmd = tc.CreateCommand();
+                    cmd.CommandText = "SELECT DISTINCT terminal, COALESCE(city, ''), COALESCE(outpost, ''), COALESCE(moon, ''), COALESCE(planet, ''), COALESCE(star_system, '') FROM trade_prices WHERE is_current = 1 AND terminal <> ''";
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read()) terminals.Add((r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetString(5)));
+                }
+                catch (Exception) { tradeOk = false; terminals.Clear(); }
+            }
+            var tradeDistinct = terminals.Select(t => t.Terminal).Distinct(StringComparer.Ordinal).Count();
+            var tradeDone = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var t in terminals)
+            {
+                if (!tradeDone.Add(t.Terminal)) continue;
+                // 端末名 "Admin - <場所>" の場所の部分 (2 段以上なら先頭の段 (店の名前) を除く) を深い順に、続けて outpost・city・moon・planet
+                var parts = t.Terminal.Split(" - ").Select(x => x.Trim()).ToList();
+                var label = parts.Count >= 2 ? parts[0] : t.Terminal;
+                var segs = (parts.Count >= 2 ? parts.Skip(1) : parts).Reverse().Concat(new[] { t.Outpost, t.City, t.Moon, t.Planet }).ToList();
+                var place = ResolvePlace(t.System, segs);
+                if (place == null) { unmatched.Add(("trade", t.Terminal, "場所が 1 つに決まらない")); continue; }
+                var cands = ShopsUnder(place.Value.Record).Where(s => s.Inv.Equals("COMMODITY", StringComparison.OrdinalIgnoreCase)).ToList();
+                var shop = MatchShop(cands, label);
+                if (shop != null) { links.Add((shop.Value.Id, "trade", t.Terminal, place.Value.How + "," + shop.Value.How, place.Value.Record)); tradeShop++; }
+                else { links.Add(("", "trade", t.Terminal, MatchLocation, place.Value.Record)); tradeLoc++; }
+            }
+
+            // 作れた紐づけが 0 行なら、前を全部残す
+            if (links.Count == 0)
+                return new LinkResult(itemDistinct, 0, 0, tradeDistinct, 0, 0, unmatched, false, "紐づけが 1 行も作れなかった");
+            using (var tx = db.BeginTransaction())
+            {
+                using (var del = db.CreateCommand())
+                {
+                    del.Transaction = tx;
+                    // trade_cache.db を読めなかったときは trade の行を消さない (前を残す)
+                    del.CommandText = tradeOk ? "DELETE FROM shop_price_links;" : "DELETE FROM shop_price_links WHERE source <> 'trade';";
+                    del.ExecuteNonQuery();
+                }
+                using (var ins = db.CreateCommand())
+                {
+                    ins.Transaction = tx;
+                    ins.CommandText = "INSERT OR IGNORE INTO shop_price_links(shop_id,source,price_key,match,location_record) VALUES(@i,@s,@k,@m,@l)";
+                    var pI = ins.Parameters.Add("@i", SqliteType.Text); var pS = ins.Parameters.Add("@s", SqliteType.Text);
+                    var pK = ins.Parameters.Add("@k", SqliteType.Text); var pM = ins.Parameters.Add("@m", SqliteType.Text);
+                    var pL = ins.Parameters.Add("@l", SqliteType.Text);
+                    foreach (var l in links)
+                    {
+                        pI.Value = l.ShopId; pS.Value = l.Source; pK.Value = l.Key; pM.Value = l.Match; pL.Value = l.Location;
+                        ins.ExecuteNonQuery();
+                    }
+                }
+                tx.Commit();
+            }
+            return new LinkResult(itemDistinct, itemShop, itemLoc, tradeDistinct, tradeShop, tradeLoc, unmatched, true, TradeKept: !tradeOk);
+        }
     }
 }

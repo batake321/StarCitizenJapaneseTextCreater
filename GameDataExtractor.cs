@@ -3654,6 +3654,14 @@ public partial class GameDataExtractor : IDisposable
                     onStatus?.Invoke($"[売り場・価格] 船・車両: 購入・レンタルの登録あり {withShop} 件, なし {shipTargets.Count - withShop} 件");
                 }
             }
+            // 価格を取り終えたので、ゲームの店と DB の価格の紐づけ (shop_price_links。［詳細］タブのお店) を作り直す。
+            // 店の表 (game_shops) が無い・空なら作らない。失敗しても取得の結果は使えるので、知らせて続ける
+            try
+            {
+                var tradeDb = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(dbPath)) ?? ".", "trade_cache.db");
+                onStatus?.Invoke(ShopTables.RebuildLinks(db, tradeDb).Summary);
+            }
+            catch (Exception ex) { onStatus?.Invoke($"[お店] 価格の紐づけを作り直せませんでした: {ex.Message}"); }
             // 最後まで終わったので取得中の印を消す (取れなかった品目は次のインデックス構築・再抽出の後に取り直す)
             DeleteMeta(db, ShopPriceInProgressMetaKey);
         }
