@@ -2514,7 +2514,8 @@ public partial class GameDataExtractor : IDisposable
             throw new InvalidOperationException($"starbreaker が失敗しました (終了コード {proc.ExitCode}): {StderrTail(stderr)}");
     }
 
-    // starbreaker の終わりを待つ。取り消されたらプロセス (子プロセスも) を止めてから取り消しの例外を上げる
+    // starbreaker の終わりを待つ。取り消されたらプロセス (子プロセスも) を止め、終わるのを待ってから (最大 5 秒。書きかけのファイルを
+    // 握ったままだと、呼ぶ側の後始末で作業フォルダを消せないため) 取り消しの例外を上げる
     private static async Task WaitStarBreakerExitAsync(Process proc, CancellationToken ct)
     {
         try
@@ -2523,7 +2524,15 @@ public partial class GameDataExtractor : IDisposable
         }
         catch (OperationCanceledException)
         {
-            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
+            try
+            {
+                if (!proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                    proc.WaitForExit(5000);
+                }
+            }
+            catch { }
             throw;
         }
     }

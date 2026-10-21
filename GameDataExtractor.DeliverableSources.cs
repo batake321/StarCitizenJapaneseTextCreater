@@ -828,7 +828,27 @@ public partial class GameDataExtractor
             }
         }
 
-        // *_planet_only.socpak の置かれたフォルダの名前 → 星図の記録の名前の後ろの部分 (Stanton3_Area18 の area18)。フォルダの名前のままで引けないもの
+        // socpak のフォルダ (pu/station/motel) と同じ並びのフォルダ (starmap/pu/station/motel) に記録のファイルがある StarMapObject
+        private Dictionary<string, List<string>>? _smoByFolder;
+        private List<string> SmoInFolder(string socDir)
+        {
+            if (_smoByFolder == null)
+            {
+                _smoByFolder = new(StringComparer.OrdinalIgnoreCase);
+                foreach (var (rn, rel) in _d.RecordToFile)
+                {
+                    if (!rn.StartsWith("StarMapObject.", StringComparison.Ordinal)) continue;
+                    var slash = rel.LastIndexOf('/');
+                    if (slash < 0) continue;
+                    var dir = rel[..slash];
+                    if (!_smoByFolder.TryGetValue(dir, out var list)) _smoByFolder[dir] = list = new List<string>();
+                    list.Add(rn);
+                }
+            }
+            return _smoByFolder.TryGetValue("starmap/" + socDir, out var hit) ? hit : [];
+        }
+
+        // *_planet_only.socpak の置かれたフォルダの名前 →星図の記録の名前の後ろの部分 (Stanton3_Area18 の area18)。フォルダの名前のままで引けないもの
         private static readonly Dictionary<string, string> PlanetOnlyFolderAlias = new(StringComparer.OrdinalIgnoreCase)
         {
             ["a18"] = "area18",
@@ -886,7 +906,11 @@ public partial class GameDataExtractor
                         var folder = parts[^2];
                         var key = PlanetOnlyFolderAlias.TryGetValue(folder, out var alias) ? alias : folder;
                         best = dp;
-                        near.Add(_pln.TryGetValue(body + "_" + key, out var placeName) ? placeName : folder);
+                        // 引けなければ、同じフォルダの並びの星図の記録 (pu/station/motel → starmap/pu/station/motel/starmapobject.grimhex.json
+                        // = GrimHEX) の英語名。それも無ければフォルダの名前のまま
+                        if (_pln.TryGetValue(body + "_" + key, out var placeName)) near.Add(placeName);
+                        else if (Named(SmoInFolder(x[..x.LastIndexOf('/')])).ToList() is { Count: > 0 } folderNames) near.UnionWith(folderNames);
+                        else near.Add(folder);
                     }
                 }
                 else if (x.StartsWith("pu/system/", StringComparison.Ordinal) && x.Count(ch => ch == '/') == 3)

@@ -28,11 +28,11 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v2.1.3-win-x64.zip (最新 v2.1.3 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.1.3/StarCitizenJapaneseTextCreater-v2.1.3-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v2.1.4-win-x64.zip (最新 v2.1.4 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.1.4/StarCitizenJapaneseTextCreater-v2.1.4-win-x64.zip)**
 >
-> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.1.3-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
+> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.1.4-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
 >
-> **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/21 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.1.3/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
+> **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/21 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.1.4/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
 
 > **💡 アプリ更新後は翻訳タブの [日本語化] → [実行] を行ってください。**
 
@@ -51,12 +51,21 @@ v1.14.5 以降、アプリ本体に翻訳データベースが同梱されてい
   - `gamedata_cache.db` — ゲームデータインデックス（ミッション・船・アイテム等）
   - WorkDir の既定値は `C:\temp` です（設定タブで変更可能）
 
-### 🚀 v2.1.3 更新内容
+### 🚀 v2.1.4 更新内容
+
+- **契約タブ**: 契約の詳細と納品物の欄のあいだの仕切りを、左右に動かせるようにしました（初めは半分ずつ）
+- **納品物の入手場所**: Quantainium・Copper の採掘の場所で、近い場所が内部名の `motel` のまま出ていたのを「Grim HEX」に直しました
+- インデックス構築を取り消したときに、作業フォルダが残ることがあったのを直しました
+
+<details>
+<summary>v2.1.3 更新内容</summary>
 
 - **契約タブ: Wikelo の契約の納品物**: Wikelo の契約を選ぶと、詳細の右に納品物の表（名前・数。資源は SCU）を出します。名前はゲームと同じ英語です
 - **納品物の入手場所**: 納品物の行をクリックすると、下に入手場所を出します。店で買える場所と値段（店のデータが無い品は UEX の場所）、資源を買える場所、BP で作るときの材料とその BP をもらえる契約、報酬としてその品をもらえる別の契約、ゲームデータから辿った場所（採掘・収穫・生き物・配置・ルート・敵の出現）です。ルート表やタグから出した場所には「（推定）」が付きます。出る確率や、必ず出るかまでは分かりません
 - インデックス構築で、契約のテンプレート側にある納品物と、ゲームデータからの入手場所を取り込むようにしました。同梱の DB には入っています
 - **v2.1.2 からは自動更新で入れられます**（v2.1.1 以前からは手で入れてください）
+
+</details>
 
 <details>
 <summary>v2.1.2 更新内容</summary>
