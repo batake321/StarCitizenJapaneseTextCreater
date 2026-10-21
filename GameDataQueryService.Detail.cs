@@ -51,7 +51,178 @@ public partial class GameDataQueryService
         }
         catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
         AddNotes();
-        return list.Take(limit).ToList();
+        // 資源 (resource_types。英語名・日本語名の部分一致。選ぶと資源の詳細: GetItemDetailText → ResourceDetailText) は、
+        // 上の品目の候補 (件数・limit・EditDistanceSearch に進むかの判定) とは別に作って先頭に足す (品目の候補の数え方には入れない)
+        var resources = SearchResourceCandidates(q).Where(c => c.Name.Trim().Length > 0)
+            .DistinctBy(c => c.Record, StringComparer.OrdinalIgnoreCase).ToList();
+        return resources.Concat(list.Take(limit)).ToList();
+    }
+
+    // ［詳細］タブの候補の種類「資源」(resource_types の資源。DetailCandidate.ItemType に入れる)
+    internal const string ResourceDetailType = "Resource";
+
+    // 資源の候補: resource_types の英語名 (OreService.LoadResources の NameEn。［鉱石］タブと同じ引き方) か日本語名に q を含むもの (大文字小文字無視)。
+    // 名前は英語名 (無ければ record 名の "ResourceType." を除いたもの)。名前の無い資源 (英語名も日本語名も無い) は出さない。
+    // 並びは 名前が q と同じもの → q で始まるもの → ほか、それぞれ名前の順
+    private List<DetailCandidate> SearchResourceCandidates(string q)
+    {
+        var result = new List<DetailCandidate>();
+        foreach (var r in OreService.LoadResources(DbPath, _translationsDbPath))
+        {
+            if (r.NameEn == null && r.NameJa == null) continue;
+            var hit = (r.NameEn?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false) || (r.NameJa?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false);
+            if (!hit) continue;
+            result.Add(new DetailCandidate(r.RecordName, r.NameEn ?? OreService.ShortRecord(r.RecordName), ResourceDetailType, "", ""));
+        }
+        int Rank(DetailCandidate c) => c.Name.Equals(q, StringComparison.OrdinalIgnoreCase) ? 0 : c.Name.StartsWith(q, StringComparison.OrdinalIgnoreCase) ? 1 : 2;
+        return result.OrderBy(Rank).ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    // ［詳細］タブの分類「鉱石」の資源 (Record = resource_types の record 名, Name = 英語名 (無ければ record 名の "ResourceType." を除いたもの), Kind = 種類の日本語名)。
+    // 入れるもの: 採掘で取れる資源 (ore_locations に行がある資源) とその精錬後 (refined_uuid の先) は group にかかわらず全部、
+    // それに加えて OreCategoryWholeGroups の group の資源を全部。名前に PLACEHOLDER / プレースホルダを含むものは出さない。並びは名前の順。
+    // 種類は group_record ごと (OreCategoryGroupLabels。表に無い group は group の record 名の後ろ)
+    private static readonly string[] OreCategoryWholeGroups =
+        ["ResourceTypeGroup.UnrefinedOres", "ResourceTypeGroup.Raw_Minerals", "ResourceTypeGroup.Mineral", "ResourceTypeGroup.Metal", "ResourceTypeGroup.Nonmetal"];
+    private static readonly Dictionary<string, string> OreCategoryGroupLabels = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["ResourceTypeGroup.UnrefinedOres"] = "未精錬の鉱石",
+        ["ResourceTypeGroup.Raw_Minerals"] = "未精錬の鉱物",
+        ["ResourceTypeGroup.Mineral"] = "鉱物",
+        ["ResourceTypeGroup.Metal"] = "金属",
+        ["ResourceTypeGroup.Nonmetal"] = "非金属",
+        ["ResourceTypeGroup.Halogen"] = "ハロゲン",
+        ["ResourceTypeGroup.Organic"] = "有機物",
+    };
+
+    public List<(string Record, string Name, string Kind)> GetOreCategoryResources()
+    {
+        var mined = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT DISTINCT resource_uuid FROM ore_locations";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) if (!r.IsDBNull(0)) mined.Add(r.GetString(0));
+        }
+        catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
+        var include = new HashSet<string>(mined, StringComparer.OrdinalIgnoreCase);
+        if (mined.Count > 0)
+        {
+            try
+            {
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "SELECT uuid, refined_uuid FROM resource_types WHERE refined_uuid IS NOT NULL";
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                    if (!r.IsDBNull(0) && mined.Contains(r.GetString(0)) && !r.IsDBNull(1) && r.GetString(1).Length > 0) include.Add(r.GetString(1));
+            }
+            catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
+        }
+        var result = new List<(string Record, string Name, string Kind)>();
+        foreach (var x in OreService.LoadResources(DbPath, _translationsDbPath))
+        {
+            if (!include.Contains(x.Uuid) && !OreCategoryWholeGroups.Contains(x.GroupRecord, StringComparer.OrdinalIgnoreCase)) continue;
+            var name = x.NameEn ?? OreService.ShortRecord(x.RecordName);
+            if (name.Contains("PLACEHOLDER", StringComparison.OrdinalIgnoreCase) || name.Contains("プレースホルダ")) continue;
+            var kind = OreCategoryGroupLabels.TryGetValue(x.GroupRecord, out var label) ? label : OreService.ShortRecord(x.GroupRecord);
+            result.Add((x.RecordName, name, kind));
+        }
+        return result.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    // 資源の詳細 (［詳細］タブ)。rec が "ResourceType." で始まる record 名か resource_types の uuid のときだけ文字を返す (それ以外・resource_types に無ければ null):
+    //   【基本】名前 (英語名。無ければ record 名の "ResourceType." を除いたもの)・種類・record 名
+    //   【採掘できる場所】ore_locations の表。精錬後の資源 (例 Copper) は、resource_types.refined_uuid でそれになる原石 (Ore_Copper 等) の行も合わせて出す。
+    //     ore_locations の行 (1 場所 1 行) を (資源, preset, 掘り方, 岩の種類) で 1 行にまとめ、場所の列に場所名を ", " でつなぐ
+    //     (番号の付いた小さな場所 (GameDataExtractor.OreSmallPlacePrefixes) は個別に並べず「Mining Claim (157 か所)」のように種類ごとの件数にする)。
+    //     星系の列は preset の星系。並びは 掘り方 (船 → ROC → 手)、出やすさの大きい順、場所の列。行が無ければ「採掘できる場所のデータがありません。」
+    private string? ResourceDetailText(string rec)
+    {
+        var isRecord = rec.StartsWith("ResourceType.", StringComparison.OrdinalIgnoreCase);
+        if (!isRecord && !Guid.TryParse(rec, out _)) return null;
+        var resources = OreService.LoadResources(DbPath, _translationsDbPath);
+        var res = resources.FirstOrDefault(x => isRecord ? x.RecordName.Equals(rec, StringComparison.OrdinalIgnoreCase) : x.Uuid.Equals(rec, StringComparison.OrdinalIgnoreCase));
+        if (res == null) return null;
+        var name = res.NameEn ?? OreService.ShortRecord(res.RecordName);
+
+        // この資源と、精錬後がこの資源になる原石の uuid
+        var uuids = new List<string> { res.Uuid };
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT uuid FROM resource_types WHERE refined_uuid = @u COLLATE NOCASE";
+            cmd.Parameters.AddWithValue("@u", res.Uuid);
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) if (!r.IsDBNull(0) && !uuids.Contains(r.GetString(0), StringComparer.OrdinalIgnoreCase)) uuids.Add(r.GetString(0));
+        }
+        catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
+
+        var rows = new List<(string Place, string System, string Method, string Rock, double Chance, double Min, double Max, double Prob, string Preset, string Uuid)>();
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            var ps = uuids.Select((_, i) => "@u" + i).ToList();
+            cmd.CommandText = $"SELECT place, system, method, rock, chance, min_pct, max_pct, part_probability, preset, resource_uuid FROM ore_locations WHERE resource_uuid IN ({string.Join(",", ps)})";
+            for (int i = 0; i < uuids.Count; i++) cmd.Parameters.AddWithValue(ps[i], uuids[i]);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                rows.Add((r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetDouble(4), r.GetDouble(5), r.GetDouble(6), r.GetDouble(7), r.GetString(8), r.GetString(9)));
+        }
+        catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
+
+        var sb = new StringBuilder();
+        sb.AppendLine("【基本】");
+        sb.AppendLine($"  名前: {name}");
+        sb.AppendLine($"  種類: {DetailTypeLabel(ResourceDetailType)}");
+        sb.AppendLine($"  record 名: {OreService.ShortRecord(res.RecordName)}");
+        sb.AppendLine();
+        sb.AppendLine("【採掘できる場所】");
+        if (rows.Count == 0)
+        {
+            sb.AppendLine("採掘できる場所のデータがありません。");
+            return sb.ToString();
+        }
+        static int MethodOrder(string m) => m switch
+        {
+            GameDataExtractor.OreMethodShip => 0,
+            GameDataExtractor.OreMethodRoc => 1,
+            GameDataExtractor.OreMethodHand => 2,
+            _ => 3,
+        };
+        static string Pct(double v) => v.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+        sb.AppendLine("| 場所 | 星系 | 掘り方 | 岩の種類 | 出やすさ | 岩の中の割合 |");
+        sb.AppendLine("|---|---|---|---|---|---|");
+        // 場所の列: 名前の順の場所名、続けて番号の付いた小さな場所の種類ごとの件数 (OreSmallPlacePrefixes の順)
+        static string PlacesText(IEnumerable<string> places)
+        {
+            var named = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            var small = new int[GameDataExtractor.OreSmallPlacePrefixes.Length];
+            foreach (var p in places.Distinct(StringComparer.Ordinal))
+            {
+                var i = Array.FindIndex(GameDataExtractor.OreSmallPlacePrefixes, x => p.StartsWith(x.Prefix, StringComparison.Ordinal));
+                if (i >= 0) small[i]++;
+                else named.Add(p);
+            }
+            var parts = named.ToList();
+            for (int i = 0; i < small.Length; i++)
+                if (small[i] > 0) parts.Add($"{GameDataExtractor.OreSmallPlacePrefixes[i].Label} ({small[i]} か所)");
+            return string.Join(", ", parts);
+        }
+        var groups = rows.GroupBy(x => (x.Uuid, x.Preset, x.Method, x.Rock))
+            .Select(g => (First: g.First(), Places: PlacesText(g.Select(x => x.Place))))
+            .OrderBy(x => MethodOrder(x.First.Method)).ThenByDescending(x => x.First.Chance).ThenBy(x => x.Places, StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (x, places) in groups)
+        {
+            var chance = x.Chance.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "%";
+            var range = $"{Pct(x.Min)}〜{Pct(x.Max)}%" + (x.Prob < 1 ? $"（入る確率 {Pct(x.Prob * 100)}%）" : "");
+            var line = $"| {Cell(MdEscape(places))} | {Cell(MdEscape(x.System))} | {Cell(MdEscape(x.Method))} | {Cell(MdEscape(x.Rock))} | {Cell(chance)} | {Cell(range)} |";
+            if (seen.Add(line)) sb.AppendLine(line);
+        }
+        sb.AppendLine();
+        sb.AppendLine("出やすさ＝その場所でその掘り方の岩のうち、この岩が出る割合（ゲームデータの relativeProbability から計算）。");
+        return sb.ToString();
     }
 
     // 名前の行で item_index.name を括弧で添えるかを決めるための比べる形。
@@ -78,6 +249,8 @@ public partial class GameDataQueryService
     {
         var rec = (recordName ?? "").Trim();
         if (rec.Length == 0) return null;
+        // 資源 (ResourceType.… か resource_types の uuid) は item_index ではなく資源の詳細 (【採掘できる場所】)
+        if (ResourceDetailText(rec) is { } resourceText) return resourceText;
         using var loc = new LocReader(_translationsDbPath);
         string? uuid = null, indexName = null, itemType = "", subType = "", indexMfr = "";
         int size = 0;
@@ -806,6 +979,7 @@ public partial class GameDataQueryService
         "Currency" => "通貨",
         "InventoryContainer" => "インベントリコンテナ",
         "SalvageModifier" => "サルベージモジュール",
+        ResourceDetailType => "資源",
         _ when itemType.StartsWith("Char_Armor_", StringComparison.Ordinal) => "アーマー",
         _ when itemType.StartsWith("Char_Clothing_", StringComparison.Ordinal) => "服",
         _ => new ShipPortInfo { ItemType = itemType }.TypeDisplay,

@@ -79,7 +79,8 @@ public partial class MainWindow : Window
         // 表の名前のダブルクリック → ［詳細］タブ
         DetailPanel.Requested += OnDetailRequested;
         DetailPanel.SearchRequested += OnDetailSearchRequested;
-        Closed += (_, _) => { DetailPanel.Requested -= OnDetailRequested; DetailPanel.SearchRequested -= OnDetailSearchRequested; };
+        DetailPanel.ListRequested += OnDetailListRequested;
+        Closed += (_, _) => { DetailPanel.Requested -= OnDetailRequested; DetailPanel.SearchRequested -= OnDetailSearchRequested; DetailPanel.ListRequested -= OnDetailListRequested; };
         // Windows のサインアウト・シャットダウン: 閉じるのを止めず (e.Cancel は効かない)、すぐに終わる片付けだけを同期で行う
         if (Application.Current != null)
         {
@@ -2552,6 +2553,8 @@ public partial class MainWindow : Window
     //  4. BP (ブループリント) の表 (blueprints) が無い・空か、resource_types に原石の精錬後 (refined_uuid) が無ければ、それだけを取り出す
     //     (GameDataExtractor.RebuildBlueprintsAsync。［BP］タブが使う)
     //  5. 星図の場所の名前 (starmap_names。［ゲームログ］の場所名) が無い・空なら、それだけを取り出す (GameDataExtractor.RebuildStarmapNamesAsync)
+    //  (追加の品目の後) 資源の採掘できる場所 (ore_locations。［詳細］タブの資源) の表が無ければ、納品物の入手場所 (deliverable_sources) と一緒に作る
+    //     (GameDataExtractor.RebuildOreLocationsAsync。作れなかったときも表は空で作るので、毎回は走らない)
     // 同時には走らせない (同じ Data.p4k を 2 本同時に読まないように。前が終わってから次を始める)。1 つが失敗しても次は行う。
     // インデックス構築・装備データの再抽出の最中は走らせない。starbreaker が入っていない・Data.p4k が見つからないときは走らせない (starbreaker を自動でダウンロードしない)。
     // 失敗はログに残す (cargo_scu は NULL・resource_types / item_ports は空のままなので、次の起動でまた試す)。終わったら積載量の覚えを捨てて一覧を描き直し、
@@ -2565,7 +2568,7 @@ public partial class MainWindow : Window
         {
             var workDir = App.Config.WorkingDirectory;
             if (string.IsNullOrEmpty(workDir)) workDir = AppDomain.CurrentDomain.BaseDirectory;
-            Task<(int Cargo, int Resources, int Blueprints, int Starmap, int Extra, string? Skipped)> task;
+            Task<(int Cargo, int Resources, int Blueprints, int Starmap, int Extra, int Ore, string? Skipped)> task;
             // 構築・再抽出・インポートの印の確認と、取り消し用の登録は _priceRefreshTasks のロックの中で行う
             // (印は取得を止める依頼より前に立つので、依頼が登録より先に来たときは、ここで印を見て始めない)
             lock (_priceRefreshTasks)
@@ -2596,17 +2599,18 @@ public partial class MainWindow : Window
                     catch (Exception ex) { Log($"[名前] AI 訳の名前の英語への書き戻しに失敗しました: {ex.Message}"); }
 
                     using var extractor = new GameDataExtractor(workDir);
-                    if (!extractor.IsReady) return (0, 0, 0, 0, 0, "starbreaker か Data.p4k が見つからない");
+                    if (!extractor.IsReady) return (0, 0, 0, 0, 0, 0, "starbreaker か Data.p4k が見つからない");
                     var needsCargo = extractor.NeedsShipCargo();
                     var needsResources = extractor.NeedsResourceTypes();
                     var needsPorts = extractor.NeedsCharacterPorts();
                     var needsBlueprints = extractor.NeedsBlueprints();
                     var needsStarmap = extractor.NeedsStarmapNames();
                     var needsExtra = extractor.NeedsExtraItems();
-                    if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints && !needsStarmap && !needsExtra) return (0, 0, 0, 0, 0, (string?)null);
-                    if (GameDataExtractor.IsIndexBuildRunning) return (0, 0, 0, 0, 0, "インデックス構築・装備データの再抽出が走っている");
+                    var needsOre = extractor.NeedsOreLocations();
+                    if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints && !needsStarmap && !needsExtra && !needsOre) return (0, 0, 0, 0, 0, 0, (string?)null);
+                    if (GameDataExtractor.IsIndexBuildRunning) return (0, 0, 0, 0, 0, 0, "インデックス構築・装備データの再抽出が走っている");
                     ct.ThrowIfCancellationRequested();
-                    int cargo = 0, resources = 0, blueprints = 0, starmap = 0, extra = 0;
+                    int cargo = 0, resources = 0, blueprints = 0, starmap = 0, extra = 0, ore = 0;
                     // 積載量・資源の種類 (失敗はここでログに残し、口の定義へ進む。取り消しはそのまま上げる)
                     try
                     {
@@ -2682,12 +2686,27 @@ public partial class MainWindow : Window
                             Log($"[品目の追加] 取り込みに失敗しました (次の起動でまた試します): {ex.Message}");
                         }
                     }
-                    return (cargo, resources, blueprints, starmap, extra, (string?)null);
+                    // 資源の採掘できる場所 (ore_locations。［詳細］タブの資源の【採掘できる場所】)。前の版の DB には表が無いので一度だけ作る。
+                    // DCB と socpak の読み込みが納品物の入手場所と同じなので、deliverable_sources も一緒に作り直す (約 2 分)。前が終わってから
+                    if (needsOre)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        try
+                        {
+                            Log("[採掘できる場所] 資源の採掘できる場所 (ore_locations) がまだ無いので、裏で作ります (納品物の入手場所も一緒に作り直します)");
+                            ore = await extractor.RebuildOreLocationsAsync(new Progress<string>(m => Log(m.StartsWith("[") ? m : $"[採掘できる場所] {m}")), ct);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            Log($"[採掘できる場所] 作れませんでした (次の起動でまた試します): {ex.Message}");
+                        }
+                    }
+                    return (cargo, resources, blueprints, starmap, extra, ore, (string?)null);
                 });
                 _startupBackfillCts = cts;
                 _startupBackfillTask = task;
             }
-            var (count, resourceCount, blueprintCount, starmapCount, extraCount, skipped) = await task;
+            var (count, resourceCount, blueprintCount, starmapCount, extraCount, _, skipped) = await task;
             if (skipped != null)
             {
                 Log($"[品目の追加] 採掘レーザー・鉱石ポッドなどの取り込みをしませんでした ({skipped})");
@@ -2695,6 +2714,7 @@ public partial class MainWindow : Window
                 Log($"[装備の口] 口の定義の取り出しをしませんでした ({skipped})");
                 Log($"[BP] ブループリントの取り出しをしませんでした ({skipped})");
                 Log($"[場所名] 星図の場所の名前の取り出しをしませんでした ({skipped})");
+                Log($"[採掘できる場所] 資源の採掘できる場所を作りませんでした ({skipped})");
             }
             if (count > 0) ShipCargo.Invalidate();   // 計算した値を使うよう、覚えた結果を捨てて一覧を描き直す
             if (resourceCount > 0)
@@ -4404,6 +4424,10 @@ public partial class MainWindow : Window
     // タブの切り替えは、ダブルクリックのマウスの処理が終わってから行う (SwitchToDetailTabLater)
     private void OnDetailRequested(string? record, string name) =>
         SwitchToDetailTabLater(() => detailPanel.ShowItem(record, name));
+
+    // ［詳細］タブを開いて、候補の一覧をリストに並べ、その中の 1 つの詳細を出す (DetailPanel.RequestList から。［BP］タブの材料の欄)
+    private void OnDetailListRequested(IReadOnlyList<(string Record, string Name, bool IsResource)> items, int selectIndex) =>
+        SwitchToDetailTabLater(() => detailPanel.ShowList(items, selectIndex));
 
     // ［詳細］タブを開いて、名前欄にその名前を入れて検索した状態にする (DetailPanel.RequestSearch から)
     private void OnDetailSearchRequested(string name) =>

@@ -28,6 +28,7 @@ public partial class BlueprintPanel : UserControl
     // 引数はその表示名のミッションの record (並んだ順。先頭が代表。先頭がミッションタブに無ければ次を使う)
     public Action<IReadOnlyList<string>>? MissionOpener { get; set; }
     private const int SourceColumn = 4;   // 「入手」の列 (Columns() の順)
+    private const int MaterialsColumn = 2;   // 「材料」の列 (Columns() の順)
 
     private bool _loadedOnce;
     private int _loadVersion;
@@ -290,6 +291,12 @@ public partial class BlueprintPanel : UserControl
             resourceByUuid.TryGetValue(uuid, out var x) ? x.Display
             : resourceRecords.TryGetValue(uuid, out var rec) && rec.Length > 0 ? OreService.ShortRecord(rec)
             : (uuid.Length > 8 ? uuid[..8] : uuid);
+        // ［詳細］に資源を出すときの record 名 (resource_types の record 名。無ければ null) と名前 (英語名。無ければ record 名の "ResourceType." を除いたもの)
+        string? ResourceRecordOf(string uuid) =>
+            resourceByUuid.TryGetValue(uuid, out var x) && x.RecordName.Length > 0 ? x.RecordName
+            : resourceRecords.TryGetValue(uuid, out var rec) && rec.Length > 0 ? rec : null;
+        string ResourceNameEn(string uuid, string record) =>
+            resourceByUuid.TryGetValue(uuid, out var x) && x.NameEn != null ? x.NameEn : OreService.ShortRecord(record);
 
         // 訳: 枠名・ミッション名・できる品の名前のキー (日本語と英語を今の訳から引く)
         var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -326,6 +333,7 @@ public partial class BlueprintPanel : UserControl
                     usedResources.Add(s.ResourceUuid);
                     s.MaterialName = ResourceName(s.ResourceUuid);
                     text = $"{s.MaterialName} {FormatQuantity(s.Quantity)} {OreService.UnitScu}";
+                    if (ResourceRecordOf(s.ResourceUuid) is { } rr) { s.DetailRecord = rr; s.DetailName = ResourceNameEn(s.ResourceUuid, rr); }
                 }
                 else
                 {
@@ -335,6 +343,14 @@ public partial class BlueprintPanel : UserControl
                         : OreService.ShortRecord(s.ItemRecord);
                     s.MaterialName = name;
                     text = $"{name} {FormatQuantity(s.Quantity)} {OreService.UnitPiece}";
+                    // 手掘りの鉱物は資源に変換したものを［詳細］に出す。資源に変換できない品目 (例 harvestable_trophy_1h_yormandi_eye) は品目のまま出す
+                    // (名前は item_index の英語名。無ければ record 名の "EntityClassDefinition." を除いたもの)
+                    if (s.MineralResourceUuid != null && ResourceRecordOf(s.MineralResourceUuid) is { } mr) { s.DetailRecord = mr; s.DetailName = ResourceNameEn(s.MineralResourceUuid, mr); }
+                    else if (s.ItemRecord.Length > 0)
+                    {
+                        s.DetailRecord = s.ItemRecord;
+                        s.DetailName = itemNames.TryGetValue(s.ItemRecord, out var en) && en.En != null ? en.En : OreService.ShortRecord(s.ItemRecord);
+                    }
                 }
                 if (s.MinQuality > 0) text += $" 品質 {s.MinQuality} 以上";
                 parts.Add(text);
@@ -344,6 +360,10 @@ public partial class BlueprintPanel : UserControl
             }
             var prefix = it.ChooseCount is { } cc ? $"{cc} 枠選択: " : "";
             it.MaterialsText = prefix + string.Join(" / ", parts);
+            // 材料の欄の中の各枠の文字の位置 (材料の欄のダブルクリックで押した枠を決める。Slots と同じ並び)
+            it.MaterialSpans.Clear();
+            var at = prefix.Length;
+            foreach (var part in parts) { it.MaterialSpans.Add((at, part.Length)); at += part.Length + " / ".Length; }
             it.MaterialsTooltip = parts.Count == 0 ? null : (it.ChooseCount is { } cc2 ? $"{tips.Count} 枠のうち {cc2} 枠を選ぶ\n" : "") + string.Join("\n", tips);
 
             it.TimeText = FormatTime(it.CraftTimeSec);
@@ -580,6 +600,7 @@ public partial class BlueprintPanel : UserControl
     // 「初期」だけ・「不明」 (ミッションが無い) なら何もしない
     private void OnCellDoubleClicked(int column, object source, int charIndex)
     {
+        if (column == MaterialsColumn) { OpenMaterialDetail(source, charIndex); return; }
         if (column != SourceColumn || source is not BlueprintItem it || MissionOpener == null) return;
         var missions = it.Missions.Where(m => m.Records.Count > 0).ToList();
         if (missions.Count == 0) return;
@@ -610,6 +631,29 @@ public partial class BlueprintPanel : UserControl
             timer.Start();
         }
         else menu.IsOpen = true;
+    }
+
+    // 材料の欄のダブルクリック: その BP の材料を全部 (枠の順。［詳細］に出せる材料 = DetailRecord のあるもの) ［詳細］タブのリストに並べ、
+    // 押した位置の文字の番号 (charIndex) にある枠の材料を選んだ状態で詳細を出す (DetailPanel.RequestList)。資源 (手掘りの鉱物を変換した資源を含む) は資源、
+    // 資源に変換できない品目は品目として並べる。押した位置が材料に当たらない (枠の間の " / " の上・「n 枠選択: 」の上・位置が分からない)・
+    // 押した材料を［詳細］に出せないときは先頭の材料を選ぶ。出せる材料が 1 つも無ければ何もしない
+    private static void OpenMaterialDetail(object source, int charIndex)
+    {
+        if (source is not BlueprintItem it) return;
+        var items = new List<(string Record, string Name, bool IsResource)>();
+        var select = 0;
+        for (int i = 0; i < it.Slots.Count; i++)
+        {
+            var s = it.Slots[i];
+            if (s.DetailRecord == null) continue;
+            if (charIndex >= 0 && i < it.MaterialSpans.Count)
+            {
+                var (start, length) = it.MaterialSpans[i];
+                if (charIndex >= start && charIndex <= start + length) select = items.Count;
+            }
+            items.Add((s.DetailRecord, s.DetailName ?? s.MaterialName, s.DetailRecord.StartsWith("ResourceType.", StringComparison.OrdinalIgnoreCase)));
+        }
+        if (items.Count > 0) DetailPanel.RequestList(items, select);
     }
 
     // === 表の列 ===
@@ -995,6 +1039,8 @@ public sealed class BlueprintItem
     public bool? Owned { get; set; }
     // 入手のミッション: 表示名 (ツールチップと同じ並び) と、その名前のミッションの record (並んだ順。派生があれば複数)
     public List<(string Name, List<string> Records)> Missions { get; } = new();
+    // 材料の欄 (MaterialsText) の中の各枠の文字の位置 (先頭からの文字の番号, 長さ)。Slots と同じ並び
+    public List<(int Start, int Length)> MaterialSpans { get; } = new();
 }
 
 // 材料の 1 枠 (blueprint_materials の 1 行)。ResourceUuid (資源) か ItemRecord (品目。手掘りの鉱物など) のどちらかが入る
@@ -1011,6 +1057,9 @@ public sealed class BlueprintSlot
     // 表示の名前 (LoadData が付ける): 枠名 (訳。無ければ debug 名)・材料の名前 (資源は［鉱石］タブと同じ出し方、品目は 日本語 (英語))
     public string SlotName { get; set; } = "";
     public string MaterialName { get; set; } = "";
+    // ［詳細］に出すときの record 名 (資源・手掘りの鉱物を変換した資源の "ResourceType.…"、資源に変換できない品目はその record 名) と名前 (英語名)。出せないものは null
+    public string? DetailRecord { get; set; }
+    public string? DetailName { get; set; }
 }
 
 // 資源の絞り込みの選択肢。Uuid は精錬後の資源 (null = すべて)。原石は「原石名 → 精錬後名」のラベルで精錬後の uuid を指す。

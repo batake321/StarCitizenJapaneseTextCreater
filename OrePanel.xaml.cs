@@ -42,6 +42,10 @@ public partial class OrePanel : UserControl
         cmbUnit.SelectedIndex = 0;
         tblTrades.SetColumns(TradeColumns());
         tblMining.SetColumns(MiningColumns());
+        // 資源の列のダブルクリック → ［詳細］タブにその資源 (採掘できる場所) を出す。在庫の表は資源の列 (読み取り専用) だけ
+        dgStock.MouseDoubleClick += DgStock_MouseDoubleClick;
+        tblTrades.CellDoubleClicked += (column, source, _) => { if (column == TradeResourceColumn && source is CommodityTrade t) OpenResourceDetail(t.ResourceUuid, t.ResourceRecord); };
+        tblMining.CellDoubleClicked += (column, source, _) => { if (column == MiningResourceColumn && source is MiningLog m) OpenResourceDetail(m.ResourceUuid, m.ResourceRecord); };
         Loaded += (_, _) =>
         {
             if (_loadedOnce) return;
@@ -107,6 +111,27 @@ public partial class OrePanel : UserControl
         if (uuid.Length > 0 && _byUuid.TryGetValue(uuid, out var r)) return r.Display;
         if (record.Length > 0) return OreService.ShortRecord(record);
         return uuid.Length > 8 ? uuid[..8] : uuid;
+    }
+
+    // 資源を［詳細］タブに出す (DetailPanel.Request)。record は resource_types の record 名 (無ければ行の record 名)、名前は英語名
+    // (無ければ record 名の "ResourceType." を除いたもの)。資源の分からない行 (資源を引けていない採掘の行など) は何もしない
+    private void OpenResourceDetail(string uuid, string record)
+    {
+        if (uuid.Length > 0 && _byUuid.TryGetValue(uuid, out var r))
+        {
+            DetailPanel.Request(r.RecordName, r.NameEn ?? OreService.ShortRecord(r.RecordName));
+            return;
+        }
+        if (record.StartsWith("ResourceType.", StringComparison.OrdinalIgnoreCase)) DetailPanel.Request(record, OreService.ShortRecord(record));
+    }
+
+    // 在庫の表の資源の列 (1 列目。読み取り専用) のダブルクリック。ほかの列 (品質・量・メモの書き換え) の動きは変えない
+    private void DgStock_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        DependencyObject? d = e.OriginalSource as DependencyObject;
+        while (d != null && d is not DataGridCell) d = d is System.Windows.Media.Visual or System.Windows.Media.Media3D.Visual3D ? System.Windows.Media.VisualTreeHelper.GetParent(d) : LogicalTreeHelper.GetParent(d);
+        if (d is not DataGridCell cell || dgStock.Columns.Count == 0 || cell.Column != dgStock.Columns[0] || cell.DataContext is not OreStockRow row) return;
+        OpenResourceDetail(row.Model.ResourceUuid, row.Model.ResourceRecord);
     }
 
     private string GroupDisplay(string uuid) => uuid.Length > 0 && _byUuid.TryGetValue(uuid, out var r) ? r.GroupName : "";
@@ -359,6 +384,9 @@ public partial class OrePanel : UserControl
         new() { Header = "利益", Numeric = true, Filterable = false, Text = o => FormatNumber(((CommodityTrade)o).ProfitAuec), Key = o => ((CommodityTrade)o).ProfitAuec },
         new() { Header = "利益率", Numeric = true, Filterable = false, Text = o => ((CommodityTrade)o).ProfitRate is { } r ? r.ToString("0.0%", CultureInfo.InvariantCulture) : "", Key = o => ((CommodityTrade)o).ProfitRate },
     ];
+
+    private const int TradeResourceColumn = 2;    // 売買の記録の「資源」の列 (TradeColumns の順)
+    private const int MiningResourceColumn = 1;   // 採掘の記録の「資源」の列 (MiningColumns の順)
 
     private string TradeResource(CommodityTrade t) => ResourceDisplay(t.ResourceUuid, t.ResourceRecord);
     private static string TradeResult(CommodityTrade t) => t.Succeeded ? "成功" : t.Result;

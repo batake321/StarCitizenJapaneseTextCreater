@@ -29,11 +29,21 @@ public partial class DetailPanel : UserControl
     // 名前欄にその名前を入れて検索した状態で［詳細］を開く要求 (名前)。MainWindow が受ける
     public static event Action<string>? SearchRequested;
     public static void RequestSearch(string name) => SearchRequested?.Invoke(name ?? "");
+    // 候補の一覧をリストに並べ、その中の 1 つを選んだ状態で［詳細］を開く要求 (候補 (record 名, 名前, 資源か), 選ぶ番号)。MainWindow が受ける。
+    // ［BP］タブの材料の欄のダブルクリック (その BP の材料を全部並べる) から使う
+    public static event Action<IReadOnlyList<(string Record, string Name, bool IsResource)>, int>? ListRequested;
+    public static void RequestList(IReadOnlyList<(string Record, string Name, bool IsResource)> items, int selectIndex)
+    {
+        if (items == null || items.Count == 0) return;
+        ListRequested?.Invoke(items, selectIndex);
+    }
 
     // 分類 (表と同じ分け方)。(すべて) は名前で全部から探す
     private const string CategoryAll = "(すべて)";
     private const string CategoryShip = "船舶";
     private const string CategoryShipWeapon = "船舶武器", CategoryShipGear = "船舶装備", CategoryPersonalWeapon = "個人武器", CategoryPersonalGear = "個人装備";
+    // 鉱石: 採掘で取れる資源とその精錬後、鉱石・鉱物・金属などの group の資源 (GameDataQueryService.GetOreCategoryResources)。種類は group、サイズは使わない
+    private const string CategoryOre = "鉱石";
     private const string AnyValue = "(すべて)";
     private const string LoadingText = "読み込み中...";
 
@@ -58,7 +68,7 @@ public partial class DetailPanel : UserControl
     public DetailPanel()
     {
         InitializeComponent();
-        cmbCategory.ItemsSource = new[] { CategoryAll, CategoryShip, CategoryShipWeapon, CategoryShipGear, CategoryPersonalWeapon, CategoryPersonalGear };
+        cmbCategory.ItemsSource = new[] { CategoryAll, CategoryShip, CategoryShipWeapon, CategoryShipGear, CategoryPersonalWeapon, CategoryPersonalGear, CategoryOre };
         _suppressSearch = true;
         cmbCategory.SelectedIndex = 0;
         _suppressSearch = false;
@@ -179,6 +189,44 @@ public partial class DetailPanel : UserControl
                 SelectInList(record);
             }
             await LoadDetailAsync(record);
+        }
+        catch (Exception ex) { ShowDetail($"詳細を出せませんでした: {ex.Message}"); txtStatus.Text = ""; }
+    }
+
+    // 候補の一覧 (RequestList) をリストに並べ、selectIndex の候補を選んだ状態にして詳細を出す。名前の欄・分類は ShowItem と同じ扱い
+    // (分類を (すべて) にし、名前の欄に選んだ候補の名前を入れる。検索はしない)。リストの行は検索の候補と同じ形 (DetailCandidate.Display):
+    // 資源は「名前 [資源]」、品目は item_index (無ければ items) の種類。同じ record は最初の 1 つだけ並べる。番号が範囲の外なら先頭を選ぶ
+    public async void ShowList(IReadOnlyList<(string Record, string Name, bool IsResource)> items, int selectIndex)
+    {
+        if (items.Count == 0) return;
+        if (selectIndex < 0 || selectIndex >= items.Count) selectIndex = 0;
+        var pick = items[selectIndex];
+        var distinct = items.Where(x => !string.IsNullOrWhiteSpace(x.Record)).DistinctBy(x => x.Record, StringComparer.OrdinalIgnoreCase).ToList();
+        if (distinct.Count == 0) return;
+        if (string.IsNullOrWhiteSpace(pick.Record)) pick = distinct[0];
+        _searchTimer.Stop();
+        SetQueryAndCategoryAll(pick.Name);
+        try
+        {
+            var db = DbPath();
+            var list = await Task.Run(() =>
+            {
+                var types = new string[distinct.Count];
+                GameDataQueryService? q = File.Exists(db) ? GameDataQueryService.OpenReadOnly(db) : null;
+                try
+                {
+                    for (int i = 0; i < distinct.Count; i++)
+                        types[i] = distinct[i].IsResource ? GameDataQueryService.ResourceDetailType : q?.ItemTypeOf(distinct[i].Record) ?? "";
+                }
+                finally { q?.Dispose(); }
+                return distinct.Select((x, i) =>
+                {
+                    var c = new DetailCandidate(x.Record, x.Name, types[i], "", "");
+                    return new ListItem(c.Record, c.Name, c.ItemType, 0, c.Display);
+                }).ToList();
+            });
+            SetList(list, selectRecord: pick.Record);
+            await LoadDetailAsync(pick.Record);
         }
         catch (Exception ex) { ShowDetail($"詳細を出せませんでした: {ex.Message}"); txtStatus.Text = ""; }
     }
@@ -311,6 +359,8 @@ public partial class DetailPanel : UserControl
         {
             if (!File.Exists(db)) return null;
             using var q = GameDataQueryService.OpenReadOnly(db);
+            // 鉱石は resource_types から作る (item_index は使わない)。選ぶと資源の詳細 (GetItemDetailText → ResourceDetailText)
+            if (category == CategoryOre) return q.GetOreCategoryResources().Select(r => Item(r.Record, r.Name, r.Kind, 0)).ToList();
             if (!q.HasItemIndex()) return null;
             return category switch
             {

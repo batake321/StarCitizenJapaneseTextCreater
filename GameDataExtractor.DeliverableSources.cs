@@ -100,18 +100,21 @@ public partial class GameDataExtractor
     }
 
     // Wikelo の納品物の入手場所を作り、deliverable_sources を入れ替える。入れた行数を返す。失敗したら例外 (呼び出し側で知らせて構築は続ける)。
+    // 同じ DCB と socpak の読み込みを使って、資源の採掘できる場所 (ore_locations。FindOreLocations) も作って入れ替える。
+    // 採掘できる場所の作成・書き込みの失敗は知らせるだけで例外にしない (ore_locations は前のまま。納品物の入手場所の扱いは変えない)。
+    // Wikelo の納品物が無いときは、deliverable_sources は前のまま (ロードアウトの読み込みと照合も飛ばす) で、採掘できる場所だけ作る。
+    // skipWriteIfIndexBuildStarts: 起動後の裏の作り直し (RebuildOreLocationsAsync) で、途中で構築・再抽出が始まったら書き込まずに 0 を返す。
     // 各段の時間を StatusChanged に出す (構築の時間がどれだけ増えたかを実測できるように)
-    private async Task<int> ExtractDeliverableSourcesAsync(string p4kPath, CancellationToken ct)
+    private async Task<int> ExtractDeliverableSourcesAsync(string p4kPath, CancellationToken ct, bool skipWriteIfIndexBuildStarts = false)
     {
         const string P = "[納品物の入手場所]";
         var total = Stopwatch.StartNew();
         var (entities, resources) = ReadDeliverableTargets();
-        if (entities.Count + resources.Count == 0)
-        {
-            StatusChanged?.Invoke($"{P} Wikelo の契約の納品物がありません (前のデータを残します)");
-            return 0;
-        }
-        StatusChanged?.Invoke($"{P} 対象: 品 {entities.Count} 件・資源 {resources.Count} 件");
+        var hasTargets = entities.Count + resources.Count > 0;
+        if (!hasTargets)
+            StatusChanged?.Invoke($"{P} Wikelo の契約の納品物がありません (前のデータを残します。採掘できる場所 (ore_locations) だけ作ります)");
+        else
+            StatusChanged?.Invoke($"{P} 対象: 品 {entities.Count} 件・資源 {resources.Count} 件");
         var dir = DeliverableTmpDir;
         try
         {
@@ -146,15 +149,21 @@ public partial class GameDataExtractor
             tLoad += sw.Elapsed.TotalSeconds;
             if (dcb.RecordCount == 0) throw new InvalidOperationException("DCB の JSON を書き出せませんでした (libs/foundry/records のレコードがありません)");
 
-            // 3. ロードアウトの XML (Data/Scripts/Loadouts/**) の itemName
-            if (!HasDeliverableSpace(dir, "ロードアウトの XML")) return 0;
-            sw.Restart();
-            StatusChanged?.Invoke($"{P} ロードアウトの XML を読み込み中...");
-            var loDir = Path.Combine(dir, "loadouts");
-            Directory.CreateDirectory(loDir);
-            await RunStarBreakerAsync($"p4k extract --p4k \"{p4kPath}\" -o \"{loDir}\" --filter \"Data/Scripts/Loadouts/**\"", ct);
-            var (loadoutItems, loadoutFiles, loadoutBad) = await Task.Run(() => DeliverableDcb.ReadLoadoutItemNames(Path.Combine(loDir, "Data"), ct), ct);
-            var tLoadout = sw.Elapsed.TotalSeconds;
+            // 3. ロードアウトの XML (Data/Scripts/Loadouts/**) の itemName (納品物の照合にだけ使う。納品物が無ければ読まない)
+            var loadoutItems = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            int loadoutFiles = 0, loadoutBad = 0;
+            double tLoadout = 0;
+            if (hasTargets)
+            {
+                if (!HasDeliverableSpace(dir, "ロードアウトの XML")) return 0;
+                sw.Restart();
+                StatusChanged?.Invoke($"{P} ロードアウトの XML を読み込み中...");
+                var loDir = Path.Combine(dir, "loadouts");
+                Directory.CreateDirectory(loDir);
+                await RunStarBreakerAsync($"p4k extract --p4k \"{p4kPath}\" -o \"{loDir}\" --filter \"Data/Scripts/Loadouts/**\"", ct);
+                (loadoutItems, loadoutFiles, loadoutBad) = await Task.Run(() => DeliverableDcb.ReadLoadoutItemNames(Path.Combine(loDir, "Data"), ct), ct);
+                tLoadout = sw.Elapsed.TotalSeconds;
+            }
 
             // 4. socpak
             sw.Restart();
@@ -165,11 +174,55 @@ public partial class GameDataExtractor
             // 5. 照合
             sw.Restart();
             var loc = LoadShipNameLocalization();
-            var rows = await Task.Run(() => new DeliverableSourceFinder(dcb, soc, loadoutItems, loc).Find(entities, resources, ct), ct);
+            var finder = new DeliverableSourceFinder(dcb, soc, loadoutItems, loc);
+            var rows = hasTargets ? await Task.Run(() => finder.Find(entities, resources, ct), ct) : new List<DeliverableSourceRow>();
             var tFind = sw.Elapsed.TotalSeconds;
+
+            // 5b. 資源の採掘できる場所 (失敗しても納品物の入手場所は続ける)
+            sw.Restart();
+            List<OreLocationRow>? oreRows = null;
+            try { oreRows = await Task.Run(() => finder.FindOreLocations(ct), ct); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { StatusChanged?.Invoke($"[採掘できる場所] 作れませんでした (前のデータを残します): {ex.Message}"); }
+            var tOre = sw.Elapsed.TotalSeconds;
 
             // 6. 書き込み (入れ替え)
             ct.ThrowIfCancellationRequested();
+            if (skipWriteIfIndexBuildStarts && IsIndexBuildRunning)
+            {
+                StatusChanged?.Invoke($"{P} インデックス構築・装備データの再抽出が始まったので、作った値は書き込みませんでした");
+                return 0;
+            }
+            if (oreRows is { Count: 0 })
+            {
+                // 作れた行が 0 行: 前の行を消さずに残す (失敗として知らせる)。表がまだ無ければ空の表だけ作る (起動後の補完が毎回走らないように)
+                try
+                {
+                    using var ddl = _db!.CreateCommand();
+                    ddl.CommandText = OreLocationsDdl;
+                    ddl.ExecuteNonQuery();
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    StatusChanged?.Invoke($"[採掘できる場所] 表を作れませんでした: {ex.Message}");
+                }
+                StatusChanged?.Invoke("[採掘できる場所] 1 行も作れませんでした (前のデータを残します)");
+            }
+            else if (oreRows != null)
+            {
+                try
+                {
+                    WriteOreLocations(oreRows);
+                    var places = oreRows.Select(r => (r.Preset, r.Place)).Distinct().Count();
+                    StatusChanged?.Invoke($"[採掘できる場所] {oreRows.Count} 行 (資源 {oreRows.Select(r => r.ResourceUuid).Distinct().Count()} 種・プリセットと場所の組 {places} 件)。時間 {tOre:F1}秒"
+                        + (loc == null ? " (英語ローカライズが見つからないので岩の種類はレコード名のまま)" : ""));
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    StatusChanged?.Invoke($"[採掘できる場所] 書き込めませんでした (前のデータを残します): {ex.Message}");
+                }
+            }
+            if (!hasTargets) return 0;
             using (var tx = _db!.BeginTransaction())
             {
                 using (var ddl = _db.CreateCommand())
@@ -233,6 +286,153 @@ public partial class GameDataExtractor
     // 入手場所の 1 行 (deliverable_sources)
     internal readonly record struct DeliverableSourceRow(string TargetKind, string Target, string Section, string Kind, string PlaceType, string Name);
 
+    // ── 資源の採掘できる場所 (ore_locations。［詳細］タブの資源の【採掘できる場所】。DeliverableSourceFinder.FindOreLocations が作る) ──
+    // 1 行 = (資源, 場所, 掘り方, 岩の種類) を 1 つの HarvestableProviderPreset (preset) について:
+    //   resource_uuid / resource_record: MineableElement の resourceType の uuid と record 名 ("ResourceType.…")
+    //   preset: HarvestableProviderPreset の record 名。place: 場所の英語名 (Where の決め方。見つからなければ preset と同じ record 名)
+    //   system: 星系名 (Stanton / Pyro / Nyx など。分からなければ '')
+    //   method: '船で採掘' (SpaceShip_Mineables) / 'ROC で採掘' (GroundVehicle_Mineables) / '手で採掘' (FPS_Mineables)
+    //   rock: 岩の種類の英語名 (MineableComposition の depositName を英語ローカライズで引いたもの。引けなければ MineableComposition の record 名)
+    //   chance: その場所でその掘り方の岩のうち、この岩の種類が出る割合 % (relativeProbability ÷ 同じグループの relativeProbability の合計 × 100。
+    //     同じ岩の種類が同じグループに 2 つ以上あれば足す)
+    //   min_pct / max_pct: 岩の中の資源の割合の範囲 % (compositionArray の minPercentage / maxPercentage。同じ資源の行が 2 つ以上あれば最小 / 最大)
+    //   part_probability: その compositionArray の行の probability (2 つ以上あれば最大)
+    //   group_probability: グループの groupProbability (式が分からないので計算には使わない。保存だけ)
+    // インデックス構築 (Step 6c) で作り直す (作れなかったときは前の行を残す)。前の版の DB には表が無いので、起動後に一度だけ作る (RebuildOreLocationsAsync)
+    internal const string OreLocationsTable = "ore_locations";
+    internal const string OreLocationsDdl = """
+
+        CREATE TABLE IF NOT EXISTS ore_locations (
+            resource_uuid TEXT NOT NULL,
+            resource_record TEXT NOT NULL,
+            preset TEXT NOT NULL,
+            place TEXT NOT NULL,
+            system TEXT NOT NULL,
+            method TEXT NOT NULL,
+            rock TEXT NOT NULL,
+            chance REAL NOT NULL,
+            min_pct REAL NOT NULL,
+            max_pct REAL NOT NULL,
+            part_probability REAL NOT NULL,
+            group_probability REAL NOT NULL,
+            PRIMARY KEY (resource_uuid, preset, place, method, rock)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ore_locations_resource ON ore_locations(resource_uuid);
+        """;
+
+    // 掘り方 (対象のグループ名 → 画面の文字)。この 3 つのグループだけを見る
+    internal const string OreMethodShip = "船で採掘", OreMethodRoc = "ROC で採掘", OreMethodHand = "手で採掘";
+    internal static readonly (string Group, string Method)[] OreGroups =
+    [
+        ("SpaceShip_Mineables", OreMethodShip),
+        ("GroundVehicle_Mineables", OreMethodRoc),
+        ("FPS_Mineables", OreMethodHand),
+    ];
+
+    // 番号の付いた小さな場所の種類 (名前の頭 → 表で件数にまとめるときの名前)。［詳細］タブの資源の表 (GameDataQueryService.ResourceDetailText) で使う
+    internal static readonly (string Prefix, string Label)[] OreSmallPlacePrefixes =
+    [
+        ("Mining Claim #", "Mining Claim"),
+        ("Mining Base #", "Mining Base"),
+        ("RMB-", "RMB"),
+        ("RAB-", "RAB"),
+        ("Cluster ", "Cluster"),
+    ];
+
+    internal readonly record struct OreLocationRow(string ResourceUuid, string ResourceRecord, string Preset, string Place, string System, string Method,
+        string Rock, double Chance, double MinPct, double MaxPct, double PartProbability, double GroupProbability);
+
+    // ore_locations を入れ替える (表が無ければ作る)
+    private void WriteOreLocations(List<OreLocationRow> rows)
+    {
+        using var tx = _db!.BeginTransaction();
+        using (var ddl = _db.CreateCommand())
+        {
+            ddl.Transaction = tx;
+            ddl.CommandText = OreLocationsDdl + "DELETE FROM ore_locations;";
+            ddl.ExecuteNonQuery();
+        }
+        using (var ins = _db.CreateCommand())
+        {
+            ins.Transaction = tx;
+            ins.CommandText = "INSERT OR IGNORE INTO ore_locations(resource_uuid,resource_record,preset,place,system,method,rock,chance,min_pct,max_pct,part_probability,group_probability) "
+                + "VALUES(@u,@r,@p,@pl,@s,@m,@k,@c,@mn,@mx,@pp,@gp)";
+            var pU = ins.Parameters.Add("@u", SqliteType.Text);
+            var pR = ins.Parameters.Add("@r", SqliteType.Text);
+            var pP = ins.Parameters.Add("@p", SqliteType.Text);
+            var pPl = ins.Parameters.Add("@pl", SqliteType.Text);
+            var pS = ins.Parameters.Add("@s", SqliteType.Text);
+            var pM = ins.Parameters.Add("@m", SqliteType.Text);
+            var pK = ins.Parameters.Add("@k", SqliteType.Text);
+            var pC = ins.Parameters.Add("@c", SqliteType.Real);
+            var pMn = ins.Parameters.Add("@mn", SqliteType.Real);
+            var pMx = ins.Parameters.Add("@mx", SqliteType.Real);
+            var pPp = ins.Parameters.Add("@pp", SqliteType.Real);
+            var pGp = ins.Parameters.Add("@gp", SqliteType.Real);
+            foreach (var r in rows)
+            {
+                pU.Value = r.ResourceUuid; pR.Value = r.ResourceRecord; pP.Value = r.Preset; pPl.Value = r.Place; pS.Value = r.System; pM.Value = r.Method; pK.Value = r.Rock;
+                pC.Value = r.Chance; pMn.Value = r.MinPct; pMx.Value = r.MaxPct; pPp.Value = r.PartProbability; pGp.Value = r.GroupProbability;
+                ins.ExecuteNonQuery();
+            }
+        }
+        tx.Commit();
+    }
+
+    // インデックスを構築した DB で、ore_locations の表がまだ無いか (前の版で構築した DB・前の版のバックアップを取り込んだ DB)。
+    // 起動後の RebuildOreLocationsAsync を走らせるか決めるため。表は EnsureDb では作らない (無いことを印にする)
+    public bool NeedsOreLocations()
+    {
+        EnsureDb();
+        using var cmd = _db!.CreateCommand();
+        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM item_index) AND NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @t)";
+        cmd.Parameters.AddWithValue("@t", OreLocationsTable);
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
+    }
+
+    // 採掘できる場所 (ore_locations) を作る。DCB と socpak の読み込みが納品物の入手場所 (Step 6c) と同じなので、Step 6c をそのまま走らせて
+    // deliverable_sources と ore_locations を一緒に作り直す。起動後に裏で一度だけ呼ばれる (MainWindow: NeedsOreLocations のとき)。
+    // 構築・再抽出と同時に走っても作業フォルダがぶつからないよう、取り出し先は別の名前 (dcb_tmp_orelocations / deliverable_tmp_orelocations) にする。
+    // 途中で構築・再抽出が始まったら (IsIndexBuildRunning)、書き込まずに 0 を返す。作れなかったとき (取り消し以外) も、次の起動で走り直さないよう
+    // 表だけは作る (空のまま。次のインデックス構築で作られる)。入った ore_locations の行数を返す
+    public async Task<int> RebuildOreLocationsAsync(IProgress<string>? progress = null, CancellationToken ct = default)
+    {
+        var p4kPath = FindDataP4k()
+            ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
+
+        await EnsureStarBreakerAsync();
+        EnsureDb();
+
+        Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
+        if (relay != null) StatusChanged += relay;
+        var prevSuffix = _tmpSuffix;
+        if (_dcbScopeDepth == 0) _tmpSuffix = "_orelocations";
+        try
+        {
+            try
+            {
+                using var dcbScope = await UseExtractedDcbAsync(p4kPath, ct);
+                await ExtractDeliverableSourcesAsync(p4kPath, ct, skipWriteIfIndexBuildStarts: true);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { StatusChanged?.Invoke($"[採掘できる場所・納品物の入手場所] 作れませんでした: {ex.Message}"); }
+            if (IsIndexBuildRunning) return 0;
+            using (var ddl = _db!.CreateCommand())
+            {
+                ddl.CommandText = OreLocationsDdl;
+                ddl.ExecuteNonQuery();
+            }
+            using var cnt = _db.CreateCommand();
+            cnt.CommandText = "SELECT COUNT(*) FROM ore_locations";
+            return Convert.ToInt32(cnt.ExecuteScalar() ?? 0L);
+        }
+        finally
+        {
+            _tmpSuffix = prevSuffix;
+            if (relay != null) StatusChanged -= relay;
+        }
+    }
+
     // ── DCB の JSON (小分けを全部読んだもの) から作る索引 (調査の rev.json・t1_enttags.json・tags.json などに当たる) ──
     // 小分けごとに LoadChunk で読み、全部読んだら Finish で索引を作る。JSON の中身は縮めて records.bin に置き、後で ReadText で読む
     internal sealed class DeliverableDcb : IDisposable
@@ -281,6 +481,14 @@ public partial class GameDataExtractor
         public Dictionary<string, string> RecordToFile { get; } = new(StringComparer.Ordinal);
         // ファイル名 (小文字) → rel (後に出たもの。調査の t2b の fileidx)
         public Dictionary<string, string> BaseToRel { get; } = new(StringComparer.Ordinal);
+        // ファイル名 (小文字) → その名前の rel 全部 (Files の並び。同じ名前のファイルが別のフォルダにあるときの候補)
+        public Dictionary<string, List<string>> BaseToRels { get; } = new(StringComparer.Ordinal);
+        // rel の小文字 → rel (records の下のパスで引くため)
+        public Dictionary<string, string> RelByLower { get; } = new(StringComparer.Ordinal);
+        // 参照先の rel → 参照元の rel (ordinal で並べたもの)。参照の文字の records の下のパスで参照先を決め、パスで引けない参照だけファイル名で引く
+        // (BaseToRel。Rev はファイル名だけで引くので、同じ名前の別のファイル (例 mining/mineableelements/ice_raw.json と
+        // tintpalettes/organics/minables/ice_raw.json) を取り違える)
+        public Dictionary<string, List<string>> RevByRel { get; } = new(StringComparer.Ordinal);
         // entities/ のレコードのタグ (record 名 → タグの uuid。タグが 1 つ以上のものだけ。調査の t1_enttags.json)。並びは調査と同じ
         public List<(string Record, HashSet<string> Tags)> EntityTags { get; } = new();
         // loadoutPath (NormalizeLoadoutPath で XML のキーと同じ形にしたもの) → それを持つレコード (actor/・loadoutkits/・entities/。調査の lp2rec)
@@ -302,7 +510,8 @@ public partial class GameDataExtractor
         public Dictionary<string, string?> TagParent { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, string> TagPath { get; } = new(StringComparer.Ordinal);
 
-        private static readonly Regex FileRefRegex = new("file://[^\"]*/([^/\"]+)\\.json\"", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        // 参照の文字 (group 1: file:// の後ろのパス全体、group 2: ファイル名)
+        private static readonly Regex FileRefRegex = new("file://([^\"]*/([^/\"]+)\\.json)\"", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         private static readonly Regex RecordNameRegex = new("\"_RecordName_\": \"([^\"]+)\"", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         private static readonly Regex RecordIdRegex = new("\"_RecordId_\": \"([0-9a-f-]{36})\"", RegexOptions.Compiled | RegexOptions.CultureInvariant);
         private static readonly Regex LoadoutPathRegex = new("\"loadoutPath\": \"([^\"]+)\"", RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -314,6 +523,7 @@ public partial class GameDataExtractor
             public string? Id600;
             public string? Id400;
             public string[] RefBases = [];
+            public (string? Rel, string Base)[] RefTargets = [];
             public string[] LoadoutPaths = [];
             public string? StarMapKey;
             public string? StarMapParentRel;
@@ -355,12 +565,18 @@ public partial class GameDataExtractor
                 }
                 var baseName = BaseOf(rel);
                 var refs = new HashSet<string>(StringComparer.Ordinal);
+                var targets = new HashSet<(string? Rel, string Base)>();
+                var relLower = rel.ToLowerInvariant();
                 foreach (Match fm in FileRefRegex.Matches(text))
                 {
-                    var b = fm.Groups[1].Value.ToLowerInvariant();
+                    var b = fm.Groups[2].Value.ToLowerInvariant();
                     if (b != baseName) refs.Add(b);
+                    // 参照先のパス (records の下の小文字)。自分自身への参照は除く (パスが無ければ前と同じくファイル名が自分と同じものを除く)
+                    var tr = RecordsRelOfRef("file://" + fm.Groups[1].Value);
+                    if (tr != null ? tr != relLower : b != baseName) targets.Add((tr, b));
                 }
                 res.RefBases = refs.ToArray();
+                res.RefTargets = targets.ToArray();
                 if (rel.StartsWith("actor/", StringComparison.Ordinal) || rel.StartsWith("loadoutkits/", StringComparison.Ordinal) || rel.StartsWith("entities/", StringComparison.Ordinal))
                     res.LoadoutPaths = LoadoutPathRegex.Matches(text).Select(x => NormalizeLoadoutPath(x.Groups[1].Value)).ToArray();
                 if (res.RecordName != null && res.RecordName.StartsWith("StarMapObject.", StringComparison.Ordinal))
@@ -481,6 +697,31 @@ public partial class GameDataExtractor
                 list.Sort(StringComparer.Ordinal);
                 d.Rev[k] = list;
             }
+            // パスで引く索引 (RelByLower・BaseToRels) と、参照先の rel ごとの参照元 (RevByRel)
+            foreach (var rel in d.Files)
+            {
+                d.RelByLower[rel.ToLowerInvariant()] = rel;
+                if (!d.BaseToRels.TryGetValue(BaseOf(rel), out var same)) d.BaseToRels[BaseOf(rel)] = same = new List<string>();
+                same.Add(rel);
+            }
+            var revByRel = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            for (int i = 0; i < _pending.Count; i++)
+            {
+                var rel = d.Files[i];
+                foreach (var (tr, b) in _pending[i].Res.RefTargets)
+                {
+                    var target = tr != null && d.RelByLower.TryGetValue(tr, out var byPath) ? byPath : d.BaseToRel.TryGetValue(b, out var byBase) ? byBase : null;
+                    if (target == null || target == rel) continue;
+                    if (!revByRel.TryGetValue(target, out var set)) revByRel[target] = set = new HashSet<string>(StringComparer.Ordinal);
+                    set.Add(rel);
+                }
+            }
+            foreach (var (k, v) in revByRel)
+            {
+                var list = v.ToList();
+                list.Sort(StringComparer.Ordinal);
+                d.RevByRel[k] = list;
+            }
 
             // タグの木 (tagdatabase/tagdatabase.tagdatabase.json の tags[] の children の入れ子)
             if (ReadText("tagdatabase/tagdatabase.tagdatabase.json") is { } tagText)
@@ -588,6 +829,9 @@ public partial class GameDataExtractor
         // 子の socpak → それを置く Entity (同じ entxml) に書かれた StarMapObject (例 nyxsystem.socpak の entdata/2998839955.entxml の
         // objectContainer="…/keeger_segment_rckcrk_001.socpak" と starmapRecord="36a9e3b4-…" (StarMapObject.AsteroidClusterBase_Nyx_Rockcracker_001))
         public Dictionary<string, HashSet<string>> ChildStarMap { get; } = new(StringComparer.Ordinal);
+        // 子の socpak → (それを置く Entity のある親の socpak, その Entity の StarMapObject)。ChildStarMap と同じ組を、どの親の中の組かを残して持つ
+        // (資源の採掘できる場所 (FindOreLocations) で、別の星系の親に置かれた組を除くのに使う。ChildStarMap の使い方は変えない)
+        public Dictionary<string, HashSet<(string Parent, string Smo)>> ChildStarMapFrom { get; } = new(StringComparer.Ordinal);
         public int SocpakCount { get; private set; }
         public int BadCount { get; private set; }
 
@@ -648,6 +892,8 @@ public partial class GameDataExtractor
                 {
                     if (!s.ChildStarMap.TryGetValue(child, out var cs)) s.ChildStarMap[child] = cs = new HashSet<string>(StringComparer.Ordinal);
                     cs.Add(smo);
+                    if (!s.ChildStarMapFrom.TryGetValue(child, out var cf)) s.ChildStarMapFrom[child] = cf = new HashSet<(string Parent, string Smo)>();
+                    cf.Add((rel, smo));
                 }
                 foreach (var rn in records)
                 {
@@ -940,29 +1186,45 @@ public partial class GameDataExtractor
             return _whereCache[soc] = (pl, near);
         }
 
-        // 品 (資源は MineableElement) を参照するレコードを上へ辿る (調査の upchain。6 段まで、契約・UI などの参照は辿らない)
-        private List<(string? Rec, List<string> Path)> UpChain(string baseName, int maxd = 6)
+        // 品 (資源は MineableElement) を参照するレコードを上へ辿る (調査の upchain。6 段まで、契約・UI などの参照は辿らない)。
+        // 辿るのは rel (records の下のパス) で、参照元は RevByRel (参照の文字のパスで決めたもの。ファイル名だけでは引かない)。
+        // Path は辿った rel の並び (先頭が出発の rel)。画面の via の文字はファイル名 (PathBases) にする
+        private List<(string? Rec, List<string> Path)> UpChain(IEnumerable<string> startRels, int maxd = 6)
         {
             var result = new List<(string?, List<string>)>();
-            var seen = new HashSet<string>(StringComparer.Ordinal) { baseName };
+            var starts = startRels.Distinct(StringComparer.Ordinal).ToList();
+            var seen = new HashSet<string>(starts, StringComparer.Ordinal);
             var fr = new Queue<(string X, int Dp, List<string> Path)>();
-            fr.Enqueue((baseName, 0, new List<string> { baseName }));
+            foreach (var st in starts) fr.Enqueue((st, 0, new List<string> { st }));
             while (fr.Count > 0)
             {
                 var (x, dp, path) = fr.Dequeue();
-                if (!_d.Rev.TryGetValue(x, out var rs)) continue;
+                if (!_d.RevByRel.TryGetValue(x, out var rs)) continue;
                 foreach (var r in rs)
                 {
                     if (Skip.Any(p => r.StartsWith(p, StringComparison.Ordinal))) continue;
-                    var b = DeliverableDcb.BaseOf(r);
-                    if (seen.Contains(b) || dp >= maxd) continue;
-                    seen.Add(b);
-                    var np = new List<string>(path) { b };
+                    if (seen.Contains(r) || dp >= maxd) continue;
+                    seen.Add(r);
+                    var np = new List<string>(path) { r };
                     result.Add((_d.Rec.TryGetValue(r, out var rn) ? rn : null, np));
-                    fr.Enqueue((b, dp + 1, np));
+                    fr.Enqueue((r, dp + 1, np));
                 }
             }
             return result;
+        }
+
+        // 辿った rel の並び → ファイル名 (小文字・.json を除く) の並び (via の文字・ロードアウトの itemName との照合に使う)
+        private static List<string> PathBases(IEnumerable<string> rels) => rels.Select(DeliverableDcb.BaseOf).ToList();
+
+        // 品 (エンティティのファイル名の小文字) の rel。契約の納品物はエンティティ (EntityClassDefinition) のファイル名しか持たないので、
+        // その名前のファイルのうち EntityClassDefinition のもの (同じ名前の別の種類のファイルを取り違えないように)。無ければ前と同じく BaseToRel (後に出たもの)
+        private List<string> EntityTargetRels(string k)
+        {
+            var list = _d.BaseToRels.TryGetValue(k, out var same)
+                ? same.Where(r => _d.Rec.TryGetValue(r, out var rn) && rn != null && rn.StartsWith("EntityClassDefinition.", StringComparison.Ordinal)).ToList()
+                : new List<string>();
+            if (list.Count == 0 && _d.BaseToRel.TryGetValue(k, out var one)) list.Add(one);
+            return list;
         }
 
         // ロードアウトの XML を使う actor (SLoadoutAssortment は、それを参照する EntityClassDefinition に置き換える。調査の actors_for_xml)
@@ -975,7 +1237,7 @@ public partial class GameDataExtractor
                 if (rn.StartsWith("SLoadoutAssortment", StringComparison.Ordinal))
                 {
                     if (!_d.RecordToFile.TryGetValue(rn, out var f)) continue;
-                    if (!_d.Rev.TryGetValue(DeliverableDcb.BaseOf(f), out var rs)) continue;
+                    if (!_d.RevByRel.TryGetValue(f, out var rs)) continue;
                     foreach (var r in rs)
                         if (_d.Rec.TryGetValue(r, out var rr) && rr != null && rr.StartsWith("EntityClassDefinition", StringComparison.Ordinal)) result.Add(rr);
                 }
@@ -1021,21 +1283,23 @@ public partial class GameDataExtractor
             var k = it.ToLowerInvariant();
             var src = new List<Src>();
             // D 品そのものの配置
-            if (_d.BaseToRecord.TryGetValue(k, out var rn) && _s.RecordToSocpaks.TryGetValue(rn, out var own))
-                foreach (var s in own) src.Add(new Src("配置", Short(rn), s, DeliverableSourceSections.Placed));
+            var targetRels = EntityTargetRels(k);
+            foreach (var tRel in targetRels)
+                if (_d.Rec.TryGetValue(tRel, out var rn) && rn != null && _s.RecordToSocpaks.TryGetValue(rn, out var own))
+                    foreach (var s in own) src.Add(new Src("配置", Short(rn), s, DeliverableSourceSections.Placed));
             // A DCB を上へ
-            var chain = UpChain(k);
+            var chain = UpChain(targetRels);
             foreach (var (r, path) in chain)
             {
                 if (r == null || r.StartsWith("StarMapObject", StringComparison.Ordinal) || r.StartsWith("BuildingBlocks", StringComparison.Ordinal)) continue;
                 if (!_s.RecordToSocpaks.TryGetValue(r, out var socs)) continue;
                 var section = ChainSection(r, path);
-                foreach (var s in socs) src.Add(new Src("参照:" + TypeOf(r), string.Join(" > ", path.Skip(1)), s, section));
+                foreach (var s in socs) src.Add(new Src("参照:" + TypeOf(r), string.Join(" > ", PathBases(path.Skip(1))), s, section));
             }
             // B 生き物 (ロードアウト)
             var lkeys = new List<string> { k };
             foreach (var (r, path) in chain)
-                if (r != null && r.StartsWith("EntityClassDefinition", StringComparison.Ordinal)) lkeys.Add(path[^1]);
+                if (r != null && r.StartsWith("EntityClassDefinition", StringComparison.Ordinal)) lkeys.Add(DeliverableDcb.BaseOf(path[^1]));
             var xmls = new HashSet<string>(StringComparer.Ordinal);
             foreach (var kk in lkeys)
                 if (_ld.TryGetValue(kk, out var xs)) xmls.UnionWith(xs);
@@ -1077,7 +1341,7 @@ public partial class GameDataExtractor
                 {
                     var owners = new List<string> { owner };
                     if (owner.StartsWith("SubHarvestableConfigRecord", StringComparison.Ordinal) && _d.RecordToFile.TryGetValue(owner, out var f)
-                        && _d.Rev.TryGetValue(DeliverableDcb.BaseOf(f), out var rs))
+                        && _d.RevByRel.TryGetValue(f, out var rs))
                         foreach (var r in rs)
                             if (_d.Rec.TryGetValue(r, out var rr) && rr != null && rr.StartsWith("SubHarvestable", StringComparison.Ordinal) && !owners.Contains(rr)) owners.Add(rr);
                     foreach (var o in owners)
@@ -1097,8 +1361,9 @@ public partial class GameDataExtractor
         private string ChainSection(string r, List<string> path)
         {
             var types = new List<string> { TypeOf(r) };
-            foreach (var b in path.Skip(1))
-                if (_d.BaseToRecord.TryGetValue(b, out var prn)) types.Add(TypeOf(prn));
+            // path は辿った rel の並び (UpChain)。その rel の record で見る (ファイル名で引くと同じ名前の別のファイルの record になるため)
+            foreach (var pr in path.Skip(1))
+                if (_d.Rec.TryGetValue(pr, out var prn) && prn != null) types.Add(TypeOf(prn));
             if (types.Any(t => t.StartsWith("LootTable", StringComparison.Ordinal))) return DeliverableSourceSections.LootListed;
             if (types.Any(t => t.StartsWith("Harvestable", StringComparison.Ordinal) || t.StartsWith("SubHarvestable", StringComparison.Ordinal)))
                 return DeliverableSourceSections.Mining;
@@ -1141,12 +1406,12 @@ public partial class GameDataExtractor
                 using var me = JsonDocument.Parse(_d.ReadText(rel)!);
                 if (!me.RootElement.TryGetProperty("_RecordValue_", out var mv) || mv.ValueKind != JsonValueKind.Object) continue;
                 if (!mv.TryGetProperty("resourceType", out var rt) || rt.ValueKind != JsonValueKind.Object || !ids.Contains(Str(rt, "_RecordId_"))) continue;
-                foreach (var (r, path) in UpChain(DeliverableDcb.BaseOf(rel)))
+                foreach (var (r, path) in UpChain([rel]))
                 {
                     if (r == null || r.StartsWith("StarMapObject", StringComparison.Ordinal) || r.StartsWith("BuildingBlocks", StringComparison.Ordinal)) continue;
                     if (!_s.RecordToSocpaks.TryGetValue(r, out var socs)) continue;
                     foreach (var s in socs)
-                        src.Add(new Src("参照:" + TypeOf(r), Short(rn) + " > " + string.Join(" > ", path.Skip(1)), s, DeliverableSourceSections.Mining));
+                        src.Add(new Src("参照:" + TypeOf(r), Short(rn) + " > " + string.Join(" > ", PathBases(path.Skip(1))), s, DeliverableSourceSections.Mining));
                 }
             }
             return src;
@@ -1174,6 +1439,293 @@ public partial class GameDataExtractor
                 }
                 foreach (var n in near) Add(x.Section, x.Kind, "near", n);
             }
+        }
+
+        // ── 資源の採掘できる場所 (ore_locations) ──
+
+        // 全 HarvestableProviderPreset の SpaceShip_Mineables / GroundVehicle_Mineables / FPS_Mineables のグループから、
+        // (資源, 場所, 掘り方, 岩の種類) の行を作る。辿り方: HarvestableElement の harvestable (HarvestablePreset) の entityClass
+        // (harvestable が空なら harvestableEntityClass) → そのエンティティの MineableParams の composition (MineableComposition) →
+        // compositionArray[] の mineableElement (MineableElement) の resourceType。辿れない要素は行を作らない (relativeProbability の合計には入れる)
+        public List<OreLocationRow> FindOreLocations(CancellationToken ct)
+        {
+            var rows = new List<OreLocationRow>();
+            var compCache = new Dictionary<string, OreComposition?>(StringComparer.Ordinal);
+            foreach (var rel in _d.Files)
+            {
+                if (!_d.Rec.TryGetValue(rel, out var hpp) || hpp == null || !hpp.StartsWith("HarvestableProviderPreset.", StringComparison.Ordinal)) continue;
+                ct.ThrowIfCancellationRequested();
+                if (_d.ReadText(rel) is not { } text) continue;
+                // (資源の uuid, 掘り方, 岩の種類) → 集計
+                var agg = new Dictionary<(string Uuid, string Method, string Rock), OreAcc>();
+                using (var doc = JsonDocument.Parse(text))
+                {
+                    if (!doc.RootElement.TryGetProperty("_RecordValue_", out var rv) || rv.ValueKind != JsonValueKind.Object) continue;
+                    foreach (var g in Arr(Get(rv, "harvestableGroups")))
+                    {
+                        var groupName = Str(g, "groupName");
+                        var method = OreGroups.FirstOrDefault(x => x.Group == groupName).Method;
+                        if (method == null) continue;
+                        var hs = Arr(Get(g, "harvestables"));
+                        var sum = hs.Sum(h => Num(Get(h, "relativeProbability")));
+                        if (sum <= 0) continue;
+                        var groupProbability = Num(Get(g, "groupProbability"));
+                        foreach (var h in hs)
+                        {
+                            var rp = Num(Get(h, "relativeProbability"));
+                            if (rp <= 0) continue;
+                            if (CompositionOf(h, compCache) is not { } comp) continue;
+                            var chance = rp / sum * 100;
+                            foreach (var part in comp.Parts)
+                            {
+                                var key = (part.Uuid, method, comp.Rock);
+                                if (!agg.TryGetValue(key, out var a))
+                                    agg[key] = a = new OreAcc { Record = part.Record, Min = part.Min, Max = part.Max, Prob = part.Prob, GroupProbability = groupProbability };
+                                else
+                                {
+                                    a.Min = Math.Min(a.Min, part.Min);
+                                    a.Max = Math.Max(a.Max, part.Max);
+                                    a.Prob = Math.Max(a.Prob, part.Prob);
+                                }
+                                a.Chance += chance;
+                            }
+                        }
+                    }
+                }
+                if (agg.Count == 0) continue;
+                foreach (var (place, system) in OrePlaces(hpp, rel))
+                    foreach (var ((uuid, method, rock), a) in agg)
+                        rows.Add(new OreLocationRow(uuid, a.Record, hpp, place, system, method, rock, a.Chance, a.Min, a.Max, a.Prob, a.GroupProbability));
+            }
+            return rows;
+        }
+
+        private sealed class OreAcc
+        {
+            public string Record = "";
+            public double Chance, Min, Max, Prob, GroupProbability;
+        }
+
+        // 岩の種類 1 つ: 名前と、中の資源 (同じ資源の行はまとめたもの)
+        private sealed record OreComposition(string Rock, List<(string Uuid, string Record, double Min, double Max, double Prob)> Parts);
+
+        // 参照の文字 (file://…/libs/foundry/records/…/x.json) のレコードの JSON の文字。records の下のパスで引き、引けなければファイル名で引く
+        // (ファイル名だけで引くと、同じ名前のファイルが別のフォルダにあるとき (例 mining/mineableelements/ice_raw.json) 違うレコードになるため)。
+        // どちらでも引けなければ null
+        private string? RefText(string? reference)
+        {
+            if (string.IsNullOrEmpty(reference)) return null;
+            if (DeliverableDcb.RecordsRelOfRef(reference) is { } relPath && _d.ReadText(relPath) is { } byPath) return byPath;
+            var m = RefTailRegex.Match(reference);
+            if (!m.Success) return null;
+            return _d.BaseToRel.TryGetValue(m.Groups[1].Value.ToLowerInvariant(), out var rel) ? _d.ReadText(rel) : null;
+        }
+
+        private static string? RefString(JsonElement o, string key) =>
+            o.ValueKind == JsonValueKind.Object && o.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String && (v.GetString() ?? "").Length > 0 ? v.GetString() : null;
+
+        // HarvestableElement → 岩の種類 (辿れなければ null)。MineableComposition の参照の文字で覚える
+        private OreComposition? CompositionOf(JsonElement h, Dictionary<string, OreComposition?> cache)
+        {
+            string? entityRef = null;
+            if (RefString(h, "harvestable") is { } presetRef)
+            {
+                if (RefText(presetRef) is not { } presetText) return null;
+                using var pd = JsonDocument.Parse(presetText);
+                if (pd.RootElement.TryGetProperty("_RecordValue_", out var pv)) entityRef = RefString(pv, "entityClass");
+            }
+            else entityRef = RefString(h, "harvestableEntityClass");
+            if (entityRef == null || RefText(entityRef) is not { } entityText) return null;
+            string? compRef = null;
+            using (var ed = JsonDocument.Parse(entityText))
+            {
+                void Find(JsonElement o)
+                {
+                    if (compRef != null) return;
+                    if (o.ValueKind == JsonValueKind.Object)
+                    {
+                        if (Str(o, "_Type_") == "MineableParams" && RefString(o, "composition") is { } c) { compRef = c; return; }
+                        foreach (var p in o.EnumerateObject()) Find(p.Value);
+                    }
+                    else if (o.ValueKind == JsonValueKind.Array)
+                        foreach (var v in o.EnumerateArray()) Find(v);
+                }
+                Find(ed.RootElement);
+            }
+            if (compRef == null) return null;
+            if (cache.TryGetValue(compRef, out var hit)) return hit;
+            OreComposition? result = null;
+            if (RefText(compRef) is { } compText)
+            {
+                using var cd = JsonDocument.Parse(compText);
+                var root = cd.RootElement;
+                var compRecord = Str(root, "_RecordName_");
+                if (root.TryGetProperty("_RecordValue_", out var cv) && cv.ValueKind == JsonValueKind.Object)
+                {
+                    var deposit = Str(cv, "depositName");
+                    var key = deposit.StartsWith('@') ? deposit[1..] : deposit;
+                    var rock = key.Length > 0 && _ini.TryGetValue(key, out var en) && OreService.EnglishText(en) is { } usable ? usable : compRecord;
+                    var parts = new List<(string Uuid, string Record, double Min, double Max, double Prob)>();
+                    foreach (var part in Arr(Get(cv, "compositionArray")))
+                    {
+                        if (RefText(RefString(part, "mineableElement")) is not { } meText) continue;
+                        using var md = JsonDocument.Parse(meText);
+                        if (!md.RootElement.TryGetProperty("_RecordValue_", out var mv) || Get(mv, "resourceType") is not { ValueKind: JsonValueKind.Object } rt) continue;
+                        var uuid = Str(rt, "_RecordId_");
+                        if (uuid.Length == 0) continue;
+                        var record = Str(rt, "_RecordName_");
+                        double mn = Num(Get(part, "minPercentage")), mx = Num(Get(part, "maxPercentage")), pr = Num(Get(part, "probability"));
+                        var i = parts.FindIndex(x => x.Uuid == uuid);
+                        if (i < 0) parts.Add((uuid, record, mn, mx, pr));
+                        else parts[i] = (uuid, parts[i].Record, Math.Min(parts[i].Min, mn), Math.Max(parts[i].Max, mx), Math.Max(parts[i].Prob, pr));
+                    }
+                    if (parts.Count > 0) result = new OreComposition(rock, parts);
+                }
+            }
+            return cache[compRef] = result;
+        }
+
+        // 星系だけしか名前の無い小惑星帯の socpak のフォルダ → 場所の名前の訳キー (英語ローカライズで引く)。
+        // Glaciem Ring / Keeger Belt の preset (HPP_Nyx_GlaciemRing / HPP_Nyx_KeegerBelt) は、そのフォルダの *_gascloud_gen.socpak に置かれ、
+        // 親を辿ると星系 (Nyx System) か、帯の中の駅 (QV Breaker Station …) にしか当たらないため、帯の名前 (global.ini の Nyx_AsteroidBelt1 / 2) を使う
+        private static readonly (string Folder, string Key)[] BeltFolderNameKeys =
+        [
+            ("pu/system/nyx/glaciemring/", "Nyx_AsteroidBelt1"),   // Glaciem Ring
+            ("pu/system/nyx/keegerbelt/", "Nyx_AsteroidBelt2"),    // Keeger Belt
+        ];
+
+        // HarvestableProviderPreset の置かれた場所 (英語名) と星系。preset の uuid が出てくる socpak ごとに、その socpak 自身を基準に決める:
+        //   ・socpak (とその親) のパスの pu/system/<星系>/ の星系 (SocpakSystems) に、preset の星系 (preset のファイルのパスの
+        //     harvestable/providerpresets/system/<星系>/) が無いものは使わない (別の星系・テスト用の socpak の使い回し。例 ellis3.socpak・pyro6.socpak の HPP_Stanton2c_Belt)。
+        //     その socpak を置く Entity の名前も、親がこの星系の socpak のものだけを使う
+        //   ・小惑星帯のフォルダ (BeltFolderNameKeys) の socpak は帯の名前
+        //   ・星・月の socpak (pu/system/<星系>/<名前>.socpak。<星>_planet_only は星) はその天体の名前だけ (親の星系・惑星の名前は付けない)
+        //   ・ほか (childcloud の .soc など) は、socpak 自身から親を幅優先で辿り、最初に名前 (StarMapObject) が引ける段の名前
+        //     (Where の名前付きの場所と同じ引き方。惑星・月の下の場所の socpak はその惑星・月、星・月の socpak はその天体)
+        //   ・星系そのものの名前 (Stanton / Nyx System など。星系の socpak・恒星の socpak) は場所に使わない
+        // 場所が 1 つも見つからなければ「場所不明 (<preset の record 名の後ろ>)」を場所にする。星系の列は preset の星系
+        private List<(string Place, string System)> OrePlaces(string hpp, string hppRel)
+        {
+            var result = new List<(string, string)>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var presetSystem = SystemFromPath(hppRel, "harvestable/providerpresets/system/");
+            if (_s.RecordToSocpaks.TryGetValue(hpp, out var socs))
+            {
+                foreach (var soc in socs.OrderBy(x => x, StringComparer.Ordinal))
+                {
+                    if (!SocpakSystems(soc).Contains(presetSystem)) continue;
+                    foreach (var n in OreSocpakPlaceNames(soc, presetSystem))
+                        if (seen.Add(n)) result.Add((n, presetSystem));
+                }
+            }
+            if (result.Count == 0) result.Add(($"場所不明 ({Short(hpp)})", presetSystem));
+            return result;
+        }
+
+        // 1 つの socpak の場所の名前 (OrePlaces の決め方。並びは名前の順)
+        private List<string> OreSocpakPlaceNames(string soc, string system)
+        {
+            foreach (var (folder, key) in BeltFolderNameKeys)
+                if (soc.StartsWith(folder, StringComparison.Ordinal) && _ini.TryGetValue(key, out var belt) && OreService.EnglishText(belt) is { } beltName)
+                    return [beltName];
+            if (PlanetSocpakName(soc, system) is { } own) return own.Length > 0 ? [own] : [];
+            var seen = new HashSet<string>(StringComparer.Ordinal) { soc };
+            var level = new List<string> { soc };
+            for (int depth = 0; level.Count > 0 && depth < 32; depth++)
+            {
+                var names = new SortedSet<string>(StringComparer.Ordinal);
+                foreach (var x in level)
+                {
+                    if (depth > 0 && PlanetSocpakName(x, system) is { } planet) { if (planet.Length > 0) names.Add(planet); continue; }
+                    // その socpak を置く Entity の StarMapObject は、親の socpak がこの星系のものだけ (同じ socpak が別の星系にも置かれているため。例 miningasteroid_003 は Nyx の delamar にも置かれる)
+                    var childSmos = _s.ChildStarMapFrom.TryGetValue(x, out var from)
+                        ? from.Where(f => SocpakSystems(f.Parent).Contains(system)).Select(f => f.Smo).Distinct(StringComparer.Ordinal).ToList() : null;
+                    foreach (var n in Named(!x.StartsWith("pu/system/", StringComparison.Ordinal) && _socSmo.TryGetValue(x, out var smos) ? smos : null)
+                                 .Concat(Named(childSmos)))
+                        if (!IsSystemName(n, system)) names.Add(n);
+                    if (_socPlanets.TryGetValue(x, out var socPl))
+                        foreach (var p in socPl)
+                            if (PlanetKeyName(p) is { } pn && !IsSystemName(pn, system)) names.Add(pn);
+                }
+                if (names.Count > 0) return names.ToList();
+                var next = new List<string>();
+                foreach (var x in level)
+                    if (_s.Parents.TryGetValue(x, out var ps))
+                        foreach (var p in ps.OrderBy(v => v, StringComparer.Ordinal))
+                            if (seen.Add(p)) next.Add(p);
+                level = next;
+            }
+            return [];
+        }
+
+        // 星・月の socpak (pu/system/<星系>/<名前>.socpak。Where の惑星・月の決め方と同じキー) ならその天体の英語名。
+        // 星系そのもの・恒星など星系の名前になるもの・名前の引けないものは ""。星・月の socpak でなければ null
+        private string? PlanetSocpakName(string soc, string system)
+        {
+            string key;
+            if (PlanetOnlyBody(soc) is { } body) key = body;
+            else if (soc.StartsWith("pu/system/", StringComparison.Ordinal) && soc.Count(ch => ch == '/') == 3)
+            {
+                var name = soc[(soc.LastIndexOf('/') + 1)..];
+                name = name.Length >= 7 ? name[..^7] : "";
+                var sys = soc.Split('/')[2];
+                if (!_pln.ContainsKey(name) && _pln.ContainsKey(sys + "_" + name)) name = sys + "_" + name;
+                key = name;
+            }
+            else return null;
+            if (IsSystemSocpakKey(key)) return "";
+            var en = PlanetKeyName(key);
+            return en == null || IsSystemName(en, system) ? "" : en;
+        }
+
+        // 惑星・月のキー (_pln のキー) の英語名 (Aggregate と同じ引き方: 星図の名前、無ければ socpak の名前を翻訳のキーとして引く)。訳が使えなければ null
+        private string? PlanetKeyName(string key)
+        {
+            var en = _pln.TryGetValue(key, out var v) ? v : _ini.TryGetValue(key, out var iniEn) ? iniEn : null;
+            return en != null && OreService.EnglishText(en) is { } usable ? usable : null;
+        }
+
+        // 星系そのものの名前か (「Stanton」「Nyx System」など。大文字小文字無視)
+        private static bool IsSystemName(string name, string system) =>
+            system.Length > 0 && (string.Equals(name, system, StringComparison.OrdinalIgnoreCase) || string.Equals(name, system + " System", StringComparison.OrdinalIgnoreCase));
+
+        // 星系そのものの socpak の名前 (stantonsystem / pyrosystem / nyxsystem。Where の惑星・月のキー)
+        private static bool IsSystemSocpakKey(string key) => key.Length > "system".Length && key.EndsWith("system", StringComparison.Ordinal);
+
+        // socpak とその親を幅優先で辿り、最初に pu/system/<星系>/ の socpak が出てくる段の星系 (表示の形。その段に複数の星系があれば全部)。
+        // 当たらなければ空 (pu/system の下に置かれていない socpak。テスト用・使われていないもの)
+        private readonly Dictionary<string, HashSet<string>> _socSystemsCache = new(StringComparer.Ordinal);
+        private HashSet<string> SocpakSystems(string soc)
+        {
+            if (_socSystemsCache.TryGetValue(soc, out var hit)) return hit;
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var seen = new HashSet<string>(StringComparer.Ordinal) { soc };
+            var level = new List<string> { soc };
+            for (int depth = 0; level.Count > 0 && depth < 64 && result.Count == 0; depth++)
+            {
+                var next = new List<string>();
+                foreach (var x in level)
+                {
+                    var sys = SystemFromPath(x, "pu/system/");
+                    if (sys.Length > 0) { result.Add(sys); continue; }
+                    if (_s.Parents.TryGetValue(x, out var ps))
+                        foreach (var p in ps)
+                            if (seen.Add(p)) next.Add(p);
+                }
+                level = next;
+            }
+            return _socSystemsCache[soc] = result;
+        }
+
+        // パスの head の後ろのフォルダ名 (星系) を表示の形にする (stanton → Stanton。先頭だけ大文字)。head で始まらなければ ''
+        private static string SystemFromPath(string path, string head)
+        {
+            if (!path.StartsWith(head, StringComparison.OrdinalIgnoreCase)) return "";
+            var rest = path[head.Length..];
+            var slash = rest.IndexOf('/');
+            if (slash <= 0) return "";
+            var name = rest[..slash].ToLowerInvariant();
+            return char.ToUpperInvariant(name[0]) + name[1..];
         }
 
         // ── 出現の設定 (調査の t8_spawn.py) ──
@@ -1348,15 +1900,19 @@ public partial class GameDataExtractor
             var m = RefTailRegex.Match(str);
             if (!m.Success) return null;
             var b = m.Groups[1].Value.ToLowerInvariant();
-            if (_refCache.TryGetValue(b, out var hit)) return hit;
+            // records の下のパスで引き、引けなければファイル名で引く (RefText と同じ。同じ名前の別のファイルを取り違えないように)。覚えるのは引いた rel で
+            var tRel = DeliverableDcb.RecordsRelOfRef(str) is { } pl && _d.RelByLower.TryGetValue(pl, out var byPath) ? byPath
+                : _d.BaseToRel.TryGetValue(b, out var byBase) ? byBase : null;
+            if (tRel == null) return null;
+            if (_refCache.TryGetValue(tRel, out var hit)) return hit;
             JsonElement? result = null;
-            if (_d.BaseToRel.TryGetValue(b, out var bRel) && _d.ReadText(bRel) is { } bText)
+            if (_d.ReadText(tRel) is { } bText)
             {
                 var doc = JsonDocument.Parse(bText);
                 _docs.Add(doc);
                 result = doc.RootElement;
             }
-            return _refCache[b] = result;
+            return _refCache[tRel] = result;
         }
 
         private static string? Tid(JsonElement? t) =>
