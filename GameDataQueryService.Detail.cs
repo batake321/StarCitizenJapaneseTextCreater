@@ -6,9 +6,11 @@ namespace StarCitizenJapaneseTextCreater;
 
 // ［詳細］タブの検索の候補 1 件 (item_index の 1 品目。船・車両・武器・装備のすべて)
 // Note は同じ名前・同じ種類の候補が複数あるときに添える見分け (record 名。追加で取り込む品目だけ。SearchDetailCandidates)
-public sealed record DetailCandidate(string Record, string Name, string ItemType, string SubType, string Manufacturer, string? Note = null)
+// DisplayText はリストの表示をそのまま決めるもの (星系・場所・お店の候補。ShopTreeCandidates)
+public sealed record DetailCandidate(string Record, string Name, string ItemType, string SubType, string Manufacturer, string? Note = null, string? DisplayText = null)
 {
-    public string Display => $"{Name}  [{GameDataQueryService.DetailTypeLabel(ItemType)}{(SubType.Length > 0 && SubType != "UNDEFINED" ? " / " + SubType : "")}]"
+    public string Display => DisplayText
+                             ?? $"{Name}  [{GameDataQueryService.DetailTypeLabel(ItemType)}{(SubType.Length > 0 && SubType != "UNDEFINED" ? " / " + SubType : "")}]"
                              + (string.IsNullOrEmpty(Note) ? "" : $"  ({Note})");
     public override string ToString() => Display;
 }
@@ -21,8 +23,9 @@ public partial class GameDataQueryService
     // ［詳細］タブの検索。item_index のあいまい検索 (FuzzySearch: 全文検索 (trigram)、無ければ LIKE) で候補を出し、
     // 少なければ綴りの揺れ用の検索 (EditDistanceSearch) も足す。名前がプレースホルダ・空のものは除き、同じ名前・同じ種類は 1 件にする。
     // ただし追加で取り込む品目 (IsExtraDetailType の種類。例 Mining_Laser_MPUV_Arm と Mining_Laser_GRIN_Arbor_S1 の「Arbor MH1 Mining Laser」) は
-    // 別の品目なので record ごとに残し、同じ名前・同じ種類が複数あるときは record 名を添えて見分けられるようにする
-    public List<DetailCandidate> SearchDetailCandidates(string query, int limit = 40)
+    // 別の品目なので record ごとに残し、同じ名前・同じ種類が複数あるときは record 名を添えて見分けられるようにする。
+    // shopTree を渡すと、星系・場所・お店の候補 (ShopTreeCandidates) も、品目の候補とは別に作って先頭に足す。並びは 星系 → 場所 → お店 → 資源 → 品目
+    public List<DetailCandidate> SearchDetailCandidates(string query, int limit = 40, ShopTree? shopTree = null)
     {
         var q = (query ?? "").Trim();
         if (q.Length == 0) return new List<DetailCandidate>();
@@ -55,7 +58,69 @@ public partial class GameDataQueryService
         // 上の品目の候補 (件数・limit・EditDistanceSearch に進むかの判定) とは別に作って先頭に足す (品目の候補の数え方には入れない)
         var resources = SearchResourceCandidates(q).Where(c => c.Name.Trim().Length > 0)
             .DistinctBy(c => c.Record, StringComparer.OrdinalIgnoreCase).ToList();
-        return resources.Concat(list.Take(limit)).ToList();
+        var places = shopTree != null ? ShopTreeCandidates(shopTree, q) : new List<DetailCandidate>();
+        return places.Concat(resources).Concat(list.Take(limit)).ToList();
+    }
+
+    // 星系・場所・お店の候補の最大の件数 (場所・お店はそれぞれ)
+    private const int ShopTreeCandidateLimit = 30;
+
+    // 星系・場所・お店の候補: 名前に q を含むもの (大文字小文字無視)。星系 → 場所 (最大 30 件) → お店 (最大 30 件) の順。
+    // それぞれ 名前が q と同じもの → q で始まるもの → ほか、同じ順位は名前の順。表示は分類のリストと同じ形に種類を添える:
+    //   星系「Stanton  [星系]」、場所「名前 (親の名前)  [場所の種類の日本語名]」、お店「名前 (場所の名前)  [装備の店 など]」
+    public static List<DetailCandidate> ShopTreeCandidates(ShopTree tree, string query)
+    {
+        var q = (query ?? "").Trim();
+        var result = new List<DetailCandidate>();
+        if (q.Length == 0 || tree.IsEmpty) return result;
+        int Rank(string name) => name.Equals(q, StringComparison.OrdinalIgnoreCase) ? 0 : name.StartsWith(q, StringComparison.OrdinalIgnoreCase) ? 1 : 2;
+        bool Hit(string name) => name.Contains(q, StringComparison.OrdinalIgnoreCase);
+        foreach (var n in tree.Systems.Where(n => Hit(n.System)).OrderBy(n => Rank(n.System)).ThenBy(n => n.System, StringComparer.OrdinalIgnoreCase))
+            result.Add(SystemCandidate(n));
+        foreach (var n in tree.Places.Where(n => Hit(n.Name)).OrderBy(n => Rank(n.Name)).ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
+                     .ThenBy(n => n.RecordName, StringComparer.Ordinal).Take(ShopTreeCandidateLimit))
+            result.Add(PlaceCandidate(n));
+        foreach (var s in tree.Shops.Where(s => Hit(s.Name)).OrderBy(s => Rank(s.Name)).ThenBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+                     .ThenBy(s => s.Location.Name, StringComparer.OrdinalIgnoreCase).ThenBy(s => s.Record, StringComparer.Ordinal).Take(ShopTreeCandidateLimit))
+            result.Add(ShopCandidate(s));
+        return result;
+    }
+
+    private static DetailCandidate SystemCandidate(ShopTreeNode n) => new(n.Record, n.System, "", "", "", DisplayText: $"{n.System}  [星系]");
+    private static DetailCandidate PlaceCandidate(ShopTreeNode n) =>
+        new(n.Record, n.Name, "", "", "", DisplayText: (n.Parent != null ? $"{n.Name} ({n.Parent.Name})" : n.Name) + $"  [{n.TypeLabel}]");
+    private static DetailCandidate ShopCandidate(ShopTreeShop s) => new(s.Record, s.Name, "", "", "", DisplayText: $"{s.Name} ({s.Location.Name})  [{s.Kind}]");
+
+    // record 1 つの候補 (リンクで移ったときにリストの先頭に置く)。星系・場所・お店は shopTree から、資源は resource_types から、
+    // 品目は item_index (無ければ items) の名前・種類から作る。見つからなければ null
+    public DetailCandidate? CandidateOf(string record, ShopTree? shopTree)
+    {
+        var rec = (record ?? "").Trim();
+        if (rec.Length == 0) return null;
+        if (ShopTree.IsTreeRecord(rec))
+        {
+            if (shopTree == null) return null;
+            if (shopTree.ShopsByRecord.TryGetValue(rec, out var shop)) return ShopCandidate(shop);
+            if (shopTree.NodesByRecord.TryGetValue(rec, out var node)) return node.IsStar ? SystemCandidate(node) : PlaceCandidate(node);
+            return null;
+        }
+        var isResource = rec.StartsWith("ResourceType.", StringComparison.OrdinalIgnoreCase);
+        if (isResource || Guid.TryParse(rec, out _))
+        {
+            var res = OreService.LoadResources(DbPath, _translationsDbPath)
+                .FirstOrDefault(x => isResource ? x.RecordName.Equals(rec, StringComparison.OrdinalIgnoreCase) : x.Uuid.Equals(rec, StringComparison.OrdinalIgnoreCase));
+            if (res != null) return new DetailCandidate(res.RecordName, res.NameEn ?? OreService.ShortRecord(res.RecordName), ResourceDetailType, "", "");
+        }
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT record_name, COALESCE(name, ''), COALESCE(item_type, ''), COALESCE(sub_type, ''), COALESCE(manufacturer, '') FROM item_index WHERE record_name = @rn COLLATE NOCASE LIMIT 1";
+            cmd.Parameters.AddWithValue("@rn", rec);
+            using var r = cmd.ExecuteReader();
+            if (r.Read() && r.GetString(1).Trim().Length > 0) return new DetailCandidate(r.GetString(0), r.GetString(1).Trim(), r.GetString(2), r.GetString(3), r.GetString(4));
+        }
+        catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
+        return null;
     }
 
     // ［詳細］タブの候補の種類「資源」(resource_types の資源。DetailCandidate.ItemType に入れる)
@@ -172,6 +237,7 @@ public partial class GameDataQueryService
         catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
 
         var sb = new StringBuilder();
+        sb.AppendLine(DetailTitle(name, DetailTypeLabel(ResourceDetailType)));
         sb.AppendLine("【基本】");
         sb.AppendLine($"  名前: {name}");
         sb.AppendLine($"  種類: {DetailTypeLabel(ResourceDetailType)}");
@@ -319,6 +385,7 @@ public partial class GameDataQueryService
         var indexKey = indexName != null ? DetailNameKey(indexName) : null;
         sb.AppendLine($"  名前: {ItemNameJaEn(nameEn, nameJa)}" + (indexName != null && indexKey != DetailNameKey(nameEn) && (nameJa == null || indexKey != DetailNameKey(nameJa)) ? $" ({indexName})" : ""));
         var typeJa = DetailTypeLabel(itemType);
+        sb.Insert(0, DetailTitle(nameEn, typeJa) + Environment.NewLine);
         sb.AppendLine($"  種類: {typeJa}" + (subType.Length > 0 && subType != "UNDEFINED" ? $" / {subType}" : "") + (typeJa != itemType && !typeJa.Contains($"({itemType})") ? $" ({itemType})" : ""));
         var mfr = ManufacturerName(itemsMfr.Length > 0 ? itemsMfr : indexMfr, loc);
         if (mfr.Length == 0) mfr = indexMfr;
@@ -820,6 +887,9 @@ public partial class GameDataQueryService
     private static string ShopCell(string name, string? record) =>
         record == null ? name : DetailLink(record, name.Replace(" / ", "/"));
 
+    // ［詳細］タブの詳細の文字のいちばん上の見出し「【【名前（種類）】】」(DetailHtml が大きめの見出しにする。文字の欄ではこのまま出る)
+    public static string DetailTitle(string name, string kind) => $"【【{name}（{kind}）】】";
+
     // ［詳細］タブの詳細の文字の中のリンク「[[record|表示名]]」(record は URL エンコードする。DetailHtml がリンクに、文字の欄では表示名だけにする)。
     // 表示名の "|" は "/" に、改行は空白にする
     public static string DetailLink(string record, string display) =>
@@ -1044,11 +1114,55 @@ public partial class GameDataQueryService
         {
             using (var cmd = _conn.CreateCommand())
             {
-                cmd.CommandText = "SELECT record_name, name_en, type, parent_record, system FROM starmap_locations";
+                // 座標の列 (x / y / z / radius) の無い前の形の表では、座標は無いものとして読む。自転の列 (spin_parent / lx / ly / lz / rot_hours) の無い表では、自転は無いものとして読む
+                bool hasCoords, hasSpin, hasPlanetRadius, hasFrame;
+                using (var info = _conn.CreateCommand())
+                {
+                    info.CommandText = "SELECT COUNT(*) FROM pragma_table_info('starmap_locations') WHERE name IN ('x', 'y', 'z', 'radius')";
+                    hasCoords = Convert.ToInt64(info.ExecuteScalar() ?? 0L) == 4;
+                    info.CommandText = "SELECT COUNT(*) FROM pragma_table_info('starmap_locations') WHERE name IN ('spin_parent', 'lx', 'ly', 'lz', 'rot_hours')";
+                    hasSpin = Convert.ToInt64(info.ExecuteScalar() ?? 0L) == 5;
+                    info.CommandText = "SELECT COUNT(*) FROM pragma_table_info('starmap_locations') WHERE name = 'planet_radius'";
+                    hasPlanetRadius = Convert.ToInt64(info.ExecuteScalar() ?? 0L) == 1;
+                    info.CommandText = "SELECT COUNT(*) FROM pragma_table_info('starmap_locations') WHERE name = 'frame_matrix'";
+                    hasFrame = Convert.ToInt64(info.ExecuteScalar() ?? 0L) == 1;
+                }
+                cmd.CommandText = "SELECT record_name, name_en, type, parent_record, system, " +
+                    (hasCoords ? "x, y, z, radius" : "NULL, NULL, NULL, NULL") + ", " +
+                    (hasSpin ? "spin_parent, lx, ly, lz, rot_hours" : "'', NULL, NULL, NULL, NULL") + ", " +
+                    (hasPlanetRadius ? "planet_radius" : "NULL") + ", " + (hasFrame ? "frame_matrix" : "NULL") + " FROM starmap_locations";
                 using var r = cmd.ExecuteReader();
-                while (r.Read()) tree.AddLocation(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4));
+                static double? D(SqliteDataReader rd, int i) => rd.IsDBNull(i) ? null : rd.GetDouble(i);
+                while (r.Read())
+                {
+                    var node = tree.AddLocation(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4));
+                    if (D(r, 5) is { } x && D(r, 6) is { } y && D(r, 7) is { } z) node.Position = (x, y, z);
+                    node.Radius = D(r, 8);
+                    node.SpinParentRecord = r.IsDBNull(9) ? "" : r.GetString(9);
+                    if (D(r, 10) is { } lx && D(r, 11) is { } ly && D(r, 12) is { } lz) node.Local = (lx, ly, lz);
+                    // rot_hours はゲームのデータでは float の値 (例 5.0300002 = float の 5.03) なので、float の精度の最短の 10 進 (5.03) にして使う
+                    // (自転の回数が 10 万回近くになるので、5.0300002 のままだと角度が 1.4° ほどずれる。実測は 5.03 で合った)
+                    node.RotHours = D(r, 13) is { } rh ? double.Parse(((float)rh).ToString(System.Globalization.CultureInfo.InvariantCulture), System.Globalization.CultureInfo.InvariantCulture) : null;
+                    node.PlanetRadius = D(r, 14);
+                    // 天体の枠の回転 (行の順の 3×3。9 つの数で読めたときだけ)
+                    if (!r.IsDBNull(15) && r.GetString(15).Split(',') is { Length: 9 } fm
+                        && fm.Select(v => double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d) ? d : double.NaN).ToArray() is { } fv
+                        && fv.All(double.IsFinite))
+                        node.Frame = fv;
+                }
             }
             tree.LinkLocations();
+            // 名前 → 星図の場所 (starmap_entities。量子ジャンプの目的地を引く。表が無い前の版の DB では空)
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'starmap_entities'";
+                if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) > 0)
+                {
+                    cmd.CommandText = "SELECT name, starmap_record FROM starmap_entities";
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read()) tree.EntityToStarmapRecord[r.GetString(0)] = r.GetString(1);
+                }
+            }
             // 店。franchise_name (franchise の英語名) の列が無い前の形の表では、表の name をそのまま使う (franchise の名前があるものとして扱う)
             bool hasFranchiseName;
             using (var cmd = _conn.CreateCommand())
@@ -1197,6 +1311,7 @@ public partial class GameDataQueryService
     private static string ShopDetailText(ShopTreeShop shop)
     {
         var sb = new StringBuilder();
+        sb.AppendLine(DetailTitle(shop.Name, shop.Kind));
         sb.AppendLine("【基本】");
         sb.AppendLine($"  名前: {shop.Name}");
         sb.AppendLine($"  種類: {shop.Kind}");
@@ -1255,6 +1370,7 @@ public partial class GameDataQueryService
     private static string PlaceDetailText(ShopTreeNode node)
     {
         var sb = new StringBuilder();
+        sb.AppendLine(DetailTitle(node.Name, node.TypeLabel));
         sb.AppendLine("【基本】");
         sb.AppendLine($"  名前: {node.Name}");
         sb.AppendLine($"  種類: {node.TypeLabel}");
@@ -1268,6 +1384,26 @@ public partial class GameDataQueryService
         sb.AppendLine();
         sb.AppendLine("【お店】");
         AppendShops(sb, node);
+        sb.AppendLine();
+        sb.AppendLine("【距離】");
+        // 惑星・衛星の自転の角度は今の時刻 (開いた時刻) のもの (CurrentLocation.ThetasAt)
+        var root = node.Root;
+        var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        var thetas = CurrentLocation.ThetasAt(Descendants(root), nowUnix);
+        sb.AppendLine(SpinTimeNote(nowUnix));
+        AppendDistances(sb, node, thetas);
+        if (root.IsStar && SystemMapSvg(root, node, overlay: new MapOverlay(thetas, null, "")) is { } systemMap)
+        {
+            sb.AppendLine();
+            sb.AppendLine("【星系図】");
+            sb.AppendLine(SvgLine(systemMap));
+        }
+        if (NearMapSvg(node, thetas) is { } nearMap)
+        {
+            sb.AppendLine();
+            sb.AppendLine("【近くの図】");
+            sb.AppendLine(SvgLine(nearMap));
+        }
         return sb.ToString();
     }
 
@@ -1275,6 +1411,7 @@ public partial class GameDataQueryService
     private static string SystemDetailText(ShopTreeNode node)
     {
         var sb = new StringBuilder();
+        sb.AppendLine(DetailTitle(node.System, "星系"));
         sb.AppendLine("【基本】");
         sb.AppendLine($"  名前: {node.System}");
         sb.AppendLine();
@@ -1283,6 +1420,474 @@ public partial class GameDataQueryService
         sb.AppendLine();
         sb.AppendLine("【お店】");
         AppendShops(sb, node);
+        // 惑星・衛星の自転の角度は今の時刻 (開いた時刻) のもの
+        var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        if (SystemMapSvg(node, null, overlay: new MapOverlay(CurrentLocation.ThetasAt(Descendants(node), nowUnix), null, "")) is { } systemMap)
+        {
+            sb.AppendLine();
+            sb.AppendLine("【星系図】");
+            sb.AppendLine(SpinTimeNote(nowUnix));
+            sb.AppendLine(SvgLine(systemMap));
+        }
+        return sb.ToString();
+    }
+
+    // ===== 距離と図 =====
+
+    // 距離の書き方 (【距離】の表と図のラベルで使う。ゲームの表記に合わせる。ゲームの QT の表示は「PYR1 L2 12.6Gm」で、G・M はメートルに付く):
+    // 1 km 未満は「67 m」(整数)、1 万 km 未満は「2,630 Km」(km の整数・3 桁区切り)、10 億 m 未満は「42.3 Mm」(百万 m 単位・小数 1 桁)、
+    // それ以上は「12.6 Gm」(十億 m 単位・小数 1 桁)
+    public static string FormatDistance(double meters)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var km = meters / 1000;
+        // 境目は丸めた後の値で決める (9,999.6 Km を「10,000 Km」と出さず「10.0 Mm」にする)
+        if (Math.Round(meters) < 1000) return Math.Round(meters).ToString("0", inv) + " m";
+        if (Math.Round(km) < 1e4) return Math.Round(km).ToString("#,0", inv) + " Km";
+        if (Math.Round(meters / 1e6, 1) < 1000) return (meters / 1e6).ToString("0.0", inv) + " Mm";
+        return (meters / 1e9).ToString("0.0", inv) + " Gm";
+    }
+
+    private static double Distance((double X, double Y, double Z) a, (double X, double Y, double Z) b) =>
+        Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y) + (a.Z - b.Z) * (a.Z - b.Z));
+
+    // 【距離】の相手の種類
+    private static readonly HashSet<string> DistanceTypes = new(StringComparer.Ordinal) { "Planet", "Moon", "Manmade", "Manmade_VisibleOnInteraction", "LandingZone", "JumpPoint" };
+    // 近くの図に描く子の種類
+    private static readonly HashSet<string> NearMapTypes = new(StringComparer.Ordinal) { "Planet", "Moon", "Manmade", "Manmade_VisibleOnInteraction", "LandingZone" };
+    // 星系図に描く種類 (その星系で座標のある場所のうち、この種類のもの全部)
+    private static readonly HashSet<string> SystemPointTypes = new(StringComparer.Ordinal) { "Planet", "Moon", "Manmade", "Manmade_VisibleOnInteraction", "LandingZone", "JumpPoint" };
+
+    private static IEnumerable<ShopTreeNode> Descendants(ShopTreeNode node)
+    {
+        foreach (var c in node.Children)
+        {
+            yield return c;
+            foreach (var d in Descendants(c)) yield return d;
+        }
+    }
+
+    // 詳細に書き添える自転の向きの時刻「（YYYY-MM-DD HH:mm 時点の自転の向き）」(手元の時刻)
+    private static string SpinTimeNote(double unix) =>
+        $"（{DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(unix * 1000)).LocalDateTime.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} 時点の自転の向き）";
+
+    // 【距離】: 同じ星系の座標がある場所 (DistanceTypes。自分は除く) までの距離の表 (名前 (リンク) | 種類 | 距離)。近い順に全部。
+    // 位置は惑星・衛星の自転の角度 thetas で回したもの (CurrentLocation.PlacePosition)
+    private static void AppendDistances(StringBuilder sb, ShopTreeNode node, IReadOnlyDictionary<ShopTreeNode, double> thetas)
+    {
+        if (node.Position is null) { sb.AppendLine("位置のデータがありません"); return; }
+        var me = CurrentLocation.PlacePosition(node, thetas);
+        var list = Descendants(node.Root).Where(n => n != node && n.Position.HasValue && DistanceTypes.Contains(n.Type))
+            .Select(n => (Node: n, D: Distance(me, CurrentLocation.PlacePosition(n, thetas)))).OrderBy(x => x.D).ThenBy(x => x.Node.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        if (list.Count == 0) { sb.AppendLine("(なし)"); return; }
+        sb.AppendLine("| 名前 | 種類 | 距離 |");
+        sb.AppendLine("|---|---|---|");
+        foreach (var (n, d) in list) sb.AppendLine($"| {DetailLink(n.Record, n.Name)} | {Cell(MdEscape(n.TypeLabel))} | {FormatDistance(d)} |");
+    }
+
+    // 図の行「<<svg:BASE64>>」(DetailHtml が SVG にする。文字の欄では「（図は WebView2 が必要です）」にする)
+    public static string SvgLine(string svg) => "<<svg:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(svg)) + ">>";
+
+    // 図の枠 (スクリプトが動かないときの大きさ。動けば、スクリプトが枠の実際の大きさ (幅は詳細の幅、高さは CSS の 500px) に合わせる)。
+    // MapFit は「全体」の表示で、いちばん遠いもの (と中心) が収まる半径の、枠の短いほうの辺の半分に対する割合 (前の図の 260 / 300 と同じ)
+    private const double MapW = 600, MapH = 500, MapFit = 260.0 / 300.0;
+
+    private static string Xml(string s) => System.Security.SecurityElement.Escape(s) ?? "";
+    private static string F(double v) => v.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+    private static string Href(ShopTreeNode n) => "scjt://detail/" + Uri.EscapeDataString(n.Record);
+
+    // 図の表示 (中心のゲームの座標と倍率 (画面の px / メートル))。DetailHtml のスクリプトと同じ式で、スクリプトが動かないときの最初の表示に使う。
+    // 「全体」: (fcx, fcy) を中心に、半径 fr が収まる倍率。倍率の範囲は「全体」の 1/2 から、いちばん近い 2 点 (dmin) の間が枠の短いほうの辺の半分になるまで。
+    // iw > 0 なら最初は (icx, icy) を中心に、幅 iw (メートル) が枠の幅に入る倍率 (範囲に収める)、iw が 0 なら「全体」
+    private static (double Cx, double Cy, double S) InitialMapView(double fcx, double fcy, double fr, double icx, double icy, double iw, double dmin)
+    {
+        var fit = Math.Min(MapW, MapH) / 2 * MapFit / fr;
+        var min = fit / 2;
+        var max = dmin > 0 ? Math.Max(fit, Math.Min(MapW, MapH) / (2 * dmin)) : fit;
+        double Clamp(double s) => Math.Max(min, Math.Min(max, s));
+        return iw > 0 ? (icx, icy, Clamp(MapW / iw)) : (fcx, fcy, Clamp(fit));
+    }
+
+    // これより近い 2 点は同じ位置として扱う (メートル)。Stanton の Green (StarMapObject.Ellis3) と microTech は 0.013 m しか離れておらず、
+    // それを「いちばん近い 2 点」にすると拡大の上限が桁外れになるため
+    private const double MapSamePoint = 1;
+
+    // 点どうしの xy の平面の距離のうち、MapSamePoint 以上のいちばん小さいもの (無ければ 0)
+    private static double MinPairDistance(IReadOnlyList<(double X, double Y)> pts)
+    {
+        var best = 0.0;
+        for (var i = 0; i < pts.Count; i++)
+            for (var j = i + 1; j < pts.Count; j++)
+            {
+                var d = Math.Sqrt(Math.Pow(pts[i].X - pts[j].X, 2) + Math.Pow(pts[i].Y - pts[j].Y, 2));
+                if (d >= MapSamePoint && (best == 0 || d < best)) best = d;
+            }
+        return best;
+    }
+
+    // 図の <svg> の開きと背景。data-* は DetailHtml のスクリプトが読む (「全体」の中心と半径、最初の表示の中心と幅、いちばん近い 2 点の距離。どれもメートル)。
+    // saveKey があれば data-save (操作の後の表示をアプリへ送る印と、その名前。マップタブの図だけ)。［全体］［＋］［－］は DetailHtml.MapBlock が svg の外に付ける
+    private static void AppendMapOpen(StringBuilder sb, double fcx, double fcy, double fr, double icx, double icy, double iw, double dmin, string? saveKey = null)
+    {
+        sb.Append($"<svg xmlns=\"http://www.w3.org/2000/svg\" class=\"zmap\" viewBox=\"0 0 {F(MapW)} {F(MapH)}\"" +
+                  $" data-fcx=\"{F(fcx)}\" data-fcy=\"{F(fcy)}\" data-fr=\"{F(fr)}\" data-icx=\"{F(icx)}\" data-icy=\"{F(icy)}\" data-iw=\"{F(iw)}\" data-dmin=\"{F(dmin)}\"" +
+                  (saveKey != null ? $" data-save=\"{Xml(saveKey)}\"" : "") + ">");
+        sb.Append($"<rect class=\"bg\" x=\"0.5\" y=\"0.5\" width=\"{F(MapW - 1)}\" height=\"{F(MapH - 1)}\"/>");
+    }
+
+    // ===== 印のアイコン =====
+    // ステーション (Manmade・Manmade_VisibleOnInteraction) = 六角形の輪と中心の点、ジャンプポイント = ひし形の輪、都市 (LandingZone) = 家の形 (三角の屋根と四角)、
+    // 図に描く種類に入らない目立つ色の場所 (Outpost など) = 小さな三角。大きさは画面の px で固定 (拡大率で変えない)。
+    // 外径はステーション・ジャンプポイント・都市 12px、小さな三角 8px。目立つ色の場所は +2px。色は CSS (.icon.mark = 印の色、.icon.hl = 目立つ色)
+
+    private static string IconKind(ShopTreeNode n) => n.Type switch
+    {
+        "Manmade" or "Manmade_VisibleOnInteraction" => "station",
+        "JumpPoint" => "jump",
+        "LandingZone" => "city",
+        _ => "other",
+    };
+
+    // アイコンの外径の半分 (px)
+    private static double IconHalf(string kind, bool hl) => (kind == "other" ? 4 : 6) + (hl ? 1 : 0);
+
+    // アイコンの形 (中心が (0,0)。h = 外径の半分)
+    private static string IconShapes(string kind, double h)
+    {
+        switch (kind)
+        {
+            case "station":
+                var hex = string.Join(" ", Enumerable.Range(0, 6).Select(i =>
+                {
+                    var a = Math.PI / 3 * i;
+                    return $"{(i == 0 ? "M" : "L")}{F2(h * Math.Cos(a))},{F2(h * Math.Sin(a))}";
+                })) + " Z";
+                return $"<path class=\"ring\" d=\"{hex}\"/><circle class=\"solid\" r=\"1.5\"/>";
+            case "jump":
+                return $"<path class=\"ring\" d=\"M0,{F2(-h)} L{F2(h)},0 L0,{F2(h)} L{F2(-h)},0 Z\"/>";
+            case "city":
+                // 屋根 (三角) と壁 (四角)
+                return $"<path class=\"solid\" d=\"M{F2(-h)},{F2(-h * 0.1)} L0,{F2(-h)} L{F2(h)},{F2(-h * 0.1)} Z M{F2(-h * 0.7)},{F2(-h * 0.1)} H{F2(h * 0.7)} V{F2(h)} H{F2(-h * 0.7)} Z\"/>";
+            default:
+                return $"<path class=\"solid\" d=\"M0,{F2(-h)} L{F2(h)},{F2(h * 0.8)} L{F2(-h)},{F2(h * 0.8)} Z\"/>";
+        }
+    }
+
+    private static string F2(double v) => v.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+
+    // 印のアイコン 1 つ (data-x / data-y のゲームの座標、data-pr = 点の大きさとして使う半径 (px)。位置は transform。スクリプトが置き直す)
+    private static string IconSvg(string kind, bool hl, string at, double x, double y, string? cls = null) =>
+        $"<g class=\"icon {cls ?? (hl ? "hl" : "mark")}\" {at} data-pr=\"{F2(IconHalf(kind, hl))}\" transform=\"translate({F(x)},{F(y)})\">{IconShapes(kind, IconHalf(kind, hl))}</g>";
+
+    // ステーション・都市など (Manmade・Manmade_VisibleOnInteraction・LandingZone) で radius があるものの大きさの円 (縁なしの薄い塗り。半径を data-wr に持ち、拡大率に合わせる)。
+    // 画面で半径 3px 未満なら隠す (data-hidebelow。スクリプトが拡大率に合わせて出し入れする)。押せない・ラベルの重なりの判定に入れない (<a> の外に置く)。
+    // here (現在位置がその中にある場所) は赤の薄い塗り。当たらなければ ""
+    private static readonly HashSet<string> AreaTypes = new(StringComparer.Ordinal) { "Manmade", "Manmade_VisibleOnInteraction", "LandingZone" };
+    private static string AreaCircle(ShopTreeNode n, string at, double x, double y, double s, bool here)
+    {
+        if (!AreaTypes.Contains(n.Type) || n.Radius is not { } rad || !(rad > 0)) return "";
+        var r = rad * s;
+        return $"<circle class=\"area{(here ? " here" : "")}\" data-rec=\"{Xml(n.RecordName)}\" {at} data-wr=\"{F(rad)}\" data-hidebelow=\"3\" cx=\"{F(x)}\" cy=\"{F(y)}\" r=\"{F(r)}\"" +
+               (r < 3 ? " visibility=\"hidden\"" : "") + "/>";
+    }
+
+    // 図の左下の凡例 (HTML。DetailHtml.MapBlock が図の枠に重ねる。拡大・移動では動かない): ステーション・ジャンプポイント・都市・惑星・衛星の印と名前
+    internal static string MapLegendHtml()
+    {
+        static string Item(string shapes, string name) =>
+            $"<span class=\"lg\"><svg class=\"lgicon\" viewBox=\"-8 -8 16 16\" width=\"16\" height=\"16\">{shapes}</svg>{name}</span>";
+        return "<div class=\"maplegend\">" +
+               Item($"<g class=\"icon mark\">{IconShapes("station", 6)}</g>", "ステーション") +
+               Item($"<g class=\"icon mark\">{IconShapes("jump", 6)}</g>", "ジャンプポイント") +
+               Item($"<g class=\"icon mark\">{IconShapes("city", 6)}</g>", "都市") +
+               Item("<circle class=\"planet\" r=\"6\"/>", "惑星") +
+               Item("<circle class=\"planet\" r=\"5\"/>", "衛星") +
+               Item("<g class=\"obj\"><path class=\"flag\" d=\"M-4,7 V-7 M-4,-7 L6,-4 L-4,-1 Z\"/></g>", "契約の目標") +
+               "</div>";
+    }
+
+    // 星系図: 上から見た xy の平面。恒星と、その星系で座標のある場所のうち SystemPointTypes のもの全部 (星系の直下に限らない) を描く。
+    // Planet・Moon は円 (radius があれば半径を data-wr に持ち、拡大率に合わせた大きさ。今の点の大きさが下限)、ほかは種類ごとの印のアイコン (IconSvg)。軌道の輪は星系の直下の Planet だけ。
+    // 点・輪・ラベルはゲームの座標 (メートル) を data-x / data-y に持ち、表示の位置は DetailHtml のスクリプトが今の拡大率・中心から置く
+    // (x / y・transform などの属性は最初の表示の位置。スクリプトが動かないときはこのまま見える)。縮尺は線形。y は上が正 (SVG では下向きなので符号を逆にする)。
+    // 最初の表示: view があればそれ (中心と幅。マップタブで覚えた表示)。無く、highlight も無ければ全体 (恒星を真ん中に、いちばん遠いものが収まる)。
+    // highlight の場所そのもの (座標が無ければ、親を辿って最初に座標のある場所。恒星まで辿ったら無し) は目立つ色にし (SystemPointTypes に無い種類でも描く)、
+    // 最初の表示はそれを中心に、次の 3 つのいちばん大きい幅が枠の幅に入る倍率:
+    //   いちばん近いほかの点 (MapSamePoint 未満は同じ位置として除く) までの距離 × 6、その場所の子孫で図に描く点 (SystemPointTypes で座標のあるもの) までのいちばん遠い距離 × 2.2、
+    //   その場所の radius × 8
+    // ラベルの data-pri は重なったときに残す順 (小さいほど優先。0 = 目立つ色の場所、1 = 恒星、2 = 惑星、3 = 衛星・LandingZone、4 = ステーション・ジャンプポイントなど)。
+    // 同じ data-pri の中は、子の場所の数 (data-sub。Children の数 = starmap_locations で parent がその場所の行の数) の多い順、同じ数なら名前の順 (data-no) に置く。
+    // 描く順は、惑星・衛星の円を全部先に (衛星・惑星の順)、ステーション・都市・ジャンプポイントなどの印とラベルを後 (上) に。その中は子の少ないほうを先 (多いほうが上)、同じ数なら名前の順。
+    // saveKey があれば svg に data-save を付ける (スクリプトが操作の後の表示をアプリへ送る。マップタブの図だけ)。
+    // overlay があれば (マップタブの現在位置): 場所を自転の角度で回した位置 (CurrentLocation.PlacePosition) に描き、現在位置の印 (赤い照準。ラベルの優先は 0) を描く。描くものが無ければ null
+    internal static string? SystemMapSvg(ShopTreeNode star, ShopTreeNode? highlight, (double Cx, double Cy, double W)? view = null, string? saveKey = null,
+        MapOverlay? overlay = null)
+    {
+        var origin = star.Position ?? (0, 0, 0);
+        ShopTreeNode? hl = null;
+        for (var n = highlight; n != null && n != star; n = n.Parent) if (n.Position.HasValue) { hl = n; break; }
+        if (hl != null && hl.Root != star) hl = null;
+        var here = overlay?.InsidePlace;
+        var items = SystemMapNodes(star, hl, here);
+        if (items.Count == 0) return null;
+        double Dxy(ShopTreeNode n) => Math.Sqrt(Math.Pow(n.Position!.Value.X - origin.X, 2) + Math.Pow(n.Position!.Value.Y - origin.Y, 2));
+        // 描く位置 (overlay があれば自転の角度で回したもの)
+        (double X, double Y, double Z) Pos(ShopTreeNode n) => overlay != null ? CurrentLocation.PlacePosition(n, overlay.Thetas) : n.Position!.Value;
+        var max = items.Max(Dxy);
+        if (max <= 0) return null;
+        // 点 (恒星と items) の xy
+        var pts = new List<(double X, double Y)> { (origin.X, origin.Y) };
+        pts.AddRange(items.Select(i => (Pos(i).X, Pos(i).Y)));
+        var dmin = MinPairDistance(pts);
+        double icx = origin.X, icy = origin.Y, iw = 0;
+        if (view is { } v && v.W > 0) { icx = v.Cx; icy = v.Cy; iw = v.W; }
+        else if (hl != null)
+        {
+            var h = (X: hl.Position!.Value.X, Y: hl.Position!.Value.Y);
+            double D2(double x, double y) => Math.Sqrt(Math.Pow(x - h.X, 2) + Math.Pow(y - h.Y, 2));
+            var dn = pts.Select(p => D2(p.X, p.Y)).Where(d => d >= MapSamePoint).DefaultIfEmpty(0).Min();
+            var far = Descendants(hl).Where(d => d.Position.HasValue && SystemPointTypes.Contains(d.Type))
+                .Select(d => D2(d.Position!.Value.X, d.Position!.Value.Y)).DefaultIfEmpty(0).Max();
+            var w = Math.Max(dn * 6, Math.Max(far * 2.2, (hl.Radius ?? 0) * 8));
+            if (w > 0) { icx = h.X; icy = h.Y; iw = w; }
+        }
+        var (vcx, vcy, s) = InitialMapView(origin.X, origin.Y, max, icx, icy, iw, dmin);
+        double Sx(double x) => MapW / 2 + (x - vcx) * s;
+        double Sy(double y) => MapH / 2 - (y - vcy) * s;
+        var sb = new StringBuilder();
+        AppendMapOpen(sb, origin.X, origin.Y, max, icx, icy, iw, dmin, saveKey);
+        foreach (var p in star.Children.Where(i => i.Type == "Planet" && i.Position.HasValue))
+            sb.Append($"<circle class=\"orbit\" data-x=\"{F(origin.X)}\" data-y=\"{F(origin.Y)}\" data-wr=\"{F(Dxy(p))}\" cx=\"{F(Sx(origin.X))}\" cy=\"{F(Sy(origin.Y))}\" r=\"{F(Dxy(p) * s)}\"/>");
+        {
+            var sx = Sx(origin.X); var sy = Sy(origin.Y);
+            sb.Append($"<a href=\"{Href(star)}\"><title>{Xml(star.System)}</title>" +
+                      $"<circle class=\"star\" data-x=\"{F(origin.X)}\" data-y=\"{F(origin.Y)}\" cx=\"{F(sx)}\" cy=\"{F(sy)}\" r=\"8\"/>" +
+                      $"<text data-pri=\"1\" data-sub=\"{star.Children.Count}\" data-no=\"0\" data-x=\"{F(origin.X)}\" data-y=\"{F(origin.Y)}\" data-ox=\"10\" data-oy=\"-10\" x=\"{F(sx + 10)}\" y=\"{F(sy - 10)}\">{Xml(star.System)}</text></a>");
+        }
+        // 名前の順の番号 (data-no。同じ data-pri・同じ子の数のラベルの順)
+        var nameNo = NameOrder(items);
+        static int DrawGroup(ShopTreeNode n) => n.Type == "Moon" ? 0 : n.Type == "Planet" ? 1 : 2;
+        foreach (var n in items.OrderBy(DrawGroup).ThenBy(i => i.Children.Count).ThenBy(i => i.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            var pp = Pos(n);
+            var px = pp.X; var py = pp.Y;
+            var x = Sx(px); var y = Sy(py);
+            var at = $"data-x=\"{F(px)}\" data-y=\"{F(py)}\"";
+            var isBody = n.Type is "Planet" or "Moon";
+            var isHl = n == hl;
+            var isHere = n == here;
+            // 量子ジャンプの目的地は目立たせる (qtdest)
+            var isDest = overlay?.QtDest == n;
+            // ラベルの距離: overlay に距離の基準 (現在位置) があれば、そこからの距離 (DistanceSuffix を添える)。無ければ今どおり (惑星は恒星から)
+            var label = MapPointLabel(n, overlay, pp, Dxy(n));
+            // data-opri: 中にいる場所でないときの優先 (マップタブの書き換えで、中にいる場所が替わったときに戻す)。中にいる場所は優先 0 で curtext を足す
+            var opri = isHl ? 0 : n.Type == "Planet" ? 2 : n.Type is "Moon" or "LandingZone" ? 3 : 4;
+            var pri = isHere ? 0 : opri;
+            var textCls = (isHl ? "hltext" : n.Type == "Planet" ? "" : "small") + (isHere ? " curtext" : "");
+            var textAttr = $"class=\"{textCls.Trim()}\" data-pri=\"{pri}\" data-opri=\"{opri}\" data-sub=\"{n.Children.Count}\" data-no=\"{nameNo[n]}\" {at}";
+            string shape, text;
+            if (isBody)
+            {
+                var cls = (isHl ? "hl" : "planet") + (isHere ? " here" : "") + (isDest ? " qtdest" : "");
+                // 点の大きさ (下限): 惑星 6px (目立つ色は 7px)、衛星 5px (目立つ色は 6px)
+                double minR = (n.Type == "Planet" ? 6 : 5) + (isHl ? 1 : 0);
+                if (n.Radius is { } rad && rad > 0)
+                {
+                    // 半径があれば拡大率に合わせた大きさ。ラベルは近くの図の自分の円と同じく円の右上へずらす
+                    // (ずらす量 = 円の半径 (200px まで) × 0.7 + data-ox / data-oy。下限の大きさのときに今の位置 (+8, +8) になるよう data-ox / data-oy を決める)
+                    var r = Math.Max(minR, rad * s);
+                    var off = Math.Min(r, 200) * 0.7;
+                    var ox = 8 - minR * 0.7; var oy = 8 + minR * 0.7;
+                    shape = $"<circle class=\"{cls}\" {at} data-wr=\"{F(rad)}\" data-minr=\"{F(minR)}\" cx=\"{F(x)}\" cy=\"{F(y)}\" r=\"{F(r)}\"/>";
+                    text = $"<text {textAttr} data-wr=\"{F(rad)}\" data-minr=\"{F(minR)}\" data-ox=\"{F(ox)}\" data-oy=\"{F(oy)}\" x=\"{F(x + off + ox)}\" y=\"{F(y - off + oy)}\">{Xml(label)}</text>";
+                }
+                else
+                {
+                    shape = $"<circle class=\"{cls}\" {at} cx=\"{F(x)}\" cy=\"{F(y)}\" r=\"{F(minR)}\"/>";
+                    text = $"<text {textAttr} data-ox=\"8\" data-oy=\"8\" x=\"{F(x + 8)}\" y=\"{F(y + 8)}\">{Xml(label)}</text>";
+                }
+            }
+            else
+            {
+                // 印のアイコン。ラベルはアイコンの右 (外径の半分 + 4px)
+                var kind = IconKind(n);
+                var lx = IconHalf(kind, isHl) + 4;
+                shape = IconSvg(kind, isHl, at, x, y, (isHl ? "hl" : "mark") + (isHere ? " here" : "") + (isDest ? " qtdest" : ""));
+                text = $"<text {textAttr} data-ox=\"{F2(lx)}\" data-oy=\"8\" x=\"{F(x + lx)}\" y=\"{F(y + 8)}\">{Xml(label)}</text>";
+            }
+            sb.Append(AreaCircle(n, at, x, y, s, isHere));
+            // data-rec: 場所の record 名 (マップタブの書き換えで、どの場所かを見分ける)
+            sb.Append($"<a data-rec=\"{Xml(n.RecordName)}\" href=\"{Href(n)}\"><title>{Xml(label)}</title>{shape}{text}</a>");
+        }
+        // 現在位置の印 (g.curmark): 取った座標の赤い照準 (g.cur)、推定位置の赤い白抜きの丸 (g.est)、量子ジャンプ中の出発地から目的地への矢印 (line.qt。先の三角は marker)、
+        // そのラベル (text.mk。優先 0)。大きさ・太さは画面の px で固定。マップタブの図 (saveKey あり) は、使わない部分も隠して置いておく
+        // (現在位置が変わったときに、ページを作り直さずにスクリプトで出し入れ・位置・ラベルを書き換えるため。使わないラベルは data-off="1")
+        var mk = MarkerOf(overlay);
+        if (saveKey != null || mk != null)
+        {
+            var (mkKind, mkPos, mkFrom, mkLabel) = mk ?? ("", (0d, 0d, 0d), null, "");
+            var x = Sx(mkPos.X); var y = Sy(mkPos.Y);
+            var from = mkFrom ?? mkPos;
+            var at = $"data-x=\"{F(mkPos.X)}\" data-y=\"{F(mkPos.Y)}\"";
+            static string Vis(bool on) => on ? "" : " visibility=\"hidden\"";
+            sb.Append($"<g class=\"curmark\"><title>{Xml(mkLabel)}</title>" +
+                      $"<g class=\"cur\" {at} data-pr=\"10\" transform=\"translate({F(x)},{F(y)})\"{Vis(mkKind == MapOverlay.KindTaken)}><circle r=\"7\"/><path d=\"M-10,0 H-3 M3,0 H10 M0,-10 V-3 M0,3 V10\"/></g>" +
+                      $"<g class=\"est\" {at} data-pr=\"10\" transform=\"translate({F(x)},{F(y)})\"{Vis(mkKind == MapOverlay.KindEstimated)}><circle r=\"8\"/></g>" +
+                      $"<text class=\"curtext mk\" data-pri=\"0\" data-sub=\"0\" data-no=\"-1\" {at} data-ox=\"14\" data-oy=\"8\" x=\"{F(x + 14)}\" y=\"{F(y + 8)}\"" +
+                      (mk == null ? " data-off=\"1\" visibility=\"hidden\"" : "") + $">{Xml(mkLabel)}</text></g>");
+        }
+        // 量子ジャンプの線 (g.qtgroup): 出発地 (QtFrom) から目的地 (QtTo) への破線と、その真ん中の向きの三角 (marker-mid)、出発地の小さな丸 (g.qtfrom)。
+        // 太さ・大きさは画面の px で固定。マップタブの図 (saveKey あり) は、使わないときも隠して置いておく (書き換えで出し入れするため)
+        var qtOn = overlay is { QtFrom: not null, QtTo: not null };
+        if (saveKey != null || qtOn)
+        {
+            var qf = overlay?.QtFrom ?? (0d, 0d, 0d);
+            var qt = overlay?.QtTo ?? qf;
+            double fx = Sx(qf.X), fy = Sy(qf.Y), tx = Sx(qt.X), ty = Sy(qt.Y);
+            sb.Append("<defs><marker id=\"qtmid\" viewBox=\"0 0 10 10\" refX=\"5\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto\"><path class=\"qthead\" d=\"M0,0 L10,5 L0,10 Z\"/></marker></defs>");
+            sb.Append($"<g class=\"qtgroup\"{(qtOn ? "" : " visibility=\"hidden\"")}>" +
+                      $"<polyline class=\"qt\" data-x1=\"{F(qf.X)}\" data-y1=\"{F(qf.Y)}\" data-x2=\"{F(qt.X)}\" data-y2=\"{F(qt.Y)}\" " +
+                      $"points=\"{F(fx)},{F(fy)} {F((fx + tx) / 2)},{F((fy + ty) / 2)} {F(tx)},{F(ty)}\" marker-mid=\"url(#qtmid)\"/>" +
+                      $"<g class=\"qtfrom\" data-x=\"{F(qf.X)}\" data-y=\"{F(qf.Y)}\" data-pr=\"4\" transform=\"translate({F(fx)},{F(fy)})\"><circle r=\"4\"/></g>" +
+                      // 線の先が契約の目標 (推定) のときの旗とラベル (優先 0。使わないときは隠し、ラベルは data-off)
+                      $"<g class=\"qtgoalslot\"><g class=\"qtgoal\" data-x=\"{F(qt.X)}\" data-y=\"{F(qt.Y)}\" data-pr=\"9\" transform=\"translate({F(tx)},{F(ty)})\"" +
+                      (overlay?.QtGoal == true ? "" : " visibility=\"hidden\"") + $"><path class=\"flag\" transform=\"scale(1.4)\" d=\"M-4,7 V-7 M-4,-7 L6,-4 L-4,-1 Z\"/></g>" +
+                      $"<text class=\"curtext goaltext\" data-pri=\"0\" data-sub=\"0\" data-no=\"-1\" data-x=\"{F(qt.X)}\" data-y=\"{F(qt.Y)}\" data-ox=\"14\" data-oy=\"8\" x=\"{F(tx + 14)}\" y=\"{F(ty + 8)}\"" +
+                      (overlay?.QtGoal == true ? "" : " data-off=\"1\" visibility=\"hidden\"") + ">契約の目標（推定）</text></g></g>");
+        }
+        // 最近の契約の目標 (橙の旗と「契約の目標」。固定の大きさ)。マップタブの図は ObjectiveSlots 個の入れ物を隠して置いておく (書き換えで出し入れするため)
+        var objs = overlay?.Objectives ?? Array.Empty<(double X, double Y, double Z)>();
+        if (saveKey != null || objs.Count > 0)
+        {
+            sb.Append("<g class=\"objmarks\">");
+            for (int i = 0; i < Math.Max(objs.Count, saveKey != null ? ObjectiveSlots : 0); i++)
+            {
+                var on = i < objs.Count;
+                (double X, double Y, double Z) op = on ? objs[i] : (0d, 0d, 0d);
+                double ox = Sx(op.X), oy = Sy(op.Y);
+                var oat = $"data-x=\"{F(op.X)}\" data-y=\"{F(op.Y)}\"";
+                sb.Append($"<g class=\"objslot\"><title>契約の目標</title><g class=\"obj\" {oat} data-pr=\"7\" transform=\"translate({F(ox)},{F(oy)})\"{(on ? "" : " visibility=\"hidden\"")}>" +
+                          $"<path class=\"flag\" d=\"M-4,7 V-7 M-4,-7 L6,-4 L-4,-1 Z\"/></g>" +
+                          $"<text class=\"small objtext\" data-pri=\"1\" data-sub=\"0\" data-no=\"-1\" {oat} data-ox=\"10\" data-oy=\"8\" x=\"{F(ox + 10)}\" y=\"{F(oy + 8)}\"" +
+                          (on ? "" : " data-off=\"1\" visibility=\"hidden\"") + ">契約の目標</text></g>");
+            }
+            sb.Append("</g>");
+        }
+        sb.Append("</svg>");
+        return sb.ToString();
+    }
+
+    // マップタブの図に置いておく最近の契約の目標の入れ物の数
+    internal const int ObjectiveSlots = 5;
+
+    // 星系図に描く場所: その星系で座標のある場所のうち SystemPointTypes のもの全部と、目立つ色の場所 (hl)・現在位置がその中にある場所 (here)
+    private static List<ShopTreeNode> SystemMapNodes(ShopTreeNode star, ShopTreeNode? hl, ShopTreeNode? here) =>
+        Descendants(star).Where(c => c.Position.HasValue && (SystemPointTypes.Contains(c.Type) || c == hl || c == here)).ToList();
+
+    // 星系図の場所のラベル: 現在位置がその中にある場所は overlay.CurrentLabel、overlay に距離の基準 (現在位置) があれば「名前 (そこからの距離 + DistanceSuffix)」、
+    // 無ければ今どおり (惑星は「名前 (恒星からの xy の距離 dxy)」、ほかは名前)。pp はその場所を描く位置
+    private static string MapPointLabel(ShopTreeNode n, MapOverlay? overlay, (double X, double Y, double Z) pp, double dxy) =>
+        overlay?.InsidePlace == n ? overlay.CurrentLabel
+        : overlay?.DistanceFrom is { } df ? $"{n.Name} ({FormatDistance(Distance(df, pp))}{overlay.DistanceSuffix})"
+        : n.Type == "Planet" ? $"{n.Name} ({FormatDistance(dxy)})" : n.Name;
+
+    // 現在位置の印 (種類・位置・矢印の出発地・ラベル)。取った座標でその場所の中にいるときは無し (その場所を赤で描く)
+    internal static (string Kind, (double X, double Y, double Z) Pos, (double X, double Y, double Z)? From, string Label)? MarkerOf(MapOverlay? overlay) => overlay switch
+    {
+        { Kind: MapOverlay.KindEstimated, Current: { } est } => (MapOverlay.KindEstimated, est, null, overlay.CurrentLabel),
+        { Kind: MapOverlay.KindTaken, Current: { } cur, InsidePlace: null } => (MapOverlay.KindTaken, cur, null, overlay.CurrentLabel),
+        _ => null,
+    };
+
+    // マップタブの書き換えのデータ (ページを作り直さずにスクリプトで書き換える): 星系図の各場所の record 名・描く位置 (自転を入れたもの)・ラベル。
+    // 決まりは SystemMapSvg と同じ (目立つ色の場所は無し)
+    internal static List<(string Record, double X, double Y, string Label)> SystemMapPointStates(ShopTreeNode star, MapOverlay overlay)
+    {
+        var origin = star.Position ?? (0, 0, 0);
+        var list = new List<(string, double, double, string)>();
+        foreach (var n in SystemMapNodes(star, null, overlay.InsidePlace))
+        {
+            var pp = CurrentLocation.PlacePosition(n, overlay.Thetas);
+            var dxy = Math.Sqrt(Math.Pow(n.Position!.Value.X - origin.X, 2) + Math.Pow(n.Position!.Value.Y - origin.Y, 2));
+            list.Add((n.RecordName, pp.X, pp.Y, MapPointLabel(n, overlay, pp, dxy)));
+        }
+        return list;
+    }
+
+    // 名前の順 (OrdinalIgnoreCase。同じ名前は record 名の順) の番号
+    private static Dictionary<ShopTreeNode, int> NameOrder(IEnumerable<ShopTreeNode> nodes) =>
+        nodes.OrderBy(n => n.Name, StringComparer.OrdinalIgnoreCase).ThenBy(n => n.RecordName, StringComparer.Ordinal)
+             .Select((n, i) => (n, i)).ToDictionary(x => x.n, x => x.i);
+
+    // 近くの図: その場所を真ん中に、座標がある子 (NearMapTypes) を xy の平面で描く。自分の半径があれば円の大きさで描く (拡大率に合わせて変わる。最小 4px)。
+    // 座標の持ち方は星系図と同じ (data-x / data-y。自分の円とラベルは半径も data-wr)。最初の表示は全体 (いちばん遠い子と自分の半径が収まる線形)。
+    // 子の Planet・Moon は 5px の円、ほかは星系図と同じ印のアイコン。
+    // ラベルの data-pri: 0 = 自分、2 = 惑星、3 = 衛星・都市、4 = ステーションなど。同じ data-pri の中は星系図と同じく子の場所の数 (data-sub) の多い順、同じ数なら名前の順 (data-no)。
+    // 描く順は、自分の円、子の惑星・衛星の円、ステーション・都市などの印 (上) の順。その中は子の少ないほうを先 (多いほうが上)、同じ数なら名前の順。描く子が無ければ null
+    internal static string? NearMapSvg(ShopTreeNode center, IReadOnlyDictionary<ShopTreeNode, double> thetas)
+    {
+        if (center.Position is null) return null;
+        // 位置は惑星・衛星の自転の角度 thetas で回したもの
+        (double X, double Y, double Z) Pos(ShopTreeNode n) => CurrentLocation.PlacePosition(n, thetas);
+        var c = Pos(center);
+        var kids = center.Children.Where(k => k.Position.HasValue && NearMapTypes.Contains(k.Type)).ToList();
+        if (kids.Count == 0) return null;
+        double Dxy(ShopTreeNode n) => Math.Sqrt(Math.Pow(Pos(n).X - c.X, 2) + Math.Pow(Pos(n).Y - c.Y, 2));
+        var max = Math.Max(kids.Max(Dxy), center.Radius ?? 0);
+        if (max <= 0) return null;
+        var pts = new List<(double X, double Y)> { (c.X, c.Y) };
+        pts.AddRange(kids.Select(k => (Pos(k).X, Pos(k).Y)));
+        var dmin = MinPairDistance(pts);
+        var (vcx, vcy, s) = InitialMapView(c.X, c.Y, max, c.X, c.Y, 0, dmin);
+        double Sx(double x) => MapW / 2 + (x - vcx) * s;
+        double Sy(double y) => MapH / 2 - (y - vcy) * s;
+        var sb = new StringBuilder();
+        AppendMapOpen(sb, c.X, c.Y, max, c.X, c.Y, 0, dmin);
+        var cx = Sx(c.X); var cy = Sy(c.Y);
+        var cat = $"data-x=\"{F(c.X)}\" data-y=\"{F(c.Y)}\"";
+        sb.Append($"<g><title>{Xml(center.Name)}</title>");
+        if (center.Radius is { } rad && rad > 0)
+        {
+            // 半径があれば円の大きさ (最小 4px)。ラベルは円の右上 (円の半径 (200px まで) の 0.7 倍 + 6px ずらす)
+            var selfR = Math.Max(4, rad * s);
+            var off = Math.Min(selfR, 200) * 0.7;
+            sb.Append($"<circle class=\"self\" {cat} data-wr=\"{F(rad)}\" data-minr=\"4\" cx=\"{F(cx)}\" cy=\"{F(cy)}\" r=\"{F(selfR)}\"/>");
+            sb.Append($"<text class=\"hltext\" data-pri=\"0\" data-sub=\"{center.Children.Count}\" data-no=\"0\" {cat} data-wr=\"{F(rad)}\" data-minr=\"4\" data-ox=\"6\" data-oy=\"-6\" x=\"{F(cx + off + 6)}\" y=\"{F(cy - off - 6)}\">{Xml(center.Name)}</text>");
+        }
+        else
+        {
+            // 半径が無ければ 6px の円。ラベルは 6 × 0.7 + 6px ずらす
+            sb.Append($"<circle class=\"self\" {cat} cx=\"{F(cx)}\" cy=\"{F(cy)}\" r=\"6\"/>");
+            sb.Append($"<text class=\"hltext\" data-pri=\"0\" data-sub=\"{center.Children.Count}\" data-no=\"0\" {cat} data-ox=\"10.2\" data-oy=\"-10.2\" x=\"{F(cx + 10.2)}\" y=\"{F(cy - 10.2)}\">{Xml(center.Name)}</text>");
+        }
+        sb.Append("</g>");
+        var nameNo = NameOrder(kids);
+        foreach (var n in kids.OrderBy(k => k.Type is "Planet" or "Moon" ? 0 : 1).ThenBy(k => k.Children.Count).ThenBy(k => k.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            var pp = Pos(n);
+            var px = pp.X; var py = pp.Y;
+            var x = Sx(px); var y = Sy(py);
+            var at = $"data-x=\"{F(px)}\" data-y=\"{F(py)}\"";
+            var label = $"{n.Name} ({FormatDistance(Distance(c, pp))})";
+            var pri = n.Type == "Planet" ? 2 : n.Type is "Moon" or "LandingZone" ? 3 : 4;
+            var textAttr = $"data-pri=\"{pri}\" data-sub=\"{n.Children.Count}\" data-no=\"{nameNo[n]}\" {at}";
+            string shape, text;
+            if (n.Type is "Planet" or "Moon")
+            {
+                shape = $"<circle class=\"planet\" {at} cx=\"{F(x)}\" cy=\"{F(y)}\" r=\"5\"/>";
+                text = $"<text {textAttr} data-ox=\"8\" data-oy=\"8\" x=\"{F(x + 8)}\" y=\"{F(y + 8)}\">{Xml(label)}</text>";
+            }
+            else
+            {
+                var kind = IconKind(n);
+                var lx = IconHalf(kind, false) + 4;
+                shape = IconSvg(kind, false, at, x, y);
+                text = $"<text {textAttr} data-ox=\"{F2(lx)}\" data-oy=\"8\" x=\"{F(x + lx)}\" y=\"{F(y + 8)}\">{Xml(label)}</text>";
+            }
+            sb.Append(AreaCircle(n, at, x, y, s, false));
+            sb.Append($"<a href=\"{Href(n)}\"><title>{Xml(label)}</title>{shape}{text}</a>");
+        }
+        sb.Append("</svg>");
         return sb.ToString();
     }
 
@@ -1355,6 +1960,15 @@ public sealed class ShopTree
     private readonly Dictionary<string, ShopTreeNode> _byStarmapRecord = new(StringComparer.Ordinal);
     public Dictionary<string, ShopTreeShop> ShopsByRecord { get; } = new(StringComparer.Ordinal);
     public Dictionary<string, ShopTreeNode> NodesByRecord { get; } = new(StringComparer.Ordinal);
+    // 名前 (socpak の Child の entityName・子の socpak のファイル名) → 星図の場所の record 名 (starmap_entities。大文字小文字は区別しない)
+    public Dictionary<string, string> EntityToStarmapRecord { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    // 星図の場所の record 名 (StarMapObject.…) の場所 (無ければ null)
+    public ShopTreeNode? NodeByStarmapRecord(string record) => _byStarmapRecord.TryGetValue(record, out var n) ? n : null;
+
+    // 名前 (量子ジャンプの目的地など) の場所 (starmap_entities で引く。無ければ null)
+    public ShopTreeNode? NodeByEntityName(string name) =>
+        EntityToStarmapRecord.TryGetValue(name.Trim(), out var rec) ? NodeByStarmapRecord(rec) : null;
     // 価格の名前 → 店の record (shop_price_links)。item: item_shop_prices.location、trade: trade_prices.terminal
     private readonly Dictionary<string, string> _itemLinks = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _tradeLinks = new(StringComparer.Ordinal);
@@ -1368,19 +1982,23 @@ public sealed class ShopTree
     public HashSet<string> LinkedItemKeys => new(_itemLinks.Keys, StringComparer.Ordinal);
     public HashSet<string> LinkedTradeKeys => new(_tradeLinks.Keys, StringComparer.Ordinal);
 
-    public void AddLocation(string record, string name, string type, string parent, string system)
+    public ShopTreeNode AddLocation(string record, string name, string type, string parent, string system)
     {
         var isStar = parent.Length == 0 && type == "Star";
         var node = new ShopTreeNode(isStar ? SystemPrefix + system : PlacePrefix + record, record, name, type, TypeLabel(type), parent, system, isStar);
         _byStarmapRecord[record] = node;
         NodesByRecord[node.Record] = node;
+        return node;
     }
 
-    // 親子をつなぐ (AddLocation を全部終えてから呼ぶ)
+    // 親子と自転の親をつなぐ (AddLocation を全部終えてから呼ぶ)
     public void LinkLocations()
     {
         foreach (var n in _byStarmapRecord.Values)
+        {
             if (n.ParentRecord.Length > 0 && _byStarmapRecord.TryGetValue(n.ParentRecord, out var p)) { n.Parent = p; p.Children.Add(n); }
+            if (n.SpinParentRecord.Length > 0 && _byStarmapRecord.TryGetValue(n.SpinParentRecord, out var sp)) n.SpinParent = sp;
+        }
     }
 
     // hasFranchiseName: 名前が franchise の英語名か (false なら Entity 名から作った名前。ApplyDataNames で販売データの店名に替えることがある)
@@ -1453,6 +2071,19 @@ public sealed class ShopTree
     }
 }
 
+// 星系図に重ねるもの (マップタブの現在位置): Thetas = Planet・Moon ごとの自転の角度 (ラジアン。分かるものだけ)、Current = 現在位置 (量子ジャンプ中は目的地。無ければ null)、
+// CurrentLabel = その印のラベル、Kind = 印の形 (taken = 取った座標の照準、est = 推定位置の白抜きの丸、moving = 量子ジャンプ中の矢印)、ArrowFrom = 矢印の出発地、
+// DistanceFrom / DistanceSuffix = 各場所のラベルの距離の基準と、距離に添える文字 (無ければ今どおり)、InsidePlace = 現在位置がその中にある場所 (赤で描き、ラベルを CurrentLabel にする)
+// QtFrom / QtTo = 量子ジャンプの線の出発地と目的地 (無ければ線は無し)、QtDest = 量子ジャンプの目的地 (目立たせる)、
+// QtGoal = 線の先が契約の目標 (推定。旗と「契約の目標（推定）」を出す)、Objectives = 地図に出す最近の契約の目標の位置 (橙の旗と「契約の目標」)
+internal sealed record MapOverlay(IReadOnlyDictionary<ShopTreeNode, double> Thetas, (double X, double Y, double Z)? Current, string CurrentLabel,
+    string Kind = MapOverlay.KindTaken, (double X, double Y, double Z)? ArrowFrom = null, (double X, double Y, double Z)? DistanceFrom = null,
+    string DistanceSuffix = "", ShopTreeNode? InsidePlace = null, (double X, double Y, double Z)? QtFrom = null, (double X, double Y, double Z)? QtTo = null,
+    ShopTreeNode? QtDest = null, bool QtGoal = false, IReadOnlyList<(double X, double Y, double Z)>? Objectives = null)
+{
+    public const string KindTaken = "taken", KindEstimated = "est", KindMoving = "moving";
+}
+
 // 星図の場所 1 つ (starmap_locations の 1 行)。Record は詳細の record (根の Star は System:<星系>、ほかは Place:<record 名>)
 public sealed class ShopTreeNode(string record, string recordName, string name, string type, string typeLabel, string parentRecord, string system, bool isStar)
 {
@@ -1467,6 +2098,23 @@ public sealed class ShopTreeNode(string record, string recordName, string name, 
     public ShopTreeNode? Parent { get; set; }
     public List<ShopTreeNode> Children { get; } = new();
     public List<ShopTreeShop> Shops { get; } = new();
+    // 星系の恒星からの絶対座標 (メートル。starmap_locations の x / y / z。無ければ null) と半径 (StarMapObject の size。無ければ null)
+    public (double X, double Y, double Z)? Position { get; set; }
+    public double? Radius { get; set; }
+    // 自転の親 (祖先で最初の Planet・Moon。starmap_locations.spin_parent。無ければ空 / null) と、その座標からの相対位置 (自転の角度 0 のとき。lx / ly / lz。無ければ null)
+    public string SpinParentRecord { get; set; } = "";
+    public ShopTreeNode? SpinParent { get; set; }
+    public (double X, double Y, double Z)? Local { get; set; }
+    // Planet・Moon の 1 回転にかかる時間 (時間。starmap_locations.rot_hours。読めなければ null。0 は回らない)
+    public double? RotHours { get; set; }
+    // Planet・Moon の半径 (メートル。starmap_locations.planet_radius = socpak の planetRadius。読めなければ null)。地表からの高さに使う (無ければ Radius)
+    public double? PlanetRadius { get; set; }
+    // Planet・Moon の枠の回転 (恒星の回転 × 天体の回転。行の順の 3×3。starmap_locations.frame_matrix。無ければ null)
+    public double[]? Frame { get; set; }
+    // 地表からの高さに使う半径 (PlanetRadius、無ければ Radius)
+    public double? SurfaceRadius => PlanetRadius ?? Radius;
+    // この場所の星系の恒星 (根の Star)
+    public ShopTreeNode Root { get { var n = this; while (n.Parent != null) n = n.Parent; return n; } }
 }
 
 // ゲームの店 1 つ (game_shops の 1 行)、または場所だけ結べた価格の行だけで作った店 (recordPrefix が PriceShop:)。Items / Commodities は紐づけた DB の価格

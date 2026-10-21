@@ -91,6 +91,37 @@ public class ScreenCaptureService : IDisposable
         return IntPtr.Zero;
     }
 
+    // 画面の矩形 (x, y, w, h。画面の座標) を撮って PNG にする (ファイルには保存しない)。［マップ］の mobiGlas の確認 (MobiGlasDetector) に使う。
+    // 撮り方は CaptureScreenAsPng と同じ (デスクトップの DC から BitBlt)
+    public static byte[]? CaptureRectAsPng(int x, int y, int w, int h)
+    {
+        if (w <= 0 || h <= 0) return null;
+        var desktopDC = GetDC(IntPtr.Zero);
+        var memDC = CreateCompatibleDC(desktopDC);
+        var hBitmap = CreateCompatibleBitmap(desktopDC, w, h);
+        var oldBitmap = SelectObject(memDC, hBitmap);
+        BitBlt(memDC, 0, 0, w, h, desktopDC, x, y, SRCCOPY);
+        SelectObject(memDC, oldBitmap);
+        try
+        {
+            var source = Imaging.CreateBitmapSourceFromHBitmap(
+                hBitmap, IntPtr.Zero, Int32Rect.Empty,
+                System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
+            source.Freeze();
+            using var ms = new MemoryStream();
+            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+            encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(source));
+            encoder.Save(ms);
+            return ms.ToArray();
+        }
+        finally
+        {
+            DeleteObject(hBitmap);
+            DeleteDC(memDC);
+            ReleaseDC(IntPtr.Zero, desktopDC);
+        }
+    }
+
     public byte[]? CaptureScreenAsPng()
     {
         var w = GetSystemMetrics(SM_CXSCREEN);

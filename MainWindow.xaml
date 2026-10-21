@@ -2064,6 +2064,11 @@
                 <local:DetailPanel x:Name="detailPanel"/>
             </TabItem>
 
+            <!-- ［マップ］: Stanton・Pyro・Nyx の星系図 (詳細タブと同じ図。点・ラベルを押すと［詳細］でその場所を開く) (MapPanel) -->
+            <TabItem x:Name="tabMap" Header="マップ">
+                <local:MapPanel x:Name="mapPanel"/>
+            </TabItem>
+
             <TabItem x:Name="tabChat" Header="チャット">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>

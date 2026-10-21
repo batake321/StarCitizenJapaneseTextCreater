@@ -246,6 +246,13 @@ public static class IniMerger
                 Console.WriteLine($"    itemPort_ keys added from port display names: {portNames}");
         }
 
+        // チャットのコマンドの名前は原語 (英語) のままにする (利用者の決定)。
+        // 鍵が "chat_command_" で始まり、英語の値が空白を含まない 1 語の英字 (例 chat_command_contact_add=addfriend) のものは、英語の値を書く。
+        // 用語集・置き換えの後、"@" 前置複製の前に行う (それらで書き換わらないようにし、"@" 版にも英語を載せるため)
+        var chatCommands = KeepChatCommandNamesEnglish(english, merged);
+        if (chatCommands > 0)
+            Console.WriteLine($"    Chat command names kept in English: {chatCommands}");
+
         // Add @-prefixed duplicates for keys the game may reference with @ prefix
         int atDupes = 0;
         foreach (var key in merged.Keys.ToList())
@@ -260,6 +267,25 @@ public static class IniMerger
         Console.WriteLine($"    @-prefixed duplicates added: {atDupes}");
 
         return merged;
+    }
+
+    private static readonly Regex ChatCommandNameRegex = new(@"^[A-Za-z]+$", RegexOptions.Compiled);
+
+    // 英語の ini の "chat_command_" で始まる鍵のうち、値が 1 語の英字 (コマンドの名前) のものを merged に英語の値で書く ("@" 版も)。書いた鍵の数を返す
+    internal static int KeepChatCommandNamesEnglish(Dictionary<string, string> english, Dictionary<string, string> merged)
+    {
+        var count = 0;
+        foreach (var (key, enVal) in english)
+        {
+            if (!key.StartsWith("chat_command_", StringComparison.Ordinal)) continue;
+            if (!ChatCommandNameRegex.IsMatch(enVal)) continue;
+            merged[key] = enVal;
+            // ゲームのチャット画面は "@chat_command_…" で引く。"@" 版が先に入っている (訳の DB・入力の ini にある) と
+            // "@" 前置複製で上書きされないため、"@" 版にも英語の値を書く
+            merged["@" + key] = enVal;
+            count++;
+        }
+        return count;
     }
 
     // ［日本語化］の［実行］(MainWindow.RunPipeline の "apply") と同じ材料・同じ設定で Merge し、ゲーム用 ini に書き出す値を作る

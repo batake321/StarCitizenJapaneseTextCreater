@@ -35,11 +35,22 @@ public static class GameLogVoiceScenes
     public const string Respawn = "復活";
     // 量子ジャンプの到着 (種類「量子ジャンプ」。表の場面の欄は「量子ジャンプ離脱」。鍵は保存済みの設定のため「量子ジャンプ」のまま)
     public const string QuantumArrived = "量子ジャンプ";
+    // ハンガー進入・退出 (種類「ハンガー進入」「ハンガー退出」。{場所} は到着と同じ規則で埋める: PlaceOf。
+    // 読む範囲は格納と同じ GameLogSoundJudge.StowLiveWindow (ハンガー退出の行は通知から 10 秒たってから足されるため。ハンガー進入も同じ範囲にしてある))
+    public const string HangarEnter = "ハンガー進入";
+    public const string HangarExit = "ハンガー退出";
     // 既定の文を変えた場面の前の既定の文。保存された文がこれと同じなら、今の既定の文として扱う (ItemOf)
     private static readonly Dictionary<string, string> OldDefaultTexts = new()
     {
         [QuantumArrived] = "量子ジャンプします。",
-        ["降りた"] = "{船}から降りました。",
+        // 「量子ジャンプ開始」の行は目的地を選んだ行 (Player has selected point …) で作る。実際に跳んだ時の行は Game.log に無い
+        ["量子ジャンプ開始"] = "量子ジャンプします。",
+        ["降りた"] = "操縦席を離れました。",
+    };
+    // {船} の船が分からないときに {船} に入れる言葉 (場面の鍵 → 言葉)。無い場面は {船} を直後の助詞ごと取り除く
+    private static readonly Dictionary<string, string> ShipFallbacks = new()
+    {
+        ["降りた"] = "船",   // 「から降りました。」にせず「船から降りました。」にする
     };
 
     public static readonly GameLogVoiceScene[] All =
@@ -48,13 +59,17 @@ public static class GameLogVoiceScenes
         new(Arrival, "到着", "{場所}に到着しました。ハンガーリクエスト可能です。", true),
         new("乗船", "乗船（自分の船）", "{船}に乗船しました。", false),
         new("下船", "下船", "{船}から降りました。", false),
-        new("降りた", "操縦席を離れた", "操縦席を離れました。", false),
+        new("降りた", "操縦席を離れた", "{船}から降りました。", false),
         new("操縦", "操縦（操縦席に座った）", "{船}を操縦します。", false),
         new("呼び出し完了", "呼び出し完了", "{船}の準備ができました。", false),
         new("格納", "格納", "{船}を格納しました。", false),
         // 「ハンガーリクエスト完了」の通知 (離陸前と着陸時の両方に同じ文面で出る)
         new("ハンガー要求", "ハンガーリクエスト完了", "ハンガーが許可されました。", false),
-        new("量子ジャンプ開始", "量子ジャンプ開始", "量子ジャンプします。", false),
+        // GameLogParser の「ハンガー進入」「ハンガー退出」(船: 申請の後の管轄区域の通知ですぐ。徒歩: 管轄区域の通知の後 10 秒 Location が変わらなかったとき。
+        // 決まりは GameLogParser の _hangarRequestTime の説明)
+        new(HangarEnter, "ハンガーに入った", "ハンガーに入りました。", false),
+        new(HangarExit, "ハンガーを出た", "ハンガーを出ました。", false),
+        new("量子ジャンプ開始", "量子ジャンプの目的地を設定", "量子ジャンプの目的地を設定しました。", false),
         new(QuantumArrived, "量子ジャンプ離脱", "量子ジャンプから離脱します。", false),
         new("契約受注", "契約受注", "{内容}", false),
         new("契約完了", "契約完了", "{内容}", false),
@@ -83,6 +98,9 @@ public static class GameLogVoiceScenes
             if (s.Key == key) return s;
         return null;
     }
+
+    // 場面の表示名 (設定の表の場面の欄。場面でなければ鍵のまま)。読み上げの記録に使う
+    public static string LabelOf(string key) => Find(key)?.Label ?? key;
 
     // 行の場面の鍵。読み上げの場面でない行は null
     public static string? SceneOf(GameLogEntry e)
@@ -146,13 +164,18 @@ public static class GameLogVoiceScenes
     // {船} = 行の ShipName (内部名のまま (「_」を含む) か無ければ取り除く)、{内容} = 行の Content、
     // {金額} = 行の Amount を整数にした「n aUEC」(無ければ取り除く)。取り除くときは直後の助詞も取り除く。
     // 入れる値からは書式のタグを外し、できた文の 5 文字以上の全部大文字の英字の語は頭だけ大文字にする (ORISON → Orison。VOICEVOX が 1 字ずつ読むため。UEE などの 4 文字以下は変えない)
-    public static string BuildText(string template, GameLogEntry e, string? place)
+    // shipSpoken: {船} に入れる船の名前を読み上げ用にする (会社名を除く: StripManufacturer)。null ならそのまま。表の表示 (行の ShipName) は変えない。
+    // {船} の船が分からない (読めない) とき、場面に ShipFallbacks の言葉があればそれを入れる (「降りた」は「船」)
+    public static string BuildText(string template, GameLogEntry e, string? place, Func<string, string>? shipSpoken = null)
     {
         var text = template;
         var placeText = place != null ? StripTags(place) : null;
         var shipText = e.ShipName != null ? StripTags(e.ShipName) : null;
+        if (shipSpoken != null && IsReadableShip(shipText)) shipText = shipSpoken(shipText!);
         text = IsReadablePlace(placeText) ? text.Replace("{場所}", placeText, StringComparison.Ordinal) : PlaceField.Replace(text, "");
-        text = IsReadableShip(shipText) ? text.Replace("{船}", shipText, StringComparison.Ordinal) : ShipField.Replace(text, "");
+        text = IsReadableShip(shipText) ? text.Replace("{船}", shipText, StringComparison.Ordinal)
+            : ShipFallbacks.TryGetValue(e.Kind, out var fallback) ? text.Replace("{船}", fallback, StringComparison.Ordinal)
+            : ShipField.Replace(text, "");
         text = text.Replace("{内容}", StripTags(e.Content), StringComparison.Ordinal);
         text = e.Amount is double a
             ? text.Replace("{金額}", Math.Round(a).ToString("0", CultureInfo.InvariantCulture) + " aUEC", StringComparison.Ordinal)
@@ -167,9 +190,23 @@ public static class GameLogVoiceScenes
     // 船の名前が読める名前か (内部名のまま (「_」を含む) は読まない)
     public static bool IsReadableShip(string? ship) => ship is { Length: > 0 } s && !s.Contains('_');
 
-    // 読み上げる文の {場所} に入れる場所 (到着の音と、復活の場面は ArrivalPlace。ほかは null)
+    // 船の名前の頭の会社名を除く (「Drake Cutlass Black」→「Cutlass Black」)。prefixes = 会社名の候補 (ゲームデータの船のメーカー名と、その短い名前)。
+    // 名前が「候補 + 空白」で始まり (大文字小文字は区別しない)、残りが空でなければ残りを返す。長い候補から見る。一致しなければそのまま
+    public static string StripManufacturer(string ship, IEnumerable<string> prefixes)
+    {
+        foreach (var p in prefixes.Where(p => !string.IsNullOrWhiteSpace(p)).OrderByDescending(p => p.Length))
+        {
+            if (ship.Length <= p.Length + 1 || !ship.StartsWith(p, StringComparison.OrdinalIgnoreCase) || ship[p.Length] != ' ') continue;
+            var rest = ship[(p.Length + 1)..].Trim();
+            if (rest.Length > 0) return rest;
+        }
+        return ship;
+    }
+
+    // 読み上げる文の {場所} に入れる場所 (到着の音と、復活・ハンガー進入・ハンガー退出の場面は ArrivalPlace。ほかは null)
     public static string? PlaceOf(GameLogSoundEvent ev, GameLogPlaceNames? sharedPlaceNames) =>
-        ev.Kind == GameLogSoundKind.Arrival || ev.Scene == Respawn ? ArrivalPlace(ev.Entry, sharedPlaceNames) : null;
+        ev.Kind == GameLogSoundKind.Arrival || ev.Scene == Respawn || ev.Scene == HangarEnter || ev.Scene == HangarExit
+            ? ArrivalPlace(ev.Entry, sharedPlaceNames) : null;
 
     // 到着の行の場所の表示名。名前待ち (PendingPlaceId) なら共有の場所名から引き (無ければ null)、名前が入っていれば内容から船の部分 (" / 船: …") を除いたもの
     public static string? ArrivalPlace(GameLogEntry e, GameLogPlaceNames? sharedPlaceNames)
@@ -296,7 +333,8 @@ public static class GameLogVoicePlayer
 {
     public const int MaxWaiting = 3;
 
-    private sealed record Request(string Url, int Speaker, string Text, string? FallbackPath);
+    // Scene = 場面の表示名 (読み上げの記録「[読み上げ] 読まない（場面）: 理由」に使う。空なら記録に場面を出さない)
+    private sealed record Request(string Url, int Speaker, string Text, string? FallbackPath, string Scene);
 
     private static readonly object Lock = new();
     private static readonly LinkedList<Request> Queue = new();
@@ -306,12 +344,18 @@ public static class GameLogVoicePlayer
     // 失敗の知らせ (どのスレッドからも呼ばれる。呼ぶ側で UI のスレッドへ回す)
     public static Action<string>? Log { get; set; }
 
-    public static void Enqueue(string url, int speaker, string text, string? fallbackPath)
+    // scene = 場面の表示名 (読み上げの記録用)
+    public static void Enqueue(string url, int speaker, string text, string? fallbackPath, string scene = "")
     {
         lock (Lock)
         {
-            Queue.AddLast(new Request(url, speaker, text, fallbackPath));
-            while (Queue.Count > MaxWaiting) Queue.RemoveFirst();
+            Queue.AddLast(new Request(url, speaker, text, fallbackPath, scene));
+            while (Queue.Count > MaxWaiting)
+            {
+                var dropped = Queue.First!.Value;
+                Queue.RemoveFirst();
+                Report($"[読み上げ] 読まない（{dropped.Scene}）: 読み上げの順番待ちが {MaxWaiting} 件を超えたので古いものを捨てた");
+            }
             if (_worker == null)
             {
                 _worker = new Thread(Run) { IsBackground = true, Name = "GameLogVoice" };
@@ -347,6 +391,9 @@ public static class GameLogVoicePlayer
             catch (Exception ex) { error = GameLogVoiceVox.Reason(ex); }
         }
         else error = "読み上げる文が空です";
+        // 読み上げの記録: 読めなかったら毎回 1 行 (下の失敗の知らせは直前と同じ理由なら出さないので別に出す)
+        if (wav == null)
+            Report($"[読み上げ] 読まない（{r.Scene}）: VOICEVOX で読み上げられませんでした: {error}" + (r.FallbackPath != null ? " (音のファイルを鳴らします)" : ""));
         if (wav != null)
         {
             _lastError = null;

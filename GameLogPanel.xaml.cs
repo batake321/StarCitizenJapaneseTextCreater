@@ -49,6 +49,24 @@ public partial class GameLogPanel : UserControl
     private string? _startError;   // 読み込みを始められなかった理由 (ゲームのフォルダが無い)。状態の 1 行目に出す
     private GameLogEntry[] _currentRows = [];
 
+    // 今の Game.log の追い読みでの、今の着陸場所の元の名前 (GameLogParser.CurrentLandingRawName。例 RR_P3_LEO。追い読みのたびに裏のスレッドで読んで覚える)
+    private string? _currentLandingRaw;
+    // 今の Game.log の追い読みでの量子ジャンプの状態 (GameLogParser.QuantumState。追い読みのたびに裏のスレッドで読んで覚える)
+    private GameLogQuantumState? _currentQuantum;
+
+    // ［マップ］の自動の取得: 追い読みで量子ジャンプの目的地の選択 ("select") か到着 ("arrive") の行を見たとき (UI のスレッドで呼ぶ)
+    public event Action<string>? QuantumEventSeen;
+    private static readonly TimeSpan QuantumEventFreshness = TimeSpan.FromSeconds(30);
+
+    // ［マップ］の推定位置に使う量子ジャンプの状態。追い読みが動いていない・Game.log が無ければ null。UI のスレッドから呼ぶ
+    public GameLogQuantumState? CurrentQuantumState() => _tail == null || _logMissing ? null : _currentQuantum;
+
+    // 今の Game.log の追い読みでの、今の着陸場所の名前 (［マップ］の［現在位置］の自転の角度の実測の基準に使う)。
+    // 元の名前 (RR_P3_LEO など) があればそれ、無ければ行の表示名 (CurrentLocation.LandingPlaceFromEntries)。
+    // 追い読みが動いていない・着陸場所の外・名前が分からなければ null。UI のスレッドから呼ぶ
+    public string? CurrentLandingPlace() =>
+        _tail == null || _logMissing ? null : _currentLandingRaw ?? CurrentLocation.LandingPlaceFromEntries(_currentRows, _placeNames);
+
     // trade_cache.db に残した行 (game_log_entries。GameLogStore)。
     //   StoredLoader: 残してある行の全部 (保存した PC の名前つき) と、読めなかった行の数 (MainWindow → HangarService。裏のスレッドで呼ぶ)
     //   StoredSaver:  手元の確定済みの行の写し (GameLogStore.Row) を残す (INSERT OR IGNORE。入れた行数を返す。MainWindow → HangarService。
@@ -659,8 +677,20 @@ public partial class GameLogPanel : UserControl
                 var parser = tail.Parser;
                 var changed = reset || parser.Changed;
                 parser.Changed = false;
-                return (Found: found, Reset: reset, Changed: changed, Rows: changed ? parser.Entries.ToArray() : null);
+                return (Found: found, Reset: reset, Changed: changed, Rows: changed ? parser.Entries.ToArray() : null, LandingRaw: parser.CurrentLandingRawName, Quantum: parser.QuantumState);
             });
+            var prevQuantum = _currentQuantum;
+            _currentLandingRaw = result.LandingRaw;
+            _currentQuantum = result.Quantum;
+            // ［マップ］の自動の取得: 前の追い読みから、量子ジャンプの目的地の選択 (TargetTime) か到着 (ArrivedTime) が新しくなったら知らせる。
+            // 読み直し (ゲームの起動) の直後と、30 秒より前の行 (起動のときにまとめて読んだ古い行) では知らせない
+            if (prevQuantum != null && !result.Reset && result.Quantum is { } nq)
+            {
+                if (nq.TargetTime is { } tt && nq.TargetTime != prevQuantum.TargetTime && DateTime.UtcNow - tt < QuantumEventFreshness)
+                    QuantumEventSeen?.Invoke("select");
+                if (nq.ArrivedTime is { } at && nq.ArrivedTime != prevQuantum.ArrivedTime && DateTime.UtcNow - at < QuantumEventFreshness)
+                    QuantumEventSeen?.Invoke("arrive");
+            }
             _pollError = null;
             var missingChanged = _logMissing != !result.Found;
             _logMissing = !result.Found;
@@ -736,6 +766,8 @@ public partial class GameLogPanel : UserControl
             var voice = config.GameLogVoiceVoxEnabled;
             if (voice && GameLogVoicePlayer.Log == null)
                 GameLogVoicePlayer.Log = message => Dispatcher.BeginInvoke(() => ChatService.LogExternal(message));
+            // 読み上げの記録 (読まないと決めた行とその理由) をアプリのログに出す
+            _soundJudge.Log ??= ChatService.LogExternal;
             var sounds = _soundJudge.OnPoll(found, reset, rows, DateTime.UtcNow, config.ArmisticeSoundEnabled, config.ArrivalSoundEnabled,
                 voice ? scene => GameLogVoiceScenes.IsEnabled(config, scene) : null);
             foreach (var ev in sounds)
@@ -750,8 +782,13 @@ public partial class GameLogPanel : UserControl
                 {
                     // 到着・復活の {場所} は今の場所の名前 (保留から鳴らすときも、そのとき分かっている名前)
                     var place = GameLogVoiceScenes.PlaceOf(ev, _placeNames);
-                    var text = GameLogVoiceScenes.BuildText(GameLogVoiceScenes.TemplateOf(config, ev.Scene), ev.Entry, place);
-                    GameLogVoicePlayer.Enqueue(config.VoiceVoxUrl, GameLogVoiceScenes.SpeakerOf(config, ev.Scene), text, path);
+                    // {船} は会社名を除いた船の名前 (GameLogNames.ShipSpokenName)
+                    var names = _names;
+                    var text = GameLogVoiceScenes.BuildText(GameLogVoiceScenes.TemplateOf(config, ev.Scene), ev.Entry, place,
+                        names != null ? names.ShipSpokenName : null);
+                    var label = GameLogVoiceScenes.LabelOf(ev.Scene);
+                    ChatService.LogExternal($"[読み上げ] {label}: {text}");
+                    GameLogVoicePlayer.Enqueue(config.VoiceVoxUrl, GameLogVoiceScenes.SpeakerOf(config, ev.Scene), text, path, label);
                 }
                 else if (path != null && !GameLogSoundPlayer.Play(path, out var error)) ChatService.LogExternal($"[ゲームログ] {error}");
             }
@@ -885,8 +922,84 @@ public partial class GameLogPanel : UserControl
                 _places.Clear();
                 _blueprintHeadings = null;
                 _rescueHeadings = null;
+                _manufacturerPrefixes = null;
             }
         }
+
+        // 読み上げの {船}: 船の名前の頭の会社名を除いた名前 (GameLogVoiceScenes.StripManufacturer)。会社名の候補が読めなければそのまま
+        public string ShipSpokenName(string ship) => GameLogVoiceScenes.StripManufacturer(ship, ManufacturerPrefixes());
+
+        // 会社名の候補: gamedata_cache.db の ships.manufacturer (メーカーの record のファイル。例 …/scitemmanufacturer.drak.json) ごとに、
+        // ファイル名の最後の語をコードとし (GameDataQueryService.ManufacturerName と同じ。_ の前の語でも引く)、翻訳 DB の manufacturer_Name<コード> の英語
+        // (例 Drake Interplanetary)、その最初の語 (Drake)、コードの大文字 (RSI) の 3 つ。読めなければ空 (覚えず、次の時にもう一度引く)。
+        // それに、同じ manufacturer の船の英語の表示名 (ships.name_en。乗船の通知などの船名と同じ) が 2 つ以上あり、その全部が同じ最初の語
+        // (大文字小文字は区別しない) で始まれば、その語も足す (例 ORIG の船は全部「Origin …」→「Origin」)。表示名が 1 つだけのメーカーでは足さない
+        // (船の名前そのものを消さないため)。表示名に使えない値 (空・<= PLACEHOLDER => など) は数えない。name_en 列の無い古い DB ではこの分は足さない
+        private IReadOnlyList<string> ManufacturerPrefixes()
+        {
+            lock (_lock)
+            {
+                if (_manufacturerPrefixes != null) return _manufacturerPrefixes;
+                var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    var refs = new List<string>();
+                    using (var game = Open(_gamedataCacheDbPath))
+                    {
+                        if (game == null) return [];
+                        using (var cmd = game.CreateCommand())
+                        {
+                            cmd.CommandText = "SELECT DISTINCT manufacturer FROM ships WHERE manufacturer IS NOT NULL AND manufacturer != ''";
+                            using var r = cmd.ExecuteReader();
+                            while (r.Read()) refs.Add(r.GetString(0));
+                        }
+                        // 表示名の最初の語から決まる分
+                        try
+                        {
+                            var names = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+                            using var cmd = game.CreateCommand();
+                            cmd.CommandText = "SELECT manufacturer, name_en FROM ships WHERE manufacturer IS NOT NULL AND manufacturer != '' AND name_en IS NOT NULL";
+                            using var r = cmd.ExecuteReader();
+                            while (r.Read())
+                            {
+                                if (r.IsDBNull(1) || Usable(r.GetString(1)) is not { } n) continue;
+                                var mref = r.GetString(0);
+                                if (!names.TryGetValue(mref, out var hs)) names[mref] = hs = new(StringComparer.OrdinalIgnoreCase);
+                                hs.Add(n);
+                            }
+                            foreach (var hs in names.Values)
+                            {
+                                if (hs.Count < 2) continue;
+                                var words = hs.Select(n => n.Split(' ', 2)[0]).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                                if (words.Count == 1 && words[0].Length > 0) set.Add(words[0]);
+                            }
+                        }
+                        catch { }   // name_en 列の無い古い DB など: この分は足さない
+                    }
+                    foreach (var mref in refs)
+                    {
+                        var stem = Path.GetFileNameWithoutExtension(mref.Replace('\\', '/'));
+                        var code = stem.Contains('.') ? stem[(stem.LastIndexOf('.') + 1)..] : stem;
+                        if (code.Length == 0) continue;
+                        foreach (var c in new[] { code, code.Split('_')[0] }.Distinct())
+                        {
+                            if (c.Length == 0) continue;
+                            if (EnglishText(Lookup("@manufacturer_Name" + c.ToUpperInvariant()).En) is not { } name) continue;
+                            set.Add(name);
+                            var space = name.IndexOf(' ');
+                            if (space > 0) set.Add(name[..space]);
+                            set.Add(c.ToUpperInvariant());
+                            break;
+                        }
+                    }
+                }
+                catch { return []; }
+                var list = set.ToList();
+                if (list.Count > 0) _manufacturerPrefixes = list;
+                return list;
+            }
+        }
+        private List<string>? _manufacturerPrefixes;
 
         // BP受信の通知の品名 → 同定した BP (無ければ null)。DB を読めなければ例外 (GameLogParser が同定なしにする)
         public IReadOnlyList<GameLogBlueprint>? Blueprints(string name) => BlueprintPanel.BlueprintsByOutputName(_gamedataCacheDbPath, _translationsDbPath, name);

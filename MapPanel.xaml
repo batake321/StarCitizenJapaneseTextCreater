@@ -1,0 +1,32 @@
+<UserControl x:Class="StarCitizenJapaneseTextCreater.MapPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf">
+    <!-- ［マップ］タブ。
+         上: ［3 星系］［Stanton］［Pyro］［Nyx］。［3 星系］は 3 つの星系図を横に並べる (狭ければ折り返す)、星系のボタンはその星系図 1 つを枠いっぱいに出す。
+         下: 星系図 (WebView2。詳細タブと同じ図・スクリプト・CSS・CSP)。点・ラベルを押すと［詳細］タブでその場所の詳細を開く -->
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
+            <Button x:Name="btnAll" Content="3 星系" Padding="10,2" Margin="0,0,6,0" Click="BtnView_Click" Tag="3"/>
+            <Button x:Name="btnStanton" Content="Stanton" Padding="10,2" Margin="0,0,6,0" Click="BtnView_Click" Tag="Stanton"/>
+            <Button x:Name="btnPyro" Content="Pyro" Padding="10,2" Margin="0,0,6,0" Click="BtnView_Click" Tag="Pyro"/>
+            <Button x:Name="btnNyx" Content="Nyx" Padding="10,2" Margin="0,0,6,0" Click="BtnView_Click" Tag="Nyx"/>
+            <!-- ゲームに /showlocation を送って現在位置を読み、そのまわりを出す (MapPanel.BtnCurrent_Click) -->
+            <Button x:Name="btnCurrent" Content="現在位置" Padding="10,2" Margin="12,0,6,0" Click="BtnCurrent_Click"
+                    ToolTip="ゲーム (Star Citizen) のチャットに /showlocation を打ち込んで座標を読み、現在位置のまわりを出します"/>
+            <!-- オンのとき、量子ジャンプの目的地の選択と到着の行を見たら 2 秒後に自動で座標を取る (MapPanel.OnQuantumEvent)。状態は Config.MapAutoCapture -->
+            <CheckBox x:Name="chkAutoCapture" Content="QT の前後で自動で現在位置を取る" VerticalAlignment="Center" Margin="6,0,6,0"
+                      ToolTip="量子ジャンプの目的地を選んだときはすぐ (取れなければ 3 秒おきにあと 2 回)、到着したときは 2 秒後に、［現在位置］と同じ取り方で座標を取ります (ゲームの窓が前にあるときだけ)"/>
+            <TextBlock x:Name="txtStatus" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
+        </StackPanel>
+
+        <wv2:WebView2 x:Name="webMap" Grid.Row="1"/>
+        <!-- 図を出せないとき (インデックスが未構築・WebView2 が使えない) の文字 -->
+        <TextBlock x:Name="txtMessage" Grid.Row="1" Visibility="Collapsed" Margin="4" TextWrapping="Wrap" FontSize="14"/>
+    </Grid>
+</UserControl>

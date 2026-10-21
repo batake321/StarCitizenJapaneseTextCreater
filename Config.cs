@@ -64,6 +64,18 @@ public class AppConfig
     public List<string> TabOrder { get; set; } = new();
     public string LastTab { get; set; } = "";
 
+    // ［マップ］: 最後の表示 ("3" = 3 星系の並び、ほかは 1 つだけ大きく出す星系の名前。空なら 3 星系) と、
+    // 星系図ごとに最後に操作した表示 (中心・幅。メートル。MapPanel が図のスクリプトから受けて入れる。無い星系は全体の表示)
+    public string MapView { get; set; } = "";
+    public List<MapViewState> MapViews { get; set; } = new();
+    // ［マップ］の最後の現在位置 (ゲームの /showlocation の座標と取得した時刻。Utc が 0 なら無し) と、惑星・衛星ごとの自転の角度の補正値 (最新の 1 つ)
+    public MapCurrentState MapCurrent { get; set; } = new();
+    // ［マップ］の Location の番号ごとの「どこにいたか」(［現在位置］で座標を取ったときに覚える。番号ごとに最新の 1 つ)
+    public List<MapLocationMemory> MapLocationMemories { get; set; } = new();
+    // ［マップ］の「QT の前後で自動で現在位置を取る」(既定はオフ)
+    public bool MapAutoCapture { get; set; } = false;
+    public List<MapSpinCorrection> MapSpinCorrections { get; set; } = new();
+
     // PC 間の同期: 個人データの書き出し・取り込みに使う共有フォルダ (空なら同期しない)
     public string SyncFolder { get; set; } = "";
 
@@ -75,6 +87,48 @@ public class AppConfig
     // 変更番号 (RequestedP4ChangeNum 例 "12913470")。空なら記録なし (新しい版かどうかは gamedata_meta.build_p4_change_num と比べる)
     public string ExtractedBuildVersion { get; set; } = "";
     public string ExtractedBuildChangeNum { get; set; } = "";
+}
+
+// ［マップ］の星系図 1 つの、最後に操作した表示 (System: 星系の名前、Cx / Cy: 中心のゲームの座標、W: 枠の幅に入る幅。どれもメートル)
+public class MapViewState
+{
+    public string System { get; set; } = "";
+    public double Cx { get; set; }
+    public double Cy { get; set; }
+    public double W { get; set; }
+}
+
+// ［マップ］の現在位置 (X / Y / Z: 恒星を原点にしたメートル、Utc: 取得した時刻 (UNIX 秒)。0 なら無し、
+// LocationId: 取ったときの Game.log の Location の番号 (分からなければ ""))
+public class MapCurrentState
+{
+    public double X { get; set; }
+    public double Y { get; set; }
+    public double Z { get; set; }
+    public double Utc { get; set; }
+    public string LocationId { get; set; } = "";
+}
+
+// ［マップ］の Location の番号 1 つの「どこにいたか」(LocationId: Game.log の Location の番号、Record: 場所・天体・星系 (恒星) の record 名、
+// Kind: "inside" = その場所の中、"near" = その天体の付近、"space" = その星系の宇宙、Utc: 覚えた時刻 (UNIX 秒))
+public class MapLocationMemory
+{
+    public string LocationId { get; set; } = "";
+    public string Record { get; set; } = "";
+    public string Kind { get; set; } = "";
+    public double Utc { get; set; }
+}
+
+// ［マップ］の惑星・衛星の自転の角度の補正値 1 つ (CurrentLocation.Locate):
+//   Body: Planet・Moon の record 名、OffsetDeg: 補正値 (実測の θ − データの式の θ。度。-180〜180)、Utc: 実測した時刻 (UNIX 秒)、
+//   Ref: 実測の基準の種類 ("log" = Game.log の居場所、"near" = 近くの場所)、RefName: その場所の名前
+public class MapSpinCorrection
+{
+    public string Body { get; set; } = "";
+    public double OffsetDeg { get; set; }
+    public double Utc { get; set; }
+    public string Ref { get; set; } = "";
+    public string RefName { get; set; } = "";
 }
 
 public class TranslationConfig

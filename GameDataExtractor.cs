@@ -3660,6 +3660,7 @@ public partial class GameDataExtractor : IDisposable
             {
                 var tradeDb = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(dbPath)) ?? ".", "trade_cache.db");
                 onStatus?.Invoke(ShopTables.RebuildLinks(db, tradeDb).Summary);
+                NotifyShopTablesChanged();
             }
             catch (Exception ex) { onStatus?.Invoke($"[お店] 価格の紐づけを作り直せませんでした: {ex.Message}"); }
             // 最後まで終わったので取得中の印を消す (取れなかった品目は次のインデックス構築・再抽出の後に取り直す)
@@ -6863,6 +6864,10 @@ public partial class GameDataExtractor : IDisposable
     // 次に表示するときに引き直す。MainWindow が UI のスレッドで出す
     public static event Action? ItemNamesChanged;
     public static void NotifyItemNamesChanged() => ItemNamesChanged?.Invoke();
+
+    // 星図の場所・店・価格の紐づけの表 (starmap_locations / game_shops / shop_price_links) を作り直した (［詳細］タブのお店・場所の覚えを捨てる)。裏のスレッドから呼ばれる
+    public static event Action? ShopTablesChanged;
+    public static void NotifyShopTablesChanged() => ShopTablesChanged?.Invoke();
 
     // item_index.name_ja を translations.db の item_Name 行の訳で埋める。
     //   1. 名前のローカライズキー (item_index.name_key) と translations.key の一致。キーそのもの、無ければ "キー,P" (GameDataQueryService.LookupLoc と同じ順)。

@@ -83,6 +83,43 @@ public class WindowsOcrEngine : IOcrEngine
         };
     }
 
+    // 画像全体を、言語 language (例 "ja"・"en-US") の Windows OCR で読んだ文字 (切り出し・ガンマ補正はしない。横幅が minWidth 未満なら拡大する)。
+    // その言語の OCR が無ければ null。［マップ］の mobiGlas の確認 (MobiGlasDetector) に使う (RecognizeAsync の動きは変えない)
+    public static async Task<string?> RecognizeWholeTextAsync(byte[] pngImage, string language, int minWidth = 2560)
+    {
+        var engine = OcrEngine.TryCreateFromLanguage(new Windows.Globalization.Language(language));
+        if (engine == null) return null;
+        var bi = new BitmapImage();
+        bi.BeginInit();
+        bi.StreamSource = new MemoryStream(pngImage);
+        bi.CacheOption = BitmapCacheOption.OnLoad;
+        bi.EndInit();
+        bi.Freeze();
+        BitmapSource src = bi;
+        // 拡大は、長い辺が OCR の上限 (OcrEngine.MaxImageDimension) を超えない範囲で
+        double scale = Math.Min(Math.Max(1.0, (double)minWidth / bi.PixelWidth), (double)OcrEngine.MaxImageDimension / Math.Max(bi.PixelWidth, bi.PixelHeight));
+        if (scale > 1.0)
+        {
+            var scaled = new TransformedBitmap(bi, new ScaleTransform(scale, scale));
+            scaled.Freeze();
+            src = scaled;
+        }
+        using var ms = new MemoryStream();
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(WpfBitmapFrame.Create(src));
+        encoder.Save(ms);
+        SoftwareBitmap softwareBitmap;
+        using (var stream = new InMemoryRandomAccessStream())
+        {
+            await stream.WriteAsync(ms.ToArray().AsBuffer());
+            stream.Seek(0);
+            var decoder = await WinBitmapDecoder.CreateAsync(stream);
+            softwareBitmap = await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
+        }
+        var result = await engine.RecognizeAsync(softwareBitmap);
+        return result.Text;
+    }
+
     private static byte[] PreprocessImage(byte[] pngImage)
     {
         // Load

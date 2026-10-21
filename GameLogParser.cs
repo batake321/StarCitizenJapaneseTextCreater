@@ -358,6 +358,23 @@ public sealed class GameLogVehicleClasses
 //   ・通知の文言などに改行があると、次の行が「同じ時刻 (または 1 ミリ秒だけ遅い時刻) + 空白 + 続き」([Notice] もタグも無い) になる。
 //     続きの先頭 1 バイトが欠けていて先頭に置換文字 (U+FFFD) が出るので取り除き、1 行につなげる (欠けた字は戻せない)
 //   ・つなぐのは通知 (Added notification) と船の呼び出し (SetVehicleSpawningInformations / SetVehicleSpawnedInformations) の行で、行末の [Team_…] が無いもの
+// ［マップ］の推定位置の読み取り用の量子ジャンプの状態 (GameLogParser.QuantumState):
+//   Target / TargetTime: 最後に選んだ目的地 (Player has selected point <名前>) とその時刻、StartName: 最後の経路計算の出発地 (Projected Start Location is <名前>)、
+//   ArrivedTime: 最後の到着 (<Quantum Drive Arrived - Arrived at Final Destination>) の時刻、Moving / MovingSince: 量子ジャンプ中か (目的地を選んだ後、到着より前に
+//   Location が変わった) とその時刻、LastLocationChange: 最後に Location が変わった時刻、TargetIsSurface: 目的地が Game.log の「Adding surface location <名前>」に出た
+//   地表の地点か、LocationId: 今の Location の番号 (Update Inventory Location の「Location [A] -> [B]」の B)、LocationChangeAtSelection: 目的地を選んだときの、
+//   それまでに Location が変わった最後の時刻。どれも、そのファイルでまだ無ければ null / false
+//   ObjectiveMarkers: 契約の目標の印 (新しい 10 件まで。古い順)、LogStart: このファイルの最初の行の時刻、LastDeathOrRespawn: 最後の死亡・復活の時刻、
+//   Stopped: 量子ジャンプが途中で停止 (移動中に宇宙の番号から別の番号に変わり、15 秒たっても戻らず、到着の行も無い)、LastHangarEnter: 最後のハンガー進入の時刻、
+//   LandingSince: 今の着陸場所に着いた時刻 (着陸場所の外なら null)
+public sealed record GameLogQuantumState(string? Target, DateTime? TargetTime, string? StartName, DateTime? ArrivedTime, bool Moving, DateTime? MovingSince,
+    DateTime? LastLocationChange, bool TargetIsSurface = false, string? LocationId = null, DateTime? LocationChangeAtSelection = null,
+    IReadOnlyList<GameLogObjectiveMarker>? ObjectiveMarkers = null, DateTime? LogStart = null, DateTime? LastDeathOrRespawn = null,
+    bool Stopped = false, DateTime? LastHangarEnter = null, DateTime? LandingSince = null);
+
+// 契約の目標の印 1 つ (Game.log の <CObjectiveMarkerComponent::AddToPlayerDataBank>): 時刻、ZonePos (x, y, z。どの天体の枠かは書かれていない)、missionId、objectiveId
+public sealed record GameLogObjectiveMarker(DateTime Time, double X, double Y, double Z, string MissionId, string ObjectiveId);
+
 public sealed class GameLogParser
 {
     private static long _seq;
@@ -502,6 +519,40 @@ public sealed class GameLogParser
     private readonly Dictionary<string, GameLogEntry> _pendingCommodity = new(StringComparer.OrdinalIgnoreCase);
     // 最後に選んだ量子ジャンプの行き先 (使っても消さない。そのファイルでまだ選んでいなければ null)
     private string? _quantumTarget;
+    // ［マップ］の推定位置の読み取り用 (QuantumState。既存の行の作り方には使わない):
+    //   _quantumTarget を選んだ時刻、最後の経路計算の出発地 (Projected Start Location is <名前>)、最後の到着の時刻、
+    //   量子ジャンプ中か (目的地を選んだ後、到着より前に Location が変わったら真。到着の行か新しい目的地の選択で解く) とその時刻、最後に Location が変わった時刻
+    private DateTime? _quantumTargetTime;
+    private string? _quantumStartName;
+    private DateTime? _quantumArrivedTime;
+    private bool _quantumMoving;
+    private DateTime? _quantumMovingSince;
+    private DateTime? _lastLocationChange;
+    // 今の Location の番号 (Update Inventory Location の「Location [A] -> [B]」の B。読み取り用 QuantumState.LocationId。まだ無ければ null)
+    private string? _currentLocationId;
+    // 目的地を選んだときの、その前に Location が変わった最後の時刻 (読み取り用 QuantumState.LocationChangeAtSelection。量子ジャンプの線の出発地を決めるのに使う)
+    private DateTime? _locationChangeAtSelection;
+    // このファイルの最初の行の時刻と、最後の死亡・復活の時刻 (読み取り用 QuantumState.LogStart / LastDeathOrRespawn。取った座標を使ってよいかに使う)
+    private DateTime? _logStartTime;
+    private DateTime? _lastDeathOrRespawn;
+    // 量子ジャンプの途中で停止の判定: 移動中になったときの Location の番号 (宇宙の番号) と、移動中にそこから別の番号に変わった時刻 (停止の候補)。
+    // 候補から QuantumStopWait たっても宇宙の番号に戻らず、到着の行も無ければ「途中で停止」(到着にはしない。到着の行は最終の目的地に着いたときだけ出る)。
+    // また宇宙の番号に変わったら移動中に戻す
+    private string? _quantumSpaceId;
+    private DateTime? _quantumStopCandidate;
+    private bool _quantumStopped;
+    private static readonly TimeSpan QuantumStopWait = TimeSpan.FromSeconds(15);
+    // 最後のハンガー進入の行の時刻と、今の着陸場所に着いた時刻 (読み取り用。量子ジャンプの状態を消すのに使う)
+    private DateTime? _lastHangarEnter;
+    private DateTime? _landingSince;
+    // 量子航法の経路に足された地表の地点の名前 (Adding surface location <名前>。読み取り用 QuantumState.TargetIsSurface)
+    private readonly HashSet<string> _surfaceLocations = new(StringComparer.Ordinal);
+    private static readonly Regex SurfaceLocationRegex = new(@"Adding surface location (\S+) to end of route", RegexOptions.Compiled);
+    // 契約の目標の印 (読み取り用 QuantumState.ObjectiveMarkers。古い順)
+    private readonly List<GameLogObjectiveMarker> _objectiveMarkers = new();
+    private const int MaxObjectiveMarkers = 10;
+    private static readonly Regex ObjectiveMarkerRegex = new(
+        @"ZonePos: x: (-?[0-9.]+), y: (-?[0-9.]+), z: (-?[0-9.]+), missionId\[([^\]]*)\], objectiveId\[([^\]]*)\]", RegexOptions.Compiled);
     // 直前に「量子ジャンプ開始」の行を作った行き先 (到着の行 (<Quantum Drive Arrived - Arrived at Final Destination>) で null に戻す)。
     // 到着の前に同じ行き先の選択がまた来ても、前の選択の行から QuantumReselectWindow 未満 (続けての選び直し) なら開始の行を作らない
     private string? _quantumStartTarget;
@@ -521,6 +572,25 @@ public sealed class GameLogParser
     private DateTime? _lastDeathTime;
     // 死亡の行を出してから、まだ復活の行を出していないか (次の「前の Location が 0 の場所の変化」を「復活」にする)
     private bool _respawnPending;
+    // ─── ハンガーの出入り ───
+    // 船に乗っているとき (操縦中 _drivingId か乗船中 _boarded。区域の行の Piloting と同じ): 「ハンガーリクエスト完了」の通知で申請を覚え (HangarRequestWindow まで)、
+    // 申請が残っているときに次に来た「…管轄区域に進入」の通知で申請を使い切る。「無統治区域管轄区域に進入」(HangarHeading) ならその時刻ですぐ「ハンガー進入」、
+    // それ以外の管轄ならその時刻ですぐ「ハンガー退出」。申請が残っていなければ管轄区域の通知はハンガーの出入りにしない。
+    // 船を降りて歩いているとき: HangarHeading の通知の後 HangarWindow のあいだ Location が変わらなければ「ハンガー進入」、
+    // ハンガーにいるあいだのそれ以外の「…管轄区域に進入」の通知の後 HangarWindow のあいだ Location が変わらなければ「ハンガー退出」
+    // (HangarWindow を過ぎた時刻の行が来たとき・追い読みの今の時刻 (AdvanceHangarCandidates)・ファイルの終わり (Flush) で確定する)
+    // _hangarRequestTime は船に乗っているときの直前の「ハンガーリクエスト完了」の通知の時刻 (まだ無いか、使ったら null)
+    private DateTime? _hangarRequestTime;
+    private static readonly TimeSpan HangarRequestWindow = TimeSpan.FromMinutes(10);
+    private const string HangarHeading = "無統治区域管轄区域に進入";
+    // 歩いているときの候補の判定の時間 (通知からこの時間以内に Location が変われば捨てる)
+    private static readonly TimeSpan HangarWindow = TimeSpan.FromSeconds(10);
+    // ハンガーにいるか (「ハンガー進入」の行を作ったら true)。「ハンガー退出」の行を作ったとき、Location が変わったとき (ステーションの区域を出た) に false。
+    // ファイルごとに解析器を作り直すので、新しいファイルの読み始めは false
+    private bool _inHangar;
+    // 歩いているときのハンガー進入・退出の候補: 通知の時刻と、そのときの着陸場所の ID ("0" = 着陸場所の外)。まだ無ければ null
+    private (DateTime Time, string PlaceId)? _hangarCandidate;
+    private (DateTime Time, string PlaceId)? _hangarExitCandidate;
     // 死亡の直前 (DeathCollisionWindow 以内) の同じ船の衝突なら死亡の行に「（衝突）」を添える
     private static readonly TimeSpan DeathCollisionWindow = TimeSpan.FromSeconds(5);
     // 救急サービスの通知の直前 (RescueDeathWindow 以内) に死亡の行があれば、その通知では死亡の行を出さない
@@ -802,6 +872,8 @@ public sealed class GameLogParser
     private static readonly Regex UnstowRegex = new(@"<UnstowPendingEntities> Unstow Request\[(\d+)\] .*?finalized spawn of '([A-Za-z][A-Za-z0-9_]*?)_(\d{6,})' \[\3\]", RegexOptions.Compiled);
     // 納品の目標達成の本文: 品名 を n/n
     private static readonly Regex DeliveryRegex = new(@"^(.+?) を (\d+)/(\d+)$", RegexOptions.Compiled);
+    // 量子航法の経路計算の出発地: <Calculate Route> … Projected Start Location is <名前> for route to destination <名前> (［マップ］の推定位置の読み取り用)
+    private static readonly Regex ProjectedStartRegex = new(@"<Calculate Route> .*?Projected Start Location is (.+?) for route to destination ", RegexOptions.Compiled);
     // 量子ジャンプの行き先: Player has selected point XXX as their destination
     private static readonly Regex QuantumTargetRegex = new(@"<Player Selected Quantum Target - Local> .*?Player has selected point (.+?) as their destination", RegexOptions.Compiled);
     // 行の中の船: クラス_ID[ID] (量子ジャンプの行の | DRAK_Ironclad_819458464586[819458464586]|)
@@ -901,6 +973,9 @@ public sealed class GameLogParser
     public void FeedLine(string line)
     {
         line = line.TrimEnd('\r', '\n');
+        // ［マップ］の推定位置の読み取り用: このファイルの最初の行の時刻 (ログの始まり)
+        if (_logStartTime == null && line.Length > 0 && line[0] == '<' && StampRegex.Match(line) is { Success: true } ls && TryParseStamp(ls.Groups[1].Value, out var lst))
+            _logStartTime = lst;
         if (_pending != null)
         {
             // 直前の行の続き: 同じ時刻か 1 ミリ秒だけ遅い時刻 + 空白 + 本文の続き ([Notice] などの [ で始まらない)
@@ -919,6 +994,21 @@ public sealed class GameLogParser
             var cut = _pending;
             _pending = null;
             Process(cut);
+        }
+
+        // ［マップ］の推定位置の読み取り用: 量子航法の経路に足された地表の地点の名前 (… Adding surface location <名前> to end of route)。
+        // この行 (<Calculate Route!>) はほかの処理には使わない (覚えるだけ)
+        if (line.Contains("Adding surface location ", StringComparison.Ordinal) && SurfaceLocationRegex.Match(line) is { Success: true } sl)
+            _surfaceLocations.Add(sl.Groups[1].Value);
+        // ［マップ］の推定位置の読み取り用: 契約の目標の印 (<CObjectiveMarkerComponent::AddToPlayerDataBank> … ZonePos: x: …, y: …, z: …, missionId[…], objectiveId[…])。
+        // この行はほかの処理には使わない (覚えるだけ。同じ objectiveId は最新の 1 つ、全部で新しい MaxObjectiveMarkers 件まで)
+        if (line.Contains("<CObjectiveMarkerComponent::AddToPlayerDataBank>", StringComparison.Ordinal) && ObjectiveMarkerRegex.Match(line) is { Success: true } om
+            && StampRegex.Match(line) is { Success: true } oms && TryParseStamp(oms.Groups[1].Value, out var omTime)
+            && ParseNumber(om.Groups[1].Value) is double ox && ParseNumber(om.Groups[2].Value) is double oy && ParseNumber(om.Groups[3].Value) is double oz)
+        {
+            _objectiveMarkers.RemoveAll(o => o.ObjectiveId == om.Groups[5].Value);
+            _objectiveMarkers.Add(new GameLogObjectiveMarker(omTime, ox, oy, oz, om.Groups[4].Value, om.Groups[5].Value));
+            if (_objectiveMarkers.Count > MaxObjectiveMarkers) _objectiveMarkers.RemoveAt(0);
         }
 
         if (!HasTag(line)) return;
@@ -982,6 +1072,9 @@ public sealed class GameLogParser
             if (!c.Decided) DecideStow(c, null);
             if (_stowCandidates.Contains(c)) CompleteStow(c);
         }
+        // まだ行にしていない (歩いているときの) ハンガー進入・退出の候補も行にする (格納の候補と同じく、ファイルの終わりで確定する)
+        if (_hangarCandidate is { } h) CompleteHangar(h);
+        if (_hangarExitCandidate is { } hx) CompleteHangarExit(hx);
     }
 
     private static bool NeedsContinuation(string line) =>
@@ -998,6 +1091,10 @@ public sealed class GameLogParser
 
         // まだ行にしていない格納のうち、この行の時刻で船が決まるもの・待ち終わったものを処理する
         AdvanceStowCandidates(time);
+        // 歩いているときのハンガー進入・退出の候補が HangarWindow を過ぎたら行にする
+        AdvanceHangarCandidates(time);
+        // 量子ジャンプの停止の候補が QuantumStopWait を過ぎたら途中で停止にする
+        AdvanceQuantumArrival(time);
 
         Match m;
         if (line.Contains("<Vehicle Control Flow>", StringComparison.Ordinal))
@@ -1021,6 +1118,30 @@ public sealed class GameLogParser
         {
             if (!(m = UpdateLocationRegex.Match(line)).Success) return;
             LearnPlayerName(m.Groups[1].Value);
+            // 歩いているときのハンガー進入・退出の候補の通知から HangarWindow 以内に Location が変わった: 候補を捨てる。Location が変わったら (ステーションの区域を出た) ハンガーにいる状態も解く
+            _currentLocationId = m.Groups[5].Value;   // ［マップ］の推定位置の読み取り用: 今の Location の番号
+            if (m.Groups[4].Value != m.Groups[5].Value)
+            {
+                // ［マップ］の推定位置の読み取り用: Location が変わった時刻。目的地を選んだ後、到着より前なら量子ジャンプ中にする
+                _lastLocationChange = time;
+                if (!_quantumMoving && _quantumTarget != null && _quantumTargetTime is { } qt && (_quantumArrivedTime is not { } qa || qt > qa))
+                {
+                    _quantumMoving = true;
+                    _quantumMovingSince = time;
+                    _quantumSpaceId = m.Groups[5].Value;   // 移動中になったときの Location の番号 (宇宙の番号)
+                    _quantumStopCandidate = null;
+                    _quantumStopped = false;
+                }
+                else if (_quantumMoving)
+                {
+                    // 移動中: 宇宙の番号から別の番号に変わったら停止の候補 (最初に離れた時刻)。宇宙の番号に戻ったら候補を捨て、途中で停止も解く (移動中に戻す)
+                    if (m.Groups[5].Value == _quantumSpaceId) { _quantumStopCandidate = null; _quantumStopped = false; }
+                    else _quantumStopCandidate ??= time;
+                }
+                if (_hangarCandidate is { } hangarCand && time - hangarCand.Time <= HangarWindow) _hangarCandidate = null;
+                if (_hangarExitCandidate is { } hangarExitCand && time - hangarExitCand.Time <= HangarWindow) _hangarExitCandidate = null;
+                _inHangar = false;
+            }
             OnLanding(time, m.Groups[3].Value, m.Groups[4].Value, m.Groups[5].Value);
             return;
         }
@@ -1113,6 +1234,7 @@ public sealed class GameLogParser
             if ((m = FuelEstimateRegex.Match(line)).Success && ParseNumber(m.Groups[1].Value) is double fuel
                 && (m = VehicleRefRegex.Match(line)).Success)
                 _routeFuel[m.Groups[2].Value] = fuel;
+            if ((m = ProjectedStartRegex.Match(line)).Success) _quantumStartName = m.Groups[1].Value.Trim();
             return;
         }
         if (line.Contains("<Claim Failed>", StringComparison.Ordinal))
@@ -1277,6 +1399,11 @@ public sealed class GameLogParser
         {
             var target = m.Groups[1].Value;
             _quantumTarget = target;
+            _quantumTargetTime = time;
+            _quantumMoving = false;
+            _quantumStopCandidate = null;
+            _quantumStopped = false;
+            _locationChangeAtSelection = _lastLocationChange;
             var startShip = "";
             string? startCls = null;
             if ((m = VehicleRefRegex.Match(line)).Success)
@@ -1301,6 +1428,10 @@ public sealed class GameLogParser
         {
             // 着いたので、次に同じ行き先を選んだら開始の行を作る
             _quantumStartTarget = null;
+            _quantumArrivedTime = time;
+            _quantumMoving = false;
+            _quantumStopCandidate = null;
+            _quantumStopped = false;
             var ship = "";
             string? cls = null;
             double? fuel = null;
@@ -1486,6 +1617,7 @@ public sealed class GameLogParser
     // 着陸場所の外 (Landing 0) での復活: 内容は Location の ID の表示名 (名前がまだなら名前待ち)。着陸場所の外にいるので _landingId は 0 にする (出発の行は出さない)
     private void OnRespawnOutside(DateTime time, string locationId)
     {
+        _lastDeathOrRespawn = time;   // ［マップ］の推定位置の読み取り用
         _landingId = "0";
         _lastDeparture = null;
         AttachPlace(Add(time, "復活", PlaceDisplay(locationId)), locationId);
@@ -1494,6 +1626,7 @@ public sealed class GameLogParser
     // login = true なら種類「ログイン」(内容は場所名だけ。船は添えない)。それ以外の扱い (場所の状態・再入の取り消し・場所名の遅延解決) は到着と同じ
     private void OnArrive(DateTime time, string id, bool login)
     {
+        _landingSince = time;   // ［マップ］の推定位置の読み取り用
         _landingId = id;
         _placeId = id;
         if (_confirmId != null && id != _confirmPlace) _confirmId = null;   // 別の着陸場所へ移った: 呼び出した船の確定は諦める
@@ -1518,6 +1651,8 @@ public sealed class GameLogParser
     // 再入の取り消し (同じ場所に ReentryWindow 以内に戻った) はしない (復活の行は必ず出す)。直前の出発の行はそのまま残す
     private void OnRespawn(DateTime time, string id)
     {
+        _lastDeathOrRespawn = time;   // ［マップ］の推定位置の読み取り用
+        _landingSince = time;
         _landingId = id;
         _placeId = id;
         if (_confirmId != null && id != _confirmPlace) _confirmId = null;   // 別の着陸場所へ移った: 呼び出した船の確定は諦める
@@ -1528,6 +1663,7 @@ public sealed class GameLogParser
     // 死亡を覚える (救急サービスの通知と重ねないため・次の Location [0] -> [X] を復活にするため)
     private void OnDeath(DateTime time)
     {
+        _lastDeathOrRespawn = time;   // ［マップ］の推定位置の読み取り用
         _lastDeathTime = time;
         _respawnPending = true;
     }
@@ -2109,6 +2245,7 @@ public sealed class GameLogParser
             if (_lastAtc != null && time - _lastAtcTime <= AtcWindow) parts.Add(AtcPlace(_lastAtc));
             if (_lastShipName != null) parts.Add($"船: {_lastShipName}");
             Add(time, "ハンガー要求", string.Join(" / ", parts), shipClass: _lastShipClass, shipName: _lastShipName);
+            if (_drivingId != null || _boarded != null) _hangarRequestTime = time;   // 船に乗っているときのハンガーの出入りの判定に使う申請
             return;
         }
 
@@ -2170,8 +2307,74 @@ public sealed class GameLogParser
         var title = NotificationTitle(text);
         if (title.EndsWith("管轄区域に進入", StringComparison.Ordinal) || Array.IndexOf(AreaHeadings, title) >= 0
             || StartsWithAny(title, AreaPrefixHeadings, out _))
-            Add(time, "区域", title, piloting: _drivingId != null || _boarded != null,
+        {
+            var onShip = _drivingId != null || _boarded != null;
+            Add(time, "区域", title, piloting: onShip,
                 atJumpPointStop: AtJumpPointStop());
+            // ハンガーの出入り (フィールドの説明 (_hangarRequestTime の上) のとおり)
+            if (title.EndsWith("管轄区域に進入", StringComparison.Ordinal))
+            {
+                if (onShip)
+                {
+                    // 船: 申請が残っていれば使い切り、無統治区域ならすぐハンガー進入、それ以外の管轄ならすぐハンガー退出
+                    if (_hangarRequestTime is { } req && time >= req && time - req <= HangarRequestWindow)
+                    {
+                        _hangarRequestTime = null;
+                        if (title == HangarHeading) AddHangarEnter(time, _landingId);
+                        else AddHangarExit(time, _landingId);
+                    }
+                }
+                // 徒歩: 候補として覚え、HangarWindow のあいだ Location が変わらなければ行にする
+                else if (title == HangarHeading) _hangarCandidate = (time, _landingId);
+                else if (_inHangar) _hangarExitCandidate = (time, _landingId);
+            }
+        }
+    }
+
+    // 時刻 now (UTC) で歩いているときのハンガー進入・退出の候補を進める: 候補の時刻から HangarWindow を過ぎていれば行にする (AdvanceHangarCandidates の説明)。
+    // 行の時刻で Process から呼ぶほか、追い読み (GameLogTail.Poll) が見に行くたびに今の時刻で呼ぶ (次の行が来なくても確定するため)
+    // 量子ジャンプの途中で停止の判定: 移動中に宇宙の番号から別の番号に変わり、now (行の時刻か、追い読みでは今の時刻) までに QuantumStopWait たっても
+    // 宇宙の番号に戻っていなければ「途中で停止」にする (到着にはしない。移動中のまま、また宇宙の番号に変われば解く)。
+    // ハンガー進入の確定と同じく、行の時刻と追い読みの今の時刻で呼ぶ
+    public void AdvanceQuantumArrival(DateTime now)
+    {
+        if (!_quantumMoving || _quantumStopped || _quantumStopCandidate is not { } at || now - at < QuantumStopWait) return;
+        _quantumStopped = true;
+    }
+
+    public void AdvanceHangarCandidates(DateTime now)
+    {
+        if (_hangarCandidate is { } hangar && now - hangar.Time > HangarWindow) CompleteHangar(hangar);
+        if (_hangarExitCandidate is { } hangarExit && now - hangarExit.Time > HangarWindow) CompleteHangarExit(hangarExit);
+    }
+
+    // 歩いているときのハンガー進入の候補を行にする (通知の時刻で)
+    private void CompleteHangar((DateTime Time, string PlaceId) c)
+    {
+        _hangarCandidate = null;
+        AddHangarEnter(c.Time, c.PlaceId);
+    }
+
+    // 歩いているときのハンガー退出の候補を行にする (通知の時刻で)
+    private void CompleteHangarExit((DateTime Time, string PlaceId) c)
+    {
+        _hangarExitCandidate = null;
+        AddHangarExit(c.Time, c.PlaceId);
+    }
+
+    // 「ハンガー退出」の行を足す (通知の時刻で。内容はハンガー進入と同じ)。ハンガーにいる状態を解く
+    private void AddHangarExit(DateTime time, string placeId)
+    {
+        _inHangar = false;
+        AttachPlace(Add(time, "ハンガー退出", placeId == "0" ? "" : PlaceDisplay(placeId)), placeId);
+    }
+
+    // 「ハンガー進入」の行を足す (通知の時刻で)。内容は通知のときの着陸場所 (名前がまだなら「場所 ID n」で名前待ち)。着陸場所の外だったら空。ハンガーにいる状態にする
+    private void AddHangarEnter(DateTime time, string placeId)
+    {
+        _inHangar = true;
+        AttachPlace(Add(time, "ハンガー進入", placeId == "0" ? "" : PlaceDisplay(placeId)), placeId);
+        _lastHangarEnter = time;   // ［マップ］の推定位置の読み取り用
     }
 
     // 通知の見出し (": " の前。前後の空白と末尾の ":" を除く)
@@ -2180,6 +2383,15 @@ public sealed class GameLogParser
         var colon = text.IndexOf(": ", StringComparison.Ordinal);
         return (colon >= 0 ? text[..colon] : text).Trim().TrimEnd(':').Trim();
     }
+
+    // ［マップ］の推定位置の読み取り用の量子ジャンプの状態 (GameLogQuantumState。読むだけ。追い読みと同じスレッドで読むこと)
+    public GameLogQuantumState QuantumState => new(_quantumTarget, _quantumTargetTime, _quantumStartName, _quantumArrivedTime, _quantumMoving, _quantumMovingSince, _lastLocationChange,
+        _quantumTarget != null && _surfaceLocations.Contains(_quantumTarget), _currentLocationId, _locationChangeAtSelection, _objectiveMarkers.ToArray(),
+        _logStartTime, _lastDeathOrRespawn, _quantumMoving && _quantumStopped, _lastHangarEnter, _landingId != "0" ? _landingSince : null);
+
+    // 今の着陸場所のログの中の元の名前 (RequestLocationInventory の Location[…]。例 RR_P3_LEO)。着陸場所の外か、このファイルでまだ分からなければ null。
+    // ［マップ］の［現在位置］が使う (読むだけ。追い読みと同じスレッドで読むこと)
+    public string? CurrentLandingRawName => _landingId != "0" && _placeRawNames.TryGetValue(_landingId, out var raw) ? raw : null;
 
     // 今の着陸場所がジャンプポイント脇の休憩所 (場所の名前が "RR_JP_" で始まる) か。名前がこのファイルでまだ分からなければ false
     private bool AtJumpPointStop() =>
@@ -2846,8 +3058,20 @@ public sealed class GameLogTail
             blueprintByName, blueprintHeadings, rescueHeadings);
     }
 
-    // 増えた分を読む。戻り値: ファイルがあったか。reset = 最初から読み直した (それまでの行は捨てた)
+    // 増えた分を読む。戻り値: ファイルがあったか。reset = 最初から読み直した (それまでの行は捨てた)。
+    // ファイルがあれば、読んだ行が無くても、歩いているときのハンガー進入・退出の候補を今の時刻 (UTC。Game.log の時刻も UTC) で進める
     public bool Poll(out bool reset)
+    {
+        var found = PollLines(out reset);
+        if (found)
+        {
+            Parser.AdvanceHangarCandidates(DateTime.UtcNow);
+            Parser.AdvanceQuantumArrival(DateTime.UtcNow);
+        }
+        return found;
+    }
+
+    private bool PollLines(out bool reset)
     {
         reset = false;
         if (!File.Exists(_path)) return false;

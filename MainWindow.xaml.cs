@@ -122,6 +122,17 @@ public partial class MainWindow : Window
         powerPanel.WorkDirProvider = () => WorkDir;
         powerPanel.OwnedShipsProvider = () => (cmbLoadoutShip.ItemsSource as IEnumerable<LoadoutShipChoice>) ?? [];
         powerPanel.MyComponentsProvider = () => _myComponents;
+        // ［マップ］: 最後の表示を設定に入れたら、設定のファイルに保存する
+        // (保存に失敗しても MessageBox は出さず、アプリのログに出すだけ)
+        mapPanel.SaveConfig = () => SaveConfigToFile(showError: false);
+        // ［マップ］の［現在位置］: ［ゲームログ］の追い読みの今の着陸場所 (Game.log の居場所。自転の角度の実測の基準に使う)
+        mapPanel.LandingPlaceProvider = gameLogPanel.CurrentLandingPlace;
+        // ［マップ］の推定位置: ［ゲームログ］の追い読みの量子ジャンプの状態
+        mapPanel.QuantumStateProvider = gameLogPanel.CurrentQuantumState;
+        // ［マップ］が見えたときに［ゲームログ］の追い読みを始める (起動時の EnsureStarted と同じ。二重には始めない)
+        mapPanel.EnsureGameLogStarted = gameLogPanel.EnsureStarted;
+        // ［マップ］の自動の取得: ［ゲームログ］の追い読みで量子ジャンプの目的地の選択・到着の行を見たら知らせる
+        gameLogPanel.QuantumEventSeen += mapPanel.OnQuantumEvent;
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -1866,7 +1877,10 @@ public partial class MainWindow : Window
         MessageBox.Show("設定を保存しました。", "完了");
     }
 
-    private void SaveConfigToFile()
+    private void SaveConfigToFile() => SaveConfigToFile(showError: true);
+
+    // showError: 保存に失敗したとき MessageBox で知らせるか (false はアプリのログに出すだけ。マップタブからの保存)
+    private void SaveConfigToFile(bool showError)
     {
         // 壊れた設定ファイルの控えを作れなかった起動中は、元のファイルを上書きしない (起動時に知らせ済み)
         if (App.ConfigSaveDisabled) return;
@@ -1919,6 +1933,12 @@ public partial class MainWindow : Window
                     : new { i.Kind, i.Enabled, i.Text }).ToList(),
                 App.Config.TabOrder,
                 App.Config.LastTab,
+                App.Config.MapView,
+                App.Config.MapViews,
+                App.Config.MapCurrent,
+                App.Config.MapLocationMemories,
+                App.Config.MapAutoCapture,
+                App.Config.MapSpinCorrections,
                 App.Config.SyncFolder,
                 App.Config.ExtractedBuildVersion,
                 App.Config.ExtractedBuildChangeNum,
@@ -1929,11 +1949,17 @@ public partial class MainWindow : Window
                 WriteIndented = true,
                 Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
             });
-            File.WriteAllText(App.ConfigPath, json, Encoding.UTF8);
+            // 同じフォルダの一時ファイルに書いてから入れ替える (元が無ければ移す)
+            var tmp = App.ConfigPath + ".tmp";
+            File.WriteAllText(tmp, json, Encoding.UTF8);
+            if (File.Exists(App.ConfigPath)) File.Replace(tmp, App.ConfigPath, null);
+            else File.Move(tmp, App.ConfigPath);
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"設定保存エラー: {ex.Message}", "エラー");
+            // showError = false (マップタブからの保存): MessageBox を出さず、アプリのログに出すだけ
+            if (showError) MessageBox.Show($"設定保存エラー: {ex.Message}", "エラー");
+            else App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 設定を保存できませんでした: {ex.GetType().FullName}: {ex.Message}");
         }
     }
 
@@ -2787,7 +2813,7 @@ public partial class MainWindow : Window
                         ct.ThrowIfCancellationRequested();
                         try
                         {
-                            Log("[採掘できる場所] 資源の採掘できる場所 (ore_locations) がまだ無いので、裏で作ります (納品物の入手場所も一緒に作り直します)");
+                            Log("[採掘できる場所] 採掘できる場所・星図の場所・店の表がまだ無い・前の形なので、裏で作ります (納品物の入手場所も一緒に作り直します)");
                             ore = await extractor.RebuildOreLocationsAsync(new Progress<string>(m => Log(m.StartsWith("[") ? m : $"[採掘できる場所] {m}")), ct);
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)

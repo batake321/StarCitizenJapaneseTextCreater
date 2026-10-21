@@ -396,7 +396,10 @@ public partial class GameDataExtractor
     }
 
     // インデックスを構築した DB で、星図の場所 (starmap_locations)・ゲームの店 (game_shops) の表がまだ無い・前の形か (前の版で構築した DB)。
-    // 無ければ起動後に RebuildOreLocationsAsync (Step 6c) で作る (ore_locations と同じ扱い)
+    // 無ければ起動後に RebuildOreLocationsAsync (Step 6c) で作る (ore_locations と同じ扱い)。
+    // 前の形の表 (列が足りない) は、今の版 (gamedata_meta の build_p4_change_num) でまだ作ろうとしていなければ作り直す
+    // (作ろうとした版と表の形は ShopTablesAttemptMetaKey。0 行・失敗で前の形の表が残っても、同じ版・同じ形では起動のたびに走らない。
+    //  版が変わるか、表の形の番号 (ShopTablesFormat) を上げれば、また 1 回試す)
     public bool NeedsShopTables()
     {
         EnsureDb();
@@ -404,8 +407,39 @@ public partial class GameDataExtractor
         cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM item_index) AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (@a, @b)) < 2";
         cmd.Parameters.AddWithValue("@a", ShopTables.StarmapLocationsTable);
         cmd.Parameters.AddWithValue("@b", ShopTables.GameShopsTable);
-        // 前の形の game_shops (franchise_name の列が無い) も作り直す
-        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0 || ShopTables.ShopsTableLacksFranchiseNameColumn(_db);
+        if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0) return true;
+        // 前の形の game_shops (franchise_name の列が無い)・starmap_locations (座標・自転の列が無い)・starmap_entities が無い
+        if (!ShopTables.ShopsTableLacksFranchiseNameColumn(_db) && !ShopTables.StarmapTableLacksCoordinateColumns(_db)
+            && !ShopTables.EntitiesTableMissing(_db)) return false;
+        return ReadMetaValue(ShopTablesAttemptMetaKey) != ShopTablesAttemptValue();
+    }
+
+    // 店・星図の表の形の番号。表・列を足したら上げる (上げると、前の形の表が残っている DB で、同じ版でももう 1 回作り直す)。
+    // 2: starmap_entities を足した (実データで、番号の無い前の印のために starmap_entities が作られなかった)。3: starmap_locations に planet_radius を足した。
+    // 4: starmap_locations に frame_matrix を足した
+    private const string ShopTablesFormat = "4";
+
+    // 作ろうとした印の値 (build_p4_change_num と表の形の番号)
+    private string ShopTablesAttemptValue() => (ReadMetaValue(BuildChangeNumMetaKey) ?? "") + "|" + ShopTablesFormat;
+
+    // 店・星図の表 (starmap_locations / game_shops / shop_price_links / starmap_entities) を作ろうとした Data.p4k の版と表の形
+    // (「build_p4_change_num|ShopTablesFormat」) の gamedata_meta の記録
+    internal const string ShopTablesAttemptMetaKey = "shop_tables_attempt_build";
+
+    // 店・星図の表を作ろうとしたことを記録する (成功・0 行・失敗のどれでも)
+    private void MarkShopTablesAttempt() => SetMeta(_db!, ShopTablesAttemptMetaKey, ShopTablesAttemptValue());
+
+    // gamedata_meta の値 (表・行が無ければ null)
+    private string? ReadMetaValue(string key)
+    {
+        try
+        {
+            using var cmd = _db!.CreateCommand();
+            cmd.CommandText = "SELECT value FROM gamedata_meta WHERE key = @k";
+            cmd.Parameters.AddWithValue("@k", key);
+            return cmd.ExecuteScalar() as string;
+        }
+        catch (SqliteException) { return null; }
     }
 
     // ゲームの店の表 (game_shops) はあるが、DB の価格との紐づけ (shop_price_links) の表がまだ無い・前の形か。そうなら起動後に RebuildShopPriceLinks で作る
@@ -427,14 +461,16 @@ public partial class GameDataExtractor
         var tradeDb = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(DbPath)) ?? ".", "trade_cache.db");
         var r = ShopTables.RebuildLinks(_db!, tradeDb);
         StatusChanged?.Invoke(r.Summary);
+        NotifyShopTablesChanged();
         return r.Linked;
     }
 
-    // Step 6c の中で、星図の場所とゲームの店を作って表を入れ替え、紐づけを作り直す。作れた行が 0 行なら前の行を残す (表が無ければ空で作る)
+    // Step 6c の中で、星図の場所とゲームの店を作って表を入れ替え、紐づけを作り直す。作れた行が 0 行なら前の行を残す (前の形の表でも消さない。表が無ければ空で作る)。
+    // 作ろうとした版を記録する (MarkShopTablesAttempt)
     private void WriteShopTables(DeliverableDcb dcb, DeliverableSocpaks soc, Dictionary<string, string>? loc)
     {
         var sw = Stopwatch.StartNew();
-        var starmap = ShopTables.BuildStarmap(dcb, loc);
+        var starmap = ShopTables.BuildStarmap(dcb, loc, soc);
         var (shops, shopStats) = ShopTables.BuildShops(dcb, soc, starmap, loc);
         using (var ddl = _db!.CreateCommand())
         {
@@ -443,16 +479,16 @@ public partial class GameDataExtractor
         }
         if (starmap.Count == 0) StatusChanged?.Invoke("[お店] 星図の場所を 1 行も作れませんでした (前のデータを残します)");
         else ShopTables.WriteStarmap(_db!, starmap);
-        if (shops.Count == 0)
-        {
-            StatusChanged?.Invoke("[お店] 店を 1 行も作れませんでした (前のデータを残します)");
-            // 前の形の表 (列が足りない) が残るなら、新しい形の空の表にする (次の起動で補完が毎回走らないように)
-            ShopTables.ReplaceOldFormatTables(_db!);
-        }
+        if (shops.Count == 0) StatusChanged?.Invoke("[お店] 店を 1 行も作れませんでした (前のデータを残します)");
         else ShopTables.WriteShops(_db!, shops);
-        StatusChanged?.Invoke($"[お店] 星図の場所 {starmap.Count} 行・店 {shops.Count} 行 ({shopStats})。時間 {sw.Elapsed.TotalSeconds:F1}秒");
+        var entities = ShopTables.BuildEntities(dcb, soc);
+        ShopTables.WriteEntities(_db!, entities);
+        StatusChanged?.Invoke($"[お店] 星図の名前の対応 (starmap_entities) {entities.Count} 行" + (entities.Count == 0 ? " (前のデータを残します)" : ""));
+        MarkShopTablesAttempt();
+        StatusChanged?.Invoke($"[お店] 星図の場所 {starmap.Count} 行 (座標のあるもの {starmap.Count(r => r.X.HasValue)} 行)・店 {shops.Count} 行 ({shopStats})。時間 {sw.Elapsed.TotalSeconds:F1}秒");
         var tradeDb = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(DbPath)) ?? ".", "trade_cache.db");
         StatusChanged?.Invoke(ShopTables.RebuildLinks(_db!, tradeDb).Summary);
+        NotifyShopTablesChanged();
     }
 
     // 採掘できる場所 (ore_locations) を作る。DCB と socpak の読み込みが納品物の入手場所 (Step 6c) と同じなので、Step 6c をそのまま走らせて
@@ -485,11 +521,11 @@ public partial class GameDataExtractor
             using (var ddl = _db!.CreateCommand())
             {
                 // 星図の場所・店・紐づけの表も、作れなかったときは空で作る (次の起動で走り直さないように。ore_locations と同じ扱い)
-                ddl.CommandText = OreLocationsDdl + ShopTables.StarmapLocationsDdl + ShopTables.GameShopsDdl + ShopTables.ShopPriceLinksDdl;
+                ddl.CommandText = OreLocationsDdl + ShopTables.StarmapLocationsDdl + ShopTables.GameShopsDdl + ShopTables.ShopPriceLinksDdl + ShopTables.StarmapEntitiesDdl;
                 ddl.ExecuteNonQuery();
             }
-            // 店・紐づけの表が前の形 (列が足りない) のまま残っていれば、新しい形の空の表にする (作り直しが失敗しても、次の起動で補完が毎回走らないように)
-            ShopTables.ReplaceOldFormatTables(_db);
+            // 店・星図の表を作ろうとした版を記録する (作り直しが失敗して前の形の表が残っても、同じ版では次の起動で補完が毎回走らないように。前のデータは消さない)
+            MarkShopTablesAttempt();
             using var cnt = _db.CreateCommand();
             cnt.CommandText = "SELECT COUNT(*) FROM ore_locations";
             return Convert.ToInt32(cnt.ExecuteScalar() ?? 0L);
@@ -903,6 +939,13 @@ public partial class GameDataExtractor
         // socpak → その中の .soc にある店 (Entity EntityClass="SCShop" と、その EntityComponentShop (__type="SShopComponentParams") の属性)。
         // ［詳細］タブのお店 (game_shops。ShopTables.Build) に使う
         public Dictionary<string, List<SocShop>> Shops { get; } = new(StringComparer.Ordinal);
+        // socpak → その直下の <名前>.xml (普通の XML) の ChildObjectContainers の Child の木 (子の socpak・親からの位置・starMapRecord)。
+        // 星図の場所の座標 (starmap_locations の x / y / z。ShopTables.BuildStarmap) に使う
+        public Dictionary<string, List<SocChild>> Containers { get; } = new(StringComparer.Ordinal);
+        // socpak → 直下の xml の ExposedEntities の Entity の planetRotationSpeed (惑星・衛星の 1 回転にかかる時間 (時間))。starmap_locations.rot_hours に使う
+        public Dictionary<string, double> RotationHours { get; } = new(StringComparer.Ordinal);
+        // socpak → 直下の xml の ExposedEntities の Entity の planetRadius (惑星・衛星の半径。メートル)。starmap_locations.planet_radius に使う
+        public Dictionary<string, double> PlanetRadius { get; } = new(StringComparer.Ordinal);
         public int SocpakCount { get; private set; }
         public int BadCount { get; private set; }
 
@@ -919,7 +962,7 @@ public partial class GameDataExtractor
             using var zip = new ZipArchive(fs, ZipArchiveMode.Read);
             // 読む (順に) と調べる (並列に) を分ける。socpak は無圧縮で入っているので、entry をそのまま読んで中の zip を開く (一時ファイルは作らない)
             var queue = new System.Collections.Concurrent.BlockingCollection<(string Rel, byte[] Data)>(boundedCapacity: 8);
-            var results = new System.Collections.Concurrent.ConcurrentBag<(string Rel, HashSet<string> Records, HashSet<string>? Kids, List<(string Planet, HashSet<string> Creatures)> Ale, List<(string Child, string Smo)> ChildSmo, List<SocShop> Shops)>();
+            var results = new System.Collections.Concurrent.ConcurrentBag<(string Rel, HashSet<string> Records, HashSet<string>? Kids, List<(string Planet, HashSet<string> Creatures)> Ale, List<(string Child, string Smo)> ChildSmo, List<SocShop> Shops, List<SocChild>? Containers, double? RotHours, double? PlanetRadius)>();
             int bad = 0;
             var workers = Enumerable.Range(0, Math.Max(1, Environment.ProcessorCount - 1)).Select(_ => Task.Run(() =>
             {
@@ -957,9 +1000,12 @@ public partial class GameDataExtractor
             catch (AggregateException) when (ct.IsCancellationRequested) { ct.ThrowIfCancellationRequested(); }
             s.SocpakCount = count;
             s.BadCount = bad;
-            foreach (var (rel, records, kids, ale, childSmo, shops) in results)
+            foreach (var (rel, records, kids, ale, childSmo, shops, containers, rotHours, planetRadius) in results)
             {
+                if (planetRadius is { } pr) s.PlanetRadius[rel] = pr;
                 if (shops.Count > 0) s.Shops[rel] = shops;
+                if (containers is { Count: > 0 }) s.Containers[rel] = containers;
+                if (rotHours is { } rh) s.RotationHours[rel] = rh;
                 foreach (var (child, smo) in childSmo)
                 {
                     if (!s.ChildStarMap.TryGetValue(child, out var cs)) s.ChildStarMap[child] = cs = new HashSet<string>(StringComparer.Ordinal);
@@ -984,9 +1030,14 @@ public partial class GameDataExtractor
             return s;
         }
 
-        private static (string Rel, HashSet<string> Records, HashSet<string>? Kids, List<(string Planet, HashSet<string> Creatures)> Ale, List<(string Child, string Smo)> ChildSmo, List<SocShop> Shops) ScanOne(string rel, byte[] data, DeliverableDcb dcb)
+        private static (string Rel, HashSet<string> Records, HashSet<string>? Kids, List<(string Planet, HashSet<string> Creatures)> Ale, List<(string Child, string Smo)> ChildSmo, List<SocShop> Shops, List<SocChild>? Containers, double? RotHours, double? PlanetRadius) ScanOne(string rel, byte[] data, DeliverableDcb dcb)
         {
             var shops = new List<SocShop>();
+            List<SocChild>? containers = null;
+            double? rotHours = null, planetRadius = null;
+            // 直下の <名前>.xml (例 stantonsystem.socpak の stantonsystem.xml。_editor.xml は使わない)
+            var ownXml = rel[(rel.LastIndexOf('/') + 1)..];
+            ownXml = (ownXml.EndsWith(".socpak", StringComparison.Ordinal) ? ownXml[..^7] : ownXml) + ".xml";
             var records = new HashSet<string>(StringComparer.Ordinal);
             var kids = new HashSet<string>(StringComparer.Ordinal);
             var ale = new List<(string, HashSet<string>)>();
@@ -1006,6 +1057,28 @@ public partial class GameDataExtractor
                 var text = Encoding.Latin1.GetString(bytes);
                 var lower = iname.ToLowerInvariant();
                 var isEntxml = lower.EndsWith(".entxml", StringComparison.Ordinal);
+                if (lower == ownXml && text.Contains("<Child", StringComparison.Ordinal))
+                {
+                    try { containers = ReadContainerChildren(System.Xml.Linq.XDocument.Parse(Encoding.UTF8.GetString(bytes)).Root); }
+                    catch (System.Xml.XmlException) { }
+                }
+                // 惑星・衛星の自転: 直下の xml の <ExposedEntities><Entity … planetRotationSpeed="5.0300002"> (1 回転にかかる時間 (時間))
+                if (lower == ownXml && text.Contains("planetRotationSpeed", StringComparison.Ordinal))
+                {
+                    try
+                    {
+                        var root = System.Xml.Linq.XDocument.Parse(Encoding.UTF8.GetString(bytes)).Root;
+                        var ent = root?.Descendants("Entity").FirstOrDefault(e => e.Parent?.Name == "ExposedEntities" && e.Attribute("planetRotationSpeed") != null);
+                        if (ent != null && double.TryParse((string?)ent.Attribute("planetRotationSpeed"), System.Globalization.NumberStyles.Float,
+                                System.Globalization.CultureInfo.InvariantCulture, out var h) && double.IsFinite(h))
+                            rotHours = h;
+                        // 同じ Entity の planetRadius (天体の半径。メートル)。starmap_locations.planet_radius に使う
+                        if (ent != null && double.TryParse((string?)ent.Attribute("planetRadius"), System.Globalization.NumberStyles.Float,
+                                System.Globalization.CultureInfo.InvariantCulture, out var prd) && double.IsFinite(prd) && prd > 0)
+                            planetRadius = prd;
+                    }
+                    catch (System.Xml.XmlException) { }
+                }
                 // .soc の中の店 (SCShop)。店の属性の入った CryXmlB だけを読む
                 if (lower.EndsWith(".soc", StringComparison.Ordinal) && text.Contains("SShopComponentParams", StringComparison.Ordinal))
                     shops.AddRange(ReadSocShops(bytes, text));
@@ -1065,7 +1138,47 @@ public partial class GameDataExtractor
                     catch (Exception) { }   // 調査と同じく、JSON として読めない .ale は飛ばす (socpak のほかの中身は使う)
                 }
             }
-            return (rel, records, kids, ale, childSmo, shops);
+            return (rel, records, kids, ale, childSmo, shops, containers, rotHours, planetRadius);
+        }
+
+        private const string ChildPrefix = "data/objectcontainers/";
+
+        // 要素の ChildObjectContainers の Child の木。name は子の socpak のパス (ObjectContainers の下の相対パスの小文字)、
+        // pos は親からの位置 (pos="x,y,z")、starMapRecord は StarMapObject の uuid (小文字)。pos の読めない Child は (0,0,0) とする。
+        // rot は回転の四元数 (rot="w,x,y,z")。読めない・無い・長さ 0 なら null (回さない)
+        internal static List<SocChild> ReadContainerChildren(System.Xml.Linq.XElement? el)
+        {
+            var list = new List<SocChild>();
+            if (el == null) return list;
+            foreach (var cc in el.Elements("ChildObjectContainers"))
+                foreach (var c in cc.Elements("Child"))
+                {
+                    var name = ((string?)c.Attribute("name") ?? "").Replace('\\', '/').ToLowerInvariant();
+                    if (name.StartsWith(ChildPrefix, StringComparison.Ordinal)) name = name[ChildPrefix.Length..];
+                    double x = 0, y = 0, z = 0;
+                    var pos = ((string?)c.Attribute("pos") ?? "").Split(',');
+                    if (pos.Length == 3)
+                    {
+                        var inv = System.Globalization.CultureInfo.InvariantCulture;
+                        double.TryParse(pos[0], System.Globalization.NumberStyles.Float, inv, out x);
+                        double.TryParse(pos[1], System.Globalization.NumberStyles.Float, inv, out y);
+                        double.TryParse(pos[2], System.Globalization.NumberStyles.Float, inv, out z);
+                    }
+                    (double W, double X, double Y, double Z)? rot = null;
+                    var rs = ((string?)c.Attribute("rot") ?? "").Split(',');
+                    if (rs.Length == 4)
+                    {
+                        var inv = System.Globalization.CultureInfo.InvariantCulture;
+                        var q = new double[4];
+                        bool ok = true;
+                        for (int i = 0; i < 4; i++) ok &= double.TryParse(rs[i], System.Globalization.NumberStyles.Float, inv, out q[i]);
+                        var len = Math.Sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+                        if (ok && len > 0) rot = (q[0] / len, q[1] / len, q[2] / len, q[3] / len);
+                    }
+                    list.Add(new SocChild(name, x, y, z, ((string?)c.Attribute("starMapRecord") ?? "").Trim().ToLowerInvariant(), ReadContainerChildren(c), rot,
+                        ((string?)c.Attribute("entityName") ?? "").Trim()));
+                }
+            return list;
         }
 
         // .soc のバイト列から店を読む。.soc には CryXmlB がいくつも埋め込まれているので、"CryXmlB" の位置で切り分け、
@@ -1096,6 +1209,10 @@ public partial class GameDataExtractor
             return list;
         }
     }
+
+    // socpak の xml の Child 1 つ (子の socpak・親からの位置・starMapRecord・入れ子の Child・回転の四元数 (w,x,y,z。無ければ null)・entityName (無ければ ""))
+    internal sealed record SocChild(string Socpak, double X, double Y, double Z, string StarMapRecord, List<SocChild> Kids,
+        (double W, double X, double Y, double Z)? Rot = null, string EntityName = "");
 
     // .soc の中の店 1 つ (Entity の Name・EntityCryGUID、EntityComponentShop の franchise (ShopFranchise の uuid)・shopInventoryType (ITEM / COMMODITY))
     internal readonly record struct SocShop(string EntityName, string Guid, string Franchise, string InventoryType);
@@ -2176,11 +2293,91 @@ public partial class GameDataExtractor
     //   shop_price_links: DB の価格 (item_shop_prices の location・trade_cache.db の trade_prices の terminal) とゲームの店の紐づけ
     internal static class ShopTables
     {
-        internal const string StarmapLocationsTable = "starmap_locations", GameShopsTable = "game_shops", ShopPriceLinksTable = "shop_price_links";
+        internal const string StarmapLocationsTable = "starmap_locations", GameShopsTable = "game_shops", ShopPriceLinksTable = "shop_price_links",
+            StarmapEntitiesTable = "starmap_entities";
+
+        // starmap_entities: 名前 → 星図の場所の record (Game.log の量子ジャンプの目的地「Player has selected point <名前>」を星図の場所に引く。［マップ］の推定位置)。
+        //   name: socpak の xml の Child (starMapRecord のあるもの) の entityName と、その子の socpak のファイル名 (拡張子なし)。小文字にして入れる (大文字小文字は区別しない)。
+        //   starmap_record: その Child の starMapRecord の StarMapObject の record 名。同じ name が別の record に当たるものは入れない
+        internal const string StarmapEntitiesDdl = """
+
+            CREATE TABLE IF NOT EXISTS starmap_entities (
+                name TEXT PRIMARY KEY,
+                starmap_record TEXT NOT NULL
+            );
+            """;
+
+        // starmap_entities の行 (名前 (小文字) → record)。socpak の xml の Child の木を全部辿る
+        public static Dictionary<string, string> BuildEntities(DeliverableDcb dcb, DeliverableSocpaks soc)
+        {
+            var map = new Dictionary<string, string>(StringComparer.Ordinal);
+            var conflict = new HashSet<string>(StringComparer.Ordinal);
+            void Add(string name, string rec)
+            {
+                if (name.Length == 0) return;
+                var key = name.ToLowerInvariant();
+                if (conflict.Contains(key)) return;
+                if (map.TryGetValue(key, out var have)) { if (have != rec) { map.Remove(key); conflict.Add(key); } return; }
+                map[key] = rec;
+            }
+            void Walk(IEnumerable<SocChild> nodes)
+            {
+                foreach (var n in nodes)
+                {
+                    if (n.StarMapRecord.Length > 0 && dcb.IdToRecord.TryGetValue(n.StarMapRecord, out var rn) && rn.StartsWith("StarMapObject.", StringComparison.Ordinal))
+                    {
+                        Add(n.EntityName, rn);
+                        if (n.Socpak.Length > 0)
+                        {
+                            var file = n.Socpak[(n.Socpak.LastIndexOf('/') + 1)..];
+                            Add(file.EndsWith(".socpak", StringComparison.OrdinalIgnoreCase) ? file[..^7] : file, rn);
+                        }
+                    }
+                    Walk(n.Kids);
+                }
+            }
+            foreach (var (_, list) in soc.Containers.OrderBy(kv => kv.Key, StringComparer.Ordinal)) Walk(list);
+            return map;
+        }
+
+        // starmap_entities を入れ替える (0 行なら前の行を残す。表が無ければ空で作る)
+        public static void WriteEntities(SqliteConnection db, Dictionary<string, string> rows)
+        {
+            using var tx = db.BeginTransaction();
+            using (var del = db.CreateCommand())
+            {
+                del.Transaction = tx;
+                del.CommandText = StarmapEntitiesDdl + (rows.Count > 0 ? "DELETE FROM starmap_entities;" : "");
+                del.ExecuteNonQuery();
+            }
+            if (rows.Count > 0)
+            {
+                using var ins = db.CreateCommand();
+                ins.Transaction = tx;
+                ins.CommandText = "INSERT OR IGNORE INTO starmap_entities(name, starmap_record) VALUES(@n, @r)";
+                var pN = ins.Parameters.Add("@n", SqliteType.Text); var pR = ins.Parameters.Add("@r", SqliteType.Text);
+                foreach (var (n, r) in rows.OrderBy(kv => kv.Key, StringComparer.Ordinal)) { pN.Value = n; pR.Value = r; ins.ExecuteNonQuery(); }
+            }
+            tx.Commit();
+        }
+
+        // starmap_entities の表が無いか (前の版で作った DB)
+        internal static bool EntitiesTableMissing(SqliteConnection db)
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'starmap_entities'";
+            return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0;
+        }
 
         // record_name: StarMapObject の record 名。uuid: _RecordId_。name_en: 英語名 (name の訳キーを英語の global.ini で引き、無ければ ",P" を付けて引き直す。
         //   引けない・PLACEHOLDER・UNINITIALIZED なら record 名の "StarMapObject." の後ろ)。type: StarMapObjectType の name (例 Planet)。
-        // parent_record: parent の StarMapObject の record 名 (根は '')。system: 根の Star の英語名 (Stanton / Pyro / Nyx)
+        // parent_record: parent の StarMapObject の record 名 (根は '')。system: 根の Star の英語名 (Stanton / Pyro / Nyx)。
+        // spin_parent: 自転の親 (祖先で最初の Planet・Moon の record 名。その行が Planet・Moon なら ''。無ければ '')。lx / ly / lz: 自転の親からの相対位置 (自転の角度 0 のとき。メートル。
+        //   どちらかの座標が無ければ null)。rot_hours: Planet・Moon の 1 回転にかかる時間 (時間。socpak の planetRotationSpeed。読めなければ null)。
+        //   planet_radius: Planet・Moon の半径 (メートル。同じ Entity の planetRadius。読めなければ null。地表からの高さに使う)。
+        //   frame_matrix: Planet・Moon の枠の回転 (恒星の回転 × その天体の回転 = R(q_恒星)·R(q_天体)。行の順の 3×3 を「,」で 9 つ。無ければ null)。
+        //     天体の枠での位置 (Game.log の契約の目標の ZonePos など) を lx / ly / lz と同じ向きにするのに使う
+        //   x / y / z と合わせて BuildStarmap の説明を参照
         internal const string StarmapLocationsDdl = """
 
             CREATE TABLE IF NOT EXISTS starmap_locations (
@@ -2189,7 +2386,18 @@ public partial class GameDataExtractor
                 name_en TEXT NOT NULL,
                 type TEXT NOT NULL,
                 parent_record TEXT NOT NULL,
-                system TEXT NOT NULL
+                system TEXT NOT NULL,
+                x REAL,
+                y REAL,
+                z REAL,
+                radius REAL,
+                spin_parent TEXT NOT NULL DEFAULT '',
+                lx REAL,
+                ly REAL,
+                lz REAL,
+                rot_hours REAL,
+                planet_radius REAL,
+                frame_matrix TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_starmap_locations_parent ON starmap_locations(parent_record);
             """;
@@ -2228,7 +2436,10 @@ public partial class GameDataExtractor
             CREATE INDEX IF NOT EXISTS idx_shop_price_links_shop ON shop_price_links(shop_id);
             """;
 
-        internal readonly record struct StarmapRow(string Record, string Uuid, string Name, string Type, string Parent, string System);
+        internal readonly record struct StarmapRow(string Record, string Uuid, string Name, string Type, string Parent, string System,
+            double? X = null, double? Y = null, double? Z = null, double? Radius = null,
+            string SpinParent = "", double? LX = null, double? LY = null, double? LZ = null, double? RotHours = null, double? PlanetRadius = null,
+            string? FrameMatrix = null);
         internal readonly record struct ShopRow(string ShopId, string EntityName, string Name, string FranchiseRecord, string FranchiseName, string InventoryType, string Location, string Socpak);
 
         private static string ShortRecord(string rn) { var dot = rn.IndexOf('.'); return dot >= 0 ? rn[(dot + 1)..] : rn; }
@@ -2243,7 +2454,18 @@ public partial class GameDataExtractor
         }
 
         // 星図の場所 (根の Star まで辿れるものだけ)
-        public static List<StarmapRow> BuildStarmap(DeliverableDcb dcb, Dictionary<string, string>? loc)
+        // 座標 (x / y / z): 星系の恒星からの絶対座標 (メートル。ゲームの /showlocation の座標と同じ向き)。socpak の xml の Child の木を、starMapRecord が Star の
+        //   StarMapObject の Child から辿り、親の位置を足していったもの。Child の starMapRecord で StarMapObject に結び、同じ StarMapObject が複数の Child にあれば最初の 1 つ。
+        //   入れ子の Child と、子の socpak の xml の Child の両方を辿る (同じ socpak の xml は 1 度だけ辿る)。取れなければ null。
+        //   回転は、絶対座標 = R(q_恒星)·( P_惑星 + Rz(θ)·( R(q_惑星)·p_local ) ) の θ = 0 のとき。q_恒星 は恒星の Child の rot、q_惑星 は Planet・Moon の Child の rot
+        //   (その Child の下を辿るときに、親からの位置に掛ける。下にまた Planet・Moon があれば、その rot に替える)。ほかの Child の rot は使わない
+        //   (恒星の直下の場所は恒星の rot だけで回る)。θ は自転の角度で、ここでは 0 (マップタブが現在位置から求めて回す)
+        // spin_parent / lx / ly / lz: 祖先 (parent_record を辿る) で最初の Planet・Moon と、その座標からの差 (= R(q_恒星)·R(q_惑星)·p_local)。
+        //   Planet・Moon の行そのものは spin_parent を空にする (衛星は親の惑星の自転では回さない)。
+        // rot_hours: Planet・Moon の Child の socpak の直下の xml の planetRotationSpeed (DeliverableSocpaks.RotationHours。同じ天体が複数の Child にあれば最初に辿ったもの)。
+        //   Child から引けなければ、record の短い名前と同じファイル名の socpak (1 つだけのとき) の値
+        // radius: StarMapObject の _RecordValue_.size (無ければ null)
+        public static List<StarmapRow> BuildStarmap(DeliverableDcb dcb, Dictionary<string, string>? loc, DeliverableSocpaks soc)
         {
             var keys = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var (rn, key) in dcb.StarMapNameKeys) keys.TryAdd(rn, key);
@@ -2269,8 +2491,132 @@ public partial class GameDataExtractor
                 if (loop || TypeOf(cur) != "Star") continue;
                 rows.Add(new StarmapRow(rn, uuidOf.TryGetValue(rn, out var u) ? u : "", NameOf(rn), TypeOf(rn), ParentOf(rn) ?? "", NameOf(cur)));
             }
+
+            // 座標と、Planet・Moon の 1 回転にかかる時間
+            var coords = new Dictionary<string, (double X, double Y, double Z)>(StringComparer.Ordinal);
+            var rotHours = new Dictionary<string, double>(StringComparer.Ordinal);
+            var planetRadius = new Dictionary<string, double>(StringComparer.Ordinal);
+            var frames = new Dictionary<string, double[]>(StringComparer.Ordinal);
+            var expanded = new HashSet<string>(StringComparer.Ordinal);
+            string? RecordOfUuid(string uuid) => uuid.Length > 0 && dcb.IdToRecord.TryGetValue(uuid, out var rn) && rn.StartsWith("StarMapObject.", StringComparison.Ordinal) ? rn : null;
+            // ms: 恒星の回転、mb: 今の Planet・Moon の回転 (子の親からの位置に ms·mb を掛ける)
+            void Visit(SocChild node, double x, double y, double z, double[] ms, double[] mb)
+            {
+                var rec = RecordOfUuid(node.StarMapRecord);
+                if (rec != null) coords.TryAdd(rec, (x, y, z));
+                if (rec != null && TypeOf(rec) is "Planet" or "Moon")
+                {
+                    mb = RotMatrix(node.Rot);
+                    frames.TryAdd(rec, MatMul(ms, mb));   // その天体の枠の回転 (恒星の回転 × 天体の回転)
+                    if (node.Socpak.Length > 0 && soc.RotationHours.TryGetValue(node.Socpak, out var rh)) rotHours.TryAdd(rec, rh);
+                    if (node.Socpak.Length > 0 && soc.PlanetRadius.TryGetValue(node.Socpak, out var prv)) planetRadius.TryAdd(rec, prv);
+                }
+                var m = MatMul(ms, mb);
+                void Kid(SocChild k)
+                {
+                    var (dx, dy, dz) = MatApply(m, k.X, k.Y, k.Z);
+                    Visit(k, x + dx, y + dy, z + dz, ms, mb);
+                }
+                foreach (var k in node.Kids) Kid(k);
+                if (node.Socpak.Length > 0 && expanded.Add(node.Socpak) && soc.Containers.TryGetValue(node.Socpak, out var own))
+                    foreach (var k in own) Kid(k);
+            }
+            var stars = new HashSet<string>(rows.Where(r => r.Type == "Star").Select(r => r.Record), StringComparer.Ordinal);
+            var starNodes = new List<SocChild>();
+            void FindStars(IEnumerable<SocChild> nodes)
+            {
+                foreach (var n in nodes)
+                {
+                    if (RecordOfUuid(n.StarMapRecord) is { } rec && stars.Contains(rec)) starNodes.Add(n);
+                    FindStars(n.Kids);
+                }
+            }
+            foreach (var (_, list) in soc.Containers.OrderBy(kv => kv.Key, StringComparer.Ordinal)) FindStars(list);
+            // 恒星に結ばれる Child が星系の xml (例 stantonsystem.xml の OOC_Stanton) のほかにもあり、恒星ごとに最初の 1 つだけを辿ると
+            // 星系の木を辿らないことがある (実データで Stanton の座標が microTech の下だけになった。もう 1 つの Child がどこにあるかは確かめていない)。
+            // 入れ子の Child の多いもの (星系の木) から順に、全部を恒星を原点にして辿る (同じ StarMapObject は先に入ったものを使う)
+            static int Count(SocChild n) => 1 + n.Kids.Sum(Count);
+            foreach (var n in starNodes.Select((n, i) => (n, i)).OrderByDescending(x => Count(x.n)).ThenBy(x => x.i).Select(x => x.n))
+                Visit(n, 0, 0, 0, RotMatrix(n.Rot), RotMatrix(null));   // 恒星を原点にし、恒星の rot で回す
+
+            double? RadiusOf(string rn)
+            {
+                if (!dcb.RecordToFile.TryGetValue(rn, out var rel) || dcb.ReadText(rel) is not { } text) return null;
+                try
+                {
+                    using var doc = JsonDocument.Parse(text);
+                    if (doc.RootElement.TryGetProperty("_RecordValue_", out var rv) && rv.ValueKind == JsonValueKind.Object
+                        && rv.TryGetProperty("size", out var sz) && sz.ValueKind == JsonValueKind.Number) return sz.GetDouble();
+                }
+                catch (JsonException) { }
+                return null;
+            }
+            // Child から 1 回転の時間が引けなかった Planet・Moon は、record の短い名前 (StarMapObject. の後ろ。小文字) と同じファイル名の socpak
+            // (例 StarMapObject.Nyx1 → pu/system/nyx/nyx1.socpak) の値を使う。同じファイル名の socpak が 2 つ以上あれば使わない。
+            // (実データで、nyxsystem.xml の Nyx1・Nyx2・Nyx3 の Child は test/locations/dummyplanet/dummyplanet.socpak を指していて、
+            //  nyx1.socpak 等の値に届かない。Delamar は Child が見つからない)
+            var rotByFile = soc.RotationHours.GroupBy(kv => kv.Key[(kv.Key.LastIndexOf('/') + 1)..], StringComparer.Ordinal)
+                .Where(g => g.Count() == 1).ToDictionary(g => g.Key, g => g.First().Value, StringComparer.Ordinal);
+            foreach (var r in rows)
+                if (r.Type is "Planet" or "Moon" && !rotHours.ContainsKey(r.Record)
+                    && rotByFile.TryGetValue(ShortRecord(r.Record).ToLowerInvariant() + ".socpak", out var fh))
+                    rotHours[r.Record] = fh;
+            // planetRadius も同じ決まり (Child から引けなければ、同じファイル名の socpak (1 つだけのとき))
+            var radByFile = soc.PlanetRadius.GroupBy(kv => kv.Key[(kv.Key.LastIndexOf('/') + 1)..], StringComparer.Ordinal)
+                .Where(g => g.Count() == 1).ToDictionary(g => g.Key, g => g.First().Value, StringComparer.Ordinal);
+            foreach (var r in rows)
+                if (r.Type is "Planet" or "Moon" && !planetRadius.ContainsKey(r.Record)
+                    && radByFile.TryGetValue(ShortRecord(r.Record).ToLowerInvariant() + ".socpak", out var frd))
+                    planetRadius[r.Record] = frd;
+            // 自転の親: parent_record を辿って最初の Planet・Moon (輪になっていたら無し)。その行が Planet・Moon なら無し
+            string SpinParentOf(string rn)
+            {
+                if (TypeOf(rn) is "Planet" or "Moon") return "";
+                var seen = new HashSet<string>(StringComparer.Ordinal) { rn };
+                for (var p = ParentOf(rn); p != null && seen.Add(p); p = ParentOf(p))
+                    if (TypeOf(p) is "Planet" or "Moon") return p;
+                return "";
+            }
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i];
+                var c = coords.TryGetValue(r.Record, out var v) ? v : ((double, double, double)?)null;
+                var sp = SpinParentOf(r.Record);
+                (double, double, double)? l = c is { } cc && sp.Length > 0 && coords.TryGetValue(sp, out var pc)
+                    ? (cc.Item1 - pc.X, cc.Item2 - pc.Y, cc.Item3 - pc.Z) : null;
+                rows[i] = r with { X = c?.Item1, Y = c?.Item2, Z = c?.Item3, Radius = RadiusOf(r.Record), SpinParent = sp, LX = l?.Item1, LY = l?.Item2, LZ = l?.Item3,
+                                   RotHours = rotHours.TryGetValue(r.Record, out var rhv) ? rhv : null,
+                                   PlanetRadius = planetRadius.TryGetValue(r.Record, out var prr) ? prr : null,
+                                   FrameMatrix = frames.TryGetValue(r.Record, out var fm)
+                                       ? string.Join(",", fm.Select(v => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture))) : null };
+            }
             return rows;
         }
+
+        // 四元数 (w,x,y,z。長さ 1。null なら回さない) の回転行列 (行の順の 3×3)。R(q)·v はふつうの右手系の回転
+        internal static double[] RotMatrix((double W, double X, double Y, double Z)? q)
+        {
+            if (q is not { } r) return new double[] { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+            double w = r.W, x = r.X, y = r.Y, z = r.Z;
+            return new[]
+            {
+                1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
+                2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+                2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y),
+            };
+        }
+
+        private static double[] MatMul(double[] a, double[] b)
+        {
+            var c = new double[9];
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 3; j++)
+                    c[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j];
+            return c;
+        }
+
+        private static (double, double, double) MatApply(double[] m, double x, double y, double z) =>
+            (m[0] * x + m[1] * y + m[2] * z, m[3] * x + m[4] * y + m[5] * z, m[6] * x + m[7] * y + m[8] * z);
 
         // 店の名前を Entity 名から作る (franchise の名前の無い店): "_" で区切り、"SCShop"・"Entity"・"Shop" の語を除いた残りの語を全部空白でつなぐ
         // (例 SCShop_Pyro_RestStop_Rund_Admin → "Pyro RestStop Rund Admin"、SCShop_H_Pharmacy_Levski → "H Pharmacy Levski")。
@@ -2355,19 +2701,51 @@ public partial class GameDataExtractor
             return (rows.Values.OrderBy(r => r.ShopId, StringComparer.Ordinal).ToList(), stats);
         }
 
+        // starmap_locations に座標の列 (x / y / z / radius) か自転の列 (spin_parent / lx / ly / lz / rot_hours / planet_radius / frame_matrix) が無い (前の形の表) か
+        internal static bool StarmapTableLacksCoordinateColumns(SqliteConnection db)
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('starmap_locations')";
+            if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0) return false;   // 表が無い
+            cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('starmap_locations') WHERE name IN ('x', 'y', 'z', 'radius', 'spin_parent', 'lx', 'ly', 'lz', 'rot_hours', 'planet_radius', 'frame_matrix')";
+            return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) < 11;
+        }
+
         public static void WriteStarmap(SqliteConnection db, List<StarmapRow> rows)
         {
+            var dropOld = StarmapTableLacksCoordinateColumns(db);
             using var tx = db.BeginTransaction();
-            using (var del = db.CreateCommand()) { del.Transaction = tx; del.CommandText = StarmapLocationsDdl + "DELETE FROM starmap_locations;"; del.ExecuteNonQuery(); }
+            using (var del = db.CreateCommand())
+            {
+                del.Transaction = tx;
+                // 前の形の表 (座標・自転の列が無い) は作り直す
+                if (dropOld) { del.CommandText = "DROP TABLE starmap_locations;"; del.ExecuteNonQuery(); }
+                del.CommandText = StarmapLocationsDdl + "DELETE FROM starmap_locations;";
+                del.ExecuteNonQuery();
+            }
             using (var ins = db.CreateCommand())
             {
                 ins.Transaction = tx;
-                ins.CommandText = "INSERT OR IGNORE INTO starmap_locations(record_name,uuid,name_en,type,parent_record,system) VALUES(@r,@u,@n,@t,@p,@s)";
+                ins.CommandText = "INSERT OR IGNORE INTO starmap_locations(record_name,uuid,name_en,type,parent_record,system,x,y,z,radius,spin_parent,lx,ly,lz,rot_hours,planet_radius,frame_matrix) VALUES(@r,@u,@n,@t,@p,@s,@x,@y,@z,@rad,@sp,@lx,@ly,@lz,@rh,@pr,@fm)";
+                var pFm = ins.Parameters.Add("@fm", SqliteType.Text);
+                var pPr = ins.Parameters.Add("@pr", SqliteType.Real);
+                var pRh = ins.Parameters.Add("@rh", SqliteType.Real);
+                var pSp = ins.Parameters.Add("@sp", SqliteType.Text); var pLx = ins.Parameters.Add("@lx", SqliteType.Real);
+                var pLy = ins.Parameters.Add("@ly", SqliteType.Real); var pLz = ins.Parameters.Add("@lz", SqliteType.Real);
+                var pX = ins.Parameters.Add("@x", SqliteType.Real); var pY = ins.Parameters.Add("@y", SqliteType.Real);
+                var pZ = ins.Parameters.Add("@z", SqliteType.Real); var pRad = ins.Parameters.Add("@rad", SqliteType.Real);
                 var pR = ins.Parameters.Add("@r", SqliteType.Text); var pU = ins.Parameters.Add("@u", SqliteType.Text); var pN = ins.Parameters.Add("@n", SqliteType.Text);
                 var pT = ins.Parameters.Add("@t", SqliteType.Text); var pP = ins.Parameters.Add("@p", SqliteType.Text); var pS = ins.Parameters.Add("@s", SqliteType.Text);
                 foreach (var r in rows)
                 {
                     pR.Value = r.Record; pU.Value = r.Uuid; pN.Value = r.Name; pT.Value = r.Type; pP.Value = r.Parent; pS.Value = r.System;
+                    pX.Value = (object?)r.X ?? DBNull.Value; pY.Value = (object?)r.Y ?? DBNull.Value; pZ.Value = (object?)r.Z ?? DBNull.Value;
+                    pRad.Value = (object?)r.Radius ?? DBNull.Value;
+                    pSp.Value = r.SpinParent;
+                    pLx.Value = (object?)r.LX ?? DBNull.Value; pLy.Value = (object?)r.LY ?? DBNull.Value; pLz.Value = (object?)r.LZ ?? DBNull.Value;
+                    pRh.Value = (object?)r.RotHours ?? DBNull.Value;
+                    pPr.Value = (object?)r.PlanetRadius ?? DBNull.Value;
+                    pFm.Value = (object?)r.FrameMatrix ?? DBNull.Value;
                     ins.ExecuteNonQuery();
                 }
             }
@@ -2442,19 +2820,6 @@ public partial class GameDataExtractor
 
         // 場所だけ結んだ行の match
         internal const string MatchLocation = "location";
-
-        // 店・紐づけの表が前の形 (game_shops に franchise_name、shop_price_links に location_record の列が無い) なら DROP し、新しい形の空の表を作る。
-        // 補完の作り直しが失敗した・店が 0 行だったときに呼ぶ (次の起動で NeedsShopTables / NeedsShopPriceLinks が真にならないように)
-        internal static void ReplaceOldFormatTables(SqliteConnection db)
-        {
-            var dropShops = ShopsTableLacksFranchiseNameColumn(db);
-            var dropLinks = LinksTableLacksLocationColumn(db);
-            using var cmd = db.CreateCommand();
-            if (dropShops) { cmd.CommandText = "DROP TABLE game_shops;"; cmd.ExecuteNonQuery(); }
-            if (dropLinks) { cmd.CommandText = "DROP TABLE shop_price_links;"; cmd.ExecuteNonQuery(); }
-            cmd.CommandText = GameShopsDdl + ShopPriceLinksDdl;
-            cmd.ExecuteNonQuery();
-        }
 
         // 紐づけの表を新しい形にする: 無ければ作り、前の形 (location_record の列が無い) なら列を足す (前の行は残す。location_record は '')
         internal static void MigrateLinksTable(SqliteConnection db)

@@ -12,6 +12,7 @@ namespace StarCitizenJapaneseTextCreater;
 // ［詳細］タブ。船・車両・武器・装備の詳細を出す (GameDataQueryService.GetItemDetailText を Markdown の表にして WebView2 で出す)。
 //   名前の欄・分類・種類・サイズ: どれを変えても下のリストを絞り込む。名前の入力は 0.3 秒待ってから絞り込む。
 //     分類が (すべて): 名前で item_index をあいまい検索する (GameDataQueryService.SearchDetailCandidates。船・車両を含む全部)。
+//       星系・場所・お店・資源の名前の部分一致の候補を、品目の候補の前に足す (星系 → 場所 → お店 → 資源 → 品目)。
 //       名前が空ならリストは空。種類・サイズは使わない (空のリスト)
 //     分類が 船舶: 船・車両 (GetDetailShipList。比べるツールの船の一覧と同じ規則)。種類は船の種別 (ゲーム内の分類) を大きさでまとめたもの、サイズは船のサイズ
 //     分類が 船舶武器 / 船舶装備 / 個人武器 / 個人装備: ［船舶戦闘］［船舶装備］［個人戦闘］［個人装備］の表と同じ品目
@@ -92,6 +93,15 @@ public partial class DetailPanel : UserControl
         Loaded += async (_, _) => await (_webInit ??= InitWebViewAsync());
         // 品目名が作り直されたら、分類ごとの品目の覚えを次に表示されたとき (Loaded) に捨てて読み直す
         GameDataExtractor.ItemNamesChanged += () => _namesStale = true;
+        // 星図の場所・店・紐づけの表が作り直されたら (起動後の補完・構築・価格の取得の後)、お店・場所の覚えと、その分類のリストの覚えをすぐ捨てる。
+        // 次に詳細・分類・検索で使うときに今の表から作り直す (前は品目名の作り直しのときだけ捨てていたので、補完の前に作った座標の無い木を使い続けていた)
+        GameDataExtractor.ShopTablesChanged += () => Dispatcher.BeginInvoke(() =>
+        {
+            _shopTreeTask = null;
+            _categoryRows.Remove(CategoryShop);
+            _categoryRows.Remove(CategoryStation);
+            _categoryRows.Remove(CategorySystem);
+        });
         Loaded += async (_, _) =>
         {
             if (!_namesStale) return;
@@ -117,15 +127,16 @@ public partial class DetailPanel : UserControl
         await RefreshListSafeAsync();
     }
 
-    private static string WorkDir()
+    // 作業ディレクトリ・DB の場所 (MapPanel も使う)
+    internal static string WorkDir()
     {
         var workDir = App.Config.WorkingDirectory;
         if (string.IsNullOrEmpty(workDir)) workDir = AppDomain.CurrentDomain.BaseDirectory;
         return workDir;
     }
 
-    private static string DbPath() => Path.Combine(WorkDir(), "gamedata_cache.db");
-    private static string TradeDbPath() => Path.Combine(WorkDir(), "trade_cache.db");
+    internal static string DbPath() => Path.Combine(WorkDir(), "gamedata_cache.db");
+    internal static string TradeDbPath() => Path.Combine(WorkDir(), "trade_cache.db");
 
     // ===== お店・ステーション・星系 =====
 
@@ -229,7 +240,7 @@ public partial class DetailPanel : UserControl
     // 詳細の文字 (GetItemDetailText の形) を出す。WebView2 では Markdown の表にして HTML で、使えなければ文字のまま
     private void ShowDetail(string text)
     {
-        txtDetail.Text = DetailHtml.StripLinks(text);   // 文字の欄ではリンクは表示名だけ
+        txtDetail.Text = DetailHtml.ForTextBox(text);   // 文字の欄ではリンクは表示名だけ、図は 1 行の断り書き
         txtDetail.ScrollToHome();
         if (_webFailed) return;
         var html = DetailHtml.FromDetailText(text);
@@ -327,13 +338,40 @@ public partial class DetailPanel : UserControl
     // ===== リンク・戻る =====
 
     // 詳細の中のリンク (DetailHtml の scjt://detail/…) で record の詳細を開く。移る前の状態を戻るの履歴に積む (同じ詳細へのリンクなら積まない)。
-    // 分類・リストはそのまま。リストにその record の行があれば選んだ状態にし、無ければ選択を外す
+    // 名前の欄を移った先の名前にし、分類を (すべて) にする (検索は走らせない)。リストは、先頭に移った先の候補 1 件 (選んだ状態)、
+    // その下にその名前での検索の結果 (SearchAllAsync。同じ record は除く) を並べる。移った先の候補が作れなければ、名前の欄・分類・リストはそのまま
     private async void OpenLink(string record)
     {
         if (string.IsNullOrWhiteSpace(record)) return;
         if (!string.Equals(record, _detailRecord, StringComparison.OrdinalIgnoreCase)) PushHistory(CaptureState());
-        SelectInList(record);
-        try { await LoadDetailAsync(record); }
+        _searchTimer.Stop();
+        var version = ++_searchVersion;   // 進行中の検索の結果でリストを差し替えない
+        try
+        {
+            var detail = LoadDetailAsync(record);
+            var db = DbPath();
+            var tree = await GetShopTreeOrNullAsync();
+            var target = await Task.Run(() =>
+            {
+                if (!File.Exists(db)) return null;
+                using var q = GameDataQueryService.OpenReadOnly(db);
+                return q.CandidateOf(record, tree);
+            });
+            if (target != null && version == _searchVersion)
+            {
+                SetQueryAndCategoryAll(target.Name);
+                var found = await SearchAllAsync(target.Name) ?? new List<ListItem>();
+                if (version == _searchVersion)
+                {
+                    var list = new List<ListItem> { ToListItem(target) };
+                    list.AddRange(found.Where(x => !x.Record.Equals(target.Record, StringComparison.OrdinalIgnoreCase)));
+                    SetList(list, selectRecord: target.Record);
+                    ShowStatus($"候補 {list.Count} 件");
+                }
+            }
+            else if (target == null) SelectInList(record);
+            await detail;
+        }
         catch (Exception ex) { _detailRecord = null; ShowDetail($"詳細を出せませんでした: {ex.Message}"); txtStatus.Text = ""; }
     }
 
@@ -579,16 +617,26 @@ public partial class DetailPanel : UserControl
         ShowStatus($"{list.Count} 件");
     }
 
-    // 分類 (すべて) の検索: item_index のあいまい検索 (船・車両・武器・装備のすべて)。DB が無ければ null
-    private static async Task<List<ListItem>?> SearchAllAsync(string query)
+    // 分類 (すべて) の検索: 星系・場所・お店 (ShopTree。作れなければ出さない)、資源、item_index のあいまい検索 (船・車両・武器・装備のすべて)。DB が無ければ null
+    private async Task<List<ListItem>?> SearchAllAsync(string query)
     {
         var db = DbPath();
+        var tree = await GetShopTreeOrNullAsync();
         return await Task.Run(() =>
         {
             if (!File.Exists(db)) return null;
             using var q = GameDataQueryService.OpenReadOnly(db);
-            return q.SearchDetailCandidates(query).Select(c => new ListItem(c.Record, c.Name, c.ItemType, 0, c.Display)).ToList();
+            return q.SearchDetailCandidates(query, shopTree: tree).Select(ToListItem).ToList();
         });
+    }
+
+    private static ListItem ToListItem(DetailCandidate c) => new(c.Record, c.Name, c.ItemType, 0, c.Display);
+
+    // 星系・場所・お店 (ShopTree)。作れなければ null (検索・リンクの候補にだけ使うので、失敗は知らせない)
+    private async Task<ShopTree?> GetShopTreeOrNullAsync()
+    {
+        try { return await GetShopTreeAsync(); }
+        catch { return null; }
     }
 
     // リストを差し替える (選択を変えても詳細は開き直さない)。selectRecord があればその行を選んだ状態にする
@@ -771,6 +819,12 @@ internal static class DetailHtml
     // 文字の欄 (WebView2 が使えないとき) 用: リンクを表示名だけにする
     public static string StripLinks(string text) => LinkRegex.Replace(text ?? "", m => m.Groups[2].Value);
 
+    // 図の行「<<svg:BASE64>>」(GameDataQueryService.SvgLine)
+    private static readonly Regex SvgLineRegex = new(@"^\s*<<svg:([A-Za-z0-9+/=]+)>>\s*$", RegexOptions.Multiline);
+
+    // 文字の欄 (WebView2 が使えないとき) に出す文字: リンクは表示名だけ、図の行は「（図は WebView2 が必要です）」
+    public static string ForTextBox(string text) => SvgLineRegex.Replace(StripLinks(text), "（図は WebView2 が必要です）");
+
     // WebView2 の移動先がリンク (scjt://detail/<URL エンコードした record>) なら record を返す
     public static bool TryParseLink(string? uri, out string record)
     {
@@ -789,7 +843,15 @@ internal static class DetailHtml
     private static string TableLineLinks(string line) =>
         LinkRegex.Replace(line, m => LinkHtml(m.Groups[1].Value, Escape(m.Groups[2].Value)));
 
-    public static string FromDetailText(string text) => Wrap(Markdig.Markdown.ToHtml(ToMarkdown(text ?? ""), Pipeline));
+    public static string FromDetailText(string text) => Page(Markdig.Markdown.ToHtml(ToMarkdown(text ?? ""), Pipeline));
+
+    // 図 1 つの HTML のブロック (1 行): <div class="map"> の中に svg (GameDataQueryService.SystemMapSvg / NearMapSvg) と、右上に重ねる［全体］［＋］［－］の HTML のボタン。
+    // ボタンは CSS (.mapctl) で枠の右上に置く (svg の中の座標には頼らない)。押したときの動きは MapScript。
+    // 左下に凡例 (GameDataQueryService.MapLegendHtml。CSS の .maplegend。拡大・移動では動かない)。詳細タブとマップタブ (MapPanel) で使う
+    public static string MapBlock(string svg) =>
+        "<div class=\"map\">" + svg.Replace("\r", "").Replace("\n", " ") +
+        "<div class=\"mapctl\"><button type=\"button\" data-act=\"fit\">全体</button><button type=\"button\" data-act=\"in\">＋</button><button type=\"button\" data-act=\"out\">－</button></div>" +
+        GameDataQueryService.MapLegendHtml() + "</div>";
 
     public static string ToMarkdown(string text)
     {
@@ -825,6 +887,23 @@ internal static class DetailHtml
         {
             var t = lines[i].Trim();
             if (t.Length == 0) { FlushAll(); continue; }
+            // 図の行「<<svg:BASE64>>」(GameDataQueryService.SvgLine) → インラインの SVG (div で囲んだ HTML のブロック。中は自分で作った SVG だけ)
+            if (SvgLineRegex.Match(t) is { Success: true } svgMatch)
+            {
+                FlushAll();
+                string svg;
+                try { svg = Encoding.UTF8.GetString(Convert.FromBase64String(svgMatch.Groups[1].Value)); }
+                catch (FormatException) { continue; }
+                md.AppendLine(MapBlock(svg)).AppendLine();
+                continue;
+            }
+            // 「【【名前（種類）】】」(GameDataQueryService.DetailTitle) → 大きめの見出し (## )
+            if (t.StartsWith("【【", StringComparison.Ordinal) && t.EndsWith("】】", StringComparison.Ordinal) && t.Length > 4)
+            {
+                FlushAll();
+                md.AppendLine("## " + Inline(t[2..^2])).AppendLine();
+                continue;
+            }
             if (t.StartsWith('【') && t.IndexOf('】') is var close && close > 0)
             {
                 FlushAll();
@@ -924,12 +1003,60 @@ internal static class DetailHtml
     }
 
     // 色は今のアプリ (明るい背景) に合わせる。表に罫線を付ける。強調 (<EM4>) は明るい背景で読める青
-    private static string Wrap(string body) => $$"""
+    // body は自分で作った HTML (名前などは打ち消し済み)。extraCss はページに足す CSS (マップタブの並べ方など)。スクリプトは MapScript だけ
+    public static string Page(string body, string extraCss = "") => $$"""
         <!DOCTYPE html><html><head><meta charset="utf-8">
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
         <style>
         body { font-family: 'Yu Gothic UI','Meiryo','Segoe UI',sans-serif; font-size: 13px; color: #212121; background: #FFFFFF;
                margin: 8px 10px; line-height: 1.5; word-wrap: break-word; }
+        h2 { font-size: 1.35em; margin: 0.2em 0 0.5em; }
+        .map { margin: 0.3em 0 0.8em; position: relative; }
+        .map svg.zmap { display: block; width: 100%; height: 500px; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+        .map svg.zmap.dragging { cursor: grabbing; }
+        .map g.icon, .map g.icon.mark { fill: none; stroke: #6D4C41; stroke-width: 1.6; }
+        .map g.icon.hl { fill: none; stroke: #D84315; }
+        .map g.icon .solid { fill: #6D4C41; stroke: none; }
+        .map g.icon.hl .solid { fill: #D84315; }
+        .map g.icon * { pointer-events: visible; }
+        .maplegend { position: absolute; left: 8px; bottom: 8px; display: flex; flex-wrap: wrap; gap: 2px 10px; padding: 2px 6px;
+                     background: rgba(255,255,255,0.85); border: 1px solid #CCCCCC; border-radius: 3px; font-size: 22px; color: #424242; pointer-events: none; }
+        .maplegend .lg { display: inline-flex; align-items: center; gap: 3px; }
+        .maplegend svg { display: block; }
+        .mapctl { position: absolute; top: 8px; right: 8px; display: flex; gap: 4px; }
+        .mapctl button { font: inherit; font-size: 24px; min-width: 44px; height: 44px; padding: 0 12px; background: #FFFFFF; color: #212121;
+                         border: 1px solid #90A4AE; border-radius: 3px; cursor: pointer; }
+        .mapctl button:hover { background: #E3F2FD; }
+        .map .bg { fill: #F7F9FC; stroke: #CCCCCC; }
+        .map .orbit { fill: none; stroke: #B0BEC5; stroke-width: 1; }
+        .map .star { fill: #F9A825; }
+        .map .planet { fill: #1565C0; }
+        .map .mark { fill: #6D4C41; }
+        .map .hl { fill: #D84315; }
+        .map .self { fill: #BBDEFB; stroke: #1565C0; stroke-width: 1; }
+        .map text { fill: #212121; font-size: 22px; }
+        .map text.small { font-size: 18px; fill: #5D4037; }
+        .map g.cur { fill: none; stroke: #E53935; stroke-width: 2; }
+        .map g.est circle { fill: #FFFFFF; stroke: #E53935; stroke-width: 3; }
+        .map line.qt, .map polyline.qt { stroke: #E53935; stroke-width: 3; fill: none; }
+        .map polyline.qt { stroke-dasharray: 10 6; }
+        .map g.qtfrom circle { fill: #E53935; }
+        .map g.obj, .map g.qtgoal { fill: #EF6C00; stroke: #EF6C00; stroke-width: 1.6; }
+        .map g.qtgoal { stroke: #E53935; fill: #EF6C00; stroke-width: 2; }
+        .map text.objtext { fill: #E65100; }
+        .map circle.qtdest { stroke: #E53935; stroke-width: 3; }
+        .map g.icon.qtdest { stroke: #E53935; stroke-width: 3; }
+        .map .qthead { fill: #E53935; }
+        .map g.qtend circle { fill: #E53935; }
+        .map .here { fill: #E53935; }
+        .map circle.area { fill: #6D4C41; fill-opacity: 0.12; stroke: none; pointer-events: none; }
+        .map circle.bigbody { fill-opacity: 0.08; stroke: #1565C0; stroke-width: 1.5; }
+        .map circle.bigbody.here, .map circle.bigbody.hl { stroke: #D84315; }
+        .map circle.area.here { fill: #E53935; fill-opacity: 0.18; }
+        .map g.icon.here { fill: none; stroke: #E53935; stroke-width: 2.4; }
+        .map g.icon.here .solid { fill: #E53935; stroke: none; }
+        .map text.curtext { fill: #E53935; font-weight: 600; }
+        .map text.hltext { fill: #D84315; font-weight: 600; }
         h3 { font-size: 1.05em; margin: 1em 0 0.4em; padding-bottom: 2px; border-bottom: 1px solid #DDD; }
         h3:first-child { margin-top: 0.2em; }
         p { margin: 0.3em 0; }
@@ -938,6 +1065,367 @@ internal static class DetailHtml
         th { background: #E8E8E8; font-weight: 600; }
         tr:nth-child(even) td { background: #F8F8F8; }
         .em { color: #1565C0; }
-        </style></head><body>{{body}}</body></html>
+        {{extraCss}}
+        </style></head><body>{{body}}<script>{{MapScript}}</script></body></html>
+        """;
+
+    // 図 (GameDataQueryService.SystemMapSvg / NearMapSvg の svg.zmap) を動かすスクリプト (ページに 1 つ)。外への通信・ファイルの読み込みはしない。
+    // ゲームデータの名前はここに入れない (点の座標などは svg の要素の data-* 属性から読む)。
+    // ・表示: 中心 (ゲームの座標) と倍率 (px / メートル) から、data-x / data-y を持つ要素を置き直す。viewBox を枠の実際の大きさ (px) にするので、字と点の大きさは変わらない
+    // ・倍率の範囲と最初の表示: GameDataQueryService.InitialMapView と同じ式
+    // ・ホイール: カーソルの位置を中心に拡大・縮小。左ドラッグ: 移動 (動かした後のクリックではリンクを開かない)。右上の［全体］［＋］［－］(MapBlock の .mapctl)
+    // ・枠の大きさが変わったら置き直す (ResizeObserver と窓の resize)
+    // ・svg に data-save があれば (マップタブの図だけ)、操作 (ホイール・ドラッグ・ボタン) が止まって 500ms 後に
+    //   window.chrome.webview.postMessage({ map: data-save の値, cx, cy, w }) で今の中心と幅 (メートル) をアプリへ送る (MapPanel が受けて覚える)
+    // ・表示を変えるたびに、ラベルを data-pri の小さい順 (同じなら data-sub の多い順、同じなら data-no の順) に置き、先に置いたものと重なるものは隠す (点と <title> は残す)
+    private const string MapScript = """
+        (function () {
+          'use strict';
+          var FIT = 260 / 300, MARGIN = 1;
+          function num(el, name, def) { var v = parseFloat(el.getAttribute(name)); return isNaN(v) ? def : v; }
+          function setup(svg) {
+            var st = { W: 600, H: 500, cx: 0, cy: 0, s: 1, min: 1, max: 1, ready: false };
+            var fcx = num(svg, 'data-fcx', 0), fcy = num(svg, 'data-fcy', 0), fr = num(svg, 'data-fr', 1);
+            var icx = num(svg, 'data-icx', fcx), icy = num(svg, 'data-icy', fcy), iw = num(svg, 'data-iw', 0), dmin = num(svg, 'data-dmin', 0);
+            if (!(fr > 0)) return;
+            var bg = svg.querySelector('.bg');
+            var ctl = svg.parentNode ? svg.parentNode.querySelector('.mapctl') : null;
+            // data-save があれば (マップタブの図だけ)、操作が止まって 500ms 後に今の表示 (中心と幅。メートル) をアプリへ送る
+            var saveKey = svg.getAttribute('data-save'), saveTimer = 0;
+            // data-x を持つ要素: circle (点・円・軌道の輪)、g.icon (印のアイコン。transform で置く。data-pr = 点の大きさ (半径 px))、text (ラベル)
+            var items = Array.prototype.map.call(svg.querySelectorAll('[data-x]'), function (el) {
+              var tag = el.tagName.toLowerCase();
+              var it = {
+                el: el, kind: tag === 'circle' ? 'circle' : tag === 'g' ? 'icon' : 'text',
+                x: num(el, 'data-x', 0), y: num(el, 'data-y', 0), ox: num(el, 'data-ox', 0), oy: num(el, 'data-oy', 0),
+                wr: el.hasAttribute('data-wr') ? num(el, 'data-wr', 0) : null, minr: num(el, 'data-minr', 0), hb: num(el, 'data-hidebelow', 0),
+                r0: tag === 'circle' ? num(el, 'r', 0) : num(el, 'data-pr', 0), sx: 0, sy: 0, r: 0, tx: 0, ty: 0
+              };
+              el._zm = it;
+              return it;
+            });
+            // 量子ジャンプの矢印の線 (data-x1 / data-y1 → data-x2 / data-y2。両端をゲームの座標で持つ)
+            var lines = Array.prototype.map.call(svg.querySelectorAll('line[data-x1], polyline[data-x1]'), function (el) {
+              return { el: el, poly: el.tagName.toLowerCase() === 'polyline', x1: num(el, 'data-x1', 0), y1: num(el, 'data-y1', 0), x2: num(el, 'data-x2', 0), y2: num(el, 'data-y2', 0) };
+            });
+            // ラベルと、その点 (同じ親 (<a> / <g>) の中の circle か g.icon)
+            var labels = Array.prototype.slice.call(svg.querySelectorAll('text[data-pri]')).map(function (el, i) {
+              var pt = null;
+              Array.prototype.forEach.call(el.parentNode.children, function (c) {
+                if (!pt && c !== el && c._zm && c._zm.kind !== 'text') pt = c._zm;
+              });
+              return { el: el, it: el._zm, pt: pt, pri: num(el, 'data-pri', 9), sub: num(el, 'data-sub', 0), no: num(el, 'data-no', 0), i: i };
+            });
+            // 置く順: data-pri の小さい順、同じなら子の場所の数 (data-sub) の多い順、同じなら名前の順 (data-no)
+            labels.sort(function (a, b) { return a.pri - b.pri || b.sub - a.sub || a.no - b.no || a.i - b.i; });
+            function fitScale() { return Math.min(st.W, st.H) / 2 * FIT / fr; }
+            function limits() {
+              var f = fitScale();
+              st.min = f / 2;
+              st.max = dmin > 0 ? Math.max(f, Math.min(st.W, st.H) / (2 * dmin)) : f;
+            }
+            function clamp(s) { return Math.max(st.min, Math.min(st.max, s)); }
+            function fit() { st.cx = fcx; st.cy = fcy; st.s = clamp(fitScale()); }
+            function initial() {
+              if (iw > 0) { st.cx = icx; st.cy = icy; st.s = clamp(st.W / iw); } else { fit(); }
+            }
+            function notify() {
+              if (saveKey === null || !(window.chrome && window.chrome.webview)) return;
+              if (saveTimer) clearTimeout(saveTimer);
+              saveTimer = setTimeout(function () {
+                saveTimer = 0;
+                window.chrome.webview.postMessage({ map: saveKey, cx: st.cx, cy: st.cy, w: st.W / st.s });
+              }, 500);
+            }
+            // 枠の実際の大きさ (CSS の px) を読み、viewBox・背景を合わせる。枠が見えていない (幅 0) ときは false
+            function measure() {
+              var r = svg.getBoundingClientRect();
+              if (r.width < 1 || r.height < 1) return false;
+              st.W = r.width; st.H = r.height;
+              svg.setAttribute('viewBox', '0 0 ' + st.W + ' ' + st.H);
+              if (bg) { bg.setAttribute('width', Math.max(0, st.W - 1)); bg.setAttribute('height', Math.max(0, st.H - 1)); }
+              limits();
+              return true;
+            }
+            function render() {
+              var s = st.s, hw = st.W / 2, hh = st.H / 2;
+              items.forEach(function (it) {
+                var sx = hw + (it.x - st.cx) * s, sy = hh - (it.y - st.cy) * s;
+                var rr = it.wr === null ? null : Math.max(it.minr, it.wr * s);
+                it.sx = sx; it.sy = sy;
+                if (it.kind === 'circle') {
+                  it.el.setAttribute('cx', sx); it.el.setAttribute('cy', sy);
+                  if (rr !== null) it.el.setAttribute('r', rr);
+                  // 惑星・衛星の円 (data-minr のある円) が画面で大きい (半径 150px 超) ときは、塗りを薄くして輪郭を出す (中の場所・アイコン・ラベルが見えるように)
+                  if (rr !== null && it.el.hasAttribute('data-minr')) it.el.classList.toggle('bigbody', rr > 150);
+                  // ステーションなどの大きさの円 (data-hidebelow): 画面の半径がそれ未満なら隠す
+                  if (it.hb > 0) { if (rr !== null && rr < it.hb) it.el.setAttribute('visibility', 'hidden'); else it.el.removeAttribute('visibility'); }
+                  it.r = rr !== null ? rr : it.r0;
+                } else if (it.kind === 'icon') {
+                  it.el.setAttribute('transform', 'translate(' + sx + ',' + sy + ')');
+                  it.r = it.r0;
+                } else {
+                  var ox = it.ox, oy = it.oy;
+                  if (rr !== null) { var o = Math.min(rr, 200) * 0.7; ox += o; oy -= o; }
+                  it.tx = sx + ox; it.ty = sy + oy;
+                }
+              });
+              lines.forEach(function (ln) {
+                var ax = hw + (ln.x1 - st.cx) * s, ay = hh - (ln.y1 - st.cy) * s, bx = hw + (ln.x2 - st.cx) * s, by = hh - (ln.y2 - st.cy) * s;
+                // polyline (量子ジャンプの線) は真ん中にも点を置く (向きの三角を marker-mid で真ん中に出すため)
+                if (ln.poly) ln.el.setAttribute('points', ax + ',' + ay + ' ' + (ax + bx) / 2 + ',' + (ay + by) / 2 + ' ' + bx + ',' + by);
+                else { ln.el.setAttribute('x1', ax); ln.el.setAttribute('y1', ay); ln.el.setAttribute('x2', bx); ln.el.setAttribute('y2', by); }
+              });
+              declutter();
+            }
+            function boxHit(b, p) {
+              return b.x < p.x + p.width + MARGIN && p.x < b.x + b.width + MARGIN && b.y < p.y + p.height + MARGIN && p.y < b.y + b.height + MARGIN;
+            }
+            // ラベルの箱 b が点 p と重なるか。円 (circle) は円の形で、印のアイコンは外径の正方形で見る。
+            // 自分の点が円の中にあるとき (その天体の上の場所) は、その円とは重ならないものとする (どこに置いても重なるため)
+            function pointHit(b, p, own) {
+              if (p.kind === 'circle') {
+                if (own && Math.pow(own.sx - p.sx, 2) + Math.pow(own.sy - p.sy, 2) < p.r * p.r) return false;
+                var nx = Math.max(b.x, Math.min(p.sx, b.x + b.width)), ny = Math.max(b.y, Math.min(p.sy, b.y + b.height));
+                return Math.pow(nx - p.sx, 2) + Math.pow(ny - p.sy, 2) < p.r * p.r;
+              }
+              return boxHit(b, { x: p.sx - p.r, y: p.sy - p.r, width: p.r * 2, height: p.r * 2 });
+            }
+            // ラベルを data-pri の順に置く。先に置いたラベルや、先に置いたラベルの点と重なるときは、右 (元の位置) → 左 → 上 → 下 の順に試し、
+            // どこにも置けないときだけ隠す (点と <title> は残る)
+            function declutter() {
+              var placed = [], points = [];
+              // 優先は書き換えで変わることがあるので、置くたびに読み直して並べ直す
+              labels.forEach(function (lb) { lb.pri = num(lb.el, 'data-pri', 9); });
+              labels.sort(function (a, b) { return a.pri - b.pri || b.sub - a.sub || a.no - b.no || a.i - b.i; });
+              labels.forEach(function (lb) {
+                var el = lb.el, it = lb.it, own = lb.pt;
+                // 使っていないラベル (data-off。現在位置の印の無いときのラベル) は隠し、重なりの判定に入れない
+                if (el.getAttribute('data-off') === '1') { el.setAttribute('visibility', 'hidden'); return; }
+                var pr = own ? own.r : 4, sx = own ? own.sx : it.sx, sy = own ? own.sy : it.sy;
+                var tries = [[it.tx, it.ty, 'start'], [2 * sx - it.tx, it.ty, 'end'], [sx, sy - pr - 6, 'middle'], [sx, sy + pr + 22, 'middle']];
+                el.removeAttribute('visibility');
+                var ok = false;
+                for (var t = 0; t < tries.length && !ok; t++) {
+                  el.setAttribute('x', tries[t][0]); el.setAttribute('y', tries[t][1]); el.setAttribute('text-anchor', tries[t][2]);
+                  var b = el.getBBox(), hit = false;
+                  for (var k = 0; k < placed.length && !hit; k++) if (boxHit(b, placed[k])) hit = true;
+                  for (var m = 0; m < points.length && !hit; m++) if (points[m] !== own && pointHit(b, points[m], own)) hit = true;
+                  if (!hit) { ok = true; placed.push(b); }
+                }
+                if (!ok) {
+                  el.setAttribute('x', it.tx); el.setAttribute('y', it.ty); el.setAttribute('text-anchor', 'start');
+                  el.setAttribute('visibility', 'hidden');
+                }
+                if (own) points.push(own);
+              });
+            }
+            // 量子ジャンプの線 (両端 x1,y1 → x2,y2) のどちらかの端が今の表示の枠からはみ出していたら、線全体が枠の 8 割に収まるように中心と倍率を変える
+            // (倍率は limits の範囲)。変えたら覚えた表示にも入れる (notify)。同じ線 (両端が同じ) については 1 回だけ (qtFitKey)
+            var qtFitKey = null;
+            function fitQt(x1, y1, x2, y2) {
+              var key = Math.round(x1) + ',' + Math.round(y1) + ',' + Math.round(x2) + ',' + Math.round(y2);
+              if (key === qtFitKey || !st.ready) return;
+              qtFitKey = key;
+              function inside(x, y) {
+                var sx = st.W / 2 + (x - st.cx) * st.s, sy = st.H / 2 - (y - st.cy) * st.s;
+                return sx >= 0 && sx <= st.W && sy >= 0 && sy <= st.H;
+              }
+              if (inside(x1, y1) && inside(x2, y2)) return;
+              var dx = Math.abs(x2 - x1), dy = Math.abs(y2 - y1);
+              var sx = dx > 0 ? st.W * 0.8 / dx : Infinity, sy = dy > 0 ? st.H * 0.8 / dy : Infinity;
+              var ns = Math.min(sx, sy);
+              st.cx = (x1 + x2) / 2; st.cy = (y1 + y2) / 2;
+              if (isFinite(ns)) st.s = clamp(ns);
+              render();
+              notify();
+            }
+            function start() {
+              if (st.ready || !measure()) return;
+              st.ready = true;
+              initial();
+              render();
+              // ページを作ったときに量子ジャンプの線が出ていれば、それにも同じ決まりを当てる
+              var qg0 = svg.querySelector('g.qtgroup');
+              if (qg0 && qg0.getAttribute('visibility') !== 'hidden')
+                lines.forEach(function (ln) { if (ln.el.parentNode === qg0) fitQt(ln.x1, ln.y1, ln.x2, ln.y2); });
+            }
+            // 枠の大きさが変わったら (窓の大きさ・詳細の幅・見えていなかった枠が見えたとき) 置き直す
+            function resized() {
+              if (!st.ready) { start(); return; }
+              if (!measure()) return;
+              st.s = clamp(st.s);
+              render();
+            }
+            function zoomAt(px, py, f) {
+              if (!st.ready) return;
+              var ns = clamp(st.s * f);
+              if (ns === st.s) return;
+              var wx = st.cx + (px - st.W / 2) / st.s, wy = st.cy - (py - st.H / 2) / st.s;
+              st.s = ns;
+              st.cx = wx - (px - st.W / 2) / ns; st.cy = wy + (py - st.H / 2) / ns;
+              render();
+              notify();
+            }
+            svg.addEventListener('wheel', function (e) {
+              if (e.ctrlKey || !st.ready) return;
+              e.preventDefault();
+              var r = svg.getBoundingClientRect();
+              var dy = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * st.H : e.deltaY;
+              zoomAt(e.clientX - r.left, e.clientY - r.top, Math.pow(1.0015, -dy));
+            }, { passive: false });
+            var drag = null, moved = false;
+            svg.addEventListener('pointerdown', function (e) {
+              moved = false;
+              if (e.button !== 0 || !st.ready) return;
+              drag = { id: e.pointerId, x: e.clientX, y: e.clientY, cx: st.cx, cy: st.cy, on: false };
+            });
+            svg.addEventListener('pointermove', function (e) {
+              if (!drag || e.pointerId !== drag.id) return;
+              var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+              if (!drag.on) {
+                if (Math.abs(dx) + Math.abs(dy) < 4) return;
+                drag.on = true; moved = true;
+                try { svg.setPointerCapture(e.pointerId); } catch (err) { }
+                svg.classList.add('dragging');
+              }
+              st.cx = drag.cx - dx / st.s; st.cy = drag.cy + dy / st.s;
+              render();
+            });
+            function end(e) {
+              if (!drag || e.pointerId !== drag.id) return;
+              var was = drag.on;
+              drag = null;
+              svg.classList.remove('dragging');
+              if (was) notify();
+            }
+            svg.addEventListener('pointerup', end);
+            svg.addEventListener('pointercancel', end);
+            // ドラッグの後のクリックは、リンクを開かせない
+            svg.addEventListener('click', function (e) {
+              if (moved) { e.preventDefault(); e.stopPropagation(); moved = false; }
+            }, true);
+            svg.addEventListener('dragstart', function (e) { e.preventDefault(); });
+            if (ctl) ctl.addEventListener('click', function (e) {
+              var b = e.target.closest ? e.target.closest('button') : null;
+              if (!b || !st.ready) return;
+              e.preventDefault();
+              var act = b.getAttribute('data-act');
+              if (act === 'fit') { fit(); render(); notify(); }
+              else if (act === 'in') zoomAt(st.W / 2, st.H / 2, 1.5);
+              else if (act === 'out') zoomAt(st.W / 2, st.H / 2, 1 / 1.5);
+            });
+            if (window.ResizeObserver) new ResizeObserver(resized).observe(svg);
+            window.addEventListener('resize', resized);
+            // マップタブの図 (data-save) だけ: アプリから書き換えのデータ ({ type: 'mapupdate', maps: [{ save, pts, here, mk }], near }) を受けて、
+            // ページを作り直さずに書き換える (拡大率と表示の中心はそのまま。書き換えた後にラベルを置き直す)。名前は textContent で入れる
+            function vis(el, on) { if (!el) return; if (on) el.removeAttribute('visibility'); else el.setAttribute('visibility', 'hidden'); }
+            function setXY(el, x, y) {
+              if (!el) return;
+              el.setAttribute('data-x', x); el.setAttribute('data-y', y);
+              if (el._zm) { el._zm.x = x; el._zm.y = y; }
+            }
+            function applyUpdate(m) {
+              var groups = {};
+              Array.prototype.forEach.call(svg.querySelectorAll('[data-rec]'), function (el) {
+                var k = el.getAttribute('data-rec');
+                (groups[k] = groups[k] || []).push(el);
+              });
+              // 各場所: 位置 (自転を入れたもの) とラベル
+              (m.pts || []).forEach(function (pt) {
+                (groups[pt.r] || []).forEach(function (el) {
+                  if (el.tagName.toLowerCase() === 'a') {
+                    Array.prototype.forEach.call(el.querySelectorAll('[data-x]'), function (t) { setXY(t, pt.x, pt.y); });
+                    var tx = el.querySelector('text'), ti = el.querySelector('title');
+                    if (tx) tx.textContent = pt.l;
+                    if (ti) ti.textContent = pt.l;
+                  } else setXY(el, pt.x, pt.y);
+                });
+              });
+              // 中にいる場所: 赤 (here) と、ラベルの優先 0 (curtext)。ほかは元に戻す (data-opri)
+              Object.keys(groups).forEach(function (k) {
+                var on = k === m.here;
+                groups[k].forEach(function (el) {
+                  if (el.tagName.toLowerCase() !== 'a') { el.classList.toggle('here', on); return; }
+                  var shape = el.querySelector('circle[data-x], g.icon');
+                  if (shape) shape.classList.toggle('here', on);
+                  var tx = el.querySelector('text[data-opri]');
+                  if (tx) { tx.classList.toggle('curtext', on); tx.setAttribute('data-pri', on ? '0' : tx.getAttribute('data-opri')); }
+                });
+              });
+              // 現在位置の印: 照準 (taken)・白抜きの丸 (est)・矢印 (moving) の出し入れ、位置、ラベル
+              var mk = svg.querySelector('g.curmark');
+              if (mk) {
+                var k = m.mk ? m.mk.k : '';
+                var cur = mk.querySelector('g.cur'), est = mk.querySelector('g.est'), line = mk.querySelector('line.qt'), lab = mk.querySelector('text.mk'), ti = mk.querySelector('title');
+                vis(cur, k === 'taken'); vis(est, k === 'est'); vis(line, k === 'moving');
+                if (m.mk) {
+                  setXY(cur, m.mk.x, m.mk.y); setXY(est, m.mk.x, m.mk.y); setXY(lab, m.mk.x, m.mk.y);
+                  if (lab) { lab.textContent = m.mk.l; lab.removeAttribute('data-off'); }
+                  if (ti) ti.textContent = m.mk.l;
+                  lines.forEach(function (ln) {
+                    if (ln.el !== line) return;
+                    ln.x1 = m.mk.k === 'moving' ? m.mk.x1 : m.mk.x; ln.y1 = m.mk.k === 'moving' ? m.mk.y1 : m.mk.y; ln.x2 = m.mk.x; ln.y2 = m.mk.y;
+                  });
+                } else if (lab) lab.setAttribute('data-off', '1');
+              }
+              // 量子ジャンプの線 (qt: { x1, y1, x2, y2 } | null) と目的地を目立たせる (qtdest: record 名 | null)
+              var qg = svg.querySelector('g.qtgroup');
+              if (qg) {
+                vis(qg, !!m.qt);
+                if (m.qt) {
+                  setXY(qg.querySelector('g.qtfrom'), m.qt.x1, m.qt.y1);
+                  lines.forEach(function (ln) { if (ln.el.parentNode === qg) { ln.x1 = m.qt.x1; ln.y1 = m.qt.y1; ln.x2 = m.qt.x2; ln.y2 = m.qt.y2; } });
+                }
+              }
+              // 線が出た・両端が変わったときは、はみ出していれば収まるように表示を変える (同じ線では 1 回だけ。下の render の前に中心と倍率を決める)
+              if (m.qt) fitQt(m.qt.x1, m.qt.y1, m.qt.x2, m.qt.y2);
+              Object.keys(groups).forEach(function (k) {
+                groups[k].forEach(function (el) {
+                  if (el.tagName.toLowerCase() !== 'a') return;
+                  var shape = el.querySelector('circle[data-x], g.icon');
+                  if (shape) shape.classList.toggle('qtdest', k === m.qtdest);
+                });
+              });
+              // 線の先が契約の目標 (推定) のときの旗とラベル
+              var gs = svg.querySelector('g.qtgoalslot');
+              if (gs) {
+                var gOn = !!(m.qt && m.qt.goal);
+                var gIcon = gs.querySelector('g.qtgoal'), gText = gs.querySelector('text');
+                vis(gIcon, gOn);
+                if (gOn) { setXY(gIcon, m.qt.x2, m.qt.y2); setXY(gText, m.qt.x2, m.qt.y2); gText.removeAttribute('data-off'); }
+                else if (gText) gText.setAttribute('data-off', '1');
+              }
+              // 最近の契約の目標 (objs: [{ x, y }]。入れ物の数まで)
+              Array.prototype.forEach.call(svg.querySelectorAll('g.objslot'), function (slot, i) {
+                var o = m.objs && i < m.objs.length ? m.objs[i] : null;
+                var icon = slot.querySelector('g.obj'), tx = slot.querySelector('text');
+                vis(icon, !!o);
+                if (o) { setXY(icon, o.x, o.y); setXY(tx, o.x, o.y); tx.removeAttribute('data-off'); }
+                else if (tx) tx.setAttribute('data-off', '1');
+              });
+              if (st.ready) render();
+            }
+            if (saveKey !== null && window.chrome && window.chrome.webview) {
+              window.chrome.webview.addEventListener('message', function (e) {
+                var d = e.data;
+                if (!d || d.type !== 'mapupdate' || !d.maps) return;
+                for (var i = 0; i < d.maps.length; i++) if (d.maps[i].save === saveKey) { applyUpdate(d.maps[i]); break; }
+              });
+            }
+            start();
+          }
+          Array.prototype.forEach.call(document.querySelectorAll('svg.zmap'), setup);
+          // マップタブの【現在位置の近く】(aside.near) の書き換え: アプリが打ち消した HTML を入れる。無ければ隠す (詳細タブのページには aside.near が無い)
+          if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.addEventListener('message', function (e) {
+              var d = e.data;
+              if (!d || d.type !== 'mapupdate') return;
+              var a = document.querySelector('aside.near');
+              if (!a) return;
+              if (d.near) { a.innerHTML = d.near; a.hidden = false; } else { a.innerHTML = ''; a.hidden = true; }
+            });
+          }
+        })();
         """;
 }
