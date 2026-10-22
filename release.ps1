@@ -18,7 +18,7 @@ $Repo = "batake321/StarCitizenJapaneseTextCreater"
 Set-Location $ProjectDir
 
 # このプロジェクトのフォルダ (publish・bin など) から起動しているアプリがあれば止める (publish の exe を置き換えられないため)。
-# インストール先など、ほかの場所から起動しているものは止めない。D:\temp の DB は下の -wal の確かめと quick_check で守る
+# インストール先など、ほかの場所から起動しているものは止めない。作業フォルダ (AppData) の DB は下の -wal の確かめと quick_check で守る
 $running = @(Get-Process -Name $ProjectName -ErrorAction SilentlyContinue | Where-Object {
     -not $_.Path -or $_.Path.StartsWith($ProjectDir + '\', [StringComparison]::OrdinalIgnoreCase) })
 if ($running.Count -gt 0) {
@@ -34,7 +34,7 @@ Write-Host "Build OK" -ForegroundColor Green
 
 # 1.5. Bundle DB files from WorkDir
 Write-Host "=== Bundle DB ===" -ForegroundColor Cyan
-$workDir = "D:\temp"
+$workDir = Join-Path $ProjectDir "AppData"
 # 同梱してよい DB はこの 3 つだけ。
 # 所持船・My Hangar・所持コンポーネント・装備の設定は trade_cache.db に入っており、これは個人データなので絶対に同梱しない
 $allowedDbs = @("translations.db", "gamedata_cache.db", "equipment_cache.db")
