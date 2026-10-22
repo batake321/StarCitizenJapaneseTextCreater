@@ -682,7 +682,7 @@ public partial class GameLogPanel : UserControl
             var prevQuantum = _currentQuantum;
             _currentLandingRaw = result.LandingRaw;
             _currentQuantum = result.Quantum;
-            // ［マップ］の自動の取得: 前の追い読みから、量子ジャンプの目的地の選択 (TargetTime) か到着 (ArrivedTime) が新しくなったら知らせる。
+            // ［マップ］の自動の取得: 前の追い読みから、量子ジャンプの目的地の選択 (TargetTime)・到着 (ArrivedTime)・移動中になった時刻 (MovingSince) が新しくなったら知らせる。
             // 読み直し (ゲームの起動) の直後と、30 秒より前の行 (起動のときにまとめて読んだ古い行) では知らせない
             if (prevQuantum != null && !result.Reset && result.Quantum is { } nq)
             {
@@ -690,6 +690,9 @@ public partial class GameLogPanel : UserControl
                     QuantumEventSeen?.Invoke("select");
                 if (nq.ArrivedTime is { } at && nq.ArrivedTime != prevQuantum.ArrivedTime && DateTime.UtcNow - at < QuantumEventFreshness)
                     QuantumEventSeen?.Invoke("arrive");
+                // 量子ジャンプが移動中になった (MovingSince が新しくなった) ときも知らせる (到着予定の速さを測る座標を取るため)
+                if (nq.Moving && nq.MovingSince is { } ms && nq.MovingSince != prevQuantum.MovingSince && DateTime.UtcNow - ms < QuantumEventFreshness)
+                    QuantumEventSeen?.Invoke("move");
             }
             _pollError = null;
             var missingChanged = _logMissing != !result.Found;

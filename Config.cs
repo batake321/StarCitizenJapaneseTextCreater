@@ -99,7 +99,8 @@ public class MapViewState
 }
 
 // ［マップ］の現在位置 (X / Y / Z: 恒星を原点にしたメートル、Utc: 取得した時刻 (UNIX 秒)。0 なら無し、
-// LocationId: 取ったときの Game.log の Location の番号 (分からなければ ""))
+// LocationId: 取ったときの Game.log の Location の番号 (分からなければ "")、
+// System: 量子ジャンプの途中 (目的地を選んでから到着するまで) に取ったとき、線の星系で決めた星系の名前 (例 Pyro。そうでなければ ""))
 public class MapCurrentState
 {
     public double X { get; set; }
@@ -107,6 +108,7 @@ public class MapCurrentState
     public double Z { get; set; }
     public double Utc { get; set; }
     public string LocationId { get; set; } = "";
+    public string System { get; set; } = "";
 }
 
 // ［マップ］の Location の番号 1 つの「どこにいたか」(LocationId: Game.log の Location の番号、Record: 場所・天体・星系 (恒星) の record 名、

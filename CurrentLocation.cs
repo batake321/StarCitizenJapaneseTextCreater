@@ -172,22 +172,32 @@ internal static class CurrentLocation
     // 実測の基準: Game.log の居場所が近くの惑星の子 (自転の親が同じ) なら、その場所を θ で回したときの現在位置との距離が 50 Km 以内のときに使う。
     //   無ければ、中心からの距離と z の差が両方 5 Km 以内の子のうち、差 (√(距離の差² + z の差²)) のいちばん小さいもの。
     //   どちらも、その場所の中心からの距離 (軌道の半径。地表の場所なら地表の高さ) と現在位置の中心からの距離・z を比べて、範囲内のときだけ使う
-    public static Result? Locate(ShopTree tree, (double X, double Y, double Z) cur, double unix, IEnumerable<string> systemNames, ShopTreeNode? logPlace, bool fresh)
+    // system を渡したら (量子ジャンプの途中に取った座標。線の星系)、いちばん近い場所で星系を選ばず、その星系を使う
+    // (Pyro と Nyx は恒星がどちらも原点で座標が重なるため)。その星系が systemNames に無い・座標のある場所が無ければ null (選ぶときに候補にならないのと同じ)
+    public static Result? Locate(ShopTree tree, (double X, double Y, double Z) cur, double unix, IEnumerable<string> systemNames, ShopTreeNode? logPlace, bool fresh,
+        ShopTreeNode? system = null)
     {
-        // 星系: いちばん近い場所 (θ = 0 の座標で) までの距離がいちばん短いもの
-        ShopTreeNode? system = null;
-        var best = double.MaxValue;
-        foreach (var name in systemNames)
+        if (system != null)
         {
-            var star = tree.Systems.FirstOrDefault(s => s.System.Equals(name, StringComparison.OrdinalIgnoreCase));
-            if (star == null) continue;
-            foreach (var p in PlacesOf(tree, star))
-            {
-                var d = Dist(cur, p.Position!.Value);
-                if (d < best) { best = d; system = star; }
-            }
+            var given = system;
+            if (!systemNames.Any(n => given.System.Equals(n, StringComparison.OrdinalIgnoreCase)) || !PlacesOf(tree, given).Any()) return null;
         }
-        if (system == null) return null;
+        else
+        {
+            // 星系: いちばん近い場所 (θ = 0 の座標で) までの距離がいちばん短いもの
+            var best = double.MaxValue;
+            foreach (var name in systemNames)
+            {
+                var star = tree.Systems.FirstOrDefault(s => s.System.Equals(name, StringComparison.OrdinalIgnoreCase));
+                if (star == null) continue;
+                foreach (var p in PlacesOf(tree, star))
+                {
+                    var d = Dist(cur, p.Position!.Value);
+                    if (d < best) { best = d; system = star; }
+                }
+            }
+            if (system == null) return null;
+        }
 
         var places = PlacesOf(tree, system).ToList();
 
@@ -293,9 +303,10 @@ internal static class CurrentLocation
 
     // 使う現在位置。Pos: 位置 (Moving なら目的地の位置、MovingUnknown なら出発地の位置)、Unix: 自転の角度に使う時刻、Place: 着陸場所・目的地の場所 (Taken・MovingUnknown なら null)、
     // From: 量子ジャンプの出発地の位置、FromName: その名前、TargetDesc: MovingUnknown の目的地の書き方 (「目的地不明: 地表の地点」など)、
-    // NoPos: 位置が無い (MovingUnknown で出発地も引けない。Pos は使わない)
+    // NoPos: 位置が無い (MovingUnknown で出発地も引けない。Pos は使わない)、
+    // System: 星系の名前 (Taken で、量子ジャンプの途中に取った座標のとき。MapCurrentState.System。それ以外は null)
     public sealed record EffectivePosition(PositionKind Kind, (double X, double Y, double Z) Pos, double Unix, ShopTreeNode? Place, (double X, double Y, double Z)? From,
-        string? FromName, string? TargetDesc = null, bool NoPos = false, string? Memory = null);
+        string? FromName, string? TargetDesc = null, bool NoPos = false, string? Memory = null, string? System = null);
 
     // 使う現在位置を決める。logRunning が偽 (［ゲームログ］の追い読みが動いていない・Game.log が無い) なら推定はせず、取った座標 (古くても) だけ。
     // 追い読みが動いていれば次の順 (引けない名前の段は飛ばす)。どれでもなければ null (推定位置なし。古い取った座標は使わない):
@@ -304,11 +315,13 @@ internal static class CurrentLocation
     //   3. 着陸場所 (landingRaw。StarMapObject.<名前>) の位置 (今の時刻の自転を入れる)
     //   4. 今の Location の番号 (q.LocationId) で覚えた居場所 (App.Config.MapLocationMemories): 場所の中ならその場所の位置、天体の付近・宇宙なら位置無し (EstMemory)
     //   5. 最後の到着が最後の目的地の選択より後で、その後に Location が変わっていなければ、目的地の位置
+    // 取った座標に星系の名前 (taken.System。量子ジャンプの途中に取ったとき) があれば、EffectivePosition.System に入れる
     public static EffectivePosition? Effective(ShopTree tree, MapCurrentState taken, double nowUnix, bool logRunning, string? landingRaw,
         GameLogQuantumState? q, EffectivePosition? previous)
     {
         var takenPos = taken.Utc > 0 && double.IsFinite(taken.X) && double.IsFinite(taken.Y) && double.IsFinite(taken.Z)
-            ? new EffectivePosition(PositionKind.Taken, (taken.X, taken.Y, taken.Z), taken.Utc, null, null, null) : null;
+            ? new EffectivePosition(PositionKind.Taken, (taken.X, taken.Y, taken.Z), taken.Utc, null, null, null,
+                System: string.IsNullOrEmpty(taken.System) ? null : taken.System) : null;
         if (!logRunning) return takenPos;
         static double Unix(DateTime t) => new DateTimeOffset(DateTime.SpecifyKind(t, DateTimeKind.Utc)).ToUnixTimeMilliseconds() / 1000.0;
         if (takenPos != null && TakenInThisLog(taken, q) && (q?.LastLocationChange is not { } changedAt || Unix(changedAt) <= taken.Utc)) return takenPos;
@@ -360,6 +373,7 @@ internal static class CurrentLocation
     //   目的地が引けなければ「不明（地表の地点 / 契約のビーコン）」で、線は無し。ただし契約のビーコン (MISSION_QT_Quantum_Beacon) で、目的地を選んだ時刻より前の
     //   10 分以内に契約の目標の印 (q.ObjectiveMarkers) があれば、その目標の位置 (ObjectiveOf) を線の先にし、行は「QT 目的地 契約のビーコン（目標: Monox 地表付近）: 設定」。
     //   線の出発地: ［現在位置］で取った座標が、目的地の選択より新しいか、取った後に目的地の選択まで Location が変わっていない (q.LocationChangeAtSelection) ならその座標。
+    //   ただし移動中か途中で停止で q.MovingSince があり、取った座標がそれより後に取ったもの (量子ジャンプの途中に取った座標) なら、取った座標は使わない。
     //   無ければ推定 (着陸場所 → 今の Location の番号で覚えた居場所 (場所の中) → Game.log の出発地の名前 (星図の英語名。星系の名前は引かない))。どれも無ければ線は無し
     public static QtState? Quantum(ShopTree tree, GameLogQuantumState? q, MapCurrentState taken, double nowUnix, string? landingRaw, IEnumerable<string>? systemNames = null)
     {
@@ -370,15 +384,19 @@ internal static class CurrentLocation
         if (q.LandingSince is { } ls && ls > selected && !string.IsNullOrWhiteSpace(landingRaw)) return null;
         static double Unix(DateTime t) => new DateTimeOffset(DateTime.SpecifyKind(t, DateTimeKind.Utc)).ToUnixTimeMilliseconds() / 1000.0;
         (double X, double Y, double Z) At(ShopTreeNode n) => PlacePosition(n, ThetasAt(tree.Places.Where(p => p.Root == n.Root), nowUnix));
-        var status = q.Stopped ? "途中で停止（もう一度 QT が必要）" : q.Moving ? "移動中" : "設定";
+        var status = QtStatus(q);
         var startNode = q.StartName is { } sn0 ? NodeByEnglishName(tree, sn0, placesOnly: true) : null;
         (double X, double Y, double Z)? from = null;
         string? fromSource = null;
+        var fromTaken = false;
         var selUnix = Unix(selected);
-        if (taken.Utc > 0 && double.IsFinite(taken.X) && double.IsFinite(taken.Y) && double.IsFinite(taken.Z) && TakenInThisLog(taken, q)
+        // 量子ジャンプの途中 (移動中・途中で停止。跳び始めた時刻 q.MovingSince より後) に取った座標は、線の出発地に使わない
+        var takenWhileMoving = (q.Moving || q.Stopped) && q.MovingSince is { } movingSince && taken.Utc > Unix(movingSince);
+        if (taken.Utc > 0 && double.IsFinite(taken.X) && double.IsFinite(taken.Y) && double.IsFinite(taken.Z) && TakenInThisLog(taken, q) && !takenWhileMoving
             && (taken.Utc >= selUnix || q.LocationChangeAtSelection is not { } changed || Unix(changed) <= taken.Utc))
         {
             from = (taken.X, taken.Y, taken.Z);
+            fromTaken = true;
             fromSource = $"取った座標（{DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(taken.Utc * 1000)).LocalDateTime.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)}）";
         }
         else if (!string.IsNullOrWhiteSpace(landingRaw) && tree.NodesByRecord.TryGetValue("Place:StarMapObject." + landingRaw.Trim(), out var landing) && landing.Position.HasValue)
@@ -405,7 +423,10 @@ internal static class CurrentLocation
                 && markers.Where(o => o.Time <= selected && selected - o.Time <= ObjectiveBeforeSelection).OrderByDescending(o => o.Time).FirstOrDefault() is { } marker)
             {
                 // 目標の星系: 出発地の名前の場所の星系、無ければ線の出発地の星系
-                var system = startNode?.Root ?? (from is { } fp && systemNames != null ? Locate(tree, fp, nowUnix, systemNames, null, fresh: false)?.System : null);
+                // (線の出発地が取った座標で、取ったときの星系の名前 (taken.System) があれば、その星系で決める)
+                var takenSystem = fromTaken && !string.IsNullOrEmpty(taken.System)
+                    ? tree.Systems.FirstOrDefault(s => s.System.Equals(taken.System, StringComparison.OrdinalIgnoreCase)) : null;
+                var system = startNode?.Root ?? (from is { } fp && systemNames != null ? Locate(tree, fp, nowUnix, systemNames, null, fresh: false, takenSystem)?.System : null);
                 if (system != null && ObjectiveOf(tree, marker, system, BodyOf(startNode), from, nowUnix) is { } goal)
                     return new QtState($"QT 目的地 契約のビーコン（目標: {goal.Where}）: {status}", null, from, from != null ? goal.Pos : null, system, Goal: true, FromSource: fromSource);
             }
@@ -415,6 +436,9 @@ internal static class CurrentLocation
         }
         return new QtState($"QT 目的地 {target.Name}: {status}", target, from, from != null ? At(target) : null, target.Root, FromSource: fromSource);
     }
+
+    // 量子ジャンプの状態の言葉 (状態の行の最後の「: 」より後ろ): 途中で停止・移動中・設定
+    public static string QtStatus(GameLogQuantumState q) => q.Stopped ? "途中で停止（もう一度 QT が必要）" : q.Moving ? "移動中" : "設定";
 
     // 契約の目標の印を、目的地を選んだ時刻より前のどれだけまで見るか
     private static readonly TimeSpan ObjectiveBeforeSelection = TimeSpan.FromMinutes(10);
@@ -476,10 +500,12 @@ internal static class CurrentLocation
 
     // 覚える「どこにいたか」(［現在位置］で座標を取ったとき。Location の番号と組にして覚える): 場所の中 (WhereaboutsOf の Inside) ならその場所 ("inside")、
     // そうでなく、ある Planet・Moon の付近 (その子のいちばん遠いものの距離 × 1.5 以内、または radius × 3 以内。いちばん近いもの) ならその天体 ("near")、
-    // どちらでもなければ星系 (恒星) の宇宙 ("space")。星系が分からなければ null
-    public static (string Record, string Kind)? Classify(ShopTree tree, (double X, double Y, double Z) pos, double unix, IEnumerable<string> systemNames, ShopTreeNode? logPlace)
+    // どちらでもなければ星系 (恒星) の宇宙 ("space")。星系が分からなければ null。
+    // system を渡したら (量子ジャンプの途中に取った座標。線の星系) その星系で決める (Locate に渡す。中・付近・宇宙の判定はその星系の中で同じ)
+    public static (string Record, string Kind)? Classify(ShopTree tree, (double X, double Y, double Z) pos, double unix, IEnumerable<string> systemNames, ShopTreeNode? logPlace,
+        ShopTreeNode? system = null)
     {
-        if (Locate(tree, pos, unix, systemNames, null, fresh: false) is not { } loc) return null;
+        if (Locate(tree, pos, unix, systemNames, null, fresh: false, system) is not { } loc) return null;
         var w = WhereaboutsOf(pos, loc, logPlace);
         if (w.Inside && w.Place != null) return (w.Place.RecordName, "inside");
         return NearBody(tree, loc.System, pos) is { } nb ? (nb.Body.RecordName, "near") : (loc.System.RecordName, "space");
