@@ -17,9 +17,10 @@ $Repo = "batake321/StarCitizenJapaneseTextCreater"
 
 Set-Location $ProjectDir
 
-# アプリが起動中なら止める (どこから起動したものでも。インストール先から起動したものも含む)。
-# 起動中だと publish の exe を置き換えられず、D:\temp の DB の中身が -wal に残っていることもある
-$running = @(Get-Process -Name $ProjectName -ErrorAction SilentlyContinue)
+# このプロジェクトのフォルダ (publish・bin など) から起動しているアプリがあれば止める (publish の exe を置き換えられないため)。
+# インストール先など、ほかの場所から起動しているものは止めない。D:\temp の DB は下の -wal の確かめと quick_check で守る
+$running = @(Get-Process -Name $ProjectName -ErrorAction SilentlyContinue | Where-Object {
+    -not $_.Path -or $_.Path.StartsWith($ProjectDir + '\', [StringComparison]::OrdinalIgnoreCase) })
 if ($running.Count -gt 0) {
     $where = ($running | ForEach-Object { if ($_.Path) { $_.Path } else { "PID $($_.Id)" } }) -join ', '
     throw "アプリを閉じてから実行してください (起動中: $where)"

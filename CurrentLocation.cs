@@ -448,20 +448,27 @@ internal static class CurrentLocation
     // 場所の天体 (その場所が Planet・Moon ならそれ、ほかは自転の親)。無ければ null
     private static ShopTreeNode? BodyOf(ShopTreeNode? n) => n == null ? null : n.Type is "Planet" or "Moon" ? n : n.SpinParent;
 
-    // 契約の目標の位置: Pos = 絶対位置、Body = その天体、Where = 書き方 (「Monox 地表付近」「Monox 上空 12 Km」)
-    public sealed record ObjectivePoint(GameLogObjectiveMarker Marker, ShopTreeNode Body, (double X, double Y, double Z) Pos, string Where);
+    // 契約の目標の位置: Pos = 絶対位置、Body = その天体 (宇宙の目標なら null)、Where = 書き方 (「Monox 地表付近」「Monox 上空 12 Km」「RAB-TUNG 付近」)
+    public sealed record ObjectivePoint(GameLogObjectiveMarker Marker, ShopTreeNode? Body, (double X, double Y, double Z) Pos, string Where);
 
     // 目標の印 (ZonePos は、どの天体かは書かれていないが、天体の中心からの、自転といっしょに回る天体の枠での位置) の天体と絶対位置。
     //   天体: system の Planet・Moon のうち、|ZonePos| と半径 (planet_radius、無ければ radius) の差が半径の 3% 以内のもの。複数なら preferBody (量子ジャンプの出発地の天体)、
     //   次に refPos (現在位置・線の出発地) に近いもの。決まらない・その天体の枠の回転 (frame_matrix) が無ければ null。
     //   絶対位置 = 天体の位置 + Rz(θ)·(枠の回転·ZonePos) (場所の位置 (PlacePosition) と同じ順。θ はその天体の時刻 unix の自転の角度 (データの式 + 補正値))
+    //   当てはまる天体が無く、|ZonePos| が恒星の半径より大きければ、宇宙の目標とみなし ZonePos を星系の座標 (恒星が原点) のまま使う
+    //   (2026-10-22 の小惑星基地の契約で、ZonePos が星図の RAB-TUNG の位置と一致した)。書き方は SpaceObjectiveWhere
     public static ObjectivePoint? ObjectiveOf(ShopTree tree, GameLogObjectiveMarker m, ShopTreeNode system, ShopTreeNode? preferBody,
         (double X, double Y, double Z)? refPos, double unix)
     {
         var len = Math.Sqrt(m.X * m.X + m.Y * m.Y + m.Z * m.Z);
         var cands = PlacesOf(tree, system).Where(b => b.Type is "Planet" or "Moon" && b.SurfaceRadius is { } r && r > 0
             && Math.Abs(len - r) <= r * ObjectiveRadiusTolerance && b.Frame != null).ToList();
-        if (cands.Count == 0) return null;
+        if (cands.Count == 0)
+        {
+            if (system.Radius is not { } starRadius || !(len > starRadius)) return null;
+            var sp = (m.X, m.Y, m.Z);
+            return new ObjectivePoint(m, null, sp, SpaceObjectiveWhere(tree, system, sp, unix));
+        }
         var body = cands.Count == 1 ? cands[0]
             : preferBody != null && cands.Contains(preferBody) ? preferBody
             : refPos is { } rp ? cands.OrderBy(b => Dist(rp, b.Position!.Value)).First() : null;
@@ -475,6 +482,17 @@ internal static class CurrentLocation
         var alt = len - body.SurfaceRadius!.Value;
         var where = Math.Abs(alt) <= ObjectiveSurfaceBand ? $"{body.Name} 地表付近" : $"{body.Name} 上空 {GameDataQueryService.FormatDistance(alt)}";
         return new ObjectivePoint(m, body, pos, where);
+    }
+
+    // 宇宙の目標の書き方: いちばん近い場所 (その時刻の自転を入れた位置) の中の距離 (InsideRange) 以内なら「RAB-TUNG 付近」、
+    // それより遠ければ「宇宙（RAB-TUNG から 1.2 Gm）」、場所が無ければ「宇宙」
+    private static string SpaceObjectiveWhere(ShopTree tree, ShopTreeNode system, (double X, double Y, double Z) pos, double unix)
+    {
+        var places = PlacesOf(tree, system).ToList();
+        var thetas = ThetasAt(places, unix);
+        var near = places.Select(p => (Node: p, Distance: Dist(pos, PlacePosition(p, thetas)))).OrderBy(x => x.Distance).FirstOrDefault();
+        if (near.Node == null) return "宇宙";
+        return near.Distance <= InsideRange(near.Node) ? $"{near.Node.Name} 付近" : $"宇宙（{near.Node.Name} から {GameDataQueryService.FormatDistance(near.Distance)}）";
     }
 
     // 目標の書き方で「地表付近」と言う高さ (メートル)
