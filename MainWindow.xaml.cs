@@ -169,6 +169,15 @@ public partial class MainWindow : Window
         _gameLogVoice.Load(config);
         grpGameLogSound.DataContext = _gameLogVoice;
         chkGameLogVoiceVox.IsChecked = config.GameLogVoiceVoxEnabled;
+        // 読み上げる文を外のアプリに渡す設定 (出力先・呼び方・exe・API)
+        SelectComboByTag(cmbGameLogVoiceOutput, GameLogVoiceExternal.NormalizeOutput(config.GameLogVoiceOutput));
+        SelectComboByTag(cmbGameLogVoiceExternalKind,
+            string.Equals(config.GameLogVoiceExternalKind, GameLogVoiceExternal.KindApi, StringComparison.OrdinalIgnoreCase) ? GameLogVoiceExternal.KindApi : GameLogVoiceExternal.KindExe);
+        txtGameLogVoiceExePath.Text = config.GameLogVoiceExternalExePath;
+        txtGameLogVoiceExeArgs.Text = config.GameLogVoiceExternalExeArgs;
+        txtGameLogVoiceApiUrl.Text = config.GameLogVoiceExternalUrl;
+        SelectComboByTag(cmbGameLogVoiceApiMethod, string.Equals(config.GameLogVoiceExternalMethod?.Trim(), "POST", StringComparison.OrdinalIgnoreCase) ? "POST" : "GET");
+        txtGameLogVoiceApiBody.Text = config.GameLogVoiceExternalBody;
         txtArmisticeSoundPath.Text = config.ArmisticeSoundPath;
         txtArrivalSoundPath.Text = config.ArrivalSoundPath;
         var mfs = config.MissionDetailFontSize;
@@ -1859,6 +1868,7 @@ public partial class MainWindow : Window
         App.Config.GameLogVoiceVoxEnabled = chkGameLogVoiceVox.IsChecked == true;
         _gameLogVoice.Save(App.Config);
         GameLogVoiceVox.ClearCache();
+        SaveGameLogVoiceExternal(App.Config);
         App.Config.ArmisticeSoundPath = txtArmisticeSoundPath.Text.Trim();
         App.Config.ArrivalSoundPath = txtArrivalSoundPath.Text.Trim();
         App.Config.SyncFolder = txtSyncFolder.Text.Trim();
@@ -1931,6 +1941,13 @@ public partial class MainWindow : Window
                 GameLogVoiceItems = App.Config.GameLogVoiceItems.Select(i => i.SpeakerId is int s
                     ? (object)new { i.Kind, i.Enabled, i.Text, SpeakerId = s }
                     : new { i.Kind, i.Enabled, i.Text }).ToList(),
+                App.Config.GameLogVoiceOutput,
+                App.Config.GameLogVoiceExternalKind,
+                App.Config.GameLogVoiceExternalExePath,
+                App.Config.GameLogVoiceExternalExeArgs,
+                App.Config.GameLogVoiceExternalUrl,
+                App.Config.GameLogVoiceExternalMethod,
+                App.Config.GameLogVoiceExternalBody,
                 App.Config.TabOrder,
                 App.Config.LastTab,
                 App.Config.MapView,
@@ -2019,6 +2036,51 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             MessageBox.Show($"VOICEVOX で読み上げられませんでした: {GameLogVoiceVox.Reason(ex)}\n(URL: {url}、話者 ID {speaker})", "試聴");
+        }
+    }
+
+    // 読み上げる文を外のアプリに渡す設定の欄 → 設定 (出力先・呼び方・exe のパスと引数・API の URL・方法・本文)。
+    // exe のパスと URL は前後の空白を除く。引数と本文のひな形はそのまま (空白も渡す値の一部のため)
+    private void SaveGameLogVoiceExternal(AppConfig config)
+    {
+        config.GameLogVoiceOutput = GameLogVoiceExternal.NormalizeOutput((cmbGameLogVoiceOutput.SelectedItem as ComboBoxItem)?.Tag as string);
+        config.GameLogVoiceExternalKind = (cmbGameLogVoiceExternalKind.SelectedItem as ComboBoxItem)?.Tag as string ?? GameLogVoiceExternal.KindExe;
+        config.GameLogVoiceExternalExePath = txtGameLogVoiceExePath.Text.Trim();
+        config.GameLogVoiceExternalExeArgs = txtGameLogVoiceExeArgs.Text;
+        config.GameLogVoiceExternalUrl = txtGameLogVoiceApiUrl.Text.Trim();
+        config.GameLogVoiceExternalMethod = (cmbGameLogVoiceApiMethod.SelectedItem as ComboBoxItem)?.Tag as string ?? "GET";
+        config.GameLogVoiceExternalBody = txtGameLogVoiceApiBody.Text;
+    }
+
+    // ［試す］: 今の欄 (保存前) の設定で外のアプリを 1 回呼ぶ ({talk} = 読み上げのテストです、{scene} = テスト、{speaker} = 既定の声の話者 ID)。
+    // 出力先の選択にかかわらず呼ぶ。結果はメッセージボックス
+    private async void GameLogVoiceExternalTest_Click(object sender, RoutedEventArgs e)
+    {
+        var temp = new AppConfig();
+        SaveGameLogVoiceExternal(temp);
+        var s = GameLogVoiceExternalSettings.From(temp);
+        var speaker = int.TryParse(_gameLogVoice.DefaultSpeakerKey, out var d) ? d : 16;
+        var target = s.IsApi ? $"URL: {s.Url}" : $"exe: {s.ExePath}";
+        try
+        {
+            await GameLogVoiceExternal.CallAsync(s, "読み上げのテストです", "テスト", speaker, CancellationToken.None);
+            MessageBox.Show(s.IsApi ? $"外のアプリを呼びました。\n({target})" : $"外のアプリを起動しました。\n({target})", "試す");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"外のアプリを呼べませんでした: {GameLogVoiceExternal.Reason(ex)}\n({target})", "試す");
+        }
+    }
+
+    private static void SelectComboByTag(ComboBox combo, string tag)
+    {
+        for (int i = 0; i < combo.Items.Count; i++)
+        {
+            if (combo.Items[i] is ComboBoxItem ci && ci.Tag as string == tag)
+            {
+                combo.SelectedIndex = i;
+                return;
+            }
         }
     }
 

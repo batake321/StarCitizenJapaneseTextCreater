@@ -326,6 +326,141 @@ public static class GameLogVoiceVox
     private sealed class VoiceVoxException(string message) : Exception(message);
 }
 
+// 読み上げる文を外のアプリ (exe か API) に渡す設定 1 回分 (読み上げの順番待ちから取り出したときに App.Config から作る。設定タブの［試す］は保存前の欄から作る)。
+// Kind = GameLogVoiceExternal.KindExe / KindApi、Method = "GET" / "POST"
+public sealed record GameLogVoiceExternalSettings(string Kind, string ExePath, string ExeArgs, string Url, string Method, string Body)
+{
+    public static GameLogVoiceExternalSettings From(AppConfig c) =>
+        new(c.GameLogVoiceExternalKind ?? "", c.GameLogVoiceExternalExePath ?? "", c.GameLogVoiceExternalExeArgs ?? "",
+            c.GameLogVoiceExternalUrl ?? "", c.GameLogVoiceExternalMethod ?? "", c.GameLogVoiceExternalBody ?? "");
+
+    public bool IsApi => string.Equals(Kind, GameLogVoiceExternal.KindApi, StringComparison.OrdinalIgnoreCase);
+    public bool IsPost => string.Equals(Method?.Trim(), "POST", StringComparison.OrdinalIgnoreCase);
+    // exe のパスか URL が空 (呼べない)
+    public bool IsEmpty => IsApi ? string.IsNullOrWhiteSpace(Url) : string.IsNullOrWhiteSpace(ExePath);
+}
+
+// 読み上げる文を外のアプリに渡す。{talk} = 読み上げる文、{scene} = 場面の表示名、{speaker} = その場面の VOICEVOX の話者 ID。
+// exe: 引数のひな形に値を入れて Process.Start (終わるのを待たない)。値は Windows の引数の規則 (CommandLineToArgvW) で打ち消す (EscapeArg)。
+// API: URL のひな形に値を Uri.EscapeDataString で入れ、GET か POST (本文のひな形に値を JSON の文字列の中身として入れる。Content-Type は application/json; charset=utf-8) で呼ぶ。
+// 5 秒 (GameLogVoiceVox.Timeout と同じ) で打ち切る。応答の本文は使わない。2xx 以外は失敗
+public static class GameLogVoiceExternal
+{
+    // 出力先 (Config.GameLogVoiceOutput)。これら以外の値は VOICEVOX だけとして扱う
+    public const string OutputVoiceVox = "VoiceVox";
+    public const string OutputExternal = "External";
+    public const string OutputBoth = "Both";
+    // 外のアプリの呼び方 (Config.GameLogVoiceExternalKind)。KindApi 以外は exe として扱う
+    public const string KindExe = "Exe";
+    public const string KindApi = "Api";
+
+    public static readonly TimeSpan Timeout = GameLogVoiceVox.Timeout;
+    private static readonly HttpClient Http = new() { Timeout = System.Threading.Timeout.InfiniteTimeSpan };
+    private static readonly Regex Field = new(@"\{(talk|scene|speaker)\}", RegexOptions.Compiled);
+
+    // 出力先を 3 つのどれかにそろえる (空・知らない値は VOICEVOX だけ)
+    public static string NormalizeOutput(string? output) =>
+        string.Equals(output, OutputExternal, StringComparison.OrdinalIgnoreCase) ? OutputExternal
+        : string.Equals(output, OutputBoth, StringComparison.OrdinalIgnoreCase) ? OutputBoth
+        : OutputVoiceVox;
+
+    // ひな形の {talk} {scene} {speaker} を 1 回で置き換える (入れた値の中の {…} はもう置き換えない)。
+    // escape(値, 置き換えた欄の直後の文字 (無ければ null)) で値を打ち消す
+    private static string Fill(string template, string talk, string scene, int speaker, Func<string, char?, string> escape) =>
+        Field.Replace(template, m =>
+        {
+            var value = m.Groups[1].Value switch
+            {
+                "talk" => talk,
+                "scene" => scene,
+                _ => speaker.ToString(CultureInfo.InvariantCulture),
+            };
+            var end = m.Index + m.Length;
+            return escape(value, end < template.Length ? template[end] : null);
+        });
+
+    public static string FillArgs(string template, string talk, string scene, int speaker) =>
+        Fill(template, talk, scene, speaker, EscapeArg);
+    public static string FillUrl(string template, string talk, string scene, int speaker) =>
+        Fill(template, talk, scene, speaker, (v, _) => Uri.EscapeDataString(v));
+    public static string FillJson(string template, string talk, string scene, int speaker) =>
+        Fill(template, talk, scene, speaker, (v, _) => EscapeJson(v));
+
+    // exe の引数の値の打ち消し (CommandLineToArgvW の規則): " は \" にし、" の直前の \ の並びは数を倍にする。
+    // ひな形で値の直後が " (例 "{talk}") のときは、値の末尾の \ の並びも倍にする (閉じの " を打ち消さないため)
+    public static string EscapeArg(string value, char? next)
+    {
+        var sb = new StringBuilder(value.Length + 8);
+        var backslashes = 0;
+        foreach (var ch in value)
+        {
+            if (ch == '\\') { backslashes++; continue; }
+            if (ch == '"')
+            {
+                sb.Append('\\', backslashes * 2 + 1);
+                sb.Append('"');
+            }
+            else
+            {
+                sb.Append('\\', backslashes);
+                sb.Append(ch);
+            }
+            backslashes = 0;
+        }
+        sb.Append('\\', next == '"' ? backslashes * 2 : backslashes);
+        return sb.ToString();
+    }
+
+    // JSON の文字列の中身としての打ち消し (前後の引用符は付けない)
+    public static string EscapeJson(string value)
+    {
+        var json = JsonSerializer.Serialize(value, new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+        return json[1..^1];
+    }
+
+    // 外のアプリを 1 回呼ぶ。失敗は例外 (理由は Reason で文にする)。exe は起動まで、API は応答 (2xx か) まで待つ
+    public static async Task CallAsync(GameLogVoiceExternalSettings s, string talk, string scene, int speaker, CancellationToken ct)
+    {
+        if (s.IsEmpty) throw new ExternalException(EmptyMessage);
+        if (!s.IsApi)
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = s.ExePath.Trim(),
+                Arguments = FillArgs(s.ExeArgs, talk, scene, speaker),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            using var p = System.Diagnostics.Process.Start(psi);
+            return;
+        }
+        var url = FillUrl(s.Url.Trim(), talk, scene, speaker);
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            throw new ExternalException($"URL の形が違います (http:// か https:// で始めてください): {url}");
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(Timeout);
+        // 応答の本文は使わないので、ヘッダーまで受けたら判定する
+        using var req = new HttpRequestMessage(s.IsPost ? HttpMethod.Post : HttpMethod.Get, uri);
+        if (s.IsPost) req.Content = new StringContent(FillJson(s.Body, talk, scene, speaker), Encoding.UTF8, "application/json");
+        using var res = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+        if (!res.IsSuccessStatusCode) throw new ExternalException($"HTTP {(int)res.StatusCode} が返りました");
+    }
+
+    public const string EmptyMessage = "外のアプリの設定が空です";
+
+    // 失敗の理由の文 (起動できない・接続できない・HTTP エラー・タイムアウト)
+    public static string Reason(Exception ex) => ex switch
+    {
+        ExternalException e => e.Message,
+        OperationCanceledException => $"{Timeout.TotalSeconds:0} 秒以内に応答がありませんでした",
+        HttpRequestException h => $"接続できません ({h.Message})",
+        System.ComponentModel.Win32Exception w => $"起動できません ({w.Message})",
+        _ => ex.Message,
+    };
+
+    private sealed class ExternalException(string message) : Exception(message);
+}
+
 // 読み上げの順番待ち。裏のスレッドで 1 つずつ VOICEVOX の wav を作って最後まで鳴らす (前の声を途中で切らない)。
 // 待ちが MaxWaiting を超えたら古いものから捨てる。VOICEVOX で作れなかったときは、FallbackPath (休戦ゾーン進入・到着の音のファイル) があればそれを鳴らす。
 // 失敗の理由は Log に渡す (直前と同じ理由なら渡さない)
@@ -381,8 +516,19 @@ public static class GameLogVoicePlayer
         }
     }
 
+    // 外のアプリ (GameLogVoiceExternal) の失敗の知らせのうち直前に出したもの (同じなら出さない。呼べたら消す)
+    private static string? _lastExternalError;
+
     private static void Play(Request r)
     {
+        // 出力先が「外のアプリだけ」「両方」なら、VOICEVOX で鳴らす前に外のアプリを呼ぶ (API は応答を待つ)。
+        // 「外のアプリだけ」は VOICEVOX も音のファイルも鳴らさない。「両方」は外が失敗しても VOICEVOX で鳴らす
+        var output = GameLogVoiceExternal.NormalizeOutput(App.Config.GameLogVoiceOutput);
+        if (output != GameLogVoiceExternal.OutputVoiceVox)
+        {
+            CallExternal(r, output == GameLogVoiceExternal.OutputExternal);
+            if (output == GameLogVoiceExternal.OutputExternal) return;
+        }
         byte[]? wav = null;
         string? error = null;
         if (r.Text.Length > 0)
@@ -424,6 +570,39 @@ public static class GameLogVoicePlayer
             player.PlaySync();
         }
         catch (Exception ex) { Report($"[ゲームログ] 音を鳴らせませんでした: {path} ({ex.Message})"); }
+    }
+
+    // 外のアプリを呼ぶ (失敗は記録だけ。成功は記録しない)。externalOnly = 出力先が「外のアプリだけ」(失敗したら何も読まないので「読まない」の記録にする)。
+    // 設定が空 (exe のパス・URL が空) なら呼ばず、「[読み上げ] 外のアプリの設定が空です」を直前と同じでなければ出す
+    private static void CallExternal(Request r, bool externalOnly)
+    {
+        var s = GameLogVoiceExternalSettings.From(App.Config);
+        if (s.IsEmpty)
+        {
+            if (_lastExternalError != GameLogVoiceExternal.EmptyMessage)
+            {
+                _lastExternalError = GameLogVoiceExternal.EmptyMessage;
+                Report($"[読み上げ] {GameLogVoiceExternal.EmptyMessage}");
+            }
+            return;
+        }
+        string? error = null;
+        try { GameLogVoiceExternal.CallAsync(s, r.Text, r.Scene, r.Speaker, CancellationToken.None).GetAwaiter().GetResult(); }
+        catch (Exception ex) { error = GameLogVoiceExternal.Reason(ex); }
+        if (error == null)
+        {
+            _lastExternalError = null;
+            return;
+        }
+        // 読み上げの記録: 呼べなかったら毎回 1 行 (下の失敗の知らせは直前と同じ理由なら出さないので別に出す)
+        Report(externalOnly
+            ? $"[読み上げ] 読まない（{r.Scene}）: 外のアプリを呼べませんでした: {error}"
+            : $"[読み上げ] 外のアプリを呼べませんでした（{r.Scene}）: {error}");
+        if (error != _lastExternalError)
+        {
+            _lastExternalError = error;
+            Report($"[ゲームログ] 外のアプリを呼べませんでした: {error}");
+        }
     }
 
     private static void Report(string message)

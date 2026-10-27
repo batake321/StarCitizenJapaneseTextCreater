@@ -59,6 +59,16 @@ public class AppConfig
     public bool GameLogVoiceVoxEnabled { get; set; } = false;
     public int GameLogVoiceVoxSpeakerId { get; set; } = 16;
     public List<GameLogVoiceItem> GameLogVoiceItems { get; set; } = new();
+    // ［ゲームログ］の読み上げの出力先 (GameLogVoiceExternal.OutputVoiceVox = VOICEVOX だけ / OutputExternal = 外のアプリだけ / OutputBoth = 両方)。
+    // 外のアプリの呼び方 (KindExe / KindApi)、exe のパスと引数のひな形、API の URL のひな形・方法 (GET / POST)・POST の本文のひな形。
+    // ひな形の {talk} {scene} {speaker} を、読み上げる文・場面の表示名・話者 ID に置き換える (GameLogVoiceExternal)。読み上げは上の GameLogVoiceVoxEnabled が入っているときだけ
+    public string GameLogVoiceOutput { get; set; } = GameLogVoiceExternal.OutputVoiceVox;
+    public string GameLogVoiceExternalKind { get; set; } = GameLogVoiceExternal.KindExe;
+    public string GameLogVoiceExternalExePath { get; set; } = "";
+    public string GameLogVoiceExternalExeArgs { get; set; } = "";
+    public string GameLogVoiceExternalUrl { get; set; } = "";
+    public string GameLogVoiceExternalMethod { get; set; } = "GET";
+    public string GameLogVoiceExternalBody { get; set; } = "";
 
     // 最上位のタブの並び (TabItem の x:Name の順。無い名は無視、載っていないタブは末尾) と、最後に見ていたタブ (x:Name。無ければ先頭)
     public List<string> TabOrder { get; set; } = new();
