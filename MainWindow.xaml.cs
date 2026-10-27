@@ -3633,6 +3633,10 @@ public partial class MainWindow : Window
 
         _webServer?.Dispose();
         _webServer = new ChatWebServer();
+        // データ API の交易・所持船は、メモリに持っている TradeService を読む
+        _webServer.SetTradeService(_tradeService);
+        // データ API の交易ルートの商品名の表示 (CommodityDisplayName) は画面と同じ CommodityLabel で付ける (覚えを UI のスレッドで持つので UI のスレッドで呼ぶ)
+        _webServer.SetCommodityLabeler(names => Dispatcher.Invoke(() => names.Select(CommodityLabel).ToList()));
 
         _webServer.SetMessageHandler(async (text, selection) =>
         {
@@ -6603,7 +6607,7 @@ public partial class MainWindow : Window
     // 裏で work を行う (ctx にその読み込みの DB を記録する)。使用中なら onBusy (使用中の待ちの文。使用中の例外が出た接続の DB の名前入り) を
     // 出して間を置き、読み直す。current() が偽になった (新しい読み込みに替わった)・token でやめた・UI の口が閉じられた (StaleEquipException) なら null。
     // 使用中でない失敗は投げる
-    private static async Task<T?> RunEquipBgAsync<T>(Func<T> work, SqliteReadContext ctx, Func<bool> current, Action<string> onBusy, CancellationToken token) where T : class
+    internal static async Task<T?> RunEquipBgAsync<T>(Func<T> work, SqliteReadContext ctx, Func<bool> current, Action<string> onBusy, CancellationToken token) where T : class
     {
         while (true)
         {
@@ -7878,7 +7882,7 @@ public partial class MainWindow : Window
     // 受け付ける種類が分かるときはそれでも絞る)。
     // shipRecordName は船の ships.record_name。
     // 先頭は「(デフォルトに戻す)」。裏のスレッドで呼ぶ (mine は所持コンポーネント、equip は裏の口)
-    private static LoadoutRow MakeLoadoutRow(ShipPortLoadout p, string shipRecordName, List<MyComponent> mine, EquipmentService equip)
+    internal static LoadoutRow MakeLoadoutRow(ShipPortLoadout p, string shipRecordName, List<MyComponent> mine, EquipmentService equip)
     {
         var row = new LoadoutRow
         {
@@ -8582,7 +8586,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private static double ParseSuffixedNumber(string input)
+    internal static double ParseSuffixedNumber(string input)
     {
         if (string.IsNullOrWhiteSpace(input)) return 0;
         input = input.Trim().Replace(",", "").Replace("_", "");

@@ -51,6 +51,7 @@
       <div class="grp">AI チャット</div>
       <a href="#chat">21. AI チャット</a>
       <a href="#webchat">22. Web チャット・スマホ</a>
+      <a href="#dataapi" class="sub">データ API</a>
       <a href="#knowledge">23. ナレッジ（記憶）</a>
 
       <div class="grp">その他</div>
@@ -1348,6 +1349,68 @@
       <li>画面右上の歯車アイコンから話者（キャラクター）を変えられます。アプリの設定タブの <b>VoiceVox 話者ID</b> でも指定できます。</li>
       <li>読み上げの速さは、アプリの設定タブの <b>VoiceVox 速度</b>（0.5〜2.0 倍、既定 1.0 倍）で決めます。<span class="btn">設定を保存</span> を押したあと、ブラウザでページを読み込み直すと反映されます。</li>
     </ul>
+
+    <h3 id="dataapi">データ API（読み取り専用）</h3>
+
+    <p>Web サーバーを起動している間は、詳細タブ・交易・契約などのデータを <b>JSON か HTML</b> で読み出せます。ほかのツールやスクリプトから使うためのもので、<b>すべて GET の読み取り専用</b>です（DB には書き込みません）。データは画面と同じ読み方で出します。</p>
+
+    <ul>
+      <li><b>ポート:</b> Web チャットと同じです。<code>http://localhost:8099/api/…</code>、HTTPS なら <code>https://localhost:8100/api/…</code>（LAN の他の機械からは <code>192.168.x.x</code>）。</li>
+      <li><b>形式:</b> <code>format=json</code>（既定）か <code>format=html</code>。それ以外は 400 になります。
+        <ul>
+          <li>JSON の<b>一覧</b>は <code>{ "total": 全体の件数, "count": 返した件数, "items": [ … ] }</code> です。<code>total</code> は <code>limit</code>・<code>offset</code> を通す前の件数、<code>count</code> は返した件数です。</li>
+          <li>JSON の<b>詳細</b>は <code>{ "record", "name", "text" }</code> です。項目はアプリの中のデータの項目名のままです。</li>
+          <li>HTML の一覧は表、詳細は詳細タブと同じ見た目のページです。詳細の中のリンクは <code>/api/detail?record=…&amp;format=html</code> に移ります。</li>
+        </ul>
+      </li>
+      <li><b>件数:</b> 一覧には <code>limit</code>（最大件数。1 以上の整数）と <code>offset</code>（飛ばす件数。0 以上の整数）を付けられます。付けなければ全件です。<code>/api/search</code> の <code>limit</code> だけは 1〜1000 です。</li>
+      <li><b>生の JSON:</b> 契約の一覧の <code>RawJson</code>（ゲームデータの生の JSON。とても大きい）は、既定では出しません。<code>raw=1</code> を付けたときだけ出します。</li>
+      <li><b>エラー</b>は形式にかかわらず <code>{ "error": "…" }</code> で返します。引数の誤りは 400、個人のデータをこの PC 以外から読もうとしたときは 403、見つからないとき・<code>/api/</code> で始まる知らないパスは 404、GET 以外は 405、データがまだ無いときは 503、アプリの中の失敗は 500（<code>"内部エラー"</code>。中身はアプリのログ <code>app_log.txt</code> に残します）。</li>
+    </ul>
+
+    <div class="note warn">
+      <p><strong>個人のデータはこの PC からだけ。</strong>パスが <code>/api/my/</code> で始まるもの（所持船・所持品・Hangar・ゲームログなど）は、要求元がこの PC（ループバック）で、しかも <code>Host</code> ヘッダーのホスト名が <code>localhost</code>・<code>127.0.0.1</code>・<code>[::1]</code> のどれか（ポートは問わない）のときだけ返します。それ以外は 403 になります。個人のデータの応答には CORS のヘッダーを付けません。</p>
+      <p><strong>ゲームのデータのルートに混ざる個人のデータも同じ条件です。</strong><code>/api/blueprints</code> の所持（<code>Owned</code>）・在庫（<code>StockText</code>・<code>stockText</code>）・手持ち（<code>haves</code>）、<code>/api/detail</code> と <code>/api/missions/detail</code> の【ブループリント】の節の「在庫」「所持」の行と「手持ち」の欄は、上と同じ条件（この PC から、<code>Host</code> が <code>localhost</code>・<code>127.0.0.1</code>・<code>[::1]</code>）のときだけ画面と同じに出し、そのときの応答には CORS のヘッダーを付けません。条件に合わない要求（LAN の他の機械から・<code>Host</code> が違う）には、個人のデータを出さずに CORS のヘッダーを付けて返します。ほかのゲームのデータのルートは、いつも CORS のヘッダーを付けます。</p>
+    </div>
+
+    <table>
+      <thead><tr><th>パス</th><th>中身</th><th>応答の形</th><th>主な引数</th></tr></thead>
+      <tbody>
+        <tr><td><code>/api</code></td><td>API の一覧</td><td>一覧（<code>path</code>・<code>description</code>・<code>parameters</code>・<code>personal</code>）と <code>formats</code></td><td></td></tr>
+        <tr><td><code>/api/search</code></td><td>詳細タブの検索（星系・場所・お店・資源・品目）</td><td>一覧（<code>total</code> は見つかった候補の数）</td><td><code>q</code> 名前、<code>limit</code> 品目の候補の最大件数（1〜1000。既定 40）</td></tr>
+        <tr><td><code>/api/detail</code></td><td>詳細タブの詳細（品目・資源・お店・場所・星系）</td><td>詳細</td><td><code>record</code>（必須）</td></tr>
+        <tr><td><code>/api/ships</code> <code>/api/ship-weapons</code> <code>/api/ship-gear</code></td><td>詳細タブの分類「船舶」「船舶武器」「船舶装備」</td><td>一覧</td><td><code>kind</code> 種類、<code>size</code> サイズ（<code>3</code> か <code>S3</code>）、<code>name</code> 名前の一部</td></tr>
+        <tr><td><code>/api/personal-weapons</code> <code>/api/personal-gear</code> <code>/api/ores</code></td><td>詳細タブの分類「個人武器」「個人装備」「鉱石」</td><td>一覧</td><td><code>kind</code>、<code>name</code></td></tr>
+        <tr><td><code>/api/shops</code> <code>/api/stations</code> <code>/api/systems</code></td><td>詳細タブの分類「お店」「ステーション」「星系」</td><td>一覧</td><td><code>kind</code>、<code>name</code></td></tr>
+        <tr><td><code>/api/trade/commodities</code> <code>/api/trade/terminals</code></td><td>交易のコモディティ・端末</td><td>一覧</td><td></td></tr>
+        <tr><td><code>/api/trade/prices</code></td><td>端末で買える物・売れる物</td><td><code>{ "terminal", "buy": 一覧, "sell": 一覧 }</code>（<code>limit</code>・<code>offset</code> はそれぞれに）</td><td><code>terminal</code> 端末名（必須）</td></tr>
+        <tr><td><code>/api/trade/routes</code></td><td>交易ルートの検索</td><td>一覧（<code>CommodityDisplayName</code> は画面と同じ「日本語 (英語)」）</td><td><code>budget</code> 予算（画面と同じ書き方: <code>1000000</code>・<code>1M</code>・<code>500k</code>・<code>3.5m</code>）・<code>scu</code> 積載量（必須）、<code>buySystem</code> <code>sellSystem</code>（既定 全て）、<code>excludeOutposts</code> <code>loadingDockOnly</code> <code>excludeLowStock</code>（true/false）、<code>commodities</code>（カンマ区切り）、<code>top</code>（既定 20）</td></tr>
+        <tr><td><code>/api/missions/categories</code></td><td>契約の分類</td><td>一覧</td><td></td></tr>
+        <tr><td><code>/api/missions</code></td><td>契約の一覧</td><td>一覧（<code>RawJson</code> は <code>raw=1</code> のときだけ）</td><td><code>category</code> か <code>q</code> のどちらか一方（<code>q</code> が空なら全部）、<code>raw</code></td></tr>
+        <tr><td><code>/api/missions/detail</code></td><td>契約の詳細と納品物（Wikelo の契約）</td><td>詳細と <code>deliverables</code>（<code>item</code>・<code>sources</code> 入手場所の文）</td><td><code>record</code>（必須）</td></tr>
+        <tr><td><code>/api/blueprints</code></td><td>ブループリント</td><td><code>record</code> 無し: 一覧（BP タブの表の行）。<code>record</code> 付き: <code>{ "record", "total", "count", "items": [{ "item", "stockText", "haves" }], "text" }</code>（<code>text</code> は詳細タブの【ブループリント】の節）。品目が無ければ 404</td><td><code>record</code> できる品の record 名（省略可）</td></tr>
+        <tr><td><code>/api/starmap</code></td><td>星図の星系・場所</td><td>一覧</td><td></td></tr>
+        <tr><td><code>/api/my/ships</code></td><td>所持船</td><td>一覧</td><td></td></tr>
+        <tr><td><code>/api/my/components</code> <code>/api/my/gear</code></td><td>所持コンポーネント・所持している個人装備</td><td>一覧（同じ品の行は画面と同じく 1 行にまとめた形）</td><td></td></tr>
+        <tr><td><code>/api/my/blueprints</code></td><td>所持している BP</td><td>一覧（<code>Uuid</code> と BP の名前 <code>Name</code>）</td><td></td></tr>
+        <tr><td><code>/api/my/hangar/pledges</code> <code>/api/my/hangar/ships</code> <code>/api/my/hangar/ccus</code></td><td>Hangar の pledge・保有船・CCU</td><td>一覧</td><td></td></tr>
+        <tr><td><code>/api/my/loadout</code></td><td>保有船の今の装備と付け替えの候補（装備タブの表と同じ）</td><td>一覧（行に <code>Candidates</code> 候補・<code>SelectedChoice</code> 今の選択）と <code>ship</code>・<code>name</code>・<code>record</code></td><td><code>ship</code> 保有船の InstanceKey（<code>/api/my/hangar/ships</code> の値）か <code>my|所持船の Id</code>（必須）</td></tr>
+        <tr><td><code>/api/my/gamelog</code></td><td>ゲームログの残してある行</td><td>一覧と <code>broken</code>（読めなかった行の数）</td><td></td></tr>
+        <tr><td><code>/api/my/mining</code> <code>/api/my/ore-stock</code> <code>/api/my/commodity-trades</code></td><td>採掘の記録・鉱石の在庫・商品売買の記録</td><td>一覧</td><td></td></tr>
+      </tbody>
+    </table>
+
+    <p>例:</p>
+    <pre><code>http://localhost:8099/api/search?q=Arrow
+http://localhost:8099/api/detail?record=EntityClassDefinition.xxx&amp;format=html
+http://localhost:8099/api/ship-weapons?size=S3&amp;limit=20
+http://localhost:8099/api/trade/routes?budget=1M&amp;scu=96&amp;buySystem=Stanton
+http://localhost:8099/api/missions?q=&amp;limit=10&amp;raw=1
+http://localhost:8099/api/my/hangar/ships</code></pre>
+
+    <div class="note tip">
+      <p><strong>ヒント:</strong> 交易の API は、交易タブで価格を読み込んだあとに使えます（まだなら 503）。種類（<code>kind</code>）の値は詳細タブの「種類」の欄と同じ文字です（個人装備のアーマー・服は「アーマー (ヘルメット)」のように部位まで）。<code>kind</code>・<code>name</code>・<code>size</code> などの絞り込みは前後の空白を除き、空なら絞り込みません。</p>
+    </div>
 
     <!-- ============================================================ -->
     <h2 id="knowledge"><span class="num">23</span>ナレッジ（記憶）— AI に覚えさせる</h2>

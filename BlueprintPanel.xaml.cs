@@ -82,7 +82,7 @@ public partial class BlueprintPanel : UserControl
 
     // === 読み込み ===
 
-    private sealed class LoadResult
+    internal sealed class LoadResult
     {
         public List<BlueprintItem> Items = new();
         public List<ResourceChoice> Resources = new();
@@ -130,8 +130,9 @@ public partial class BlueprintPanel : UserControl
         ApplyFilter();
     }
 
-    // DB を読んで表の行を作る (裏のスレッド)。outputRecord を渡すと、できる品がその record (大文字小文字無視) の BP だけを読む (［詳細］の「ブループリント」の節)
-    private static LoadResult LoadData(string workDir, string? outputRecord = null)
+    // DB を読んで表の行を作る (裏のスレッド)。outputRecord を渡すと、できる品がその record (大文字小文字無視) の BP だけを読む (［詳細］の「ブループリント」の節)。
+    // includePersonal が false なら、個人のデータ (在庫 ore_stock・所持 my_blueprints) を読まない (在庫・所持は読めなかったときと同じく空・null。データ API の LAN からの要求)
+    internal static LoadResult LoadData(string workDir, string? outputRecord = null, bool includePersonal = true)
     {
         var res = new LoadResult();
         var gdPath = Path.Combine(workDir, "gamedata_cache.db");
@@ -399,7 +400,7 @@ public partial class BlueprintPanel : UserControl
 
         // 在庫 (ore_stock) との照合。読み込みが例外になったときは在庫なし (照合しない・在庫の欄は空欄) として続け、例外はログに残す
         List<OreStock>? stock;
-        try { stock = OreService.LoadStockReadOnly(tcPath); }
+        try { stock = includePersonal ? OreService.LoadStockReadOnly(tcPath) : null; }
         catch (Exception ex)
         {
             stock = null;
@@ -412,7 +413,7 @@ public partial class BlueprintPanel : UserControl
 
         // 所持 (trade_cache.db の my_blueprints)。trade_cache.db が無い・読めないときは不明 (null)。読めないときは例外をログに残す
         HashSet<string>? owned;
-        try { owned = HangarService.LoadMyBlueprintUuidsReadOnly(tcPath); }
+        try { owned = includePersonal ? HangarService.LoadMyBlueprintUuidsReadOnly(tcPath) : null; }
         catch (Exception ex)
         {
             owned = null;
@@ -463,7 +464,7 @@ public partial class BlueprintPanel : UserControl
     // === 在庫の照合 ===
 
     // 在庫の索引: SCU の行は資源 (原石は精錬後に寄せる) ごと、'個' の行は資源ごとに (品質, 量) を並べる
-    private sealed class StockIndex
+    internal sealed class StockIndex
     {
         public Dictionary<string, List<(int? Quality, double Quantity)>> Scu = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, List<(int? Quality, double Quantity)>> Piece = new(StringComparer.OrdinalIgnoreCase);
@@ -743,12 +744,12 @@ public partial class BlueprintPanel : UserControl
     }
 
     // ［詳細］の「ブループリント」の節: できる品が outputRecord の BP (表の行と同じ作り)・在庫の欄・枠ごとの手持ち量 (SlotHave。在庫を読めなければ Haves は null)。
-    // BP の表が無い・その品の BP が無ければ空
-    internal static List<(BlueprintItem Item, string StockText, List<double?>? Haves)> LoadForOutput(string workDir, string outputRecord)
+    // BP の表が無い・その品の BP が無ければ空。includePersonal が false なら在庫・所持を読まない (LoadData)
+    internal static List<(BlueprintItem Item, string StockText, List<double?>? Haves)> LoadForOutput(string workDir, string outputRecord, bool includePersonal = true)
     {
         var list = new List<(BlueprintItem Item, string StockText, List<double?>? Haves)>();
         if (string.IsNullOrWhiteSpace(outputRecord)) return list;
-        var res = LoadData(workDir, outputRecord.Trim());
+        var res = LoadData(workDir, outputRecord.Trim(), includePersonal);
         if (res.Items.Count == 0) return list;
         foreach (var it in res.Items)
             list.Add((it, it.StockText, res.StockReadable ? it.Slots.Select(s => SlotHave(s, res.Stock, res.ResourceUuidByRecord)).ToList() : null));

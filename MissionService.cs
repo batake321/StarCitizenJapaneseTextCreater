@@ -2265,7 +2265,8 @@ public class MissionService : IDisposable
     //       ブループリント (BlueprintDetail.ItemSectionText。材料・その BP を報酬に出す契約)・他の契約の報酬 (RewardMissionsByEntity)
     //   資源: 交易の購入場所 (trade_cache.db の trade_prices の is_current = 1 で price_buy > 0 の行。ターミナル / 星系 / 値段)
     //   どれも無ければ「入手場所のデータなし」
-    public string FormatDeliverableSources(DeliverableItem d)
+    //   includePersonal が false なら、ブループリントの節に個人のデータ (在庫・所持・手持ち) を出さない (データ API の LAN からの要求)
+    public string FormatDeliverableSources(DeliverableItem d, bool includePersonal = true)
     {
         var lines = new List<string>();
         lines.Add($"■ {d.Name} の入手場所");
@@ -2316,7 +2317,7 @@ public class MissionService : IDisposable
             if (d.Record.Length > 0)
             {
                 string bp;
-                try { bp = BlueprintDetail.ItemSectionText(_workDir, d.Record); }
+                try { bp = BlueprintDetail.ItemSectionText(_workDir, d.Record, includePersonal); }
                 catch (Exception ex) { bp = $"【ブループリント】\n  BP を読み込めなかった ({ex.Message})"; }
                 if (bp.Length > 0)
                 {

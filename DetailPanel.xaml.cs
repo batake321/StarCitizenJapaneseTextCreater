@@ -839,9 +839,50 @@ internal static class DetailHtml
     private static string LinkHtml(string encodedRecord, string displayMarkdown) =>
         $"<a href=\"{LinkScheme}{encodedRecord}\">{displayMarkdown}</a>";
 
-    // 「|」で始まる行 (元から Markdown の表) の中のリンクを <a> にする (リンクの外はそのまま)
-    private static string TableLineLinks(string line) =>
-        LinkRegex.Replace(line, m => LinkHtml(m.Groups[1].Value, Escape(m.Groups[2].Value)));
+    // 「|」で始まる行 (元から Markdown の表) の中のリンクを <a> にする。
+    // リンクの外の文字は、生の HTML として読まれないよう < > & を文字参照にする (TableHtmlText)。リンクの表示名は今までどおり Escape で打ち消す
+    private static string TableLineLinks(string line)
+    {
+        var sb = new StringBuilder(line.Length + 16);
+        int pos = 0;
+        foreach (Match m in LinkRegex.Matches(line))
+        {
+            if (m.Index > pos) sb.Append(TableHtmlText(line[pos..m.Index]));
+            sb.Append(LinkHtml(m.Groups[1].Value, Escape(m.Groups[2].Value)));
+            pos = m.Index + m.Length;
+        }
+        if (pos < line.Length) sb.Append(TableHtmlText(line[pos..]));
+        return sb.ToString();
+    }
+
+    // 表の行の (リンクの外の) 文字の < > & を文字参照 (&lt; &gt; &amp;) にする。Markdig を通しても HTML のタグ・文字参照にならず、文字のまま出る。
+    // 表を作る側が「\」で打ち消したもの (MdEscape の \< \>) はそのまま (前の「\」が奇数個なら打ち消し済み)。
+    // 全角空白の文字参照 &#12288; (ToMarkdown が入れるもの) はそのまま
+    private static string TableHtmlText(string s)
+    {
+        const string fullWidthSpace = "&#12288;";
+        var sb = new StringBuilder(s.Length + 8);
+        int backslashes = 0;
+        for (int i = 0; i < s.Length; i++)
+        {
+            var c = s[i];
+            var escaped = backslashes % 2 == 1;
+            backslashes = c == '\\' ? backslashes + 1 : 0;
+            if (escaped) { sb.Append(c); continue; }
+            switch (c)
+            {
+                case '<': sb.Append("&lt;"); break;
+                case '>': sb.Append("&gt;"); break;
+                case '&' when string.CompareOrdinal(s, i, fullWidthSpace, 0, fullWidthSpace.Length) == 0:
+                    sb.Append(fullWidthSpace);
+                    i += fullWidthSpace.Length - 1;
+                    break;
+                case '&': sb.Append("&amp;"); break;
+                default: sb.Append(c); break;
+            }
+        }
+        return sb.ToString();
+    }
 
     public static string FromDetailText(string text) => Page(Markdig.Markdown.ToHtml(ToMarkdown(text ?? ""), Pipeline));
 

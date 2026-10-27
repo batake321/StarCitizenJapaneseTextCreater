@@ -2366,9 +2366,11 @@ public class HangarService
                 && parts[1].Split(',').Any(x => x.Trim().Equals("GunTurret", StringComparison.OrdinalIgnoreCase));
         });
 
-    private List<ShipPortLoadout> BuildShipLoadout(string shipKey, List<ShipPortInfo> ports, EquipmentService equip, bool throwIfBusy = false)
+    // loadoutOverrides: ship_loadouts の上書き (port_name → item_record)。null なら今までどおり LoadLoadout で読む (データ API は読み取り専用で読んだものを渡す)
+    private List<ShipPortLoadout> BuildShipLoadout(string shipKey, List<ShipPortInfo> ports, EquipmentService equip, bool throwIfBusy = false,
+        Dictionary<string, string>? loadoutOverrides = null)
     {
-        var overrides = LoadLoadout(shipKey);
+        var overrides = loadoutOverrides ?? LoadLoadout(shipKey);
         var result = new List<ShipPortLoadout>();
         var portSeq = new Dictionary<string, int>(StringComparer.Ordinal);   // 同名ポートの出現回数 (PortKey の採番)
 
@@ -4036,6 +4038,451 @@ public class HangarService
 
         return result;
     }
+
+    // === 読み取り専用の読み出し (データ API 用) ===
+    // trade_cache.db を Mode=ReadOnly で開いて読むだけ。InitDb (DDL・ALTER・MigrateComponentPurchases・SqliteWal.EnsureOn) も、
+    // 重複の行のまとめ (MergeDuplicateMyComponents / MergeDuplicateMyGear) の書き込みも通らない。表が無ければ空、列が無い前の版の DB は
+    // その列を ALTER で足したときの既定値 (Migrate*Schema と同じ) として読む。読む SQL・行の作り方は同じ名前の既存の Load 系のメソッドと同じ。
+    // 船の名寄せ (ResolveShip) の覚え (Ship Matrix・ストア) も、読み取り専用で読んだもので先に埋めてから使う (EnsureShipCachesReadOnly)
+
+    // trade_cache.db を読み取り専用で開く。DB が無ければ null
+    private SqliteConnection? OpenReadOnlyOrNull()
+    {
+        if (_dbPath == null || !File.Exists(_dbPath)) return null;
+        var db = new TrackedSqliteConnection($"Data Source={_dbPath};Mode=ReadOnly;Pooling=False");
+        try { db.Open(); }
+        catch { db.Dispose(); throw; }
+        return db;
+    }
+
+    private static bool ReadOnlyTableExists(SqliteConnection db, string table)
+    {
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = @t";
+        cmd.Parameters.AddWithValue("@t", table);
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) > 0;
+    }
+
+    // EnsureShipCaches の読み取り専用版 (Ship Matrix を LoadShipMatrixReadOnly で読む)。埋めた後は EnsureShipCaches が DB を読みに行かない
+    private void EnsureShipCachesReadOnly()
+    {
+        if (_matrixCache == null || _matrixByName == null)
+        {
+            _matrixCache = LoadShipMatrixReadOnly();
+            var byName = new Dictionary<string, ShipMatrixEntry>(StringComparer.OrdinalIgnoreCase);
+            foreach (var e in _matrixCache)
+                if (!byName.ContainsKey(e.Name)) byName[e.Name] = e;   // 同名は先勝ち (ORDER BY name で決定的)
+            _matrixByName = byName;
+        }
+        _aliasCache ??= LoadAliases();
+    }
+
+    // ResolveShip の読み取り専用版
+    public ShipMatrixEntry? ResolveShipReadOnly(string hangarName)
+    {
+        EnsureShipCachesReadOnly();
+        return ResolveShip(hangarName);
+    }
+
+    // ResolveShipRecordName の読み取り専用版 (translations.db・gamedata_cache.db は元から読み取り専用で開く。船の名寄せの覚えを先に埋める)
+    public string? ResolveShipRecordNameReadOnly(string shipName, string? manufacturerName)
+    {
+        EnsureShipCachesReadOnly();
+        return ResolveShipRecordName(shipName, manufacturerName);
+    }
+
+    // LoadShipMatrix の読み取り専用版
+    private List<ShipMatrixEntry> LoadShipMatrixReadOnly()
+    {
+        var list = new List<ShipMatrixEntry>();
+        using var db = OpenReadOnlyOrNull();
+        if (db == null || !ReadOnlyTableExists(db, "ship_matrix")) return list;
+        var cargo = TableColumns(db, "ship_matrix").Contains("cargocapacity") ? "cargocapacity" : "NULL";
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = $"SELECT id, name, manufacturer_code, manufacturer_name, focus, type, size, production_status, production_note, {cargo} FROM ship_matrix ORDER BY name";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            list.Add(new ShipMatrixEntry
+            {
+                Id = r.IsDBNull(0) ? 0 : r.GetInt64(0),
+                Name = r.IsDBNull(1) ? "" : r.GetString(1),
+                ManufacturerCode = r.IsDBNull(2) ? "" : r.GetString(2),
+                ManufacturerName = r.IsDBNull(3) ? "" : r.GetString(3),
+                Focus = r.IsDBNull(4) ? "" : r.GetString(4),
+                Type = r.IsDBNull(5) ? "" : r.GetString(5),
+                Size = r.IsDBNull(6) ? "" : r.GetString(6),
+                ProductionStatus = r.IsDBNull(7) ? "" : r.GetString(7),
+                ProductionNote = r.IsDBNull(8) ? "" : r.GetString(8),
+                CargoCapacity = r.IsDBNull(9) ? null : r.GetDouble(9),
+            });
+        }
+        return list;
+    }
+
+    // LoadStoreSkus の読み取り専用版
+    private List<StoreSku> LoadStoreSkusReadOnly()
+    {
+        var list = new List<StoreSku>();
+        using var db = OpenReadOnlyOrNull();
+        if (db == null || !ReadOnlyTableExists(db, "store_skus")) return list;
+        var discounted = TableColumns(db, "store_skus").Contains("native_discounted_cents") ? "native_discounted_cents" : "0";
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT id, product_id, category, name, title, url, sku_type, is_warbond, native_price_cents, price_cents,
+                   tax_description, stock_level, available, thumbnail, fetched_at, {discounted}
+            FROM store_skus ORDER BY category, name, id
+            """;
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            list.Add(new StoreSku
+            {
+                Id = r.IsDBNull(0) ? "" : r.GetString(0),
+                ProductId = r.IsDBNull(1) ? "" : r.GetString(1),
+                Category = r.IsDBNull(2) ? "" : r.GetString(2),
+                Name = r.IsDBNull(3) ? "" : r.GetString(3),
+                Title = r.IsDBNull(4) ? "" : r.GetString(4),
+                Url = r.IsDBNull(5) ? "" : r.GetString(5),
+                SkuType = r.IsDBNull(6) ? "" : r.GetString(6),
+                IsWarbond = !r.IsDBNull(7) && r.GetInt32(7) != 0,
+                NativePriceCents = r.IsDBNull(8) ? 0 : r.GetInt64(8),
+                PriceCents = r.IsDBNull(9) ? 0 : r.GetInt64(9),
+                TaxDescription = r.IsDBNull(10) ? "" : r.GetString(10),
+                StockLevel = r.IsDBNull(11) ? "" : r.GetString(11),
+                Available = !r.IsDBNull(12) && r.GetInt32(12) != 0,
+                Thumbnail = r.IsDBNull(13) ? "" : r.GetString(13),
+                FetchedAt = r.IsDBNull(14) ? "" : r.GetString(14),
+                NativeDiscountedCents = r.IsDBNull(15) ? 0 : r.GetInt64(15),
+            });
+        }
+        return list;
+    }
+
+    // LoadPledges の読み取り専用版
+    public List<HangarPledge> LoadPledgesReadOnly()
+    {
+        var list = new List<HangarPledge>();
+        using var db = OpenReadOnlyOrNull();
+        if (db == null || !ReadOnlyTableExists(db, "hangar_pledges")) return list;
+
+        var cols = TableColumns(db, "hangar_pledges");
+        var configValue = cols.Contains("config_value_cents") ? "config_value_cents" : "0";
+        var availability = cols.Contains("availability") ? "availability" : "''";
+        var byId = new Dictionary<string, HangarPledge>(StringComparer.Ordinal);
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.CommandText = $"SELECT id, name, value_cents, currency, meltable, upgraded, insurance, created_at, fetched_at, {configValue}, {availability} FROM hangar_pledges ORDER BY name";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var p = new HangarPledge
+                {
+                    Id = r.IsDBNull(0) ? "" : r.GetString(0),
+                    Name = r.IsDBNull(1) ? "" : r.GetString(1),
+                    ValueCents = r.IsDBNull(2) ? 0 : r.GetInt64(2),
+                    Currency = r.IsDBNull(3) ? "" : r.GetString(3),
+                    Meltable = r.IsDBNull(4) || r.GetInt32(4) != 0,
+                    Upgraded = !r.IsDBNull(5) && r.GetInt32(5) != 0,
+                    Insurance = ParseInsurance(r.IsDBNull(6) ? "" : r.GetString(6)),
+                    CreatedAt = r.IsDBNull(7) ? "" : r.GetString(7),
+                    FetchedAt = r.IsDBNull(8) ? "" : r.GetString(8),
+                    ConfigValueCents = r.IsDBNull(9) ? 0 : r.GetInt64(9),
+                    Availability = r.IsDBNull(10) ? "" : r.GetString(10),
+                };
+                list.Add(p);
+                if (!string.IsNullOrEmpty(p.Id)) byId[p.Id] = p;
+            }
+        }
+
+        if (ReadOnlyTableExists(db, "hangar_items"))
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT pledge_id, title, kind, manufacturer FROM hangar_items";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var pid = r.IsDBNull(0) ? "" : r.GetString(0);
+                if (!byId.TryGetValue(pid, out var p)) continue;
+                p.Items.Add(new HangarItem
+                {
+                    Title = r.IsDBNull(1) ? "" : r.GetString(1),
+                    Kind = r.IsDBNull(2) ? "" : r.GetString(2),
+                    Manufacturer = r.IsDBNull(3) ? "" : r.GetString(3),
+                });
+            }
+        }
+
+        if (ReadOnlyTableExists(db, "hangar_nameable_ships"))
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT pledge_id, membership_id, default_name, custom_name FROM hangar_nameable_ships";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var pid = r.IsDBNull(0) ? "" : r.GetString(0);
+                if (!byId.TryGetValue(pid, out var p)) continue;
+                p.NameableShips.Add(new HangarNameableShip
+                {
+                    MembershipId = r.IsDBNull(1) ? 0 : r.GetInt64(1),
+                    DefaultName = r.IsDBNull(2) ? "" : r.GetString(2),
+                    CustomName = r.IsDBNull(3) ? null : r.GetString(3),
+                });
+            }
+        }
+
+        return list;
+    }
+
+    // LoadMarks の読み取り専用版
+    private Dictionary<(string PledgeId, string ShipName), HangarShipMark> LoadMarksReadOnly()
+    {
+        var dict = new Dictionary<(string, string), HangarShipMark>();
+        using var db = OpenReadOnlyOrNull();
+        if (db == null || !ReadOnlyTableExists(db, "hangar_ship_marks")) return dict;
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT pledge_id, ship_name, mark FROM hangar_ship_marks";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            var pid = r.IsDBNull(0) ? "" : r.GetString(0);
+            var name = r.IsDBNull(1) ? "" : r.GetString(1);
+            dict[(pid, name)] = ParseMark(r.IsDBNull(2) ? "" : r.GetString(2));
+        }
+        return dict;
+    }
+
+    // GetShipInstances の読み取り専用版 (pledge・マークを読み取り専用で読み、船の名寄せの覚えを先に埋める。組み立ては GetShipInstances と同じ)
+    public List<HangarShipInstance> GetShipInstancesReadOnly()
+    {
+        EnsureShipCachesReadOnly();
+        var list = new List<HangarShipInstance>();
+        var marks = LoadMarksReadOnly();
+        foreach (var p in LoadPledgesReadOnly())
+        {
+            var shipNames = p.ShipNames;
+            var pledgeShipNames = string.Join(", ", shipNames);
+            var namedShips = ExtractNamedShips(p.Name, shipNames);   // pledge 名に含まれる既知の船名 (正規化済み)。pledge ごとに 1 回
+            var nameSeq = new Dictionary<string, int>(StringComparer.Ordinal);   // 同 pledge 内の同名船の出現回数 (InstanceKey の採番)
+            foreach (var name in shipNames)
+            {
+                marks.TryGetValue((p.Id, name), out var mark);
+                var (origin, originDisplay) = DetermineOrigin(p, name, namedShips);
+                nameSeq[name] = nameSeq.TryGetValue(name, out var seq) ? seq + 1 : 1;
+                var instanceKey = nameSeq[name] == 1 ? $"{p.Id}|{name}" : $"{p.Id}|{name}#{nameSeq[name]}";
+                list.Add(new HangarShipInstance
+                {
+                    PledgeId = p.Id,
+                    PledgeName = p.Name,
+                    Name = name,
+                    InstanceKey = instanceKey,
+                    Insurance = p.Insurance,
+                    Matrix = ResolveShip(name),
+                    Mark = mark,
+                    Origin = origin,
+                    OriginDisplay = originDisplay,
+                    PledgeShipNames = pledgeShipNames,
+                });
+            }
+        }
+
+        // 同型 (正規化名が同じ) の保有数
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in list)
+        {
+            var n = NormalizeShipName(s.Name);
+            counts[n] = counts.TryGetValue(n, out var c) ? c + 1 : 1;
+        }
+        foreach (var s in list)
+            s.SameTypeCount = counts[NormalizeShipName(s.Name)];
+
+        return list;
+    }
+
+    // LoadCcus の読み取り専用版 (標準 CCU 額の補完に使うストアの覚えも読み取り専用で先に埋める。DB は書き換えない)
+    public List<HangarCcu> LoadCcusReadOnly()
+    {
+        var list = new List<HangarCcu>();
+        using (var db = OpenReadOnlyOrNull())
+        {
+            if (db == null || !ReadOnlyTableExists(db, "hangar_ccus")) return list;
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT pledge_id, from_ship, to_ship, warbond, price_cents, std_price_cents, source, notes FROM hangar_ccus ORDER BY from_ship, to_ship";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                list.Add(new HangarCcu
+                {
+                    PledgeId = r.IsDBNull(0) ? "" : r.GetString(0),
+                    FromShip = r.IsDBNull(1) ? "" : r.GetString(1),
+                    ToShip = r.IsDBNull(2) ? "" : r.GetString(2),
+                    Warbond = !r.IsDBNull(3) && r.GetInt32(3) != 0,
+                    PriceCents = r.IsDBNull(4) ? 0 : r.GetInt64(4),
+                    StdPriceCents = r.IsDBNull(5) ? 0 : r.GetInt64(5),
+                    Source = r.IsDBNull(6) ? "sync" : r.GetString(6),
+                    Notes = r.IsDBNull(7) ? "" : r.GetString(7),
+                });
+            }
+        }
+
+        EnsureShipCachesReadOnly();
+        _storeCache ??= LoadStoreSkusReadOnly();
+        foreach (var c in list)
+        {
+            if (c.StdPriceCents != 0) continue;
+            var std = StandardCcuPriceCents(c);
+            if (std.HasValue) c.StdPriceCents = std.Value;
+        }
+        return list;
+    }
+
+    // LoadMyComponents の読み取り専用版。重複の行のまとめは DB に書かずに、MergeDuplicateMyComponents と同じ計算をメモリ上で行う:
+    // 品質を揃えた書き方 (TryNormalizeQualityJson。揃えられない値はその文字列のまま) にし、同じ品 (item_record・使用可・品質) の行を
+    // id のいちばん小さい行に残して数量を合計し、メモを id の順に JoinNotes でつなぐ。ほかの行は出さない。並びは LoadMyComponents と同じ
+    public List<MyComponent> LoadMyComponentsReadOnly()
+    {
+        var list = new List<MyComponent>();
+        using var db = OpenReadOnlyOrNull();
+        if (db == null || !ReadOnlyTableExists(db, "my_components")) return list;
+        var quality = TableColumns(db, "my_components").Contains("quality_json") ? "COALESCE(quality_json, '')" : "''";
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.CommandText = $"SELECT id, item_record, item_name, item_type, size, grade, quantity, usable, notes, added_at, {quality} FROM my_components ORDER BY item_type, size DESC, grade, item_name, id";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                list.Add(new MyComponent
+                {
+                    Id = r.GetInt32(0),
+                    ItemRecord = r.IsDBNull(1) ? "" : r.GetString(1),
+                    ItemName = r.IsDBNull(2) ? "" : r.GetString(2),
+                    ItemType = r.IsDBNull(3) ? "" : r.GetString(3),
+                    Size = r.IsDBNull(4) ? 0 : r.GetInt32(4),
+                    Grade = r.IsDBNull(5) ? 0 : r.GetInt32(5),
+                    Quantity = r.IsDBNull(6) ? 1 : r.GetInt32(6),
+                    Usable = r.IsDBNull(7) || r.GetInt32(7) != 0,
+                    Notes = r.IsDBNull(8) ? "" : r.GetString(8),
+                    AddedAt = r.IsDBNull(9) ? "" : r.GetString(9),
+                    QualityJson = r.GetString(10),
+                });
+            }
+        }
+
+        // MergeDuplicateMyComponents と同じ: 行を id の順に見て、品質を揃え、(item_record, 使用可, 品質) でまとめる
+        foreach (var c in list)
+            if (TryNormalizeQualityJson(c.QualityJson, out var normalized)) c.QualityJson = normalized;
+        var groups = new Dictionary<(string Record, bool Usable, string Quality), List<MyComponent>>();
+        foreach (var c in list.OrderBy(x => x.Id))
+        {
+            var key = (c.ItemRecord, c.Usable, c.QualityJson);
+            if (!groups.TryGetValue(key, out var rows)) groups[key] = rows = new();
+            rows.Add(c);
+        }
+        var removed = new HashSet<int>();
+        foreach (var rows in groups.Values.Where(g => g.Count > 1))
+        {
+            var keep = rows[0];
+            var qty = rows.Sum(x => x.Quantity);
+            var notes = JoinNotes(rows.Select(x => x.Notes));
+            keep.Quantity = qty;
+            keep.Notes = notes;
+            foreach (var other in rows.Skip(1)) removed.Add(other.Id);
+        }
+        if (removed.Count > 0) list.RemoveAll(c => removed.Contains(c.Id));
+        return list;
+    }
+
+    // LoadMyGear の読み取り専用版。重複の行のまとめは DB に書かずに、MergeDuplicateMyGear と同じ計算をメモリ上で行う
+    // ((item_record, 使用可) が同じ行を id のいちばん小さい行に残して数量を合計し、メモを id の順に JoinNotes でつなぐ)。並びは LoadMyGear と同じ
+    public List<MyGear> LoadMyGearReadOnly()
+    {
+        var list = new List<MyGear>();
+        using var db = OpenReadOnlyOrNull();
+        if (db == null || !ReadOnlyTableExists(db, "my_gear")) return list;
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.CommandText = "SELECT id, item_record, item_name, item_type, sub_type, size, quantity, usable, notes, added_at FROM my_gear ORDER BY item_type, sub_type, item_name, id";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                list.Add(new MyGear
+                {
+                    Id = r.GetInt32(0),
+                    ItemRecord = r.IsDBNull(1) ? "" : r.GetString(1),
+                    ItemName = r.IsDBNull(2) ? "" : r.GetString(2),
+                    ItemType = r.IsDBNull(3) ? "" : r.GetString(3),
+                    SubType = r.IsDBNull(4) ? "" : r.GetString(4),
+                    Size = r.IsDBNull(5) ? 0 : r.GetInt32(5),
+                    Quantity = r.IsDBNull(6) ? 1 : r.GetInt32(6),
+                    Usable = r.IsDBNull(7) || r.GetInt32(7) != 0,
+                    Notes = r.IsDBNull(8) ? "" : r.GetString(8),
+                    AddedAt = r.IsDBNull(9) ? "" : r.GetString(9),
+                });
+            }
+        }
+
+        var groups = new Dictionary<(string Record, bool Usable), List<MyGear>>();
+        foreach (var g in list.OrderBy(x => x.Id))
+        {
+            var key = (g.ItemRecord, g.Usable);
+            if (!groups.TryGetValue(key, out var rows)) groups[key] = rows = new();
+            rows.Add(g);
+        }
+        var removed = new HashSet<int>();
+        foreach (var rows in groups.Values.Where(x => x.Count > 1))
+        {
+            var keep = rows[0];
+            var qty = rows.Sum(x => x.Quantity);
+            var notes = JoinNotes(rows.Select(x => x.Notes));
+            keep.Quantity = qty;
+            keep.Notes = notes;
+            foreach (var other in rows.Skip(1)) removed.Add(other.Id);
+        }
+        if (removed.Count > 0) list.RemoveAll(g => removed.Contains(g.Id));
+        return list;
+    }
+
+    // LoadGameLogEntries の読み取り専用版
+    public List<StoredGameLogEntry> LoadGameLogEntriesReadOnly(out int broken)
+    {
+        broken = 0;
+        var list = new List<StoredGameLogEntry>();
+        using var db = OpenReadOnlyOrNull();
+        if (db == null || !ReadOnlyTableExists(db, "game_log_entries")) return list;
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT machine, payload_json FROM game_log_entries";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            var machine = r.IsDBNull(0) ? "" : r.GetString(0);
+            var entry = r.IsDBNull(1) ? null : GameLogStore.FromJson(r.GetString(1), machine);
+            if (entry == null) { broken++; continue; }
+            list.Add(new StoredGameLogEntry(machine, entry));
+        }
+        return list;
+    }
+
+    // LoadLoadout の読み取り専用版
+    private Dictionary<string, string> LoadLoadoutReadOnly(string shipKey)
+    {
+        var dict = new Dictionary<string, string>(StringComparer.Ordinal);
+        using var db = OpenReadOnlyOrNull();
+        if (db == null || !ReadOnlyTableExists(db, "ship_loadouts")) return dict;
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT port_name, item_record FROM ship_loadouts WHERE ship_key = @k";
+        cmd.Parameters.AddWithValue("@k", shipKey);
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            if (r.IsDBNull(0)) continue;
+            dict[r.GetString(0)] = r.IsDBNull(1) ? "" : r.GetString(1);
+        }
+        return dict;
+    }
+
+    // GetShipLoadout の読み取り専用版 (ship_loadouts の上書きを読み取り専用で読んで渡す。組み立ては GetShipLoadout と同じ BuildShipLoadout)
+    public List<ShipPortLoadout> GetShipLoadoutReadOnly(string shipKey, string shipRecordName, EquipmentService equip, bool throwIfBusy = false)
+        => BuildShipLoadout(shipKey, equip.GetShipPorts(shipRecordName), equip, throwIfBusy, LoadLoadoutReadOnly(shipKey));
 
     // === ヘルパ ===
 

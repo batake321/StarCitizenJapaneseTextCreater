@@ -314,8 +314,10 @@ public partial class GameDataQueryService
     //   【販売場所】保存データ (item_shop_prices) の購入・レンタル、無ければ uexItemPrices (星系 / 場所 / 店名 / 値段 を安い順)
     //   【ブループリント】その品をできる品とする BP (BlueprintDetail.ItemSectionText。BP が無ければ出さない)
     // shopTree を渡すと、【販売場所】の店の部分を、shop_price_links で店に結べた行だけお店の詳細へのリンク ([[record|表示名]]。DetailLink) にする
+    // includePersonal が false なら【ブループリント】の節に個人のデータ (在庫・所持・手持ち) を出さない (データ API の LAN からの要求。BlueprintDetail.ItemSectionText)
     // 品目が無ければ null
-    public string? GetItemDetailText(string recordName, IReadOnlyDictionary<string, List<(string Location, double Price)>>? uexItemPrices = null, ShopTree? shopTree = null)
+    public string? GetItemDetailText(string recordName, IReadOnlyDictionary<string, List<(string Location, double Price)>>? uexItemPrices = null, ShopTree? shopTree = null,
+        bool includePersonal = true)
     {
         var rec = (recordName ?? "").Trim();
         if (rec.Length == 0) return null;
@@ -441,7 +443,7 @@ public partial class GameDataQueryService
         // その品をできる品とする BP があれば、末尾に【ブループリント】の節 (［BP］タブと同じ読み方。BP の表が無い・BP が無ければ出さない)。
         // 読み込みが例外になったときは、この節だけを読み込めなかった旨の 1 行にする (【装着できるアタッチメント】と同じ)
         string bp;
-        try { bp = BlueprintDetail.ItemSectionText(Path.GetDirectoryName(DbPath) ?? "", rec); }
+        try { bp = BlueprintDetail.ItemSectionText(Path.GetDirectoryName(DbPath) ?? "", rec, includePersonal); }
         catch (Exception ex) { bp = "【ブループリント】" + Environment.NewLine + $"  ブループリントを読み込めなかった ({ex.Message})" + Environment.NewLine; }
         if (bp.Length > 0) { sb.AppendLine(); sb.Append(bp); }
         return sb.ToString();

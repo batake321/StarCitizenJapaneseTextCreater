@@ -11,7 +11,7 @@ using System.Text.Json;
 
 namespace StarCitizenJapaneseTextCreater;
 
-public class ChatWebServer : IDisposable
+public partial class ChatWebServer : IDisposable
 {
     private HttpListener? _listener;
     private HttpListener? _httpsListener;
@@ -286,6 +286,14 @@ public class ChatWebServer : IDisposable
                     break;
                 case var p when p.StartsWith("/api/voicevox/"):
                     await ProxyVoiceVox(ctx, ct);
+                    break;
+                // データ API (読み取り専用。ChatWebServer.DataApi.cs)
+                case var p when IsDataApiPath(p):
+                    await HandleDataApiAsync(ctx, p, ct);
+                    break;
+                // /api/ で始まり、どのルートにも当たらないパスは 404 と { "error": ... } (既存のルートのパスは今までどおり)
+                case var p when IsUnknownApiPath(p):
+                    await WriteUnknownApiAsync(ctx.Response, ct);
                     break;
                 default:
                     ctx.Response.StatusCode = 404;
@@ -653,5 +661,6 @@ public class ChatWebServer : IDisposable
     public void Dispose()
     {
         Stop();
+        DisposeDataApiCaches();   // データ API の契約の読み口 (gamedata_cache.db の接続) を閉じる
     }
 }

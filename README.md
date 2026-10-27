@@ -785,6 +785,58 @@ A. 以下を確認してください:
 >
 > ファイアウォールは「SC Japanese Assistant HTTP」「SC Japanese Assistant HTTPS」というルール名で自動登録されます。アンインストール時は Windows Defender ファイアウォール → 受信の規則 から手動で削除してください。
 
+#### データ API (読み取り専用)
+
+Web サーバーを起動している間は、詳細タブ・交易・契約などのデータを JSON か HTML で読み出せます。ほかのツールやスクリプトから使うためのもので、**すべて GET の読み取り専用**です (DB には書き込みません)。データは画面と同じ読み方で出します。
+
+- **ポート**: Web チャットと同じです。`http://localhost:8099/api/…`、HTTPS なら `https://localhost:8100/api/…` (LAN の他の機械からは `192.168.x.x`)
+- **形式**: `format=json` (既定) か `format=html`。それ以外は 400 になります
+  - JSON の**一覧**は `{ "total": 全体の件数, "count": 返した件数, "items": [ … ] }` です。`total` は `limit`・`offset` を通す前の件数、`count` は返した件数です
+  - JSON の**詳細**は `{ "record", "name", "text" }` です。項目はアプリの中のデータの項目名のままです
+  - HTML の一覧は表、詳細は詳細タブと同じ見た目のページです。詳細の中のリンクは `/api/detail?record=…&format=html` に移ります
+- **件数**: 一覧には `limit` (最大件数。1 以上の整数) と `offset` (飛ばす件数。0 以上の整数) を付けられます。付けなければ全件です。`/api/search` の `limit` だけは 1〜1000 です
+- **生の JSON**: 契約の一覧の `RawJson` (ゲームデータの生の JSON。とても大きい) は、既定では出しません。`raw=1` を付けたときだけ出します
+- **個人のデータ** (パスが `/api/my/` で始まるもの) は **この PC から**呼んだときだけ返します。要求元がこの PC (ループバック) で、しかも `Host` ヘッダーのホスト名が `localhost`・`127.0.0.1`・`[::1]` のどれか (ポートは問わない) のときだけです。それ以外は 403 になります。個人のデータの応答には CORS のヘッダーを付けません
+- **ゲームのデータのルートに混ざる個人のデータ** (`/api/blueprints` の所持 `Owned`・在庫 `StockText` `stockText`・手持ち `haves`、`/api/detail` と `/api/missions/detail` の【ブループリント】の節の「在庫」「所持」の行と「手持ち」の欄) も、`/api/my/` と同じ条件 (この PC から、`Host` が `localhost`・`127.0.0.1`・`[::1]`) のときだけ画面と同じに出し、そのときの応答には CORS のヘッダーを付けません。条件に合わない要求 (LAN の他の機械から・`Host` が違う) には、個人のデータを出さずに CORS のヘッダーを付けて返します。ほかのゲームのデータのルートは、いつも CORS のヘッダーを付けます
+- **エラー**は形式にかかわらず `{ "error": "…" }` で返します。引数の誤りは 400、個人のデータをこの PC 以外から読もうとしたときは 403、見つからないとき・`/api/` で始まる知らないパスは 404、GET 以外は 405、データがまだ無いときは 503、アプリの中の失敗は 500 (`"内部エラー"`。中身はアプリのログ `app_log.txt` に残します)
+
+| パス | 中身 | 応答の形 | 主な引数 |
+|---|---|---|---|
+| `/api` | API の一覧 | 一覧 (`path`・`description`・`parameters`・`personal`) と `formats` | |
+| `/api/search` | 詳細タブの検索 (星系・場所・お店・資源・品目) | 一覧 (`total` は見つかった候補の数) | `q` 名前、`limit` 品目の候補の最大件数 (1〜1000。既定 40) |
+| `/api/detail` | 詳細タブの詳細 (品目・資源・お店・場所・星系) | 詳細 | `record` (必須) |
+| `/api/ships` `/api/ship-weapons` `/api/ship-gear` | 詳細タブの分類「船舶」「船舶武器」「船舶装備」 | 一覧 | `kind` 種類、`size` サイズ (`3` か `S3`)、`name` 名前の一部 |
+| `/api/personal-weapons` `/api/personal-gear` `/api/ores` | 詳細タブの分類「個人武器」「個人装備」「鉱石」 | 一覧 | `kind`、`name` |
+| `/api/shops` `/api/stations` `/api/systems` | 詳細タブの分類「お店」「ステーション」「星系」 | 一覧 | `kind`、`name` |
+| `/api/trade/commodities` `/api/trade/terminals` | 交易のコモディティ・端末 | 一覧 | |
+| `/api/trade/prices` | 端末で買える物・売れる物 | `{ "terminal", "buy": 一覧, "sell": 一覧 }` (`limit`・`offset` はそれぞれに) | `terminal` 端末名 (必須) |
+| `/api/trade/routes` | 交易ルートの検索 | 一覧 (`CommodityDisplayName` は画面と同じ「日本語 (英語)」) | `budget` 予算 (画面と同じ書き方: `1000000`・`1M`・`500k`・`3.5m`)・`scu` 積載量 (必須)、`buySystem` `sellSystem` (既定 全て)、`excludeOutposts` `loadingDockOnly` `excludeLowStock` (true/false)、`commodities` (カンマ区切り)、`top` (既定 20) |
+| `/api/missions/categories` | 契約の分類 | 一覧 | |
+| `/api/missions` | 契約の一覧 | 一覧 (`RawJson` は `raw=1` のときだけ) | `category` か `q` のどちらか一方 (`q` が空なら全部)、`raw` |
+| `/api/missions/detail` | 契約の詳細と納品物 (Wikelo の契約) | 詳細と `deliverables` (`item`・`sources` 入手場所の文) | `record` (必須) |
+| `/api/blueprints` | ブループリント | `record` 無し: 一覧 (BP タブの表の行)。`record` 付き: `{ "record", "total", "count", "items": [{ "item", "stockText", "haves" }], "text" }` (`text` は詳細タブの【ブループリント】の節)。品目が無ければ 404 | `record` できる品の record 名 (省略可) |
+| `/api/starmap` | 星図の星系・場所 | 一覧 | |
+| `/api/my/ships` | 所持船 | 一覧 | |
+| `/api/my/components` `/api/my/gear` | 所持コンポーネント・所持している個人装備 | 一覧 (同じ品の行は画面と同じく 1 行にまとめた形) | |
+| `/api/my/blueprints` | 所持している BP | 一覧 (`Uuid` と BP の名前 `Name`) | |
+| `/api/my/hangar/pledges` `/api/my/hangar/ships` `/api/my/hangar/ccus` | Hangar の pledge・保有船・CCU | 一覧 | |
+| `/api/my/loadout` | 保有船の今の装備と付け替えの候補 (装備タブの表と同じ) | 一覧 (行に `Candidates` 候補・`SelectedChoice` 今の選択) と `ship`・`name`・`record` | `ship` 保有船の InstanceKey (`/api/my/hangar/ships` の値) か `my\|所持船の Id` (必須) |
+| `/api/my/gamelog` | ゲームログの残してある行 | 一覧と `broken` (読めなかった行の数) | |
+| `/api/my/mining` `/api/my/ore-stock` `/api/my/commodity-trades` | 採掘の記録・鉱石の在庫・商品売買の記録 | 一覧 | |
+
+例:
+
+```
+http://localhost:8099/api/search?q=Arrow
+http://localhost:8099/api/detail?record=EntityClassDefinition.xxx&format=html
+http://localhost:8099/api/ship-weapons?size=S3&limit=20
+http://localhost:8099/api/trade/routes?budget=1M&scu=96&buySystem=Stanton
+http://localhost:8099/api/missions?q=&limit=10&raw=1
+http://localhost:8099/api/my/hangar/ships
+```
+
+> 交易の API は、交易タブで価格を読み込んだあとに使えます (まだなら 503)。種類 (`kind`) の値は詳細タブの「種類」の欄と同じ文字です (個人装備のアーマー・服は「アーマー (ヘルメット)」のように部位まで)。`kind`・`name`・`size` などの絞り込みは前後の空白を除き、空なら絞り込みません。
+
 ---
 
 ### 10. ナレッジ (記憶) — AI にバグ情報や Tips を教える

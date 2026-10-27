@@ -10,10 +10,14 @@ namespace StarCitizenJapaneseTextCreater;
 internal static class BlueprintDetail
 {
     // ［詳細］の品の詳細の「【ブループリント】」の節 (GetItemDetailText の形。DetailHtml が「項目: 値」を表に、「|」の行をそのまま表にする)。
-    // できる品が outputRecord (大文字小文字無視) の BP が無い・BP の表が無ければ ""。同じ品に BP が複数あれば全部出す
-    public static string ItemSectionText(string workDir, string outputRecord)
+    // できる品が outputRecord (大文字小文字無視) の BP が無い・BP の表が無ければ ""。同じ品に BP が複数あれば全部出す。
+    // includePersonal が false なら在庫・所持・手持ちを読まない (読めなかったときと同じく、その行・欄を出さない。データ API の LAN からの要求)
+    public static string ItemSectionText(string workDir, string outputRecord, bool includePersonal = true)
+        => ItemSectionText(BlueprintPanel.LoadForOutput(workDir, outputRecord, includePersonal));
+
+    // 上の節の文字を、読んだ BP (BlueprintPanel.LoadForOutput の結果) から作る (データ API が LoadForOutput を 1 回だけ呼んで使う)
+    internal static string ItemSectionText(List<(BlueprintItem Item, string StockText, List<double?>? Haves)> rows)
     {
-        var rows = BlueprintPanel.LoadForOutput(workDir, outputRecord);
         if (rows.Count == 0) return "";
         var sb = new StringBuilder();
         for (int i = 0; i < rows.Count; i++)

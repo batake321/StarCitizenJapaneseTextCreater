@@ -561,6 +561,36 @@ public sealed class OreService
         return list;
     }
 
+    // === 読み取り専用の読み出し (データ API 用) ===
+    // trade_cache.db を Mode=ReadOnly で開いて読むだけ (Open の DDL・SqliteWal.EnsureOn を通らない)。DB・表が無ければ空。SQL・行の作り方は LoadTrades / LoadMining と同じ
+
+    private List<T> ReadOnlyRows<T>(string table, string sql, Func<SqliteDataReader, T> read)
+    {
+        var list = new List<T>();
+        if (!DbExists) return list;
+        using var db = new SqliteConnection($"Data Source={_dbPath};Mode=ReadOnly;Pooling=False");
+        db.Open();
+        using (var exists = db.CreateCommand())
+        {
+            exists.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = @t";
+            exists.Parameters.AddWithValue("@t", table);
+            if (Convert.ToInt64(exists.ExecuteScalar() ?? 0L) == 0) return list;
+        }
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = sql;
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) list.Add(read(r));
+        return list;
+    }
+
+    // LoadTrades の読み取り専用版
+    public List<CommodityTrade> LoadTradesReadOnly() =>
+        ReadOnlyRows("commodity_trades", $"SELECT {TradeColumns} FROM commodity_trades ORDER BY log_time DESC, rowid DESC", ReadTrade);
+
+    // LoadMining の読み取り専用版
+    public List<MiningLog> LoadMiningReadOnly() =>
+        ReadOnlyRows("mining_log", $"SELECT {MiningColumns} FROM mining_log ORDER BY log_time DESC, rowid DESC", ReadMining);
+
     private static MiningLog ReadMining(SqliteDataReader r) => new()
     {
         LogTime = Str(r, 0), PlayerName = Str(r, 1), ResourceUuid = Str(r, 2), ResourceRecord = Str(r, 3), MineralClass = Str(r, 4),
