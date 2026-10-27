@@ -379,15 +379,60 @@ public static class GameLogVoiceExternal
             return escape(value, end < template.Length ? template[end] : null);
         });
 
-    public static string FillArgs(string template, string talk, string scene, int speaker) =>
-        Fill(template, talk, scene, speaker, EscapeArg);
+    // exe の引数: 値の末尾の \ の並びを倍にするかは、置き換えた後の続き (次の欄の値も含む) で決める。
+    // 後ろから組み立て、続きが「\ の並びの後に "」なら倍にする (値の直後が " ・次の値が " で始まる・"{talk}" の値が空、のどれでも崩れない)。
+    // ひな形の文字の末尾の \ が欄の直前にあるときも同じ (欄を 1 つの塊として、その \ を文字の \ として扱う)
+    public static string FillArgs(string template, string talk, string scene, int speaker)
+    {
+        // (文字列, 値か) の並び。値は打ち消し前
+        var parts = new List<(string Text, bool IsValue)>();
+        var pos = 0;
+        foreach (Match m in Field.Matches(template))
+        {
+            if (m.Index > pos) parts.Add((template[pos..m.Index], false));
+            parts.Add((m.Groups[1].Value switch
+            {
+                "talk" => talk,
+                "scene" => scene,
+                _ => speaker.ToString(CultureInfo.InvariantCulture),
+            }, true));
+            pos = m.Index + m.Length;
+        }
+        if (pos < template.Length) parts.Add((template[pos..], false));
+
+        var rest = "";
+        for (int i = parts.Count - 1; i >= 0; i--)
+        {
+            var (text, isValue) = parts[i];
+            if (isValue)
+            {
+                rest = EscapeArg(text, NextIsQuote(rest) ? '"' : null) + rest;
+                continue;
+            }
+            // 欄の直前の文字の末尾の \ の並び (続きが " なら倍にする)
+            var trimmed = text.TrimEnd('\\');
+            var backslashes = text.Length - trimmed.Length;
+            if (backslashes > 0 && i + 1 < parts.Count && NextIsQuote(rest))
+                text = trimmed + new string('\\', backslashes * 2);
+            rest = text + rest;
+        }
+        return rest;
+    }
+
+    // s の先頭の \ の並びの後が " か
+    private static bool NextIsQuote(string s)
+    {
+        var i = 0;
+        while (i < s.Length && s[i] == '\\') i++;
+        return i < s.Length && s[i] == '"';
+    }
     public static string FillUrl(string template, string talk, string scene, int speaker) =>
         Fill(template, talk, scene, speaker, (v, _) => Uri.EscapeDataString(v));
     public static string FillJson(string template, string talk, string scene, int speaker) =>
         Fill(template, talk, scene, speaker, (v, _) => EscapeJson(v));
 
     // exe の引数の値の打ち消し (CommandLineToArgvW の規則): " は \" にし、" の直前の \ の並びは数を倍にする。
-    // ひな形で値の直後が " (例 "{talk}") のときは、値の末尾の \ の並びも倍にする (閉じの " を打ち消さないため)
+    // next == '"' (置き換えた後の続きが " になる。例 "{talk}") のときは、値の末尾の \ の並びも倍にする (閉じの " を打ち消さないため)
     public static string EscapeArg(string value, char? next)
     {
         var sb = new StringBuilder(value.Length + 8);
@@ -584,6 +629,12 @@ public static class GameLogVoicePlayer
                 _lastExternalError = GameLogVoiceExternal.EmptyMessage;
                 Report($"[読み上げ] {GameLogVoiceExternal.EmptyMessage}");
             }
+            return;
+        }
+        // 読み上げる文が空なら呼ばない。「外のアプリだけ」では「読まない」の記録を出す (「両方」は VOICEVOX の側の記録が出る)
+        if (string.IsNullOrWhiteSpace(r.Text))
+        {
+            if (externalOnly) Report($"[読み上げ] 読まない（{r.Scene}）: 読み上げる文が空です");
             return;
         }
         string? error = null;

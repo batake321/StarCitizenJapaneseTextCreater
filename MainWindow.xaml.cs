@@ -2061,14 +2061,21 @@ public partial class MainWindow : Window
         var s = GameLogVoiceExternalSettings.From(temp);
         var speaker = int.TryParse(_gameLogVoice.DefaultSpeakerKey, out var d) ? d : 16;
         var target = s.IsApi ? $"URL: {s.Url}" : $"exe: {s.ExePath}";
+        // 呼んでいるあいだ (結果のメッセージを閉じるまで) は押せなくする。exe の起動も UI のスレッドの外で行う
+        var button = sender as Button;
+        if (button != null) button.IsEnabled = false;
         try
         {
-            await GameLogVoiceExternal.CallAsync(s, "読み上げのテストです", "テスト", speaker, CancellationToken.None);
+            await Task.Run(() => GameLogVoiceExternal.CallAsync(s, "読み上げのテストです", "テスト", speaker, CancellationToken.None));
             MessageBox.Show(s.IsApi ? $"外のアプリを呼びました。\n({target})" : $"外のアプリを起動しました。\n({target})", "試す");
         }
         catch (Exception ex)
         {
             MessageBox.Show($"外のアプリを呼べませんでした: {GameLogVoiceExternal.Reason(ex)}\n({target})", "試す");
+        }
+        finally
+        {
+            if (button != null) button.IsEnabled = true;
         }
     }
 
