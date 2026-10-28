@@ -42,16 +42,29 @@ internal static class Ship3DWeb
             e.Cancel = true;
         };
         core.NewWindowRequested += (_, e) => e.Handled = true;
-        core.WebMessageReceived += (_, e) =>
+        core.WebMessageReceived += async (_, e) =>
         {
             try
             {
                 using var doc = JsonDocument.Parse(e.WebMessageAsJson);
-                if (doc.RootElement.TryGetProperty("type", out var t) && t.GetString() == "error"
-                    && doc.RootElement.TryGetProperty("message", out var m))
+                var type = doc.RootElement.TryGetProperty("type", out var t) ? t.GetString() : null;
+                if (type == "error" && doc.RootElement.TryGetProperty("message", out var m))
                     App.AppendStartupLog(App.Config.WorkingDirectory, $"[3D モデル] 表示: {m.GetString()}");
+                else if (type == "roomNames" && doc.RootElement.TryGetProperty("names", out var arr) && arr.ValueKind == JsonValueKind.Array)
+                {
+                    // 語の表で日本語にできなかった部屋の名前を AI で訳して返す (Ship3DRoomNames)。50 個・80 字までに限る
+                    var names = arr.EnumerateArray().Select(x => x.GetString() ?? "")
+                        .Where(x => x.Length is > 0 and <= 80).Distinct(StringComparer.Ordinal).Take(50).ToList();
+                    if (names.Count == 0) return;
+                    var map = await Ship3DRoomNames.ResolveAsync(names);
+                    if (map.Count > 0 && web.CoreWebView2 != null)
+                        web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "roomNames", map }));
+                }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                App.AppendStartupLog(App.Config.WorkingDirectory, $"[3D モデル] ビューアからの知らせを扱えませんでした: {ex.Message}");
+            }
         };
         web.DefaultBackgroundColor = System.Drawing.Color.FromArgb(0x1b, 0x1e, 0x24);
         core.SetVirtualHostNameToFolderMapping(ViewerHost, Path.Combine(AppContext.BaseDirectory, "wwwroot"), CoreWebView2HostResourceAccessKind.DenyCors);

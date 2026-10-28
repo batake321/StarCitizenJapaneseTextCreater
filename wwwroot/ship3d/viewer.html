@@ -177,8 +177,15 @@ function goOutsideHome() {
 // 位置 (place: 船内の位置のリストの 1 つ) に移る (船内表示にする)
 function goPlace(place) {
   inside.pos.copy(place.pos);
-  inside.yaw = Math.atan2(-place.dir.x, -place.dir.z);   // カメラは yaw = 0 で -Z を見る
-  inside.pitch = 0;
+  if (place.look) {
+    // 見る点があれば (医療ベッド)、その点の向きにする (見下ろすときは pitch が負)
+    const d = place.look.clone().sub(place.pos);
+    inside.yaw = Math.atan2(-d.x, -d.z);   // カメラは yaw = 0 で -Z を見る
+    inside.pitch = Math.atan2(d.y, Math.hypot(d.x, d.z));
+  } else {
+    inside.yaw = Math.atan2(-place.dir.x, -place.dir.z);   // カメラは yaw = 0 で -Z を見る
+    inside.pitch = 0;
+  }
   inside.fov = 70;
   setMode('inside');
 }
@@ -217,6 +224,10 @@ const KINDS = [
 
 function classify(rawName) {
   const n = (rawName || '').toLowerCase();
+  // 医療ベッドは取り付け位置が無く、ベッドの部品だけの船もある (C8R Pisces Rescue: ノード名の無いメッシュ
+  // Objects/Spaceships/Ships/ANVL/Pisces/Interior/ANVL_pisces_med_bed.cga。three.js はメッシュ名から名前を作る)。
+  // hardpoint_ でなくても med_bed / medbed を含めば医療ベッドにする (扉・画面・ガラスは除く)
+  if (/med_?bed/.test(n) && !/(door|screen|glass)/.test(n)) return 'medbed';
   if (!n.startsWith('hardpoint_')) return null;
   if (/(access|radar|controller|dashboard|camera|regen|relay)/.test(n)) return null;
   if (n.includes('seat') && n.includes('pilot') && !n.includes('copilot')) return 'pilot';
@@ -224,7 +235,8 @@ function classify(rawName) {
   if (n.includes('medbed')) return 'medbed';
   if (n.includes('cargo_bay') || n.includes('cargogrid')) return 'cargo';
   if (n.includes('turret')) return n.includes('door') ? null : 'turret';
-  if (n.includes('elevator') || /_(drop)?lift(_|$)/.test(n)) return 'elevator';
+  // エレベーターの操作盤 (例 Apollo の hardpoint_elevator_control_panel_ext) はエレベーターにしない
+  if ((n.includes('elevator') || /_(drop)?lift(_|$)/.test(n)) && !n.includes('panel')) return 'elevator';
   return null;
 }
 
@@ -253,13 +265,23 @@ function collectPlaces(root) {
     // 前から後ろの順 (前 = -Z)
     list.sort((a, b) => a.pos.z - b.pos.z);
     list.forEach((p, i) => {
-      result.push({
+      const place = {
         kind: k.key,
         label: list.length > 1 ? `${k.label} ${i + 1}` : k.label,
         name: p.name,
         pos: p.pos.clone().addScaledVector(SHIP_UP, k.eye),
         dir: p.dir,
-      });
+      };
+      if (k.key === 'medbed') {
+        // 医療ベッドは、ベッドの上から前を向くと廊下を見てしまう (Apollo は廊下の両側 x = ±1.0 m に 5 台ずつ。利用者の指摘)。
+        // ベッドの横 (船の真ん中の側へ 1.3 m。真ん中にあるベッドは後ろへ 1.3 m) に立ち、ベッドの上 (0.6 m) を見下ろす
+        const side = Math.abs(p.pos.x) >= 0.3
+          ? SHIP_LEFT.clone().multiplyScalar(p.pos.x > 0 ? 1.3 : -1.3)   // 右 (+X) のベッドは左へ、左のベッドは右へ
+          : p.dir.clone().multiplyScalar(-1.3);
+        place.pos = p.pos.clone().add(side).addScaledVector(SHIP_UP, k.eye);
+        place.look = p.pos.clone().addScaledVector(SHIP_UP, 0.6);
+      }
+      result.push(place);
     });
   }
   return result;
@@ -267,7 +289,7 @@ function collectPlaces(root) {
 
 // ===== 部屋 (利用者の決定: 船内の区画を部屋として出す) =====
 // 区画は、StarBreaker が船内 (socpak) ごとに作るノード interior_<名前> (例 600i: bridge・armoury・module・front・middle・rear、C8X: pisces_int)。
-// 名前はデータのまま。light を含むもの (exterior_lights・pisces_lighting など照明だけの区画) は出さない。
+// 名前は roomLabel で日本語にする (分からなければデータのまま)。light を含むもの (exterior_lights・pisces_lighting など照明だけの区画) は出さない。
 // 位置は、その区画の部品の範囲の真ん中から真下に床を探し (8 m 以内)、立った目の高さに置く。床が見つからなければ真ん中
 function roomPlaces(root) {
   root.updateMatrixWorld(true);
@@ -282,21 +304,119 @@ function roomPlaces(root) {
     ray.far = 8;
     const hit = ray.intersectObject(root, true)[0];
     const pos = hit ? hit.point.clone().addScaledVector(SHIP_UP, EYE_STANDING) : center;
-    result.push({ kind: 'room', label: name, name: o.name, pos, dir: SHIP_FORWARD.clone() });
+    const label = roomLabel(name);
+    // 語の表で日本語にできなかった名前は rawName を付け、アプリに AI で訳してもらう (requestRoomNames)
+    result.push({ kind: 'room', label, name: o.name, pos, dir: SHIP_FORWARD.clone(), rawName: label === name ? name : null, num: '' });
   }
   // 前から後ろの順 (前 = -Z)
   result.sort((a, b) => a.pos.z - b.pos.z);
+  // 同じ名前になった部屋は番号を付ける (例 Idris の main が並ぶとき)
+  const count = new Map();
+  for (const r of result) count.set(r.label, (count.get(r.label) ?? 0) + 1);
+  const seq = new Map();
+  for (const r of result) {
+    if (count.get(r.label) > 1) {
+      const k = (seq.get(r.label) ?? 0) + 1;
+      seq.set(r.label, k);
+      r.num = String(k);
+      r.label = `${r.label} ${k}`;
+    }
+  }
   return result;
 }
+
+// 部屋の名前を日本語にする (利用者の要望: ある程度日本語化)。名前 (小文字) に含まれる語で決める。最初に当たった部屋の種類と、
+// 位置の語 (左・右・前部・中央部・後部・上・下) を付ける。どの部屋の種類にも当たらず位置の語も無ければ、データの名前のまま。
+// もとの名前はボタンの説明 (title) に出る。語は実データで見た区画の名前から (600i・C8X・C8R・Apollo Triage・Idris-P)
+const ROOM_WORDS = [
+  [/captains?_?quarters?|cptq/, '船長室'],
+  [/crew_?dorm|dorm|quarters|bedroom|beds/, '乗員室'],
+  [/crew_changing/, '更衣室'],
+  [/hab(itation|s)?($|_)|hab_/, '居住区'],
+  [/bridge|cockpit|command/, 'ブリッジ'],
+  [/engin|engroom|(^|_)eng($|_)/, '機関室'],
+  [/bathroom|bthrm|restroom|toilet|shower|hygiene/, '浴室'],
+  [/triage|med_?bay|medical|infirmary|medic_/, '医療室'],
+  [/prison/, '監房'],
+  [/repair_bay/, '修理ベイ'],
+  [/salvage/, 'サルベージ'],
+  [/escape_?pods?/, '脱出ポッド'],
+  [/cargo|crgo|argobay|(^|_)hold($|_)/, '貨物室'],
+  [/hangar/, '格納庫'],
+  [/docking|dock/, 'ドッキング'],
+  [/armou?ry/, '武器庫'],
+  [/briefing/, 'ブリーフィングルーム'],
+  [/galley|kitchen|mess/, 'キッチン'],
+  [/lounge|communal/, 'ラウンジ'],
+  [/airlock/, 'エアロック'],
+  [/elevator|lift/, 'エレベーター'],
+  [/stairs/, '階段'],
+  [/turr|gunner/, 'タレット'],
+  [/foyer|entrance/, '入口'],
+  [/components|systems/, '機器室'],
+  [/seat_passenger/, '乗客席'],
+  [/cabin/, 'キャビン'],
+  [/mnt_|maintenance|crawlspace|accessway|companionway|walkway|hallway|corridor|cor_|(^|_)access($|_)/, '通路'],
+  [/hub|centre_room/, 'ハブ'],
+  [/modul|(^|_)mod_/, 'モジュール'],
+  [/nose/, '機首'],
+  [/tail/, '機尾'],
+  [/neck/, '首部'],
+  [/body|bdall|tdall/, '胴体'],
+  [/(^|_)int($|_)|interior/, '船内'],   // 船の中全体の区画 (例 C8X の pisces_int、100i_interior)
+];
+const ROOM_PLACES = [
+  [/left|stairsl|turrl|_l$/, '左'], [/right|stairsr|turrr|_r$/, '右'],
+  [/front|frt|fwd/, '前部'], [/middle|mid/, '中央部'], [/rear|aft|back/, '後部'],
+  [/upper|top/, '上'], [/lower|bottom/, '下'],
+];
+function roomLabel(name) {
+  const n = name.toLowerCase();
+  const kind = ROOM_WORDS.find(([re]) => re.test(n))?.[1] ?? '';
+  const where = ROOM_PLACES.filter(([re]) => re.test(n)).map(([, w]) => w).join('・');
+  if (!kind && !where) return name;
+  if (!kind) return where;
+  return where ? `${kind} (${where})` : kind;
+}
+
+// 部屋ではない区画 (全船 279 隻の区画の名前を見て決めたもの): 外の照明のまとまり (base_ext_lg など _lg)、窓・照明・目印・部品の区切り
+// (glass・glows・helper・frame・button・detail・yoke・vis_areas・markup)、船の外 (exterior・ext)
+const ROOM_SKIP = /(^|_)lg($|_)|(^|_)(glass|glows?|helper|frame|button|detail|yoke|vis_areas|exterior|ext|markup)($|_)/;
 
 function collectRooms(root) {
   const list = [];
   root.traverse(o => {
     const n = o.name || '';
-    if (n.startsWith('interior_') && !/light/i.test(n)) list.push(o);
+    if (n.startsWith('interior_') && !/light/i.test(n) && !ROOM_SKIP.test(n.slice('interior_'.length).toLowerCase())) list.push(o);
   });
   return list;
 }
+
+// ===== 部屋の名前の AI 訳 (利用者の要望: 新しく見つけた英語の名前は AI 翻訳に入れる) =====
+// 語の表で日本語にできなかった部屋の名前をアプリに送り (chrome.webview.postMessage {type:'roomNames', names})、
+// アプリが AI で訳して覚えたもの ({type:'roomNames', map: {名前: 日本語}}) が返ってきたら、リストの名前を差し替える
+let currentPlaces = [];
+function requestRoomNames(places) {
+  const names = [...new Set(places.filter(p => p.rawName).map(p => p.rawName))];
+  if (names.length === 0) return;
+  try { window.chrome?.webview?.postMessage({ type: 'roomNames', names }); } catch { }
+}
+try {
+  window.chrome?.webview?.addEventListener('message', e => {
+    const d = e.data;
+    if (!d || d.type !== 'roomNames' || !d.map) return;
+    let changed = false;
+    for (const p of currentPlaces) {
+      const ja = p.rawName ? d.map[p.rawName] : null;
+      if (!ja) continue;
+      p.label = p.num ? `${ja} ${p.num}` : ja;
+      p.name = `${p.name} (AI 訳)`;
+      p.rawName = null;
+      changed = true;
+    }
+    if (changed) showPlaces(currentPlaces);
+  });
+} catch { }
 
 function showPlaces(places) {
   const box = document.getElementById('places');
@@ -469,8 +589,10 @@ if (!glbUrl) {
     sun.target.position.copy(sphere.center);
 
     const places = collectPlaces(model).concat(roomPlaces(model));
+    currentPlaces = places;
     inside.home = places.find(p => p.kind === 'pilot') ?? null;
     showPlaces(places);
+    requestRoomNames(places);
     goOutsideHome();
     showMessage('');
     canvas.focus();
