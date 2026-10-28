@@ -14,7 +14,7 @@
             <ItemsControl ItemsSource="{Binding Jobs}">
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
-                        <Grid Margin="0,1">
+                        <Grid Margin="0,1" Visibility="{Binding IsListed, Converter={StaticResource BoolToVis}}">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="170"/>
                                 <ColumnDefinition Width="160"/>
@@ -32,6 +32,9 @@
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
+            <!-- 順番待ちの船は 1 行ずつ並べず、ここにまとめる (Ship3DExports.QueuedText) -->
+            <TextBlock Text="{Binding QueuedText}" Margin="0,2,0,0" Foreground="#555" TextTrimming="CharacterEllipsis" ToolTip="{Binding QueuedText}"
+                       Visibility="{Binding HasQueued, Converter={StaticResource BoolToVis}}"/>
             <DockPanel Margin="0,4,0,0" Visibility="{Binding BatchActive, Converter={StaticResource BoolToVis}}">
                 <Button DockPanel.Dock="Right" Content="まとめて取り消し" Padding="8,0" Click="CancelBatch_Click"
                         ToolTip="まとめて取り込むの書き出しを全部取り消します (個別に始めた書き出しはそのまま)"/>

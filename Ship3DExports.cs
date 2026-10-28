@@ -587,7 +587,16 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             : Jobs.Count > 0 ? "全体: 見積もり中" : "";
         if (pct != _overallPercent) { _overallPercent = pct; Changed(nameof(OverallPercent)); }
         if (text != _overallText) { _overallText = text; Changed(nameof(OverallText)); }
+        // 順番待ちの船は 1 行にまとめる: 「待ち N 隻: <理由> (予想 合計 約 …)」。理由は先頭の待ちの船のもの (Pump が全部に同じ理由を入れる)
+        var queued = Jobs.Where(j => j.Phase == Ship3DJobPhase.Queued).ToList();
+        var queuedText = queued.Count == 0 ? ""
+            : $"待ち {queued.Count} 隻: {queued[0].Reason} (予想 合計 約 {FormatSeconds(queued.Sum(j => j.EstimatedSeconds))})";
+        if (queuedText != _queuedText) { _queuedText = queuedText; Changed(nameof(QueuedText)); Changed(nameof(HasQueued)); }
     }
+
+    private string _queuedText = "";
+    public string QueuedText => _queuedText;
+    public bool HasQueued => _queuedText.Length > 0;
 
     internal static string FormatSeconds(double s)
     {
@@ -959,7 +968,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                        (skipRunning > 0 ? $"今書き出し中なので飛ばす: {skipRunning} 隻\n" : "") +
                        (skipForeign > 0 ? $"置き場所に同じ名前のこのアプリのものではないファイルがあるので飛ばす: {skipForeign} 隻\n" : "") +
                        (notTaken > 0 ? $"最大容量 ({MaxMb:N0} MB。今の使用量 {FormatBytes(CacheBytes())}、残り {FormatBytes(Math.Max(0, MaxMb * MB - CacheBytes()))}) を超えるので取り込まない: {notTaken} 隻\n" +
-                                       "　→ 全部取り込むには、設定タブの「3D モデル」の最大容量を上げてください (全船で約 30〜35 GB。2026-10 の LIVE での見積もり)\n" : "") +
+                                       "　→ 全部取り込むには、設定タブの「3D モデル」の最大容量を上げてください (全船 279 隻で約 25.9 GB。2026-10 の LIVE での作者の PC の実測)\n" : "") +
                        (failures.Count > 0 ? $"見積もれなかった: {failures.Count} 隻 (アプリのログに記録)\n" : "");
             if (selected.Count == 0)
             {
@@ -1225,6 +1234,8 @@ public sealed class Ship3DJob : INotifyPropertyChanged
     public int Percent => _percent;
     public string Text => _text;
     public bool IsIndeterminate => _phase == Ship3DJobPhase.Estimating;
+    // 進み具合の欄に 1 行で出すか (順番待ちの船は出さず、まとめて「待ち N 隻」の 1 行にする。利用者の要望: まとめて取り込むで待ちの行がものすごく並んだ)
+    public bool IsListed => _phase != Ship3DJobPhase.Queued;
 
     // ％と残り時間を出し直す (書き出し中は「経過 ÷ (経過 + 残り)」。終わるまでは 99% で止める)
     internal void Refresh()
@@ -1252,7 +1263,11 @@ public sealed class Ship3DJob : INotifyPropertyChanged
         if (pct != _percent) { _percent = pct; Changed(nameof(Percent)); }
         if (text != _text) { _text = text; Changed(nameof(Text)); }
         Changed(nameof(IsIndeterminate));
+        Changed(nameof(IsListed));
     }
+
+    // 待っている理由 (順番待ちのとき。「待ち N 隻」の行に出す)
+    internal string Reason => _reason;
 }
 
 // 書き出しの段階 (starbreaker -v の標準エラーの行。親の実測、600i の例):
