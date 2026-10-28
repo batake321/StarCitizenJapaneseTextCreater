@@ -767,7 +767,9 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             if (!job.Overlapped) Ship3DStats.Add(job.Short, est.GeometryMb, job.Watch.Elapsed.TotalSeconds, glbBytes);
             job.SetPhase(Ship3DJobPhase.Done, "");
             _running.Remove(job);
-            EnforceLimit(justExported: job.Short);
+            // まとめて取り込むの中では古いものを消さない (利用者の決定。保有船を優先した意味が無くなるため)。
+            // 予想より大きくて最大容量を少し超えることはある (次の個別の書き出しのときに古いものから消える)
+            if (!job.InBatch) EnforceLimit(justExported: job.Short);
             RaiseStateChanged();
             Exported?.Invoke(job.Short);
             return final;
@@ -883,6 +885,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             double sumBytes = 0, sumSeconds = 0;
             int skipFresh = 0, skipRunning = 0, skipForeign = 0, notTaken = 0, ownedCount = 0;
             var selected = new List<(string Record, string Short, string Name, Ship3DEstimate Est)>();
+            // 1. 飛ばす船を決める (照合が要る船は順に照合する)
+            var candidates = new List<(string Record, string Short, string Name, bool Owned)>();
             for (int i = 0; i < list.Count; i++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -896,27 +900,57 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 }
                 else if (state == Ship3DCacheState.Fresh) { skipFresh++; continue; }
                 if (HasForeignFile(s.Short)) { skipForeign++; continue; }
-                BatchText = $"まとめて取り込む: 見積もり中 {i + 1} / {list.Count} 隻目 ({s.Name})";
-                Ship3DEstimate est;
-                try { est = await Ship3DEstimator.EstimateAsync(extractor.StarBreakerExe, stamp, s.Record, ct); }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex)
+                candidates.Add(s);
+            }
+
+            // 2. 見積もり (--dump-hierarchy。1 隻 約 2 秒) を同時数の上限 (MaxParallelExports) まで並行に、並んだ順に始める
+            //    (1 隻ずつだと 278 隻で 9 分ほどかかり、その間は確認の窓も出なかった。利用者の指摘)。
+            //    結果は並んだ順に見て、予想サイズの合計が最大容量を超える手前で止め、残りの見積もりは取り消す。
+            //    続きの処理は UI スレッドの上で動く (await の後もこのスレッドに戻る) ので、_estimates などは同時に触られない
+            var estLimit = MaxParallelExports().Limit;
+            using var gate = new SemaphoreSlim(estLimit);
+            using var estCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            async Task<Ship3DEstimate> EstimateGatedAsync(string record)
+            {
+                await gate.WaitAsync(estCts.Token);
+                try { return await Ship3DEstimator.EstimateAsync(extractor.StarBreakerExe, stamp, record, estCts.Token); }
+                finally { gate.Release(); }
+            }
+            var estTasks = candidates.Select(s => EstimateGatedAsync(s.Record)).ToList();
+            try
+            {
+                for (int k = 0; k < candidates.Count; k++)
                 {
-                    failures.Add($"{s.Name} ({s.Short}): 見積もれませんでした: {ex.Message}");
-                    Log($"まとめて取り込む: 「{s.Name}」({s.Short}) を見積もれませんでした: {ex.Message}");
-                    continue;
+                    ct.ThrowIfCancellationRequested();
+                    var s = candidates[k];
+                    BatchText = $"まとめて取り込む: 見積もり中 {k + 1} / {candidates.Count} 隻目 (同時 {estLimit} 本。{s.Name})";
+                    Ship3DEstimate est;
+                    try { est = await estTasks[k]; }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        failures.Add($"{s.Name} ({s.Short}): 見積もれませんでした: {ex.Message}");
+                        Log($"まとめて取り込む: 「{s.Name}」({s.Short}) を見積もれませんでした: {ex.Message}");
+                        continue;
+                    }
+                    var bytes = est.GlbBytes(c);
+                    // 予想サイズの合計が最大容量を超える手前で止める (使用量は照合で消えた分を反映するため毎回測る)
+                    if (sumBytes + bytes > MaxMb * MB - CacheBytes())
+                    {
+                        notTaken = candidates.Count - k;
+                        break;
+                    }
+                    sumBytes += bytes;
+                    sumSeconds += est.Seconds(c);
+                    if (s.Owned) ownedCount++;
+                    selected.Add((s.Record, s.Short, s.Name, est));
                 }
-                var bytes = est.GlbBytes(c);
-                // 予想サイズの合計が最大容量を超える手前で止める (使用量は照合で消えた分を反映するため毎回測る)
-                if (sumBytes + bytes > MaxMb * MB - CacheBytes())
-                {
-                    notTaken = list.Count - i;
-                    break;
-                }
-                sumBytes += bytes;
-                sumSeconds += est.Seconds(c);
-                if (s.Owned) ownedCount++;
-                selected.Add((s.Record, s.Short, s.Name, est));
+            }
+            finally
+            {
+                // 使わなかった見積もりを取り消し、starbreaker が終わるのを待つ (失敗・取り消しの例外はここでは見ない)
+                estCts.Cancel();
+                try { await Task.WhenAll(estTasks); } catch { }
             }
 
             var parallel = MaxParallelExports().Limit;
@@ -924,7 +958,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             var info = (skipFresh > 0 ? $"最新のキャッシュがあるので飛ばす: {skipFresh} 隻\n" : "") +
                        (skipRunning > 0 ? $"今書き出し中なので飛ばす: {skipRunning} 隻\n" : "") +
                        (skipForeign > 0 ? $"置き場所に同じ名前のこのアプリのものではないファイルがあるので飛ばす: {skipForeign} 隻\n" : "") +
-                       (notTaken > 0 ? $"最大容量 ({MaxMb:N0} MB。今の使用量 {FormatBytes(CacheBytes())}) を超えるので取り込まない: {notTaken} 隻\n" : "") +
+                       (notTaken > 0 ? $"最大容量 ({MaxMb:N0} MB。今の使用量 {FormatBytes(CacheBytes())}、残り {FormatBytes(Math.Max(0, MaxMb * MB - CacheBytes()))}) を超えるので取り込まない: {notTaken} 隻\n" +
+                                       "　→ 全部取り込むには、設定タブの「3D モデル」の最大容量を上げてください (全船で約 30〜35 GB。2026-10 の LIVE での見積もり)\n" : "") +
                        (failures.Count > 0 ? $"見積もれなかった: {failures.Count} 隻 (アプリのログに記録)\n" : "");
             if (selected.Count == 0)
             {

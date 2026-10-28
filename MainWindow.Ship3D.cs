@@ -108,6 +108,15 @@ public partial class MainWindow
     // その後に［詳細］の船の一覧 (GetDetailShipList) の残り
     private async void Ship3DBatch_Click(object sender, RoutedEventArgs e)
     {
+        // 欄の置き場所・最大容量が今の設定と違えば、先に反映して保存する (［設定を保存］を押さずに［まとめて取り込む］を押すと、
+        // 前の最大容量のまま見積もっていた。利用者の指摘)。値が正しくなければ SaveShip3DSettings が知らせて前の値に戻す
+        var folderNow = string.IsNullOrEmpty(App.Config.Ship3DFolder) ? Ship3DExports.DefaultFolder : App.Config.Ship3DFolder;
+        if (txtShip3DMaxMB.Text.Trim() != Ship3DExports.MaxMb.ToString()
+            || !string.Equals(txtShip3DFolder.Text.Trim(), folderNow, StringComparison.OrdinalIgnoreCase))
+        {
+            SaveShip3DSettings();
+            SaveConfigToFile(showError: false);
+        }
         btnShip3DBatch.IsEnabled = false;
         txtShip3DBatchState.Text = "保有している船を調べています...";
         try
