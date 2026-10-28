@@ -230,7 +230,8 @@ function classify(rawName) {
 
 function collectPlaces(root) {
   root.updateMatrixWorld(true);
-  const found = { pilot: [], elevator: [], cargo: [], turret: [] };
+  // 種類ごとの入れ物は KINDS から作る (種類を足したときに入れ物を足し忘れると、下の found[k.key] で止まるため)
+  const found = Object.fromEntries(KINDS.map(k => [k.key, []]));
   root.traverse(o => {
     const kind = classify(o.name);
     if (!kind) return;
