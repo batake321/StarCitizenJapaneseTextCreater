@@ -89,6 +89,11 @@ public class AppConfig
     // PC 間の同期: 個人データの書き出し・取り込みに使う共有フォルダ (空なら同期しない)
     public string SyncFolder { get; set; } = "";
 
+    // 船の 3D 表示 (Ship3DExports): GLB のキャッシュの置き場所 (空なら既定 = TEMP の中の StarCitizenJapaneseTextCreater\ship3d) と、
+    // 最大容量 (MB。0 なら未設定で、初期値 = 置き場所のドライブの残り容量の 1/3、ただし最大 2GB)
+    public string Ship3DFolder { get; set; } = "";
+    public long Ship3DMaxMB { get; set; } = 0;
+
     // 自動更新: 起動したときと毎日 AutoUpdateTime (HH:mm) に、新しい版を確かめる (AppUpdater)
     public bool AutoUpdateEnabled { get; set; } = true;
     public string AutoUpdateTime { get; set; } = "08:00";

@@ -2524,6 +2524,52 @@
                             </Grid>
                         </GroupBox>
 
+                        <!-- 3D モデル (Ship3DExports / MainWindow.Ship3D.cs): ［詳細］の船の 3D 表示に使う GLB のキャッシュの置き場所・最大容量と、まとめて取り込む -->
+                        <GroupBox Header="3D モデル" Margin="0,0,0,8">
+                            <Grid Margin="8">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="140"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <TextBlock Text="置き場所:" Grid.Row="0" VerticalAlignment="Center" Margin="0,4"/>
+                                <TextBox x:Name="txtShip3DFolder" Grid.Row="0" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"
+                                         TextChanged="TxtShip3DFolder_TextChanged"
+                                         ToolTip="船の 3D モデル (GLB) を置くフォルダ。空欄なら Windows の TEMP の中 (StarCitizenJapaneseTextCreater\ship3d)。「設定を保存」で有効になります"/>
+                                <Button Content="参照…" Grid.Row="0" Grid.Column="2" Padding="10,2" Margin="6,4,0,4" Click="Ship3DBrowse_Click"/>
+
+                                <TextBlock x:Name="txtShip3DDrive" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Foreground="#666" Margin="0,2"/>
+
+                                <TextBlock Text="最大容量 (MB):" Grid.Row="2" VerticalAlignment="Center" Margin="0,4"/>
+                                <StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,4">
+                                    <TextBox x:Name="txtShip3DMaxMB" Width="90" VerticalAlignment="Center"
+                                             ToolTip="キャッシュの最大容量 (MB)。置き場所のドライブの残り容量より小さい値だけ指定できます。超えたら、書き出しが終わるたびに古いものから消します。「設定を保存」で有効になります"/>
+                                    <TextBlock x:Name="txtShip3DUsage" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
+                                </StackPanel>
+
+                                <StackPanel Grid.Row="3" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="0,6,0,4">
+                                    <Button x:Name="btnShip3DBatch" Content="まとめて取り込む" Click="Ship3DBatch_Click" Padding="14,6"
+                                            ToolTip="保有している船 (所持船と Hangar 同期の船) を先に、その後に［詳細］の船の一覧の残りを、ゲームデータから書き出してキャッシュに入れます。始める前に隻数・予想時間・予想サイズを出します"/>
+                                    <TextBlock x:Name="txtShip3DBatchState" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
+                                </StackPanel>
+
+                                <!-- 書き出しの進み具合 (［詳細］タブと同じ中身) -->
+                                <local:Ship3DProgressPanel Grid.Row="4" Grid.ColumnSpan="3" Margin="0,4"/>
+
+                                <TextBlock Grid.Row="5" Grid.ColumnSpan="3" TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontSize="12"
+                                           Text="［詳細］タブで船を出しているときの［3D 表示］［別ウィンドウ］で使う 3D モデルを、選択中のチャンネルのゲームデータ (Data.p4k) から StarBreaker で書き出して置いておきます (テクスチャ付き・船内込み)。ゲームデータが変わると書き出し直します。まとめて取り込むは、予想サイズの合計が最大容量を超える手前で止めます (古いものを消して入れ替えません)。CPU 使用率が 90% 以上のときは書き出しを始めません。"/>
+                            </Grid>
+                        </GroupBox>
+
                         <!-- 自動更新 (AppUpdater / MainWindow.Update.cs): 起動したときと毎日の時刻に新しい版を確かめ、差分だけを取って入れ替える -->
                         <GroupBox Header="自動更新" Margin="0,0,0,8">
                             <StackPanel Margin="8">

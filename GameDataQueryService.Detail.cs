@@ -393,6 +393,10 @@ public partial class GameDataQueryService
         if (mfr.Length == 0) mfr = indexMfr;
         if (mfr.Length > 0) sb.AppendLine($"  メーカー: {mfr}");
         if (size > 0) sb.AppendLine($"  サイズ: S{size}");
+        // 船・車両の積載量 (【船・車両】と同じ共通の関数: ゲームデータ → UEX → Ship Matrix)。0・不明なら出さない
+        if (itemType.StartsWith("NOITEM_Vehicle", StringComparison.OrdinalIgnoreCase)
+            && ShipCargo.Resolve(nameEn, mfr, rec) is { } cargo)
+            sb.AppendLine($"  積載量: {ShipCargo.Format(cargo.Scu)} SCU ({cargo.Source})");
         sb.AppendLine($"  record 名: {shortName}");
 
         var desc = DescriptionText(rawJson, loc);

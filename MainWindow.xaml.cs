@@ -218,6 +218,8 @@ public partial class MainWindow : Window
 
         // PC 間の同期 (MainWindow.Sync.cs): 起動時の取り込み → 書き出しと、ゲーム起動・ゲーム中・ゲーム終了の見回り
         InitSync();
+        // 3D モデル (MainWindow.Ship3D.cs): 設定タブの置き場所・最大容量の欄
+        InitShip3DSettings();
         // 自動更新 (MainWindow.Update.cs): 起動したときと毎日の時刻の確かめ
         InitAutoUpdate();
     }
@@ -1872,6 +1874,7 @@ public partial class MainWindow : Window
         App.Config.ArmisticeSoundPath = txtArmisticeSoundPath.Text.Trim();
         App.Config.ArrivalSoundPath = txtArrivalSoundPath.Text.Trim();
         App.Config.SyncFolder = txtSyncFolder.Text.Trim();
+        SaveShip3DSettings();
         SaveAutoUpdateSettings();
         App.Config.UexApiKey = txtUexApiKey.Text.Trim();
         if (double.TryParse(txtMissionFontSize.Text.Trim(), out var fs) && fs >= 8 && fs <= 30)
@@ -1957,6 +1960,8 @@ public partial class MainWindow : Window
                 App.Config.MapAutoCapture,
                 App.Config.MapSpinCorrections,
                 App.Config.SyncFolder,
+                App.Config.Ship3DFolder,
+                App.Config.Ship3DMaxMB,
                 App.Config.ExtractedBuildVersion,
                 App.Config.ExtractedBuildChangeNum,
             };

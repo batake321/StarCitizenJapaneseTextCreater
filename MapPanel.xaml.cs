@@ -17,6 +17,7 @@ namespace StarCitizenJapaneseTextCreater;
 //   データは詳細タブと同じ ShopTree (GameDataQueryService.BuildShopTree)。表が作り直されたら (GameDataExtractor.ShopTablesChanged) 作り直す。
 //   ［現在位置］: ゲームに /showlocation を送って座標を読み (ShowLocationSender)、現在位置の星系・近くの場所を求め、近くの惑星の自転の角度を実測して
 //     補正値を覚え (CurrentLocation)、その星系 1 つの表示にして印と【現在位置の近く】を出す。最後の現在位置と補正値は覚える (App.Config.MapCurrent / MapSpinCorrections)。
+//     押したとき、今わかっている現在位置の星系が今の表示と違えば、取る前にその星系 1 つの表示に切り替える (取れなくても切り替わる)。
 //   図の惑星・衛星の自転の角度は、現在位置があればその取得時刻、無ければ今の時刻のもの
 //   タブを初めて開いたとき (Loaded) に作る
 public partial class MapPanel : UserControl
@@ -241,8 +242,42 @@ public partial class MapPanel : UserControl
     // /showlocation の前にクリップボードに入れておく文字 (前の座標を読み違えないように。親が確かめた PowerShell と同じやり方)
     private const string ClipboardPlaceholder = "(showlocation を待っています)";
 
-    // ［現在位置］: ゲームに /showlocation を送って座標を読み、現在位置の星系 1 つの表示にする (CaptureAsync。自動の取得と同時には動かない)
-    private async void BtnCurrent_Click(object sender, RoutedEventArgs e) => await CaptureAsync(auto: false);
+    // ［現在位置］: ゲームに /showlocation を送って座標を読み、現在位置の星系 1 つの表示にする (CaptureAsync。自動の取得と同時には動かない)。
+    // 送る前に、今わかっている現在位置の星系 (KnownCurrentSystem) が今の表示 (3 星系の並びも含む) と違えば、先にその星系 1 つの表示にする
+    // (星系のボタンと同じ切り替え方。中心・幅は MapViews に覚えた表示)。切り替えている間も取得中と同じ扱いにする
+    // (ボタンを押せなくし、自動の取得を割り込ませない)。取得中 (自動の取得の途中) に押されたときは切り替えない
+    private async void BtnCurrent_Click(object sender, RoutedEventArgs e)
+    {
+        if (_capturing) return;
+        if (KnownCurrentSystem() is { } known && !known.Equals(CurrentView(), StringComparison.OrdinalIgnoreCase))
+        {
+            _capturing = true;
+            btnCurrent.IsEnabled = false;
+            try
+            {
+                App.Config.MapView = known;
+                SaveConfig?.Invoke();
+                await RenderAsync();
+            }
+            finally
+            {
+                _capturing = false;
+                btnCurrent.IsEnabled = true;
+            }
+        }
+        await CaptureAsync(auto: false);
+    }
+
+    // 今わかっている現在位置の星系 (SystemNames の 1 つ)。図と同じ求め方 (ComputeEffective。星系は MapState と同じく eff.System があればその星系、
+    // 無ければ CurrentLocation.Locate)。現在位置が無い・ShopTree が無い (インデックス未構築等)・星系が分からなければ null
+    private string? KnownCurrentSystem()
+    {
+        if (_tree is not { IsEmpty: false } tree) return null;
+        if (ComputeEffective(tree) is not { NoPos: false } eff) return null;
+        var effSystem = eff.System is { Length: > 0 } es ? tree.Systems.FirstOrDefault(s => s.System.Equals(es, StringComparison.OrdinalIgnoreCase)) : null;
+        var loc = CurrentLocation.Locate(tree, eff.Pos, eff.Unix, SystemNames, null, fresh: false, effSystem);
+        return loc == null ? null : SystemNames.FirstOrDefault(n => n.Equals(loc.System.System, StringComparison.OrdinalIgnoreCase));
+    }
 
     // 座標を取っている途中か (［現在位置］と自動の取得を同時に動かさない)、最後に自動で取った時刻 (UNIX 秒)
     private bool _capturing;

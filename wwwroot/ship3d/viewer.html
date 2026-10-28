@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>3D 表示</title>
+<!-- 船の 3D 表示 (Ship3DWeb が WebView2 で開く)。
+     three.js 0.186.1 (同梱。wwwroot\three) で、StarBreaker が書き出した GLB (キャッシュのフォルダ) を出す。
+     開き方: https://scjt-viewer.example/ship3d/viewer.html?glb=<GLB の URL>&title=<船の名前>
+     GLB の座標 (実物で確かめたもの。t_ORIG_600i.glb / t_ORIG_X1.glb): いちばん上のノード CryEngine_Z_up が Z 上向きを Y 上向きに直していて、
+       上 = +Y、前 = -Z (600i の hardpoint_seat_pilot が z = -45 で船の範囲 -66.7〜60.2 の前寄り。操縦席のノードの +Y 軸 (CryEngine の前) も -Z を向く)、
+       左 = -X (hardpoint_seat_bridge_left が x = -1.41、_right が +1.41)。 -->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1e24; color: #eee; font-family: "Yu Gothic UI", "Meiryo", sans-serif; font-size: 13px; }
+  #wrap { position: absolute; inset: 0; display: flex; }
+  #view { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; outline: none; }
+  #side { width: 170px; background: #262a33; border-left: 1px solid #3a3f4a; overflow-y: auto; padding: 6px; box-sizing: border-box; }
+  #side h3 { margin: 4px 0 6px; font-size: 13px; font-weight: bold; color: #ccc; }
+  #side button { display: block; width: 100%; margin: 0 0 4px; text-align: left; }
+  #side .none { color: #999; font-size: 12px; }
+  button { background: #3a404c; color: #eee; border: 1px solid #555c6a; border-radius: 3px; padding: 4px 8px; font: inherit; cursor: pointer; }
+  button:hover { background: #4a5262; }
+  button.on { background: #3d6db5; border-color: #5a8ad6; }
+  #top { position: absolute; left: 8px; top: 8px; display: flex; gap: 6px; align-items: center; }
+  #title { margin-left: 8px; font-weight: bold; text-shadow: 0 0 3px #000; }
+  #help { position: absolute; left: 8px; bottom: 8px; color: #bbb; font-size: 12px; text-shadow: 0 0 3px #000; line-height: 1.5; pointer-events: none; }
+  #msg { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.7); padding: 12px 18px; border-radius: 6px; max-width: 80%; white-space: pre-wrap; }
+  #msg.hidden { display: none; }
+  #msg.error { color: #ff9a9a; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../three/build/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="wrap">
+  <div id="view">
+    <canvas id="canvas" tabindex="0"></canvas>
+    <div id="top">
+      <button id="btnOutside" class="on" title="船の外から見ます (Home で初めの位置)">船外</button>
+      <button id="btnInside" title="船の中を見ます (Home で操縦席)">船内</button>
+      <span id="title"></span>
+    </div>
+    <div id="help">左ドラッグ: 回転 (船外は船のまわり / 船内は見回す)　右ドラッグ: 平行移動　ホイール: 拡大縮小 (船内は前後)<br>
+      W/A/S/D: 前後左右　↑/↓: 上下　Insert/Delete: 拡大/縮小　Home: 初めの位置</div>
+    <div id="msg">読み込みを始めています...</div>
+  </div>
+  <div id="side">
+    <h3>船内の位置</h3>
+    <div id="places"><div class="none">(読み込み中)</div></div>
+  </div>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from '../three/examples/jsm/loaders/GLTFLoader.js';
+
+const params = new URLSearchParams(location.search);
+const glbUrl = params.get('glb') || '';
+const title = params.get('title') || '';
+document.getElementById('title').textContent = title;
+document.title = title ? `3D 表示 - ${title}` : '3D 表示';
+
+const msgEl = document.getElementById('msg');
+function showMessage(text, isError) {
+  msgEl.textContent = text;
+  msgEl.classList.toggle('hidden', !text);
+  msgEl.classList.toggle('error', !!isError);
+}
+// 失敗はアプリにも知らせる (アプリのログに残す。Ship3DWeb の WebMessageReceived)
+function reportError(text) {
+  showMessage(text, true);
+  try { window.chrome?.webview?.postMessage({ type: 'error', message: text }); } catch { }
+}
+window.addEventListener('error', e => reportError(`表示でエラーが起きました: ${e.message}`));
+window.addEventListener('unhandledrejection', e => reportError(`表示でエラーが起きました: ${e.reason?.message ?? e.reason}`));
+
+// ===== 船の向き (GLB を調べて決めたもの。ファイルの頭の説明) =====
+const SHIP_FORWARD = new THREE.Vector3(0, 0, -1);
+const SHIP_UP = new THREE.Vector3(0, 1, 0);
+const SHIP_LEFT = new THREE.Vector3(-1, 0, 0);
+
+// 目の高さ (位置のノードから上げる量。m)。座る所 (操縦席・タレット) は座った目の高さ、立つ所 (エレベーター・貨物室) は立った目の高さ
+const EYE_SEATED = 1.2;
+const EYE_STANDING = 1.7;
+// 船内の移動の速さ (m/秒)
+const INSIDE_SPEED = 3;
+
+// ===== 描画の準備 =====
+const canvas = document.getElementById('canvas');
+let renderer;
+try {
+  // 船の外 (数百 m) から船内 (数 cm) まで出すので、深度は対数にする
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+} catch (e) {
+  reportError(`3D の描画 (WebGL) を使えません: ${e.message}`);
+  throw e;
+}
+renderer.setPixelRatio(window.devicePixelRatio || 1);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1b1e24);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 10000);
+scene.add(camera);
+
+// GLB に入っているライト (KHR_lights_punctual) は数が多すぎて重いので使わず、環境光 + 平行光、船内ではカメラに付けた光を使う
+const ambient = new THREE.AmbientLight(0xffffff, 0.9);
+scene.add(ambient);
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+scene.add(sun);
+scene.add(sun.target);
+const camLight = new THREE.PointLight(0xffffff, 25, 0, 2);
+camLight.visible = false;
+camera.add(camLight);
+
+function resize() {
+  const view = document.getElementById('view');
+  const w = Math.max(1, view.clientWidth), h = Math.max(1, view.clientHeight);
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ===== 見る位置 =====
+// 船外: target のまわりを回る (radius・theta・phi)。船内: pos から yaw・pitch の向きを見る
+const outside = { target: new THREE.Vector3(), radius: 10, theta: 0, phi: 1, home: null };
+const inside = { pos: new THREE.Vector3(), yaw: 0, pitch: 0, fov: 70, home: null };
+let mode = 'outside';
+let shipRadius = 10;
+let model = null;
+
+function applyCamera() {
+  if (mode === 'outside') {
+    const off = new THREE.Vector3().setFromSphericalCoords(outside.radius, outside.phi, outside.theta);
+    camera.position.copy(outside.target).add(off);
+    camera.up.set(0, 1, 0);
+    camera.lookAt(outside.target);
+    camera.fov = 50;
+  } else {
+    camera.position.copy(inside.pos);
+    camera.rotation.set(inside.pitch, inside.yaw, 0, 'YXZ');
+    camera.fov = inside.fov;
+  }
+  camera.near = 0.05;
+  camera.far = Math.max(5000, shipRadius * 50);
+  camera.updateProjectionMatrix();
+}
+
+function setMode(m) {
+  mode = m;
+  document.getElementById('btnOutside').classList.toggle('on', m === 'outside');
+  document.getElementById('btnInside').classList.toggle('on', m === 'inside');
+  camLight.visible = m === 'inside';
+  applyCamera();
+}
+
+// 船外の初めの位置: 左斜め前方の上から船を見下ろす。船全体 (外接球) が画面に入る距離
+function outsideHome() {
+  const box = new THREE.Box3().setFromObject(model);
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  shipRadius = Math.max(sphere.radius, 0.5);
+  const dir = new THREE.Vector3().addScaledVector(SHIP_LEFT, 1).addScaledVector(SHIP_FORWARD, 1).addScaledVector(SHIP_UP, 0.8).normalize();
+  const vHalf = THREE.MathUtils.degToRad(50) / 2;
+  const hHalf = Math.atan(Math.tan(vHalf) * camera.aspect);
+  const dist = shipRadius / Math.sin(Math.min(vHalf, hHalf)) * 1.05;
+  const s = new THREE.Spherical().setFromVector3(dir.multiplyScalar(dist));
+  return { target: sphere.center.clone(), radius: s.radius, theta: s.theta, phi: s.phi };
+}
+
+function goOutsideHome() {
+  const h = outsideHome();
+  outside.target.copy(h.target); outside.radius = h.radius; outside.theta = h.theta; outside.phi = h.phi;
+  setMode('outside');
+}
+
+// 位置 (place: 船内の位置のリストの 1 つ) に移る (船内表示にする)
+function goPlace(place) {
+  inside.pos.copy(place.pos);
+  inside.yaw = Math.atan2(-place.dir.x, -place.dir.z);   // カメラは yaw = 0 で -Z を見る
+  inside.pitch = 0;
+  inside.fov = 70;
+  setMode('inside');
+}
+
+function goInsideHome() {
+  if (inside.home) goPlace(inside.home);
+  else {
+    // 操縦席が無い船は船の真ん中から前を見る
+    const box = new THREE.Box3().setFromObject(model);
+    goPlace({ pos: box.getCenter(new THREE.Vector3()), dir: SHIP_FORWARD.clone() });
+  }
+}
+
+document.getElementById('btnOutside').addEventListener('click', () => { if (model) setMode('outside'); canvas.focus(); });
+document.getElementById('btnInside').addEventListener('click', () => {
+  if (!model) return;
+  if (!inside.entered) { inside.entered = true; goInsideHome(); } else setMode('inside');
+  canvas.focus();
+});
+
+// ===== 船内の位置 (操縦席・エレベーター・貨物室・タレット) =====
+// ノード名 (小文字にして) で分ける。hardpoint_ で始まるものだけ見る。
+//   除くもの: access (乗り降りの位置 seat_access / seataccess)・radar・controller・dashboard・camera・regen・relay を含むもの
+//   操縦席: seat と pilot を含み copilot を含まない (例 hardpoint_seat_pilot、X1 は hardpoint_pilot_seat)
+//   貨物室: cargo_bay または cargogrid を含む (例 hardpoint_cargo_bay、hardpoint_cargogrid_main_left)
+//   タレット: turret を含み door を含まない (例 hardpoint_remote_turret_top、hardpoint_turret_base_upper)
+//   エレベーター: elevator を含む、または _lift / _droplift の語がある (例 hardpoint_droplift、hardpoint_door_elevator)。
+//     door を含まないものがあればそれだけ、無ければ door を含むもの (600i は hardpoint_droplift と hardpoint_droplift_door が同じ所にあるため)
+const KINDS = [
+  { key: 'pilot', label: '操縦席', eye: EYE_SEATED },
+  { key: 'elevator', label: 'エレベーター', eye: EYE_STANDING },
+  { key: 'cargo', label: '貨物室', eye: EYE_STANDING },
+  { key: 'turret', label: 'タレット', eye: EYE_SEATED },
+];
+
+function classify(rawName) {
+  const n = (rawName || '').toLowerCase();
+  if (!n.startsWith('hardpoint_')) return null;
+  if (/(access|radar|controller|dashboard|camera|regen|relay)/.test(n)) return null;
+  if (n.includes('seat') && n.includes('pilot') && !n.includes('copilot')) return 'pilot';
+  if (n.includes('cargo_bay') || n.includes('cargogrid')) return 'cargo';
+  if (n.includes('turret')) return n.includes('door') ? null : 'turret';
+  if (n.includes('elevator') || /_(drop)?lift(_|$)/.test(n)) return 'elevator';
+  return null;
+}
+
+function collectPlaces(root) {
+  root.updateMatrixWorld(true);
+  const found = { pilot: [], elevator: [], cargo: [], turret: [] };
+  root.traverse(o => {
+    const kind = classify(o.name);
+    if (!kind) return;
+    const pos = o.getWorldPosition(new THREE.Vector3());
+    // 向きはノードの +Y 軸 (CryEngine の前) を水平にしたもの。水平の成分がほとんど無ければ船の前
+    const dir = new THREE.Vector3(0, 1, 0).transformDirection(o.matrixWorld);
+    dir.y = 0;
+    if (dir.length() < 0.2) dir.copy(SHIP_FORWARD); else dir.normalize();
+    found[kind].push({ name: o.name, pos, dir, door: o.name.toLowerCase().includes('door') });
+  });
+  const noDoor = found.elevator.filter(p => !p.door);
+  if (noDoor.length > 0) found.elevator = noDoor;
+
+  const result = [];
+  for (const k of KINDS) {
+    // 同じ種類で 0.5 m 以内に重なるもの (同じ名前のノードが入れ子になっているもの等) は 1 つにする
+    const list = [];
+    for (const p of found[k.key]) if (!list.some(q => q.pos.distanceTo(p.pos) < 0.5)) list.push(p);
+    // 前から後ろの順 (前 = -Z)
+    list.sort((a, b) => a.pos.z - b.pos.z);
+    list.forEach((p, i) => {
+      result.push({
+        kind: k.key,
+        label: list.length > 1 ? `${k.label} ${i + 1}` : k.label,
+        name: p.name,
+        pos: p.pos.clone().addScaledVector(SHIP_UP, k.eye),
+        dir: p.dir,
+      });
+    });
+  }
+  return result;
+}
+
+function showPlaces(places) {
+  const box = document.getElementById('places');
+  box.textContent = '';
+  if (places.length === 0) {
+    const d = document.createElement('div');
+    d.className = 'none';
+    d.textContent = '(データにありません)';
+    box.appendChild(d);
+    return;
+  }
+  for (const p of places) {
+    const b = document.createElement('button');
+    b.textContent = p.label;
+    b.title = p.name;
+    b.addEventListener('click', () => { inside.entered = true; goPlace(p); canvas.focus(); });
+    box.appendChild(b);
+  }
+}
+
+// ===== マウス・キー =====
+let drag = null;   // { button, x, y }
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('pointerdown', e => {
+  canvas.focus();
+  if (e.button !== 0 && e.button !== 2) return;
+  drag = { button: e.button, x: e.clientX, y: e.clientY };
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointerup', e => { drag = null; try { canvas.releasePointerCapture(e.pointerId); } catch { } });
+canvas.addEventListener('pointermove', e => {
+  if (!drag || !model) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.button === 0) {
+    if (mode === 'outside') {
+      outside.theta -= dx * 0.005;
+      outside.phi = THREE.MathUtils.clamp(outside.phi - dy * 0.005, 0.01, Math.PI - 0.01);
+    } else {
+      inside.yaw -= dx * 0.003;
+      inside.pitch = THREE.MathUtils.clamp(inside.pitch - dy * 0.003, -1.55, 1.55);
+    }
+  } else {
+    // 平行移動: 画面の右・上の向きに動かす (船外は距離に比例、船内は 1 画素 1 cm)
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+    const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+    const k = mode === 'outside' ? outside.radius * 0.0015 : 0.01;
+    const move = right.multiplyScalar(-dx * k).addScaledVector(up, dy * k);
+    if (mode === 'outside') outside.target.add(move); else inside.pos.add(move);
+  }
+  applyCamera();
+});
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (!model) return;
+  if (mode === 'outside') {
+    outside.radius = THREE.MathUtils.clamp(outside.radius * Math.exp(e.deltaY * 0.001), 0.2, shipRadius * 20);
+  } else {
+    const fwd = new THREE.Vector3();
+    camera.getWorldDirection(fwd);
+    inside.pos.addScaledVector(fwd, -e.deltaY * 0.005);
+  }
+  applyCamera();
+}, { passive: false });
+
+const keys = new Set();
+const MOVE_CODES = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown'];
+window.addEventListener('keydown', e => {
+  if (!model) return;
+  if (MOVE_CODES.includes(e.code)) { keys.add(e.code); e.preventDefault(); return; }
+  if (e.code === 'Insert' || e.code === 'Delete') {
+    // 拡大 / 縮小 (船外は近づく・離れる、船内は画角を狭める・広げる)。押し続けると繰り返す
+    const zoomIn = e.code === 'Insert';
+    if (mode === 'outside') outside.radius = THREE.MathUtils.clamp(outside.radius * (zoomIn ? 0.9 : 1 / 0.9), 0.2, shipRadius * 20);
+    else inside.fov = THREE.MathUtils.clamp(inside.fov * (zoomIn ? 0.9 : 1 / 0.9), 15, 100);
+    applyCamera();
+    e.preventDefault();
+  } else if (e.code === 'Home') {
+    if (mode === 'outside') goOutsideHome(); else goInsideHome();
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', e => keys.delete(e.code));
+window.addEventListener('blur', () => keys.clear());
+
+function moveByKeys(dt) {
+  if (keys.size === 0) return;
+  const speed = mode === 'outside' ? Math.max(outside.radius * 0.5, 1) : INSIDE_SPEED;
+  const fwd = new THREE.Vector3();
+  camera.getWorldDirection(fwd);
+  fwd.y = 0;
+  if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); else fwd.normalize();
+  const right = new THREE.Vector3().crossVectors(fwd, SHIP_UP).normalize();
+  const move = new THREE.Vector3();
+  if (keys.has('KeyW')) move.add(fwd);
+  if (keys.has('KeyS')) move.sub(fwd);
+  if (keys.has('KeyD')) move.add(right);
+  if (keys.has('KeyA')) move.sub(right);
+  if (keys.has('ArrowUp')) move.add(SHIP_UP);
+  if (keys.has('ArrowDown')) move.sub(SHIP_UP);
+  if (move.lengthSq() === 0) return;
+  move.normalize().multiplyScalar(speed * dt);
+  if (mode === 'outside') outside.target.add(move); else inside.pos.add(move);
+  applyCamera();
+}
+
+// ===== 描画の繰り返し =====
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.1);
+  last = now;
+  if (model) {
+    moveByKeys(dt);
+    // 平行光は船の左斜め前の上から当てる (カメラが動いても向きは変えない)
+    renderer.render(scene, camera);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ===== 読み込み =====
+if (!glbUrl) {
+  reportError('表示する GLB が指定されていません。');
+} else {
+  const loader = new GLTFLoader();
+  loader.load(glbUrl, gltf => {
+    showMessage('組み立て中...');
+    const root = gltf.scene;
+    // GLB のライトを取り除く (KHR_lights_punctual。描画が重くなるため)
+    const lights = [];
+    root.traverse(o => { if (o.isLight) lights.push(o); });
+    for (const l of lights) l.removeFromParent();
+    scene.add(root);
+    model = root;
+
+    const box = new THREE.Box3().setFromObject(model);
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const sunDir = new THREE.Vector3().addScaledVector(SHIP_LEFT, 0.6).addScaledVector(SHIP_FORWARD, 0.6).addScaledVector(SHIP_UP, 1).normalize();
+    sun.position.copy(sphere.center).addScaledVector(sunDir, Math.max(sphere.radius, 1) * 3);
+    sun.target.position.copy(sphere.center);
+
+    const places = collectPlaces(model);
+    inside.home = places.find(p => p.kind === 'pilot') ?? null;
+    showPlaces(places);
+    goOutsideHome();
+    showMessage('');
+    canvas.focus();
+  }, xhr => {
+    if (xhr.total > 0) {
+      const pct = Math.floor(xhr.loaded * 100 / xhr.total);
+      showMessage(`読み込み中 ${pct}% (${(xhr.loaded / 1048576).toFixed(0)} MB / ${(xhr.total / 1048576).toFixed(0)} MB)`);
+    } else {
+      showMessage(`読み込み中 ${(xhr.loaded / 1048576).toFixed(0)} MB`);
+    }
+  }, err => {
+    reportError(`GLB を読み込めませんでした: ${err?.message ?? err}`);
+  });
+}
+</script>
+</body>
+</html>

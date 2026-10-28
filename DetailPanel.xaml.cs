@@ -237,9 +237,11 @@ public partial class DetailPanel : UserControl
         App.AppendStartupLog(App.Config.WorkingDirectory, msg);   // ほかの書き込みと重ならないよう App のロックを通す
     }
 
-    // 詳細の文字 (GetItemDetailText の形) を出す。WebView2 では Markdown の表にして HTML で、使えなければ文字のまま
+    // 詳細の文字 (GetItemDetailText の形) を出す。WebView2 では Markdown の表にして HTML で、使えなければ文字のまま。
+    // 別の品目の詳細になったら、3D のボタンを隠し、3D 表示をやめて表に戻す (同じ船の出し直し (UEX の値段) ではそのまま)
     private void ShowDetail(string text)
     {
+        if (!string.Equals(_detailRecord, _ship3DRecord, StringComparison.OrdinalIgnoreCase)) SetShip3DTarget(null, "");
         txtDetail.Text = DetailHtml.ForTextBox(text);   // 文字の欄ではリンクは表示名だけ、図は 1 行の断り書き
         txtDetail.ScrollToHome();
         if (_webFailed) return;
@@ -778,6 +780,8 @@ public partial class DetailPanel : UserControl
             return;
         }
         ShowDetail(text);
+        // 船・車両 (NOITEM_Vehicle) なら［3D 表示］［別ウィンドウ］を出す
+        if (itemType.StartsWith("NOITEM_Vehicle", StringComparison.OrdinalIgnoreCase)) SetShip3DTarget(record, ShipNameFor(record));
 
         // 保存データに購入の売り場が無ければ、UEX の値段 (チャット・表と同じ取得・キャッシュ) を取ってから出し直す
         if (!text.Contains("店の販売データ無し")) return;
@@ -796,6 +800,182 @@ public partial class DetailPanel : UserControl
             ShowDetail(again);
         }
         catch { }   // UEX が取れなくても保存データの詳細のまま
+    }
+
+    // ===== 船の 3D 表示 =====
+
+    // 3D のボタンを出している船の record (船・車両の詳細を出しているとき。出していなければ null) と名前
+    private string? _ship3DRecord;
+    private string _ship3DName = "";
+    // 下の欄に 3D を出している船の短い名前 (出していなければ null)。出している間は容量の上限で消されないようにする (Ship3DExports.AcquireView)
+    private string? _ship3DShown;
+    // 3D の WebView2 (詳細の WebView2 とは別)。初期化は一度だけ
+    private Task? _web3DInit;
+
+    // 3D のボタンの船を決める (null なら隠し、3D 表示もやめる)
+    private void SetShip3DTarget(string? record, string name)
+    {
+        if (!_ship3DHooked)
+        {
+            _ship3DHooked = true;
+            // CPU 使用率が 90% をまたいだ・書き出しが加わった / 終わった・照合・キャッシュを書いた / 消した・置き場所が変わったら、ボタンを決め直す
+            Ship3DExports.Instance.StateChanged += UpdateShip3DButtons;
+            // 書き出し中の進み具合の文 (1 秒ごとに全体の文が変わるときに出し直す)
+            Ship3DExports.Instance.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(Ship3DExports.OverallText)) UpdateShip3DButtons(); };
+        }
+        _ship3DRecord = record;
+        _ship3DName = name;
+        if (record == null)
+        {
+            HideShip3D();
+            pnlShip3D.Visibility = Visibility.Collapsed;
+            return;
+        }
+        pnlShip3D.Visibility = Visibility.Visible;
+        UpdateShip3DButtons();
+        // パッチで Data.p4k が変わっていれば、この船の元データを照合する (終わったら StateChanged でボタンを決め直す)
+        if (Ship3DExports.Instance.StateOf(record) == Ship3DCacheState.NeedsVerify) _ = Ship3DExports.Instance.VerifyAsync(record);
+    }
+    private bool _ship3DHooked;
+
+    // ［読み込み］は、キャッシュが無い (照合で消したものを含む) ときで、書き出し中でなく、CPU 使用率が 90% 未満のときだけ使える。
+    // 最新のキャッシュがあるとき・照合中は使えない。［3D 表示］［別ウィンドウ］はいつでも押せる (キャッシュが無ければ［読み込み］を押すよう知らせる)
+    private void UpdateShip3DButtons()
+    {
+        if (_ship3DRecord == null) return;
+        var ex = Ship3DExports.Instance;
+        var state = ex.StateOf(_ship3DRecord);
+        var shortName = Ship3DExports.ShortName(_ship3DRecord);
+        var job = ex.Jobs.FirstOrDefault(j => j.Short.Equals(shortName, StringComparison.OrdinalIgnoreCase));
+        btnShip3DImport.IsEnabled = state == Ship3DCacheState.None && job == null && !ex.CpuHigh;
+        txtShip3D.Text = job != null ? $"3D モデル: 書き出し中 {job.Text}"
+            : state switch
+            {
+                Ship3DCacheState.Fresh => "3D モデル: キャッシュあり",
+                Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying => "3D モデル: 照合中 (パッチで Data.p4k が変わったので元データを確かめています)",
+                Ship3DCacheState.NoGame => "3D モデル: ゲームの Data.p4k が見つかりません",
+                _ => ex.CpuHigh ? $"3D モデル: キャッシュなし。CPU 使用率 {ex.CpuPercent:F0}% のため取り込みを始められません (90% 未満になったら使えます)"
+                                : "3D モデル: キャッシュなし (［読み込み］でゲームデータから取り込みます)",
+            };
+    }
+
+    // 船の名前 (リストで選んでいる行がその船ならその名前、無ければ record の短い名前)
+    private string ShipNameFor(string record) =>
+        lstCandidates.SelectedItem is ListItem item && item.Record.Equals(record, StringComparison.OrdinalIgnoreCase) && item.Name.Length > 0
+            ? item.Name : Ship3DExports.ShortName(record);
+
+    // 表示に使える GLB のパス (Data.p4k が変わっていれば照合してから)。無ければ［読み込み］を押すよう知らせて null (書き出しはしない)
+    private async Task<string?> CachedPathOrNotifyAsync(string record, string name)
+    {
+        var ex = Ship3DExports.Instance;
+        var state = ex.StateOf(record);
+        if (state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying) txtShip3D.Text = "3D モデル: 照合中 (パッチで Data.p4k が変わったので元データを確かめています)";
+        var path = await ex.GetCachedPathAsync(record);
+        UpdateShip3DButtons();
+        if (path != null) return path;
+        var msg = state == Ship3DCacheState.NoGame ? "ゲームの Data.p4k が見つかりません。設定タブのゲームのフォルダとチャンネルを確かめてください。"
+            : ex.IsExporting(record) ? $"「{name}」の 3D モデルは書き出し中です。終わってから出してください。"
+            : state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying ? $"「{name}」の元データがパッチで変わったので、キャッシュを消しました。［読み込み］で取り込み直してください。"
+            : $"「{name}」の 3D モデルはまだ取り込んでいません。［読み込み］でゲームデータから取り込んでください。";
+        MessageBox.Show(Window.GetWindow(this), msg, "3D 表示", MessageBoxButton.OK, MessageBoxImage.Information);
+        return null;
+    }
+
+    // ［読み込み］: 予想を出して確かめてから裏で書き出す。終わったとき、まだその船の詳細を出していれば下の欄に 3D を出す (別の船に移っていたら知らせだけ)
+    private async void BtnShip3DImport_Click(object sender, RoutedEventArgs e)
+    {
+        var record = _ship3DRecord;
+        if (record == null) return;
+        var name = _ship3DName;
+        btnShip3DImport.IsEnabled = false;
+        var path = await Ship3DExports.Instance.ImportAsync(record, name, Window.GetWindow(this));
+        UpdateShip3DButtons();
+        if (path == null) return;
+        if (!string.Equals(record, _ship3DRecord, StringComparison.OrdinalIgnoreCase))
+        {
+            txtStatus.Text = $"「{name}」の 3D モデルを取り込みました (その船の詳細の［3D 表示］で出せます)";
+            return;
+        }
+        await ShowShip3DAsync(record, name);
+    }
+
+    // ［3D 表示］: 取り込み済みなら下の欄に出す (書き出しはしない)
+    private async void BtnShip3D_Click(object sender, RoutedEventArgs e)
+    {
+        var record = _ship3DRecord;
+        if (record == null) return;
+        var name = _ship3DName;
+        if (await CachedPathOrNotifyAsync(record, name) == null) return;
+        if (!string.Equals(record, _ship3DRecord, StringComparison.OrdinalIgnoreCase)) return;
+        await ShowShip3DAsync(record, name);
+    }
+
+    // ［別ウィンドウ］: 取り込み済みなら別のウィンドウ (モードレス) に出す (書き出しはしない)
+    private async void BtnShip3DWindow_Click(object sender, RoutedEventArgs e)
+    {
+        var record = _ship3DRecord;
+        if (record == null) return;
+        var name = _ship3DName;
+        var owner = Window.GetWindow(this);
+        if (await CachedPathOrNotifyAsync(record, name) == null) return;
+        try
+        {
+            var win = new Ship3DWindow(record, name);
+            if (owner != null && owner.IsLoaded) win.Owner = owner;
+            win.Show();
+        }
+        catch (Exception ex)
+        {
+            AppendAppLog($"[3D モデル] 別ウィンドウを開けませんでした: {ex}");
+            MessageBox.Show($"別ウィンドウを開けませんでした: {ex.Message}", "3D 表示", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    // ［表に戻る］
+    private void BtnShip3DBack_Click(object sender, RoutedEventArgs e) => HideShip3D();
+
+    // 下の欄に 3D を出す (詳細の表の WebView2 は隠すだけで、中身はそのまま)
+    private async Task ShowShip3DAsync(string record, string name)
+    {
+        try { await (_web3DInit ??= Ship3DWeb.InitAsync(web3D)); }
+        catch (Exception ex)
+        {
+            _web3DInit = null;
+            txtShip3D.Text = $"3D 表示 (WebView2) を使えません: {ex.Message}";
+            AppendAppLog($"[3D モデル] WebView2 の初期化に失敗しました: {ex.GetType().FullName} (HResult 0x{ex.HResult:X8}): {ex}");
+            return;
+        }
+        // 待っている間に別の品目に移っていたら出さない
+        if (!string.Equals(record, _ship3DRecord, StringComparison.OrdinalIgnoreCase)) return;
+        var shortName = Ship3DExports.ShortName(record);
+        if (_ship3DShown != null) Ship3DExports.Instance.ReleaseView(_ship3DShown);
+        Ship3DExports.Instance.AcquireView(shortName);
+        _ship3DShown = shortName;
+        try { Ship3DWeb.Show(web3D, shortName, name); }
+        catch (Exception ex)
+        {
+            AppendAppLog($"[3D モデル] 表示できませんでした: {ex}");
+            txtShip3D.Text = $"3D 表示できませんでした: {ex.Message}";
+            HideShip3D();
+            return;
+        }
+        webDetail.Visibility = Visibility.Collapsed;
+        txtDetail.Visibility = Visibility.Collapsed;
+        web3D.Visibility = Visibility.Visible;
+        btnShip3DBack.Visibility = Visibility.Visible;
+    }
+
+    // 3D 表示をやめて詳細の表に戻す (3D のページは空にして、読み込んだ GLB の分のメモリを放す)
+    private void HideShip3D()
+    {
+        if (_ship3DShown == null) return;
+        Ship3DExports.Instance.ReleaseView(_ship3DShown);
+        _ship3DShown = null;
+        Ship3DWeb.Blank(web3D);
+        web3D.Visibility = Visibility.Collapsed;
+        btnShip3DBack.Visibility = Visibility.Collapsed;
+        if (_webFailed) txtDetail.Visibility = Visibility.Visible;
+        else webDetail.Visibility = Visibility.Visible;
     }
 }
 

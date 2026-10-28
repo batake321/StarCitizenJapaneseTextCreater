@@ -1,0 +1,56 @@
+<UserControl x:Class="StarCitizenJapaneseTextCreater.Ship3DProgressPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:StarCitizenJapaneseTextCreater">
+    <!-- 3D モデルの書き出しの進み具合 (Ship3DExports.Instance。［詳細］タブと設定タブの 3D モデルの欄の両方に置く。中身は同じ)。
+         船ごとのバー (動いている・待っている船ぶん) と取り消し、その下にまとめて取り込むの段階と取り消し、全体のバー、最後の知らせ。
+         ％と残り時間は予想にもとづく (StarBreaker は進み具合を出さないため) -->
+    <UserControl.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+    </UserControl.Resources>
+    <Border BorderBrush="#CCC" BorderThickness="1" Padding="6" Background="#FAFAFA"
+            Visibility="{Binding ShowPanel, Converter={StaticResource BoolToVis}}">
+        <StackPanel>
+            <ItemsControl ItemsSource="{Binding Jobs}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Margin="0,1">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="170"/>
+                                <ColumnDefinition Width="160"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding Name}" ToolTip="{Binding Record}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                            <ProgressBar Grid.Column="1" Height="14" Minimum="0" Maximum="100" Value="{Binding Percent, Mode=OneWay}"
+                                         IsIndeterminate="{Binding IsIndeterminate, Mode=OneWay}" ToolTip="{x:Static local:Ship3DExports.EstimateTip}"/>
+                            <TextBlock Grid.Column="2" Text="{Binding Text}" Margin="8,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                       ToolTip="{Binding Text}"/>
+                            <Button Grid.Column="3" Content="取り消し" Padding="8,0" Margin="6,0,0,0" Click="CancelJob_Click"
+                                    ToolTip="この船の書き出しを取り消します"/>
+                        </Grid>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <DockPanel Margin="0,4,0,0" Visibility="{Binding BatchActive, Converter={StaticResource BoolToVis}}">
+                <Button DockPanel.Dock="Right" Content="まとめて取り消し" Padding="8,0" Click="CancelBatch_Click"
+                        ToolTip="まとめて取り込むの書き出しを全部取り消します (個別に始めた書き出しはそのまま)"/>
+                <TextBlock Text="{Binding BatchText}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            </DockPanel>
+            <Grid Margin="0,4,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="170"/>
+                    <ColumnDefinition Width="160"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="全体" FontWeight="Bold" VerticalAlignment="Center"/>
+                <ProgressBar Grid.Column="1" Height="14" Minimum="0" Maximum="100" Value="{Binding OverallPercent, Mode=OneWay}"
+                             ToolTip="{x:Static local:Ship3DExports.EstimateTip}"/>
+                <TextBlock Grid.Column="2" Text="{Binding OverallText}" Margin="8,0,0,0" VerticalAlignment="Center"
+                           ToolTip="動いている・待っている書き出し全部の合計です。途中で加わった書き出しはその分を足します。残り時間は、並行に動いている本数で割って見込んでいます (予想にもとづく)"/>
+            </Grid>
+            <TextBlock Text="{Binding Notice}" Foreground="#A60" TextWrapping="Wrap" Margin="0,4,0,0"
+                       Visibility="{Binding HasNotice, Converter={StaticResource BoolToVis}}"/>
+        </StackPanel>
+    </Border>
+</UserControl>

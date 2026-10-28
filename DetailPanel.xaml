@@ -1,7 +1,8 @@
 <UserControl x:Class="StarCitizenJapaneseTextCreater.DetailPanel"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf">
+             xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+             xmlns:local="clr-namespace:StarCitizenJapaneseTextCreater">
     <!-- ［詳細］タブ。
          1 行目: 名前の入力欄。2 行目: 分類・種類・サイズ。その下に条件に合う品目のリスト、その下に詳細 (罫線の入った表。WebView2)。
          分類が (すべて) のときは名前で全部 (船・車両を含む) からあいまい検索する (item_index)。
@@ -12,6 +13,8 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition x:Name="rowList" Height="200" MinHeight="60"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*" MinHeight="80"/>
         </Grid.RowDefinitions>
@@ -41,10 +44,29 @@
 
         <GridSplitter x:Name="splitList" Grid.Row="3" Height="5" HorizontalAlignment="Stretch" Background="#E0E0E0" Margin="0,4"/>
 
-        <!-- 詳細 (Markdown を HTML にして WebView2 で出す。文字を選んでコピーできる)。WebView2 が使えないときは下の文字の欄で出す -->
-        <Border Grid.Row="4" BorderBrush="#CCC" BorderThickness="1">
+        <!-- 船の 3D 表示 (船・車両 (NOITEM_Vehicle) の詳細を出しているときだけ出す)。［読み込み］でゲームデータから取り込み (Ship3DExports)、
+             ［3D 表示］は下の欄で、［別ウィンドウ］は Ship3DWindow で出す (表示のボタンでは書き出さない)。3D を出している間は［表に戻る］で詳細の表に戻る -->
+        <StackPanel x:Name="pnlShip3D" Grid.Row="4" Orientation="Horizontal" Margin="0,0,0,4" Visibility="Collapsed">
+            <Button x:Name="btnShip3DImport" Content="読み込み" Padding="10,2" Margin="0,0,6,0" Click="BtnShip3DImport_Click"
+                    ToolTip="この船の 3D モデルをゲームデータ (選択中のチャンネルの Data.p4k) から取り込みます。最新のキャッシュがあるとき・書き出し中は使えません"/>
+            <Button x:Name="btnShip3D" Content="3D 表示" Padding="10,2" Click="BtnShip3D_Click"
+                    ToolTip="この船の 3D モデルを下の欄に出します (取り込み済みの船だけ)"/>
+            <Button x:Name="btnShip3DWindow" Content="別ウィンドウ" Padding="10,2" Margin="6,0,0,0" Click="BtnShip3DWindow_Click"
+                    ToolTip="この船の 3D モデルを別のウィンドウに出します (取り込み済みの船だけ。ウィンドウの上でほかの船に切り替えられます)"/>
+            <Button x:Name="btnShip3DBack" Content="表に戻る" Padding="10,2" Margin="6,0,0,0" Click="BtnShip3DBack_Click" Visibility="Collapsed"
+                    ToolTip="3D 表示をやめて、詳細の表に戻ります"/>
+            <TextBlock x:Name="txtShip3D" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
+        </StackPanel>
+
+        <!-- 3D モデルの書き出しの進み具合 (設定タブの 3D モデルの欄と同じ中身。書き出しが無いときは出さない) -->
+        <local:Ship3DProgressPanel Grid.Row="5" Margin="0,0,0,4"/>
+
+        <!-- 詳細 (Markdown を HTML にして WebView2 で出す。文字を選んでコピーできる)。WebView2 が使えないときは下の文字の欄で出す。
+             3D 表示はその上に別の WebView2 (web3D) で出す (詳細の WebView2 とは別) -->
+        <Border Grid.Row="6" BorderBrush="#CCC" BorderThickness="1">
             <Grid>
                 <wv2:WebView2 x:Name="webDetail"/>
+                <wv2:WebView2 x:Name="web3D" Visibility="Collapsed"/>
                 <TextBox x:Name="txtDetail" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, Yu Gothic UI" FontSize="13"
                          VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Padding="6"
                          Visibility="Collapsed"/>
