@@ -28,8 +28,19 @@ internal static class Ship3DWeb
         core.Settings.AreDevToolsEnabled = false;
         core.Settings.IsStatusBarEnabled = false;
         core.Settings.IsZoomControlEnabled = false;
-        // 中身はビューアだけ。利用者の操作でほかへ移る・新しい窓を開くことはさせない
-        core.NavigationStarting += (_, e) => { if (e.IsUserInitiated) e.Cancel = true; };
+        // 右クリックのメニュー (戻る・最新の情報に更新など) は出さない (右ドラッグで枠の外に出てから離したときに出ていた)
+        core.Settings.AreDefaultContextMenusEnabled = false;
+        // 中身はビューアだけ。ほかへ移る・新しい窓を開くことはさせない。
+        // CoreWebView2.Navigate で開くビューアも IsUserInitiated が真になることがあり、それで止めると何も出ないので、
+        // ビューア (ViewerHost) と空のページ (Blank の NavigateToString) だけを通す
+        core.NavigationStarting += (_, e) =>
+        {
+            var uri = e.Uri ?? "";
+            if (uri.StartsWith($"https://{ViewerHost}/", StringComparison.OrdinalIgnoreCase)
+                || uri.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
+                || uri.StartsWith("about:", StringComparison.OrdinalIgnoreCase)) return;
+            e.Cancel = true;
+        };
         core.NewWindowRequested += (_, e) => e.Handled = true;
         core.WebMessageReceived += (_, e) =>
         {

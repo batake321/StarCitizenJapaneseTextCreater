@@ -46,7 +46,9 @@
 
         <!-- 船の 3D 表示 (船・車両 (NOITEM_Vehicle) の詳細を出しているときだけ出す)。［読み込み］でゲームデータから取り込み (Ship3DExports)、
              ［3D 表示］は下の欄で、［別ウィンドウ］は Ship3DWindow で出す (表示のボタンでは書き出さない)。3D を出している間は［表に戻る］で詳細の表に戻る -->
-        <StackPanel x:Name="pnlShip3D" Grid.Row="4" Orientation="Horizontal" Margin="0,0,0,4" Visibility="Collapsed">
+        <StackPanel x:Name="pnlShip3D" Grid.Row="4" Margin="0,0,0,4" Visibility="Collapsed">
+            <TextBlock Text="3D モデル表示" FontWeight="Bold" Margin="0,0,0,3"/>
+            <StackPanel Orientation="Horizontal">
             <Button x:Name="btnShip3DImport" Content="読み込み" Padding="10,2" Margin="0,0,6,0" Click="BtnShip3DImport_Click"
                     ToolTip="この船の 3D モデルをゲームデータ (選択中のチャンネルの Data.p4k) から取り込みます。最新のキャッシュがあるとき・書き出し中は使えません"/>
             <Button x:Name="btnShip3D" Content="3D 表示" Padding="10,2" Click="BtnShip3D_Click"
@@ -56,6 +58,7 @@
             <Button x:Name="btnShip3DBack" Content="表に戻る" Padding="10,2" Margin="6,0,0,0" Click="BtnShip3DBack_Click" Visibility="Collapsed"
                     ToolTip="3D 表示をやめて、詳細の表に戻ります"/>
             <TextBlock x:Name="txtShip3D" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
+            </StackPanel>
         </StackPanel>
 
         <!-- 3D モデルの書き出しの進み具合 (設定タブの 3D モデルの欄と同じ中身。書き出しが無いときは出さない) -->
