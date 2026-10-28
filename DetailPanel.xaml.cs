@@ -923,6 +923,8 @@ public partial class DetailPanel : UserControl
             var win = new Ship3DWindow(record, name);
             if (owner != null && owner.IsLoaded) win.Owner = owner;
             win.Show();
+            // 別ウィンドウで出したら、この欄は詳細の表に戻す (利用者の要望。同じ 3D を 2 か所で出さない)。3D を出していなければ何もしない
+            HideShip3D();
         }
         catch (Exception ex)
         {
