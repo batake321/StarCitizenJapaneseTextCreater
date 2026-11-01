@@ -9,14 +9,18 @@ html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
 .floor.dim .slab { fill: #f8f9fa; }
 .floor.sel .slab { stroke: #5f6368; stroke-width: 1.5; }
 
-/* 区画の床 */
-.sec { fill: #dfe3e8; stroke: #8f979f; stroke-width: 0.8; vector-effect: non-scaling-stroke; fill-rule: evenodd; cursor: pointer; }
-.sec.fallback { fill: #eceff1; stroke-dasharray: 3 2; }
-.sec:hover { fill: #cfd6de; }
-.sec.selsec { fill: #fde7b0; stroke: #e37400; stroke-width: 2; }
-.sec.dest { stroke: #d93025; stroke-width: 2.5; }
+/* 区画の床 (.sec は区画のまとまり。枠 .sec-edge を先に太めに描き、その上に塗り .sec-fill を描く。塗りには塗りと同じ色の 1 px の線を付けて、
+   板どうしの継ぎ目のにじみを埋める (.stairshape-fill と同じ)。見える枠の太さは (.sec-edge の太さ − 1) の半分 (今までの 0.8・2・2.5 px に合わせた) */
+.sec-edge { fill: none; stroke: #8f979f; stroke-width: 2.6; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.sec-fill { fill: #dfe3e8; stroke: #dfe3e8; stroke-width: 1; vector-effect: non-scaling-stroke; stroke-linejoin: round; fill-rule: nonzero; cursor: pointer; }
+.sec.fallback .sec-fill { fill: #eceff1; stroke: #eceff1; }
+.sec.fallback .sec-edge { stroke-dasharray: 3 2; }
+.sec:hover .sec-fill { fill: #cfd6de; stroke: #cfd6de; }
+.sec.selsec .sec-fill { fill: #fde7b0; stroke: #fde7b0; }
+.sec.selsec .sec-edge { stroke: #e37400; stroke-width: 5; }
+.sec.dest .sec-edge { stroke: #d93025; stroke-width: 6; }
 .floor.dim { opacity: 0.3; }
-.floor.dim .sec { cursor: pointer; }
+.floor.dim .sec-fill { cursor: pointer; }
 
 /* 道順の線 (Google マップ風の青い太線と白い縁) */
 .route-case { fill: none; stroke: #ffffff; stroke-width: 9; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }

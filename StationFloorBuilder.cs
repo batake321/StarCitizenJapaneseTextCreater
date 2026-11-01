@@ -43,6 +43,9 @@ internal sealed class StationMeshSet
 {
     // socpak (位置表のキー) → 床・階段のメッシュ
     public Dictionary<string, List<StationGlbMesh>> Meshes { get; } = new(StringComparer.Ordinal);
+    // GLB を読んだ直後の socpak ごとのメッシュ (表で選び分ける前。StationMeshCache に保存し、次の取り込みで starbreaker を動かさずに判定をやり直すのに使う)。
+    // GLB に出た子ごとに 1 つの並び (1 つの GLB に同じ socpak の子が 2 回出たときは 2 つ。Meshes は後のもの、票は両方で数える)。GLB に出てこなかった socpak は並びが 0 個
+    public Dictionary<string, List<List<StationGlbMesh>>> Raw { get; } = new(StringComparer.Ordinal);
     // 書き出しを頼んだのに GLB に出てこなかった socpak
     public List<string> Missing { get; } = new();
     public List<string> Errors { get; } = new();
@@ -259,7 +262,12 @@ internal sealed class StationSection
     public (double X, double Y, double Z) Center { get; set; }
     public (double X, double Y, double Z) Half { get; set; }
     public double Yaw { get; set; }
+    // (2026-11-02、利用者の決定「A」: 区画の形が不定形で四角でない) 環は床の板ごとの凸包そのもの (四角い部品は四角のまま。環どうしは重なることがある)。
+    // 板の無い区画は箱の 4 隅の 1 つの環
     public Dictionary<string, List<List<(double X, double Y)>>> Polygons { get; } = new(StringComparer.Ordinal);
+    // 階の Id → 形の面積。板を 0.5 m の格子に塗った輪郭 (Outline。板の縁の PaintMargin の帯を含む) の環の面積の和 (形を凸包に替える前の形の面積と同じ値)。
+    // 階を一覧に出すか (MinListedFloorArea)・階の名前の候補の順に使う (形を替えても一覧に出る階・名前が変わらないように)
+    public Dictionary<string, double> PolygonArea { get; } = new(StringComparer.Ordinal);
     // 床の板が取れず、箱で代用した (推測の印)
     public bool BoxFallback { get; set; }
     public int PlateCount { get; set; }
@@ -579,9 +587,13 @@ internal static class StationFloorBuilder
             if (o.Failed) { res.Errors.Add($"{job.Pattern}: 終了コード {o.Code} {o.Tail}"); res.Missing.AddRange(job.Socpaks); continue; }
             res.TotalGlbBytes += o.Length;
             res.MaxGlbBytes = Math.Max(res.MaxGlbBytes, o.Length);
-            foreach (var (key, meshes) in o.Found) res.Meshes[key] = meshes;
+            foreach (var (key, meshes) in o.Found)
+            {
+                (res.Raw.TryGetValue(key, out var chunks) ? chunks : res.Raw[key] = new()).Add(meshes);
+                res.Meshes[key] = TakeMeshes(res, kinds, meshes);
+            }
             // 形の無い socpak は GLB に子が出ない (空の GLB) ことがあるので、出てこなかったものは空として覚える
-            foreach (var k in o.NotFound) { res.Missing.Add(k); res.Meshes[k] = new List<StationGlbMesh>(); }
+            foreach (var k in o.NotFound) { res.Missing.Add(k); res.Raw[k] = new(); res.Meshes[k] = new List<StationGlbMesh>(); }
         }
         if (kinds != null) res.NewKinds = ResolveKinds(res, kinds);
         progress?.Invoke(jobs.Count, jobs.Count);
@@ -619,24 +631,8 @@ internal static class StationFloorBuilder
                         var stem = container.StartsWith("interior_", StringComparison.Ordinal) ? container[9..] : container;
                         if (!byStem.TryGetValue(stem, out var key)) continue;
                         found.Add(key);
-                        var meshes = meshes0;
-                        if (kinds != null)
-                        {
-                            // 表に無い名前の票を数え、板にならない部品 (表・形・名前のどれでも床・階段でない、灯りでもない) は持たない
-                            foreach (var m in meshes)
-                            {
-                                if (m.Shape == null || kinds.Get(MeshKey(m.Mesh)) != null) continue;
-                                lock (res.Votes)
-                                {
-                                    var k = MeshKey(m.Mesh);
-                                    if (!res.Votes.TryGetValue(k, out var v)) res.Votes[k] = v = new int[3];
-                                    v[(int)CandidateKind(m.Shape)]++;
-                                }
-                            }
-                            meshes = meshes.Where(m => IsLightMesh(m.Mesh) || m.Shape is { } sh && (CandidateKind(sh) != StationMeshKind.None || KindOf(kinds, m.Mesh).Kind != StationMeshKind.None
-                                || NameKind(m.Mesh) != StationMeshKind.None)).ToList();
-                        }
-                        o.Found.Add((key, meshes));
+                        // 表での選び分け (TakeMeshes) は、全部の回が終わった後に回の番号の順に行う (保存した結果から判定をやり直すとき (FromRaw) と同じ順にするため)
+                        o.Found.Add((key, meshes0));
                     }
                     o.NotFound.AddRange(job.Socpaks.Where(k => !found.Contains(k)));
                 }
@@ -652,6 +648,42 @@ internal static class StationFloorBuilder
                 wake.Release();
             }
         }
+    }
+
+    // GLB を読んだ直後のメッシュ (meshes0) から、持つメッシュを選ぶ。表 (kinds) があれば、表に無い名前の票を数え (res.Votes)、
+    // 板にならない部品 (表・形・名前のどれでも床・階段でない、灯りでもない) は持たない。表が無ければ全部持つ
+    public static List<StationGlbMesh> TakeMeshes(StationMeshSet res, StationMeshKinds? kinds, List<StationGlbMesh> meshes0)
+    {
+        if (kinds == null) return meshes0;
+        foreach (var m in meshes0)
+        {
+            if (m.Shape == null || kinds.Get(MeshKey(m.Mesh)) != null) continue;
+            var k = MeshKey(m.Mesh);
+            if (!res.Votes.TryGetValue(k, out var v)) res.Votes[k] = v = new int[3];
+            v[(int)CandidateKind(m.Shape)]++;
+        }
+        return meshes0.Where(m => IsLightMesh(m.Mesh) || m.Shape is { } sh && (CandidateKind(sh) != StationMeshKind.None || KindOf(kinds, m.Mesh).Kind != StationMeshKind.None
+            || NameKind(m.Mesh) != StationMeshKind.None)).ToList();
+    }
+
+    // 保存した GLB の読み取りの結果 (StationMeshCache) から、書き出し (ExportAsync) と同じメッシュの組を作る (starbreaker は動かさない)。
+    // keys は要る socpak (全部が raw にあること。StationMeshCache.TryLoad が確かめる)。missing は保存したときに GLB に出てこなかった socpak
+    public static StationMeshSet FromRaw(IReadOnlyDictionary<string, List<List<StationGlbMesh>>> raw, IReadOnlyCollection<string> missing, IEnumerable<string> keys, StationMeshKinds? kinds)
+    {
+        var res = new StationMeshSet { Kinds = kinds };
+        // 並びは保存した並び (書き出しで Raw・Meshes に入れた順。BuildSources などが Meshes の並びで書くので、書き出しのときと同じにする)
+        var want = keys.ToHashSet(StringComparer.Ordinal);
+        foreach (var key in raw.Keys.Where(want.Contains))
+        {
+            var chunks = raw[key];
+            res.Raw[key] = chunks;
+            // 書き出しと同じく、子ごとに票を数え、Meshes は後の子のもの (子が無ければ空)
+            res.Meshes[key] = new List<StationGlbMesh>();
+            foreach (var meshes0 in chunks) res.Meshes[key] = TakeMeshes(res, kinds, meshes0);
+            if (missing.Contains(key)) res.Missing.Add(key);
+        }
+        if (kinds != null) res.NewKinds = ResolveKinds(res, kinds);
+        return res;
     }
 
     // 表に無かった名前の種類を、形の判定の票で決めて表に足す (足した数を返す)。票の多いほう (同じなら床・階段を先、階段を床より先)。
@@ -2418,6 +2450,7 @@ internal static class StationFloorBuilder
                     var corners = new[] { (a.X, a.Y), (b.X, a.Y), (b.X, b.Y), (a.X, b.Y) }
                         .Select(q => { var p = inst.ToStation.Apply((q.Item1, q.Item2, a.Z)); return (Math.Round(p.X, 2), Math.Round(p.Y, 2)); }).ToList();
                     sec.Polygons[f.Id] = new List<List<(double X, double Y)>> { corners };
+                    sec.PolygonArea[f.Id] = HullArea(corners.ToArray());
                 }
             }
             // 名札: このインスタンスの interiormaplabel のうち箱の中心にいちばん近いもの
@@ -2428,9 +2461,16 @@ internal static class StationFloorBuilder
         var groupsBySec = outlineJobs.Select(j => (j.Sec, Groups: j.Plates.GroupBy(p => PlateFloor(p, floors)?.Id ?? "").Where(g => g.Key.Length > 0).Select(g => (g.Key, Hulls: g.Select(p => p.Hull).ToList())).ToList())).ToList();
         var outlines = new List<(string Key, List<List<(double X, double Y)>> Rings)>[groupsBySec.Count];
         Parallel.For(0, groupsBySec.Count, k => outlines[k] = groupsBySec[k].Groups.Select(g => (g.Key, Outline(g.Hulls))).ToList());
+        // 形は板ごとの凸包 (Polygons)。格子の輪郭 (Outline) は面積 (PolygonArea) にだけ使う
         for (int k = 0; k < groupsBySec.Count; k++)
             foreach (var (key, rings) in outlines[k])
-                if (rings.Count > 0) groupsBySec[k].Sec.Polygons[key] = rings;
+            {
+                if (rings.Count == 0) continue;
+                var sec = groupsBySec[k].Sec;
+                sec.PolygonArea[key] = rings.Sum(r => HullArea(r.ToArray()));
+                sec.Polygons[key] = groupsBySec[k].Groups.First(g => g.Key == key).Hulls.Where(h => h.Length >= 3)
+                    .Select(h => h.Select(p => (Math.Round(p.X, 2), Math.Round(p.Y, 2))).ToList()).ToList();
+            }
         return res;
     }
 
@@ -2544,19 +2584,30 @@ internal static class StationFloorBuilder
             if (q.X < a.X - 0.5 || q.X > b.X + 0.5 || q.Y < a.Y - 0.5 || q.Y > b.Y + 0.5 || q.Z < a.Z - 1 || q.Z > b.Z + 1) continue;
             var vol = (b.X - a.X) * (b.Y - a.Y) * (b.Z - a.Z);
             if (vol < bv) { bv = vol; best = s; }
-            if (floor != null && s.Polygons.TryGetValue(floor.Id, out var rings) && InsideRings(rings, p.X, p.Y) && vol < bpv) { bpv = vol; bestPoly = s; }
+            if (floor != null && s.Polygons.TryGetValue(floor.Id, out var rings) && OnRings(rings, p.X, p.Y) && vol < bpv) { bpv = vol; bestPoly = s; }
         }
         return bestPoly ?? best;
     }
 
-    // 環の並び (外周と穴) の中か (偶奇の規則)
-    public static bool InsideRings(IEnumerable<List<(double X, double Y)>> rings, double x, double y)
+    // 区画の形 (凸の環の並び。Polygons) のどれかの中か、その縁から PaintMargin 以内か (形を格子の輪郭にしていたときの、縁の帯を含む判定と同じ幅)
+    // (箱の 4 隅の環は回りの向きが決まらないので、中かどうかは向きによらない数え方で確かめる)
+    public static bool OnRings(IEnumerable<List<(double X, double Y)>> rings, double x, double y)
     {
-        bool inside = false;
         foreach (var r in rings)
+        {
+            if (r.Count < 3) continue;
+            bool inside = false;
+            double md = double.MaxValue;
             for (int i = 0, j = r.Count - 1; i < r.Count; j = i++)
+            {
                 if ((r[i].Y > y) != (r[j].Y > y) && x < (r[j].X - r[i].X) * (y - r[i].Y) / (r[j].Y - r[i].Y) + r[i].X) inside = !inside;
-        return inside;
+                double dx = r[i].X - r[j].X, dy = r[i].Y - r[j].Y, l2 = dx * dx + dy * dy;
+                double t = l2 > 0 ? Math.Clamp(((x - r[j].X) * dx + (y - r[j].Y) * dy) / l2, 0, 1) : 0;
+                md = Math.Min(md, Math.Sqrt(Sq(r[j].X + t * dx - x) + Sq(r[j].Y + t * dy - y)));
+            }
+            if (inside || md <= PaintMargin) return true;
+        }
+        return false;
     }
 
     // 凸包 (Andrew の方法。反時計回り)

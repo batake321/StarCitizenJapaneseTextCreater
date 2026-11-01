@@ -934,7 +934,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         var max = MaxMb * MB;
         var files = CachedFiles();
         var stations = StationMapExports.CachedFiles();
-        long total = files.Sum(f => f.Length) + stations.Sum(f => f.Length);
+        long total = files.Sum(f => f.Length) + stations.Sum(f => f.Length + StationMapExports.MeshCacheBytes(f));
         if (total <= max) return;
         var protect = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { justExported };
         foreach (var v in _views.Keys) protect.Add(v);
@@ -949,8 +949,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             if (total <= max) break;
             if (StationMapExports.IsKey(key))
             {
-                // 大きさは消す前に取る
-                var len = f.Length;
+                // 大きさは消す前に取る (GLB の読み取りの結果 (.meshes.gz) も合わせて消える)
+                var len = f.Length + StationMapExports.MeshCacheBytes(f);
                 if (!StationMapExports.Instance.DeleteForLimit(key)) continue;
                 total -= len;
                 deleted.Add(key);
@@ -983,7 +983,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                     ? $"「{Path.GetFileNameWithoutExtension(left[0].Name)}」1 隻だけで最大容量 ({MaxMb:N0} MB) を超えています ({FormatBytes(left[0].Length)})。消さずに残します"
                     : $"最大容量 ({MaxMb:N0} MB) を超えていますが、表示中・書き出し中のものを除くと消せるものがありません (今 {FormatBytes(total)})";
             else if (left.Count == 0 && leftStations.Count == 1)
-                text = $"「{StationMapExports.KeyOf(leftStations[0])}」1 件だけで最大容量 ({MaxMb:N0} MB) を超えています ({FormatBytes(leftStations[0].Length)})。消さずに残します";
+                text = $"「{StationMapExports.KeyOf(leftStations[0])}」1 件だけで最大容量 ({MaxMb:N0} MB) を超えています ({FormatBytes(leftStations[0].Length + StationMapExports.MeshCacheBytes(leftStations[0]))})。消さずに残します";
             else
                 text = $"最大容量 ({MaxMb:N0} MB) を超えていますが、表示中・書き出し中のものを除くと消せるものがありません (今 {FormatBytes(total)})";
             Notice = text;

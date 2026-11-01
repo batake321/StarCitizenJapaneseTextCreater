@@ -577,10 +577,17 @@ function rebuild() {
       if (!d) continue;
       const cls = 'sec' + (s.fallback ? ' fallback' : '') + (s.id === st.selSec ? ' selsec' : '')
         + (st.dest && st.dest.kind === 'section' && st.dest.id === s.id ? ' dest' : '');
-      const p = el('path', { class: cls, d, 'data-k': 'sec', 'data-id': s.id, 'data-f': fid }, g);
+      // 区画の形は床の板ごとの凸包の輪 (重なることがある。2026-11-02、利用者の決定「A」)。階段の形と同じく、先に全部の輪の枠を太めに描き (.sec-edge)、
+      // その上に全部の輪の塗りを枠なしで描く (.sec-fill)。板どうしの境目は塗りに隠れ、外側の縁だけが残る
+      // 枠の見える外側の縁を押しても区画を選べるよう、枠にも data-k を付ける
+      const sg = el('g', { class: cls }, g);
+      el('path', { class: 'sec-edge', d, 'data-k': 'sec', 'data-id': s.id, 'data-f': fid }, sg);
+      const p = el('path', { class: 'sec-fill', d, 'data-k': 'sec', 'data-id': s.id, 'data-f': fid }, sg);
       el('title', null, p).textContent = s.name || s.id;
     }
   }
+  // 選んだ区画・目的地の区画は、太い枠が後から描く隣の区画の塗りに隠れないよう、その階のほかの区画の後ろ (上) に移す
+  for (const fid in groups) for (const n of groups[fid].querySelectorAll('g.sec.selsec, g.sec.dest')) n.parentNode.appendChild(n);
   // 階段の外形 (2026-11-02、利用者の指示「階段の形がわかるなら、階段アイコンでなく階段を枠で囲んでフロア同様に扱う」): 外形 (outline) のある階段は、
   // 両端の階 (下の端 bottom の階と上の端 top の階) の両方に、外形の輪を枠で描く。下の階は実線、上の階は破線 (viewer.css の .stairshape・.stairshape.upper)。
   // 外形の無い階段は今までどおり階段のアイコン (drawMarkers)。道順のグラフ・道順は変えない。

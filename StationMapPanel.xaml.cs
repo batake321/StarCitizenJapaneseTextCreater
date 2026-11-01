@@ -21,7 +21,7 @@ namespace StarCitizenJapaneseTextCreater;
 //   道順: StationRouteGraph の関数 (StationMapModel.Route) で計算し、ビューアに線を、左に手順を出す
 public partial class StationMapPanel : UserControl
 {
-    // 階の一覧の行: 階 1 つ (Id あり。Name は階の表示の名前)、または同じ名前の階のまとまりの行 (IsGroup。Id は ""、Group はまとまりの鍵 = 階の表示の名前)。
+    // 階の一覧の行: 階 1 つ (Id あり。Name は階の表示の名前)、または同じ名前 (数字だけ違う名前も) の階のまとまりの行 (IsGroup。Id は ""、Group はまとまりの鍵 = FloorGroupKey)。
     // まとまりの中の行は Group にまとまりの鍵が入る
     private sealed record FloorRow(string Id, string Name, string Display, string? Group = null, bool IsGroup = false);
     private sealed record SectionRow(string Id, string Display);
@@ -443,11 +443,20 @@ public partial class StationMapPanel : UserControl
         foreach (var s in m.Shops)
             // 「店名（種類）」(地図の名札と同じ)
             places.Add(new Place("shop", s.Index, "", $"店: {(_shopLabels[s.Index].Length > 0 ? _shopLabels[s.Index] : ShopNoName)}{FloorSuffix(s.Floor)}"));
-        foreach (var t in m.Transit.Where(t => t.Kind is "elevator" or "tram"))
+        _hangarLifts = HangarLifts(m);
+        _hangarBankOf = HangarBanks(m, _hangarLifts, out var bankNames);
+        foreach (var t in m.Transit.Where(t => t.Kind is "elevator" or "tram" || _hangarLifts.Contains(t.Index)))
         {
+            if (_hangarLifts.Contains(t.Index))
+            {
+                // 並びの代表 (HangarBanks) の 1 行だけ
+                if (_hangarBankOf[t.Index] == t.Index) places.Add(new Place("transit", t.Index, "", bankNames[t.Index]));
+                continue;
+            }
             var label = _transitNames.TryGetValue(t.Index, out var n) ? n : "";
             var kind = t.Kind == "tram" ? "シャトル乗り場" : "エレベーター";
-            places.Add(new Place("transit", t.Index, "", (label.Length > 0 ? $"{kind}: {label}" : kind) + FloorSuffix(t.Floor)));
+            // トラムの乗り場の名前は「シャトル乗り場（→ 次の駅）」なので、種類の言葉を前に重ねない
+            places.Add(new Place("transit", t.Index, "", (label.Length == 0 ? kind : label.StartsWith(kind, StringComparison.Ordinal) ? label : $"{kind}: {label}") + FloorSuffix(t.Floor)));
         }
         foreach (var s in m.Sections.Where(s => s.Listed))
             places.Add(new Place("section", s.Index, s.Id, $"区画: {_sectionNames[s.Id]}"));
@@ -491,8 +500,8 @@ public partial class StationMapPanel : UserControl
             .Select(r => r.F).ToList();
     }
 
-    // 階の一覧の行を作り直す。同じ表示の名前の階が 2 つ以上あれば (データに見分ける手がかりが無い階。括弧で見分けた階は名前が違うので入らない)、
-    // 「▼ 名前（N 件）」の 1 行にまとめる (数の言葉は「階」にしない。「（2 階）」が 2 階目と読めるため) (利用者の指示。ステーションの別ウィンドウの場所の一覧 (StationMapWindow.GroupRows) と同じ見た目と動き:
+    // 階の一覧の行を作り直す。同じ表示の名前の階 (数字だけ違う名前も。FloorGroupKey) が 2 つ以上あれば (括弧で見分けた階は括弧の中が数字だけ違うときだけ入る)、
+    // 「▼ 名前（N 件）」の 1 行にまとめる (名前は FloorGroupTitle) (数の言葉は「階」にしない。「（2 階）」が 2 階目と読めるため) (利用者の指示。ステーションの別ウィンドウの場所の一覧 (StationMapWindow.GroupRows) と同じ見た目と動き:
     // 閉じているときは ▼ (押すと開く)、開いているときは ▲ (押すと閉じる)、中の行は一段下げる)。
     // まとまりの行は、まとまりの中のいちばん上の階 (重ねる並びで最初の階) の所に出す。ほかの階の並びは変えない。
     // 開いた中の行は重ねる並びの順で、名前にその階の高さ (StationFloor.Z = 板の上面の中央値。一覧の並び StackOrder・区画の階 SectionFloor と同じ値) を
@@ -501,16 +510,17 @@ public partial class StationMapPanel : UserControl
     // 選んでいる階 (_floor) の行を選ぶ (閉じたまとまりの中なら、何も選ばない)。scroll: 選んだ行が見えるようにする
     private void RefreshFloors(bool scroll = false)
     {
-        var groups = _floorItems.GroupBy(r => r.Name, StringComparer.Ordinal).Where(g => g.Count() > 1).ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+        var groups = _floorItems.GroupBy(r => FloorGroupKey(r.Name), StringComparer.Ordinal).Where(g => g.Count() > 1).ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
         var rows = new List<FloorRow>();
         var done = new HashSet<string>(StringComparer.Ordinal);
         foreach (var r in _floorItems)
         {
-            if (!groups.TryGetValue(r.Name, out var members)) { rows.Add(r with { Display = r.Name + StairPartners(r.Id) }); continue; }
-            if (!done.Add(r.Name)) continue;
-            var open = _openFloorGroups.Contains(r.Name);
-            rows.Add(new FloorRow("", r.Name, $"{(open ? "▲" : "▼")} {r.Name}（{members.Count} 件）", r.Name, IsGroup: true));
-            if (open) rows.AddRange(members.Select(x => x with { Display = $"　　{x.Name}（{FloorHeight(x.Id)}）{StairPartners(x.Id)}", Group = r.Name }));
+            var key = FloorGroupKey(r.Name);
+            if (!groups.TryGetValue(key, out var members)) { rows.Add(r with { Display = r.Name + StairPartners(r.Id) }); continue; }
+            if (!done.Add(key)) continue;
+            var open = _openFloorGroups.Contains(key);
+            rows.Add(new FloorRow("", r.Name, $"{(open ? "▲" : "▼")} {FloorGroupTitle(members)}（{members.Count} 件）", key, IsGroup: true));
+            if (open) rows.AddRange(members.Select(x => x with { Display = $"　　{x.Name}（{FloorHeight(x.Id)}）{StairPartners(x.Id)}", Group = key }));
         }
         _suppress = true;
         try
@@ -569,11 +579,97 @@ public partial class StationMapPanel : UserControl
     private bool RevealFloor(string? fid)
     {
         if (fid == null || _floorItems.FirstOrDefault(r => r.Id == fid) is not { } row) return false;
-        if (_floorItems.Count(r => string.Equals(r.Name, row.Name, StringComparison.Ordinal)) < 2) return false;
-        return _openFloorGroups.Add(row.Name);
+        var key = FloorGroupKey(row.Name);
+        if (_floorItems.Count(r => string.Equals(FloorGroupKey(r.Name), key, StringComparison.Ordinal)) < 2) return false;
+        return _openFloorGroups.Add(key);
+    }
+
+    // 階のまとまりの鍵: 名前の数字を # にしたもの (数字だけ違う名前 (Clinic Floor 01・Clinic Floor 02 など) も同じまとまりにする。2026-11-02、利用者の指示)
+    private static readonly System.Text.RegularExpressions.Regex DigitsRx = new(@"\d+", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    private static string FloorGroupKey(string name) => DigitsRx.Replace(name, "#");
+
+    // まとまりの見出しの名前: 名前がみな同じならその名前。数字の所が 1 か所なら、その数字を「小さい方〜大きい方」にしたもの (「Clinic Floor 01〜10」)。
+    // 数字の所が 2 か所以上なら、番号の順で最初と最後の名前を「〜」でつないだもの (「Floor 04（Floor 01）〜Floor 07（Floor 02）」)
+    private static string FloorGroupTitle(List<FloorRow> members)
+    {
+        var names = members.Select(m => m.Name).Distinct(StringComparer.Ordinal).ToList();
+        if (names.Count == 1) return names[0];
+        long Num(string s) => long.TryParse(s, out var v) ? v : long.MaxValue;
+        var nums = names.Select(n => DigitsRx.Matches(n).Select(x => x.Value).ToList()).ToList();
+        if (nums.All(x => x.Count == 1))
+        {
+            var lo = nums.Select(x => x[0]).MinBy(Num)!;
+            var hi = nums.Select(x => x[0]).MaxBy(Num)!;
+            var m0 = DigitsRx.Match(names[0]);
+            return names[0][..m0.Index] + $"{lo}〜{hi}" + names[0][(m0.Index + m0.Length)..];
+        }
+        var sorted = names.Select((n, i) => (n, k: nums[i].Select(Num).ToList()))
+            .OrderBy(t => t.k, Comparer<List<long>>.Create((a, b) => { for (var i = 0; i < Math.Min(a.Count, b.Count); i++) { var c = a[i].CompareTo(b[i]); if (c != 0) return c; } return a.Count.CompareTo(b.Count); }))
+            .Select(t => t.n).ToList();
+        return $"{sorted[0]}〜{sorted[^1]}";
     }
 
     private string FloorSuffix(string fid) => fid.Length > 0 ? $"（階: {FloorDisplay(fid)}）" : "";
+
+    // ハンガーのエレベーター (2026-11-02、利用者の指示「ハンガーや tram の駅から道案内を出したい」): 乗らない (elevator-noride) エレベーターのうち、
+    // 同じ路線 (Line) のエレベーターの乗り場が全部同じ階にあり、その路線の行き先 (destination) が地図の中に 1 つ以下のもの
+    // (路線のもう一方の止まる所 (ハンガー) が地図の外。名前では決めない)。取り込み済みの 91 か所では Area18 12・Lorville 10・New Babbage 7・GrimHEX 4・
+    // ASD Delving 2 が当たり、ほかの乗り物は入らない。道順の節点 (Node) はある (StationRouteGraph の gateway の節点)
+    private const string HangarLift = "ハンガーのエレベーター";
+    private HashSet<int> _hangarLifts = new();
+    // ハンガーのエレベーター → その並びの代表 (一覧の 1 行。HangarBanks)
+    private Dictionary<int, int> _hangarBankOf = new();
+    // 同じ並びとみなす、ハンガーのエレベーターどうしの xy の距離 (m)。取り込み済みの都市では、並びのエレベーターは 30 m 四方ほどに固まっている
+    private const double HangarBankGap = 40;
+
+    // ハンガーのエレベーターを並びにまとめる: 同じ階で、xy が HangarBankGap 以内でつながるもの。並びの代表は、並びの真ん中 (xy の平均) にいちばん近いもの。
+    // 一覧の名前は「ハンガーのエレベーター（階: …）」。同じ階に並びが 2 つ以上あれば、名前の後に番号 (並びの真ん中の x・y の順) を付ける。
+    // 返すのは エレベーター → 代表。names は 代表 → 一覧の名前
+    private Dictionary<int, int> HangarBanks(StationMapModel m, HashSet<int> lifts, out Dictionary<int, string> names)
+    {
+        var res = new Dictionary<int, int>();
+        names = new Dictionary<int, string>();
+        var banks = new List<(string Floor, List<StationMapModel.TransitInfo> Lifts)>();
+        foreach (var byFloor in m.Transit.Where(t => lifts.Contains(t.Index)).GroupBy(t => t.Floor, StringComparer.Ordinal))
+        {
+            var left = byFloor.ToList();
+            while (left.Count > 0)
+            {
+                var bank = new List<StationMapModel.TransitInfo> { left[0] };
+                left.RemoveAt(0);
+                for (int i = 0; i < bank.Count; i++)
+                {
+                    var a = bank[i];
+                    var near = left.Where(b => Math.Sqrt((a.Pos.X - b.Pos.X) * (a.Pos.X - b.Pos.X) + (a.Pos.Y - b.Pos.Y) * (a.Pos.Y - b.Pos.Y)) <= HangarBankGap).ToList();
+                    foreach (var b in near) { bank.Add(b); left.Remove(b); }
+                }
+                banks.Add((byFloor.Key, bank));
+            }
+        }
+        foreach (var byFloor in banks.GroupBy(b => b.Floor, StringComparer.Ordinal))
+        {
+            var list = byFloor.Select(b => (b.Lifts, X: b.Lifts.Average(t => t.Pos.X), Y: b.Lifts.Average(t => t.Pos.Y))).OrderBy(b => b.X).ThenBy(b => b.Y).ToList();
+            for (int k = 0; k < list.Count; k++)
+            {
+                var (bl, cx, cy) = list[k];
+                var rep = bl.MinBy(t => (t.Pos.X - cx) * (t.Pos.X - cx) + (t.Pos.Y - cy) * (t.Pos.Y - cy))!;
+                foreach (var t in bl) res[t.Index] = rep.Index;
+                names[rep.Index] = HangarLift + (list.Count > 1 ? $" {k + 1}" : "") + FloorSuffix(byFloor.Key);
+            }
+        }
+        return res;
+    }
+    private static HashSet<int> HangarLifts(StationMapModel m)
+    {
+        var res = new HashSet<int>();
+        foreach (var t in m.Transit.Where(t => t.Kind == "elevator-noride" && t.Line.Length > 0))
+        {
+            var floors = m.Transit.Where(x => x.Line == t.Line && x.Kind.StartsWith("elevator", StringComparison.Ordinal)).Select(x => x.Floor).Distinct(StringComparer.Ordinal).Count();
+            var dests = m.Transit.Count(x => x.Kind == "destination" && x.Line == t.Line);
+            if (floors == 1 && dests <= 1) res.Add(t.Index);
+        }
+        return res;
+    }
 
     private void RefreshSections()
     {
@@ -801,6 +897,8 @@ public partial class StationMapPanel : UserControl
                 {
                     var kind = msg.TryGetProperty("kind", out var k) ? k.GetString() : null;
                     var index = msg.TryGetProperty("index", out var ix) && ix.ValueKind == JsonValueKind.Number ? ix.GetInt32() : -1;
+                    // ハンガーのエレベーターは、並びの代表の行 (HangarBanks)
+                    if (kind == "transit" && _hangarBankOf.TryGetValue(index, out var bankRep)) index = bankRep;
                     var p = _places.FirstOrDefault(x => x.Kind == kind && x.Index == index);
                     if (p == null) break;
                     _dest = p;
@@ -1037,7 +1135,7 @@ public partial class StationMapPanel : UserControl
             case "transit":
                 {
                     var t = m.Transit[p.Index];
-                    name = _transitNames.TryGetValue(p.Index, out var n) ? n : (t.Kind == "tram" ? "シャトル乗り場" : "エレベーター");
+                    name = _hangarLifts.Contains(p.Index) ? HangarLift : _transitNames.TryGetValue(p.Index, out var n) ? n : (t.Kind == "tram" ? "シャトル乗り場" : "エレベーター");
                     return t.Node >= 0 ? t.Node : m.NearestNode(t.Pos);
                 }
             case "section":
@@ -1053,9 +1151,9 @@ public partial class StationMapPanel : UserControl
                 name = "現在位置";
                 if (_cur is not { } c) return -1;
                 if (c.State == "Inside") return m.NearestNode(c.Pos);
-                // 区画の外・ステーションの外: いちばん近い到着口 (ハンガー・ドッキングのエレベーター)
-                var arrivals = m.Transit.Where(t => t.Node >= 0 && t.Kind == "elevator" && _transitNames.TryGetValue(t.Index, out _)
-                    && (t.Dest.Contains("docking", StringComparison.OrdinalIgnoreCase) || t.Dest.Contains("hangar", StringComparison.OrdinalIgnoreCase))).ToList();
+                // 区画の外・ステーションの外: いちばん近い到着口 (ハンガー・ドッキングのエレベーター。ハンガーのエレベーター (HangarLifts) も入れる)
+                var arrivals = m.Transit.Where(t => t.Node >= 0 && (_hangarLifts.Contains(t.Index) || t.Kind == "elevator" && _transitNames.TryGetValue(t.Index, out _)
+                    && (t.Dest.Contains("docking", StringComparison.OrdinalIgnoreCase) || t.Dest.Contains("hangar", StringComparison.OrdinalIgnoreCase)))).ToList();
                 if (arrivals.Count == 0) return -1;
                 var a = arrivals.MinBy(t => Math.Pow(t.Pos.X - c.Pos.X, 2) + Math.Pow(t.Pos.Y - c.Pos.Y, 2) + Math.Pow(t.Pos.Z - c.Pos.Z, 2))!;
                 return a.Node;

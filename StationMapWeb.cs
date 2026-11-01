@@ -607,7 +607,8 @@ internal sealed class StationMapModel
     // 階ごとの床の輪 (区画の床の輪をまとめたもの) と、その xy の箱 (最初に使うときに作る)
     private Dictionary<string, List<(List<(double X, double Y)> Ring, double X0, double Y0, double X1, double Y1)>>? _floorRings;
 
-    // 局所の xy が、その階の床の形 (区画の床の輪のどれか) の中にあるか
+    // 局所の xy が、その階の床の形 (区画の床の輪のどれか) の中にあるか。輪の縁から StationFloorBuilder.PaintMargin 以内も中とする
+    // (輪は床の板ごとの凸包 (2026-11-02)。前の格子の輪郭は板の縁の PaintMargin の帯まで塗っていたので、同じ幅にする)
     public bool OnFloorShape(string floorId, double x, double y)
     {
         if (_floorRings == null)
@@ -625,13 +626,11 @@ internal sealed class StationMapModel
             _floorRings = d;
         }
         if (!_floorRings.TryGetValue(floorId, out var rs)) return false;
+        const double m = StationFloorBuilder.PaintMargin;
         foreach (var (r, x0, y0, x1, y1) in rs)
         {
-            if (x < x0 || x > x1 || y < y0 || y > y1) continue;
-            var inside = false;
-            for (int i = 0, j = r.Count - 1; i < r.Count; j = i++)
-                if ((r[i].Y > y) != (r[j].Y > y) && x < (r[j].X - r[i].X) * (y - r[i].Y) / (r[j].Y - r[i].Y) + r[i].X) inside = !inside;
-            if (inside) return true;
+            if (x < x0 - m || x > x1 + m || y < y0 - m || y > y1 + m) continue;
+            if (StationFloorBuilder.OnRings(new[] { r }, x, y)) return true;
         }
         return false;
     }
@@ -670,7 +669,7 @@ internal sealed class StationMapModel
         return null;
     }
 
-    // 区画の代表の点 (その階の床のいちばん大きい輪の頂点の平均)。階を指定しなければ、区画の床のいちばん低い階
+    // 区画の代表の点 (その階の床の輪の頂点の平均を、輪の面積で重み付けした平均)。階を指定しなければ、区画の床のいちばん低い階
     public (double X, double Y, double Z)? SectionPoint(SectionInfo s, string? floor = null)
     {
         var fid = floor != null && s.Floors.ContainsKey(floor) ? floor
@@ -679,9 +678,12 @@ internal sealed class StationMapModel
         if (fid == null)
             return FloorOf((s.Center.X, s.Center.Y, s.Center.Z - s.Half.Z + 0.5)) is { } bf ? (s.Center.X, s.Center.Y, bf.Z) : null;
         var fl = Floors.First(f => f.Id == fid);
-        var ring = s.Floors[fid].OrderByDescending(r => Math.Abs(Area(r))).FirstOrDefault();
-        if (ring == null || ring.Count == 0) return null;
-        return (ring.Average(q => q.X), ring.Average(q => q.Y), fl.Z);
+        // 輪は床の板ごとの凸包 (2026-11-02 から。前は区画の輪郭)。区画全体の真ん中にするため、輪の頂点の平均を輪の面積で重み付けして平均する
+        var rings = s.Floors[fid].Where(r => r.Count > 0).ToList();
+        if (rings.Count == 0) return null;
+        var wsum = rings.Sum(r => Math.Abs(Area(r)));
+        if (wsum <= 0) return (rings.SelectMany(r => r).Average(q => q.X), rings.SelectMany(r => r).Average(q => q.Y), fl.Z);
+        return (rings.Sum(r => Math.Abs(Area(r)) * r.Average(q => q.X)) / wsum, rings.Sum(r => Math.Abs(Area(r)) * r.Average(q => q.Y)) / wsum, fl.Z);
     }
 
     private static double Area(List<(double X, double Y)> r)

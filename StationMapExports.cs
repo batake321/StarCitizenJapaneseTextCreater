@@ -81,6 +81,9 @@ internal sealed class StationMapExports : INotifyPropertyChanged
     // Checkmate 1 か所だけの実測なので、ほかのステーション (都市など) で合うかは確かめていない
     public const double BatchSecondsPerInstance = 0.12;
     public const double BytesPerInstance = 1200;
+    // GLB の読み取りの結果の保存 (StationMeshCache) の大きさ: 2026-11-02 に 86 か所を取り込んだ合計 1.22 GB ÷ インスタンスの数 ≈ 45,000 バイト
+    // (1 か所ごとでは Orison の 12,000 〜 Covalex の 401,000 バイトとばらつく)
+    public const double MeshCacheBytesPerInstance = 45000;
 
     private StationMapExports()
     {
@@ -198,7 +201,21 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         catch { return new List<FileInfo>(); }
     }
 
-    public static long CacheBytes() => CachedFiles().Sum(f => f.Length);
+    public static long CacheBytes() => CachedFiles().Sum(f => f.Length + MeshCacheBytes(f));
+
+    // 地図の JSON の横に置いた GLB の読み取りの結果 (StationMeshCache) の大きさ (無ければ 0)。容量の上限の数えに地図と合わせて入れる
+    public static long MeshCacheBytes(FileInfo json)
+    {
+        try { var f = new FileInfo(StationMeshCache.PathOf(json.FullName)); return f.Exists ? f.Length : 0; }
+        catch { return 0; }
+    }
+
+    // GLB の読み取りの結果を消す (地図を消すとき)
+    private static void DeleteMeshCache(string shortName)
+    {
+        try { var p = StationMeshCache.PathOf(JsonPath(shortName)); if (File.Exists(p)) File.Delete(p); }
+        catch (Exception ex) { Log($"{shortName}.meshes.gz を消せませんでした: {ex.Message}"); }
+    }
 
     // 置き場所に同じ名前の .json があり、それがこのアプリのもの (頭に印) でなければ true (上書きしない)
     private static bool HasForeignFile(string shortName) => File.Exists(JsonPath(shortName)) && ReadOurHeader(shortName) == null;
@@ -369,6 +386,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
     {
         var written = File.GetLastWriteTimeUtc(jsonPath);
         var node = JsonNode.Parse(File.ReadAllBytes(jsonPath))!.AsObject();
+        var oldKey = node["p4k"] is JsonObject op ? new Ship3DExports.P4kStamp((string?)op["path"] ?? "", (long?)op["size"] ?? 0, (long?)op["writeUtcTicks"] ?? 0).Key : null;
         node["p4k"] = new JsonObject { ["path"] = stamp.Path, ["size"] = stamp.Size, ["writeUtcTicks"] = stamp.WriteUtcTicks };
         var shortName = Path.GetFileNameWithoutExtension(jsonPath);
         Directory.CreateDirectory(Ship3DExports.WorkFolder);
@@ -380,6 +398,10 @@ internal sealed class StationMapExports : INotifyPropertyChanged
             File.Move(tmp, jsonPath, overwrite: true);
         }
         finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
+        // 照合が通った (元ファイルが同じ) ので、GLB の読み取りの結果の印も新しくする (前の印で保存したものだけ)
+        if (oldKey != null)
+            try { StationMeshCache.Restamp(StationMeshCache.PathOf(jsonPath), oldKey, stamp.Key); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log($"{shortName}.meshes.gz の印を書き直せませんでした: {ex.Message}"); }
     }
 
     private void DeleteChangedCache(string shortName, string reason)
@@ -402,7 +424,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
     private static bool DeleteOurCache(string shortName)
     {
         if (ReadOurHeader(shortName) == null) return false;
-        try { File.Delete(JsonPath(shortName)); return true; }
+        try { File.Delete(JsonPath(shortName)); DeleteMeshCache(shortName); return true; }
         catch (Exception ex) { Log($"{shortName}.json を消せませんでした: {ex.Message}"); return false; }
     }
 
@@ -1010,7 +1032,8 @@ internal sealed class StationMapExports : INotifyPropertyChanged
 
     // 書き出しの記録 (ログ・確かめに使う)
     internal sealed record ExportStats(int Runs, int Socpaks, int Missing, long TotalGlbBytes, long MaxGlbBytes, double ExportSeconds, double ComposeSeconds,
-        int Sources, int UnmatchedMeshes, long JsonBytes);
+        int Sources, int UnmatchedMeshes, long JsonBytes,
+        Action? SaveMeshCache = null, bool FromMeshCache = false);
 
     // 書き出して JSON を作る (UI に触れない)。GLB は workDir に作り、読んだらすぐ消す。starbreaker の失敗が 1 回でもあれば失敗 (半端な地図を残さない)。
     // afterExport は StarBreaker の部分が終わったとき (同時数の枠を空ける)。progress は (済んだ起動の数, 全部の数)
@@ -1085,9 +1108,25 @@ internal sealed class StationMapExports : INotifyPropertyChanged
             }
             return r;
         }
+        // (2026-11-02、利用者の指示) 保存した GLB の読み取りの結果 (StationMeshCache) が使えれば、starbreaker を動かさずに判定だけやり直す
+        var meshCache = StationMeshCache.PathOf(JsonPath(ShortName(prep.Root.Place.Record)));
+        var needKeys = prep.Jobs.SelectMany(j => j.Socpaks).Distinct(StringComparer.Ordinal).ToList();
+        StationMeshSet set;
+        Action? saveMeshCache = null;
+        var fromCache = false;
+        if (StationMeshCache.TryLoad(meshCache, stamp.Key, prep.TreeHash, needKeys, out var cacheWhy) is { } saved)
+        {
+            set = StationFloorBuilder.FromRaw(saved.Raw, saved.Missing, needKeys, MeshKinds());
+            fromCache = true;
+            Log($"{who} 保存した GLB の読み取りの結果を使い、starbreaker を動かしません (socpak {needKeys.Count}、{meshCache})");
+            progress?.Invoke(totalRuns, totalRuns);
+        }
+        else
+        {
+        Log($"{who} 保存した GLB の読み取りの結果は使いません ({cacheWhy})");
         Log($"{who} starbreaker の書き出しを始めます: 全 {totalRuns} 回 (終わった数で {RunLogBlock} 回ごとに 1 行で出します。{(tryExtra != null ? "同時数の上限まで並行に動かします" : "1 本ずつ")})");
         onStage?.Invoke("starbreaker の書き出し");
-        var set = await StationFloorBuilder.ExportAsync(Run, stamp.Path, prep.Jobs, workDir, progress, ct, tryExtra, releaseExtra, MeshKinds());
+        set = await StationFloorBuilder.ExportAsync(Run, stamp.Path, prep.Jobs, workDir, progress, ct, tryExtra, releaseExtra, MeshKinds());
         Log($"{who} starbreaker の書き出しが終わりました: {set.Runs} / {totalRuns} 回、{set.Seconds:F1} 秒 (starbreaker の時間の足し合わせ {sumRun:F1} 秒、同時に動いた最大 {maxActive} 本)、" +
             $"GLB 合計 {Ship3DExports.FormatBytes(set.TotalGlbBytes)}・最大 {Ship3DExports.FormatBytes(set.MaxGlbBytes)}、床・階段のメッシュのある socpak {set.Meshes.Count(m => m.Value.Count > 0)} / {set.Meshes.Count}、" +
             $"GLB に出てこなかった socpak {set.Missing.Count}、失敗 {set.Errors.Count} 回");
@@ -1095,6 +1134,15 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         {
             Log($"「{prep.Root.Place.Record}」の床の書き出しで starbreaker が {set.Errors.Count} 回失敗しました:\n{string.Join("\n", set.Errors)}");
             throw new InvalidOperationException($"starbreaker が {set.Errors.Count} 回失敗しました: {set.Errors[0]}");
+        }
+        // GLB の読み取りの結果の保存は、地図の JSON を書けた後 (呼ぶ側が ExportStats.SaveMeshCache を呼ぶ。JSON の無い保存を残さないため)
+        var kindsHash = StationMeshCache.BundledKindsHash();
+        var saveSet = set;
+        saveMeshCache = () =>
+        {
+            try { StationMeshCache.Save(meshCache, stamp.Key, prep.TreeHash, kindsHash, saveSet); Log($"{who} GLB の読み取りの結果を保存しました ({meshCache}、{Ship3DExports.FormatBytes(new FileInfo(meshCache).Length)})"); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log($"{who} GLB の読み取りの結果を保存できませんでした: {ex.Message}"); }
+        };
         }
         afterExport?.Invoke();
         ct.ThrowIfCancellationRequested();
@@ -1116,7 +1164,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         Log($"{who} 床・階・道順の作成が終わりました: 中央ディレクトリと床・道順 {tCompose:F1} 秒、照合用の元ファイル {sources.Count} 個 {tSources - tCompose:F1} 秒、" +
             $"仕上げ {sw.Elapsed.TotalSeconds - tSources:F1} 秒 (JSON {Ship3DExports.FormatBytes(Encoding.UTF8.GetByteCount(final))})");
         return (final, new ExportStats(set.Runs, prep.Jobs.Sum(j => j.Socpaks.Count), set.Missing.Count, set.TotalGlbBytes, set.MaxGlbBytes, set.Seconds,
-            sw.Elapsed.TotalSeconds, sources.Count, unmatched, Encoding.UTF8.GetByteCount(final)));
+            sw.Elapsed.TotalSeconds, sources.Count, unmatched, Encoding.UTF8.GetByteCount(final), saveMeshCache, fromCache));
     }
 
     // ログ用: starbreaker の回を何回ごとに 1 行にまとめるか (BuildJsonAsync)
@@ -1354,11 +1402,13 @@ internal sealed class StationMapExports : INotifyPropertyChanged
             var final = JsonPath(shortName);
             File.Move(tmp, final, overwrite: true);
             tmp = null;
+            stats.SaveMeshCache?.Invoke();
             _pendingDelete.Remove(shortName);   // 取り込み直したので、前のものを後で消す予定は取りやめ
             job.Watch.Stop();
             Ship3DExports.LogJob(job, $"保存しました: {swSave.Elapsed.TotalSeconds:F1} 秒、{final}");
             Log($"「{job.Name}」({shortName}) の地図を作りました: {job.Watch.Elapsed.TotalSeconds:F1} 秒 (予想 {estimate:F0} 秒 (同時 {slots} 本で見込んだもの)、計画 {prep.Seconds:F1} 秒)、" +
-                $"{Ship3DExports.FormatBytes(stats.JsonBytes)}。インスタンス {prep.Tree.Instances.Count}、starbreaker {stats.Runs} 回 {stats.ExportSeconds:F1} 秒 " +
+                $"{Ship3DExports.FormatBytes(stats.JsonBytes)}。インスタンス {prep.Tree.Instances.Count}、" +
+                (stats.FromMeshCache ? "保存した GLB の読み取りの結果を使った (starbreaker は動かしていない) " : $"starbreaker {stats.Runs} 回 {stats.ExportSeconds:F1} 秒 ") +
                 $"(socpak {stats.Socpaks}、GLB 合計 {Ship3DExports.FormatBytes(stats.TotalGlbBytes)}、最大 {Ship3DExports.FormatBytes(stats.MaxGlbBytes)})、" +
                 $"床・道順 {stats.ComposeSeconds:F1} 秒、照合用の元ファイル {stats.Sources} 個" + (stats.UnmatchedMeshes > 0 ? $" (パスの見つからないメッシュ名 {stats.UnmatchedMeshes})" : "") +
                 $"。GLB に出てこなかった socpak {stats.Missing} ({job.LogTag})");
@@ -1401,7 +1451,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
 
     // まとめて取り込む: 星図の場所のうちステーション・都市 (Manmade 系・LandingZone) で、ゲームデータの中にルートが見つかったものを、星系・名前の順に。
     //   すでに最新の地図があるもの (Data.p4k が変わっていれば照合して同じだったもの)・今取り込み中のもの・同じ名前のこのアプリのものではないファイルがあるものは飛ばす。
-    //   予想 (インスタンスの数 × BatchSecondsPerInstance 秒・× BytesPerInstance バイト。Checkmate の実測から) の大きさの合計が
+    //   予想 (インスタンスの数 × BatchSecondsPerInstance 秒・× (BytesPerInstance + MeshCacheBytesPerInstance) バイト。Checkmate の実測から) の大きさの合計が
     //   「最大容量 − 今の使用量 (船とステーションの合計)」を超える手前で止める (古いものを消して入れ替えない)。何か所・約何分・約何 MB かを聞いてから、
     //   並べて順に始める (同時数は Ship3DExports の待ち行列)。書き出しの計画は順番が来てから作る
     public async Task RunBatchAsync(Window? owner)
@@ -1508,7 +1558,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
                     Log($"ステーションのまとめて取り込む: 「{NameOf(r)}」を見積もれませんでした: {Ship3DExports.Describe(e)}");
                     continue;
                 }
-                var bytes = count * BytesPerInstance;
+                var bytes = count * (BytesPerInstance + MeshCacheBytesPerInstance);
                 if (sumBytes + bytes > Ship3DExports.MaxMb * 1024.0 * 1024 - Ship3DExports.CacheBytes() - CacheBytes())
                 {
                     notTaken = candidates.Count - k;

@@ -1921,7 +1921,7 @@ internal static class StationMapJson
     // 一覧に出す階の、描く床の形の面積の下限 (m²)。値: Checkmate の Cargo Deck の 3 階 (9 m²)・Contested Zone の 8 階 (24 m²) などの小さな切れ端は出さず、
     // 貨物のエレベーターの階 (Ext. Freight の 1 階、47〜50 m²。乗り場と行き先がある) は出す値として決めた
     public const double MinListedFloorArea = 30;
-    public const int Format = 16;   // 2: 道順のグラフの経由点を waypoints にまとめた形 (Write の graph の説明)。3: 階・区画の名前を訳と星図の場所の名前で付けるようにした (取り込みが NameFloors・NameSections に localize・placeNames を渡す。2026-11-01)。4: 区画の name を表示の名前にし、Child の entityName を entity に移した。階の名前を代表の 1 つ・訳のある名前だけにした (2026-11-01)。5: 地区 (districts) を足した (2026-11-01)。6: transit に lineInternal を足し、タグの無いエレベーターの行き先の名前を引くようにした (2026-11-01)。7: floors に reachable (乗り場からたどれない階は false。その階の区画の多角形は書かない)、transit のエレベーターに place (乗り場を含む区画の名前) を足した。床も店も無い箱だけの区画の多角形を書かないようにした (2026-11-01)。8: 階を真上から見た重なりで分けるようにした (Levels)。floors に implemented を足し、transit の kind (elevator・elevator-noride) を実装されているかの判定で決めるようにした (2026-11-01) 9: transit のトラムの乗り場に nextGateway・nextStop・nextDistrict (次の駅)、floors に stackGroup・stackLevel (行き先の鍵で決めた重ねる順番) を足した (2026-11-01) 10: 階を、数段の階段 (1.3 m 未満) でつながる床を高さの範囲 3 m 未満のあいだ足す作り方にした (利用者の規則、2026-11-01)。 11: 何も無い層を一覧から外し、階の名前をデータの名前だけにした。店の名前に area_label・販売データの名前を足した (2026-11-01)。 12: 頭に一覧に出る階の数 (listedFloors。StationMapExports.Finish が書く) を足した。 13: 乗り場の判定・地区の条件を直した (2026-11-01)。 14: 通路の部品 (corridor_*) を床にし、店の名前を階の名前・括弧の候補に使わないようにし、重ねる順を階の単位にし、新しい乗り物の仕組み (sctransport*) の乗り場を拾うようにした (2026-11-01)。 15: stairs に outline (階段の板の真上から見た形) を足し、明らかに階が違う階段の両端の床を別の層にし、エレベーターとつながった階の名前を階段でつながる階に付けるようにした (2026-11-02)。 16: 床・階段を部品の形 (GLB の三角形の上向きの面) で判定し、板を実際の面の高さで作り、部品の名前と種類を表に登録するようにした (2026-11-02)。
+    public const int Format = 17;   // 2: 道順のグラフの経由点を waypoints にまとめた形 (Write の graph の説明)。3: 階・区画の名前を訳と星図の場所の名前で付けるようにした (取り込みが NameFloors・NameSections に localize・placeNames を渡す。2026-11-01)。4: 区画の name を表示の名前にし、Child の entityName を entity に移した。階の名前を代表の 1 つ・訳のある名前だけにした (2026-11-01)。5: 地区 (districts) を足した (2026-11-01)。6: transit に lineInternal を足し、タグの無いエレベーターの行き先の名前を引くようにした (2026-11-01)。7: floors に reachable (乗り場からたどれない階は false。その階の区画の多角形は書かない)、transit のエレベーターに place (乗り場を含む区画の名前) を足した。床も店も無い箱だけの区画の多角形を書かないようにした (2026-11-01)。8: 階を真上から見た重なりで分けるようにした (Levels)。floors に implemented を足し、transit の kind (elevator・elevator-noride) を実装されているかの判定で決めるようにした (2026-11-01) 9: transit のトラムの乗り場に nextGateway・nextStop・nextDistrict (次の駅)、floors に stackGroup・stackLevel (行き先の鍵で決めた重ねる順番) を足した (2026-11-01) 10: 階を、数段の階段 (1.3 m 未満) でつながる床を高さの範囲 3 m 未満のあいだ足す作り方にした (利用者の規則、2026-11-01)。 11: 何も無い層を一覧から外し、階の名前をデータの名前だけにした。店の名前に area_label・販売データの名前を足した (2026-11-01)。 12: 頭に一覧に出る階の数 (listedFloors。StationMapExports.Finish が書く) を足した。 13: 乗り場の判定・地区の条件を直した (2026-11-01)。 14: 通路の部品 (corridor_*) を床にし、店の名前を階の名前・括弧の候補に使わないようにし、重ねる順を階の単位にし、新しい乗り物の仕組み (sctransport*) の乗り場を拾うようにした (2026-11-01)。 15: stairs に outline (階段の板の真上から見た形) を足し、明らかに階が違う階段の両端の床を別の層にし、エレベーターとつながった階の名前を階段でつながる階に付けるようにした (2026-11-02)。 16: 床・階段を部品の形 (GLB の三角形の上向きの面) で判定し、板を実際の面の高さで作り、部品の名前と種類を表に登録するようにした (2026-11-02)。 17: 区画の floors の環を、板を格子に塗った輪郭から板ごとの凸包そのものにした (四角い部品は四角のまま。環どうしは重なることがある。2026-11-02、利用者の決定「A」)。
 
     public static string Write(StationIndex index, StationTree tree, IReadOnlyList<StationFloor> floors, IReadOnlyList<StationSection> sections,
         IReadOnlyList<StationStair> stairs, IReadOnlyList<StationTransit> transit, StationGraph graph, StarRotRule rule = StationIndex.DefaultRule)
@@ -1989,16 +1989,16 @@ internal static class StationMapJson
                 var ins = tree.Instances[sec.Instance]; var inv = ins.ToStation.Inverse(); var a = ins.MinBounds!.Value; var b = ins.MaxBounds!.Value;
                 return things.Any(q => { var l = inv.Apply(q); return l.X >= a.X - 0.5 && l.X <= b.X + 0.5 && l.Y >= a.Y - 0.5 && l.Y <= b.Y + 0.5 && l.Z >= a.Z - 0.5 && l.Z <= b.Z + 0.5; });
             }
-            // 階ごとの、描く床の形の面積 (区画の多角形のうち JSON に書くもの (下の sections と同じ条件) の環の面積の和)。
+            // 階ごとの、描く床の形の面積 (区画の多角形のうち JSON に書くもの (下の sections と同じ条件) の面積 StationSection.PolygonArea の和)。
             // 一覧に出す階は、この面積が MinListedFloorArea 以上のものだけ (2026-11-01、利用者の指摘「枠の無い、意味のない階がリストにたくさんある」)
             var drawnArea = new Dictionary<string, double>(StringComparer.Ordinal);
             foreach (var s in sections)
             {
                 if (s.BoxFallback && !HasThing(s)) continue;
-                foreach (var (fid, rings) in s.Polygons)
+                foreach (var fid in s.Polygons.Keys)
                 {
                     if (unreachable.Contains(fid)) continue;
-                    drawnArea[fid] = drawnArea.GetValueOrDefault(fid) + rings.Sum(r => StationFloorBuilder.HullArea(r.ToArray()));
+                    drawnArea[fid] = drawnArea.GetValueOrDefault(fid) + s.PolygonArea.GetValueOrDefault(fid);
                 }
             }
             // 使える物のある階 (2026-11-01、利用者の指摘「こういう何もない層は要らない」): 一覧に出す階は、次のどれかがある階だけ。道順の床としては残す (グラフは変えない)
@@ -2031,11 +2031,11 @@ internal static class StationMapJson
                 // (2026-11-02) 店の名前から付けた区画の名前 (NameSource「shop」) は括弧に使わない (利用者の決定「店の名前を階の名前にも括弧の候補にも使わない」。
                 // 規則 6 を外した後も、この ② から Stanton Gateway の「Galleria（Casaba Outlet）」・Area18 の「Lobby（Traveler Rentals）」のように店の名前が出ていた)
                 if (s.NameSource == "shop") continue;
-                foreach (var (fid, rings) in s.Polygons)
+                foreach (var fid in s.Polygons.Keys)
                 {
                     if (unreachable.Contains(fid)) continue;
                     if (!secNames.TryGetValue(fid, out var ls)) secNames[fid] = ls = new();
-                    ls.Add((s.DisplayName, rings.Sum(r => StationFloorBuilder.HullArea(r.ToArray()))));
+                    ls.Add((s.DisplayName, s.PolygonArea.GetValueOrDefault(fid)));
                 }
             }
             foreach (var dup in floors.Where(IsListedFinal).GroupBy(f => shown[f.Id], StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1).ToList())
