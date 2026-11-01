@@ -37,7 +37,7 @@
                        Visibility="{Binding HasQueued, Converter={StaticResource BoolToVis}}"/>
             <DockPanel Margin="0,4,0,0" Visibility="{Binding BatchActive, Converter={StaticResource BoolToVis}}">
                 <Button DockPanel.Dock="Right" Content="まとめて取り消し" Padding="8,0" Click="CancelBatch_Click"
-                        ToolTip="まとめて取り込むの書き出しを全部取り消します (個別に始めた書き出しはそのまま)"/>
+                        ToolTip="［船舶・車両をまとめて取り込む］［マップをまとめて取り込む］の書き出しを全部取り消します (個別に始めた書き出しはそのまま)"/>
                 <TextBlock Text="{Binding BatchText}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
             </DockPanel>
             <Grid Margin="0,4,0,0">

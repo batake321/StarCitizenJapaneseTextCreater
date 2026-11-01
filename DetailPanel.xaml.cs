@@ -242,6 +242,7 @@ public partial class DetailPanel : UserControl
     private void ShowDetail(string text)
     {
         if (!string.Equals(_detailRecord, _ship3DRecord, StringComparison.OrdinalIgnoreCase)) SetShip3DTarget(null, "");
+        if (!string.Equals(_detailRecord, _stationDetailRecord, StringComparison.Ordinal)) SetStationTarget(null, null);
         txtDetail.Text = DetailHtml.ForTextBox(text);   // 文字の欄ではリンクは表示名だけ、図は 1 行の断り書き
         txtDetail.ScrollToHome();
         if (_webFailed) return;
@@ -782,6 +783,8 @@ public partial class DetailPanel : UserControl
         ShowDetail(text);
         // 船・車両 (NOITEM_Vehicle) なら［3D 表示］［別ウィンドウ］を出す
         if (itemType.StartsWith("NOITEM_Vehicle", StringComparison.OrdinalIgnoreCase)) SetShip3DTarget(record, ShipNameFor(record));
+        // ステーション・都市・前哨基地・小惑星 (星図の Manmade 系・LandingZone・Outpost 系・Asteroid 系。IsStationPlace) なら［読み込み］［地図表示］［別ウィンドウ］を出す
+        if (isTreeRecord && tree != null && tree.NodesByRecord.TryGetValue(record, out var place) && IsStationPlace(place)) SetStationTarget(place, tree);
 
         // 保存データに購入の売り場が無ければ、UEX の値段 (チャット・表と同じ取得・キャッシュ) を取ってから出し直す
         if (!text.Contains("店の販売データ無し")) return;
@@ -976,6 +979,151 @@ public partial class DetailPanel : UserControl
         Ship3DWeb.Blank(web3D);
         web3D.Visibility = Visibility.Collapsed;
         btnShip3DBack.Visibility = Visibility.Collapsed;
+        if (_webFailed) txtDetail.Visibility = Visibility.Visible;
+        else webDetail.Visibility = Visibility.Visible;
+    }
+
+    // ===== ステーションの地図 =====
+
+    // バーを出している場所 (詳細の record (Place:…)・星図の場所・木。出していなければ null) と、下の欄に地図を出しているか
+    private string? _stationDetailRecord;
+    private ShopTreeNode? _stationPlace;
+    private ShopTree? _stationTree;
+    private bool _stationShown;
+
+    // バー (［読み込み］［地図表示］［別ウィンドウ］) を出す場所: 別ウィンドウの一覧と同じ種類 (ステーション・都市 (Manmade 系・LandingZone)・前哨基地 (Outpost 系)・小惑星 (Asteroid 系))。
+    // 取り込みのルート探し (StationMapData の FindRoots) がこの種類 (StationPlace.IsMapPlace) を対象にしている
+    private static bool IsStationPlace(ShopTreeNode n) => n.Type.StartsWith("Manmade", StringComparison.Ordinal) || n.Type == "LandingZone"
+        || n.Type is "Outpost" or "Outpost_InvalidQT" or "Asteroid" or "Asteroid_ValidQT";
+
+    // バーの場所を決める (null なら隠し、地図の表示もやめる)
+    private void SetStationTarget(ShopTreeNode? place, ShopTree? tree)
+    {
+        _stationDetailRecord = place?.Record;
+        _stationPlace = place;
+        _stationTree = tree;
+        if (place == null)
+        {
+            HideStationMap();
+            pnlStation.Visibility = Visibility.Collapsed;
+            return;
+        }
+        if (!_stationHooked)
+        {
+            _stationHooked = true;
+            // 取り込みが加わった / 終わった・照合・地図を書いた / 消した・CPU 使用率が 90% をまたいだら、ボタンを決め直す
+            StationMapExports.Instance.StateChanged += UpdateStationButtons;
+            Ship3DExports.Instance.StateChanged += UpdateStationButtons;
+            Ship3DExports.Instance.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(Ship3DExports.OverallText)) UpdateStationButtons(); };
+        }
+        pnlStation.Visibility = Visibility.Visible;
+        UpdateStationButtons();
+        // パッチで Data.p4k が変わっていれば、この場所の元データを照合する (終わったら StateChanged でボタンを決め直す)
+        if (StationMapExports.Instance.StateOf(place.RecordName) == Ship3DCacheState.NeedsVerify) _ = StationMapExports.Instance.VerifyAsync(place.RecordName);
+    }
+    private bool _stationHooked;
+
+    // ［読み込み］は、地図が無い (照合で消したものを含む) ときで、取り込み中でなく、CPU 使用率が 90% 未満のときだけ使える (船の［読み込み］と同じ)
+    private void UpdateStationButtons()
+    {
+        if (_stationPlace == null) return;
+        var ex = StationMapExports.Instance;
+        var state = ex.StateOf(_stationPlace.RecordName);
+        var key = StationMapExports.KeyOf(StationMapExports.ShortName(_stationPlace.RecordName));
+        var job = Ship3DExports.Instance.Jobs.FirstOrDefault(j => j.Short.Equals(key, StringComparison.OrdinalIgnoreCase));
+        btnStationImport.IsEnabled = state == Ship3DCacheState.None && job == null && !Ship3DExports.Instance.CpuHigh;
+        txtStation.Text = job != null ? $"地図: 取り込み中 {job.Text}"
+            : state switch
+            {
+                Ship3DCacheState.Fresh => "地図: 取り込み済み",
+                Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying => "地図: 照合中 (パッチで Data.p4k が変わったので元データを確かめています)",
+                Ship3DCacheState.NoGame => "地図: ゲームの Data.p4k が見つかりません",
+                _ => Ship3DExports.Instance.CpuHigh ? $"地図: 未取り込み。CPU 使用率 {Ship3DExports.Instance.CpuPercent:F0}% のため取り込みを始められません (90% 未満になったら使えます)"
+                                                    : "地図: 未取り込み (［読み込み］でゲームデータから取り込みます)",
+            };
+    }
+
+    // 表示に使える地図があるか (Data.p4k が変わっていれば照合してから)。無ければ［読み込み］を押すよう知らせて false (取り込みはしない)
+    private async Task<bool> StationReadyOrNotifyAsync(ShopTreeNode place)
+    {
+        var ex = StationMapExports.Instance;
+        var state = ex.StateOf(place.RecordName);
+        if (await ex.GetCachedPathAsync(place.RecordName) != null) { UpdateStationButtons(); return true; }
+        UpdateStationButtons();
+        var msg = state == Ship3DCacheState.NoGame ? "ゲームの Data.p4k が見つかりません。設定タブのゲームのフォルダとチャンネルを確かめてください。"
+            : ex.IsExporting(place.RecordName) ? $"「{place.Name}」の地図は取り込み中です。終わってから出してください。"
+            : state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying ? $"「{place.Name}」の元データがパッチで変わったので、地図を消しました。［読み込み］で取り込み直してください。"
+            : $"「{place.Name}」の地図はまだ取り込んでいません。［読み込み］でゲームデータから取り込んでください。";
+        MessageBox.Show(Window.GetWindow(this), msg, "ステーションの地図", MessageBoxButton.OK, MessageBoxImage.Information);
+        return false;
+    }
+
+    // ［読み込み］: 予想を出して確かめてから裏で取り込む。終わったとき、まだその場所の詳細を出していれば下の欄に地図を出す
+    private async void BtnStationImport_Click(object sender, RoutedEventArgs e)
+    {
+        var place = _stationPlace;
+        if (place == null) return;
+        btnStationImport.IsEnabled = false;
+        var path = await StationMapExports.Instance.ImportAsync(place.RecordName, place.Name, Window.GetWindow(this));
+        UpdateStationButtons();
+        if (path == null) return;
+        if (!ReferenceEquals(place, _stationPlace))
+        {
+            txtStatus.Text = $"「{place.Name}」の地図を取り込みました (その場所の詳細の［地図表示］で出せます)";
+            return;
+        }
+        await ShowStationMapAsync(place);
+    }
+
+    private async void BtnStationMap_Click(object sender, RoutedEventArgs e)
+    {
+        var place = _stationPlace;
+        if (place == null || !await StationReadyOrNotifyAsync(place)) return;
+        if (!ReferenceEquals(place, _stationPlace)) return;
+        await ShowStationMapAsync(place);
+    }
+
+    // ［別ウィンドウ］: 取り込み済みなら別のウィンドウ (モードレス) に出し、この欄は詳細の表に戻す (同じ地図を 2 か所で出さない)
+    private async void BtnStationWindow_Click(object sender, RoutedEventArgs e)
+    {
+        var place = _stationPlace;
+        if (place == null) return;
+        var owner = Window.GetWindow(this);
+        if (!await StationReadyOrNotifyAsync(place)) return;
+        try
+        {
+            var win = new StationMapWindow(place.RecordName, place.Name, _stationTree);
+            if (owner != null && owner.IsLoaded) win.Owner = owner;
+            win.Show();
+            HideStationMap();
+        }
+        catch (Exception ex)
+        {
+            AppendAppLog($"[ステーションの地図] 別ウィンドウを開けませんでした: {ex}");
+            MessageBox.Show($"別ウィンドウを開けませんでした: {ex.Message}", "ステーションの地図", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void BtnStationBack_Click(object sender, RoutedEventArgs e) => HideStationMap();
+
+    // 下の欄に地図を出す (詳細の表の WebView2 は隠すだけ)
+    private async Task ShowStationMapAsync(ShopTreeNode place)
+    {
+        webDetail.Visibility = Visibility.Collapsed;
+        txtDetail.Visibility = Visibility.Collapsed;
+        stationMap.Visibility = Visibility.Visible;
+        btnStationBack.Visibility = Visibility.Visible;
+        _stationShown = true;
+        await stationMap.ShowAsync(place.RecordName, place.Name, _stationTree);
+    }
+
+    private void HideStationMap()
+    {
+        if (!_stationShown) return;
+        _stationShown = false;
+        stationMap.Clear();
+        stationMap.Visibility = Visibility.Collapsed;
+        btnStationBack.Visibility = Visibility.Collapsed;
         if (_webFailed) txtDetail.Visibility = Visibility.Visible;
         else webDetail.Visibility = Visibility.Visible;
     }

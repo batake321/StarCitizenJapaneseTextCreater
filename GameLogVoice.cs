@@ -39,18 +39,20 @@ public static class GameLogVoiceScenes
     // 読む範囲は格納と同じ GameLogSoundJudge.StowLiveWindow (ハンガー退出の行は通知から 10 秒たってから足されるため。ハンガー進入も同じ範囲にしてある))
     public const string HangarEnter = "ハンガー進入";
     public const string HangarExit = "ハンガー退出";
-    // 既定の文を変えた場面の前の既定の文。保存された文がこれと同じなら、今の既定の文として扱う (ItemOf)
-    private static readonly Dictionary<string, string> OldDefaultTexts = new()
+    // 既定の文を変えた場面の前の既定の文 (場面ごとに今までの既定の文すべて)。保存された文がどれかと同じなら、今の既定の文として扱う (ItemOf)
+    private static readonly Dictionary<string, string[]> OldDefaultTexts = new()
     {
-        [QuantumArrived] = "量子ジャンプします。",
+        [QuantumArrived] = ["量子ジャンプします。"],
         // 「量子ジャンプ開始」の行は目的地を選んだ行 (Player has selected point …) で作る。実際に跳んだ時の行は Game.log に無い
-        ["量子ジャンプ開始"] = "量子ジャンプします。",
-        ["降りた"] = "操縦席を離れました。",
+        ["量子ジャンプ開始"] = ["量子ジャンプします。"],
+        // v2.0.12 の「操縦席を離れました。」と v2.2.0 からの「{船}から降りました。」。
+        // 「下船」の既定の文も「{船}から降りました。」だが、鍵が「降りた」の設定だけを置き換える (下船の文は変えない)
+        ["降りた"] = ["操縦席を離れました。", "{船}から降りました。"],
     };
     // {船} の船が分からないときに {船} に入れる言葉 (場面の鍵 → 言葉)。無い場面は {船} を直後の助詞ごと取り除く
     private static readonly Dictionary<string, string> ShipFallbacks = new()
     {
-        ["降りた"] = "船",   // 「から降りました。」にせず「船から降りました。」にする
+        ["降りた"] = "船",   // 「の操縦席を離れました。」にせず「船の操縦席を離れました。」にする
     };
 
     public static readonly GameLogVoiceScene[] All =
@@ -59,7 +61,7 @@ public static class GameLogVoiceScenes
         new(Arrival, "到着", "{場所}に到着しました。ハンガーリクエスト可能です。", true),
         new("乗船", "乗船（自分の船）", "{船}に乗船しました。", false),
         new("下船", "下船", "{船}から降りました。", false),
-        new("降りた", "操縦席を離れた", "{船}から降りました。", false),
+        new("降りた", "操縦席を離れた", "{船}の操縦席を離れました。", false),
         new("操縦", "操縦（操縦席に座った）", "{船}を操縦します。", false),
         new("呼び出し完了", "呼び出し完了", "{船}の準備ができました。", false),
         new("格納", "格納", "{船}を格納しました。", false),
@@ -119,7 +121,7 @@ public static class GameLogVoiceScenes
     {
         foreach (var it in config.GameLogVoiceItems)
             if (it.Kind == key)
-                return OldDefaultTexts.TryGetValue(it.Kind, out var old) && it.Text == old
+                return OldDefaultTexts.TryGetValue(it.Kind, out var old) && Array.IndexOf(old, it.Text) >= 0
                     ? new GameLogVoiceItem { Kind = it.Kind, Enabled = it.Enabled, Text = "", SpeakerId = it.SpeakerId }
                     : it;
         var s = Find(key);

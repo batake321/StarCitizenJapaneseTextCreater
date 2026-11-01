@@ -23,6 +23,23 @@ public partial class BlueprintPanel : UserControl
     private const string StockPartial = "一部";
     private const string StockShort = "不足";
 
+    // BP の分類 (blueprints.category。BlueprintCategoryRecord. を除いた名前) の表示の文字。表 (利用者が決めた対応) に無い値は元の値のまま、空は空のまま。
+    // 画面・詳細の節・データ API の表示はすべてここを通す (絞り込み・並べ替えは元の値のまま)
+    private static readonly Regex VehicleCategoryRegex = new("^Vehicle(Component|Weapons)S([0-9]+)$", RegexOptions.Compiled);
+    internal static string CategoryLabel(string? category)
+    {
+        if (string.IsNullOrEmpty(category)) return category ?? "";
+        switch (category)
+        {
+            case "FPSArmours": return "個人装備（アーマー）";
+            case "FPSWeapons": return "個人武器";
+            case "MissionItem": return "契約のアイテム";
+        }
+        var m = VehicleCategoryRegex.Match(category);
+        if (m.Success) return (m.Groups[1].Value == "Component" ? "船舶装備 S" : "船舶武器 S") + m.Groups[2].Value;
+        return category;
+    }
+
     public Func<string>? WorkDirProvider { get; set; }
     // 入手の欄のダブルクリックで選んだミッションを開く (MainWindow がミッションタブに切り替えて詳細を出す)。
     // 引数はその表示名のミッションの record (並んだ順。先頭が代表。先頭がミッションタブに無ければ次を使う)
@@ -567,8 +584,9 @@ public partial class BlueprintPanel : UserControl
     private void RefreshCategoryCombo(List<string> categories)
     {
         var prev = cmbCategory.SelectedItem as string;
+        // 候補は表示の文字 (CategoryLabel)。並びは元の値の順のまま
         var list = new List<string> { AllLabel };
-        list.AddRange(categories);
+        list.AddRange(categories.Select(CategoryLabel));
         cmbCategory.ItemsSource = list;
         cmbCategory.SelectedItem = prev != null && list.Contains(prev) ? prev : AllLabel;
     }
@@ -582,7 +600,7 @@ public partial class BlueprintPanel : UserControl
         var uuids = _resourceChoices.Where(c => c.IsSelected && c.Uuid is { Length: > 0 }).Select(c => c.Uuid!).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         items = FilterByResources(items, uuids);
         if (cmbCategory?.SelectedItem is string cat && cat != AllLabel)
-            items = items.Where(it => string.Equals(it.Category, cat, StringComparison.Ordinal));
+            items = items.Where(it => string.Equals(it.CategoryText, cat, StringComparison.Ordinal));
         if (chkCraftable?.IsChecked == true)
             items = items.Where(it => it.StockText == StockEnough);
         if (chkOwned?.IsChecked == true)
@@ -662,7 +680,8 @@ public partial class BlueprintPanel : UserControl
     private static List<GridColumnSpec> Columns() =>
     [
         new() { Header = "できる品", Filterable = false, Text = o => ((BlueprintItem)o).Name, Key = o => TextKey(((BlueprintItem)o).Name) },
-        new() { Header = "分類", Text = o => ((BlueprintItem)o).Category, Key = o => TextKey(((BlueprintItem)o).Category) },
+        // 表示は日本語 (CategoryText)、並べ替えは元の値。検索欄・絞り込みの窓の検索は元の値 (FPSWeapons など) でも当たる
+        new() { Header = "分類", Text = o => ((BlueprintItem)o).CategoryText, Key = o => TextKey(((BlueprintItem)o).Category), SearchText = o => ((BlueprintItem)o).Category },
         new() { Header = "材料", Filterable = false, Text = o => ((BlueprintItem)o).MaterialsText, Key = o => TextKey(((BlueprintItem)o).MaterialsText), Tooltip = o => ((BlueprintItem)o).MaterialsTooltip },
         new() { Header = "時間", Numeric = true, Filterable = false, Text = o => ((BlueprintItem)o).TimeText, Key = o => ((BlueprintItem)o).CraftTimeSec },
         new() { Header = "入手", Text = o => ((BlueprintItem)o).SourceText, Key = o => TextKey(((BlueprintItem)o).SourceText), Tooltip = o => ((BlueprintItem)o).SourceTooltip },
@@ -808,6 +827,122 @@ public partial class BlueprintPanel : UserControl
                 ? l.Select(it => CleanName(OutputName(it, loc, itemNames))).Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList()
                 : new List<string>();
         return result;
+    }
+
+    // ［詳細］の資源の詳細の「この資源を使う BP」の節: 材料の枠に resourceUuids のどれかを使う BP の枠 (1 枠 1 件)。
+    // 枠の資源は blueprint_materials.resource_uuid、無ければ item_record を MineralResourceUuid で資源に直したもの。
+    // できる品の名前の順 (同じ名前は blueprint_materials の rowid の順)。BP の表が無い・使う BP が無ければ空
+    internal static List<ResourceUse> LoadResourceUses(string workDir, IReadOnlyCollection<string> resourceUuids)
+    {
+        var index = ResourceUseIndex(Path.Combine(workDir, "gamedata_cache.db"), Path.Combine(workDir, "translations.db"));
+        var list = new List<ResourceUse>();
+        foreach (var uuid in resourceUuids.Distinct(StringComparer.OrdinalIgnoreCase))
+            if (index.TryGetValue(uuid, out var l)) list.AddRange(l);
+        return list.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Order).ToList();
+    }
+
+    private static (string Stamp, Dictionary<string, List<ResourceUse>> Index)? _resourceUseIndexCache;
+
+    // 資源の uuid → それを材料に使う BP の枠 (blueprint_materials を全部 1 回読んで逆引きにする)。
+    // 名前の出し方は LoadData と同じ (できる品は OutputName、枠名は slot_name_key の訳 (日本語 → 英語) → slot_debug_name)。
+    // 索引は gamedata_cache.db と translations.db が変わっていなければ前のものを使う。DB を読めなければ例外
+    private static Dictionary<string, List<ResourceUse>> ResourceUseIndex(string gdPath, string trPath)
+    {
+        var stamp = FileStamp(gdPath) + "\n" + FileStamp(trPath);
+        lock (CacheLock)
+        {
+            if (_resourceUseIndexCache is { } c && c.Stamp == stamp) return c.Index;
+        }
+        var index = new Dictionary<string, List<ResourceUse>>(StringComparer.OrdinalIgnoreCase);
+        if (File.Exists(gdPath))
+        {
+            var byUuid = new Dictionary<string, BlueprintItem>(StringComparer.OrdinalIgnoreCase);
+            var mats = new List<(BlueprintItem Bp, BlueprintSlot Slot)>();
+            var resourceUuidByRecord = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // resource_types の record 名 → uuid
+            var itemNames = new Dictionary<string, (string? En, string? Ja)>(StringComparer.OrdinalIgnoreCase);
+            using (var game = new SqliteConnection($"Data Source={gdPath};Mode=ReadOnly;Pooling=False"))
+            {
+                game.Open();
+                if (TableExists(game, "blueprints") && TableExists(game, "blueprint_materials"))
+                {
+                    using (var cmd = game.CreateCommand())
+                    {
+                        cmd.CommandText = "SELECT uuid, record_name, category, output_record, output_name_key, output_name_en FROM blueprints";
+                        using var r = cmd.ExecuteReader();
+                        while (r.Read())
+                        {
+                            var it = new BlueprintItem
+                            {
+                                Uuid = Str(r, 0), RecordName = Str(r, 1), Category = Str(r, 2), OutputRecord = Str(r, 3),
+                                OutputNameKey = r.IsDBNull(4) ? null : r.GetString(4), OutputNameEn = r.IsDBNull(5) ? null : OreService.EnglishText(r.GetString(5)),
+                            };
+                            if (it.Uuid.Length == 0) continue;
+                            byUuid.TryAdd(it.Uuid, it);
+                        }
+                    }
+                    using (var cmd = game.CreateCommand())
+                    {
+                        cmd.CommandText = "SELECT bp_uuid, slot_debug_name, slot_name_key, resource_uuid, item_record, quantity, min_quality FROM blueprint_materials ORDER BY rowid";
+                        using var r = cmd.ExecuteReader();
+                        while (r.Read())
+                        {
+                            if (!byUuid.TryGetValue(Str(r, 0), out var it)) continue;
+                            mats.Add((it, new BlueprintSlot
+                            {
+                                DebugName = Str(r, 1), NameKey = r.IsDBNull(2) ? null : r.GetString(2),
+                                ResourceUuid = Str(r, 3), ItemRecord = Str(r, 4),
+                                Quantity = r.IsDBNull(5) ? 0 : r.GetDouble(5), MinQuality = r.IsDBNull(6) ? 0 : r.GetInt32(6),
+                            }));
+                        }
+                    }
+                    if (TableExists(game, "resource_types"))
+                    {
+                        using var cmd = game.CreateCommand();
+                        cmd.CommandText = "SELECT uuid, record_name FROM resource_types";
+                        using var r = cmd.ExecuteReader();
+                        while (r.Read())
+                        {
+                            var uuid = Str(r, 0);
+                            var record = Str(r, 1);
+                            if (uuid.Length > 0 && record.Length > 0) resourceUuidByRecord.TryAdd(record, uuid);
+                        }
+                    }
+                    // できる品の名前 (item_index の name / name_ja。同じ record (大文字小文字無視) は先の行 (rowid の順))
+                    if (mats.Count > 0 && TableExists(game, "item_index"))
+                    {
+                        using var cmd = game.CreateCommand();
+                        cmd.CommandText = "SELECT record_name, name, name_ja FROM item_index ORDER BY rowid";
+                        using var r = cmd.ExecuteReader();
+                        while (r.Read()) AddItemName(itemNames, r);
+                    }
+                }
+            }
+            if (mats.Count > 0)
+            {
+                // 訳: 枠名・できる品の名前のキー
+                var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var (it, s) in mats)
+                {
+                    if (s.NameKey is { Length: > 0 } k) keys.Add(k);
+                    if (it.OutputNameKey is { Length: > 0 } ok) keys.Add(ok);
+                }
+                var loc = CachedTranslations(gdPath, trPath, keys);
+                var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // BP の uuid → できる品の名前
+                for (int i = 0; i < mats.Count; i++)
+                {
+                    var (it, s) = mats[i];
+                    var uuid = s.ResourceUuid.Length > 0 ? s.ResourceUuid : MineralResourceUuid(s.ItemRecord, resourceUuidByRecord);
+                    if (uuid == null) continue;
+                    if (!names.TryGetValue(it.Uuid, out var name)) names[it.Uuid] = name = OutputName(it, loc, itemNames);
+                    var slotName = s.NameKey is { Length: > 0 } sk && loc.TryGetValue(sk, out var st) ? (OreService.JapaneseText(st.Ja) ?? OreService.EnglishText(st.En) ?? s.DebugName) : s.DebugName;
+                    var unit = s.ResourceUuid.Length > 0 ? OreService.UnitScu : OreService.UnitPiece;
+                    if (!index.TryGetValue(uuid, out var list)) index[uuid] = list = new List<ResourceUse>();
+                    list.Add(new ResourceUse(it.Uuid, it.OutputRecord, name, it.Category, slotName, s.Quantity, unit, s.MinQuality, i));
+                }
+            }
+        }
+        lock (CacheLock) _resourceUseIndexCache = (stamp, index);
+        return index;
     }
 
     // missions.raw_json の BlueprintRewards の 1 件 ({"_Type_":"BlueprintRewards", ..., "chance":…, "blueprintPool":"…"})
@@ -1020,6 +1155,8 @@ public sealed class BlueprintItem
     public string Uuid { get; set; } = "";
     public string RecordName { get; set; } = "";       // "CraftingBlueprintRecord." を除いた record 名
     public string Category { get; set; } = "";
+    // 分類の表示の文字 (BlueprintPanel.CategoryLabel)。表・絞り込みの候補・詳細の節に出す
+    public string CategoryText => BlueprintPanel.CategoryLabel(Category);
     public string OutputRecord { get; set; } = "";     // できる品の record 名 (EntityClassDefinition.…。［詳細］に渡す)
     public string? OutputNameKey { get; set; }
     public string? OutputNameEn { get; set; }
@@ -1062,6 +1199,10 @@ public sealed class BlueprintSlot
     public string? DetailRecord { get; set; }
     public string? DetailName { get; set; }
 }
+
+// 資源を材料に使う BP の枠 1 つ (BlueprintPanel.LoadResourceUses)。Name はできる品の名前 (OutputName)、SlotName は枠名、
+// Unit は SCU (資源) か 個 (品目)、Order は blueprint_materials の読んだ順 (同じ名前の並びに使う)
+public sealed record ResourceUse(string BpUuid, string OutputRecord, string Name, string Category, string SlotName, double Quantity, string Unit, int MinQuality, int Order);
 
 // 資源の絞り込みの選択肢。Uuid は精錬後の資源 (null = すべて)。原石は「原石名 → 精錬後名」のラベルで精錬後の uuid を指す。
 // IsSelected はドロップダウンのチェック (複数選べる)

@@ -202,6 +202,8 @@ public partial class GameDataQueryService
     //     ore_locations の行 (1 場所 1 行) を (資源, preset, 掘り方, 岩の種類) で 1 行にまとめ、場所の列に場所名を ", " でつなぐ
     //     (番号の付いた小さな場所 (GameDataExtractor.OreSmallPlacePrefixes) は個別に並べず「Mining Claim (157 か所)」のように種類ごとの件数にする)。
     //     星系の列は preset の星系。並びは 掘り方 (船 → ROC → 手)、出やすさの大きい順、場所の列。行が無ければ「採掘できる場所のデータがありません。」
+    //   【この資源を使う BP】この資源と、原石なら resource_types.refined_uuid の精錬後の資源を材料に使う BP (BlueprintDetail.ResourceSectionText)。
+    //     採掘できる場所が無い資源でも出す。使う BP が無ければ出さない
     private string? ResourceDetailText(string rec)
     {
         var isRecord = rec.StartsWith("ResourceType.", StringComparison.OrdinalIgnoreCase);
@@ -247,6 +249,7 @@ public partial class GameDataQueryService
         if (rows.Count == 0)
         {
             sb.AppendLine("採掘できる場所のデータがありません。");
+            AppendUses();
             return sb.ToString();
         }
         static int MethodOrder(string m) => m switch
@@ -291,7 +294,38 @@ public partial class GameDataQueryService
         }
         sb.AppendLine();
         sb.AppendLine("出やすさ＝その場所でその掘り方の岩のうち、この岩が出る割合（ゲームデータの relativeProbability から計算）。出やすさ×割合＝出やすさ × 岩の中の割合（入る確率が 1 未満ならそれも掛ける）。");
+        AppendUses();
         return sb.ToString();
+
+        // 末尾の【この資源を使う BP】の節 (使う BP が無ければ出さない)。引く資源はこの資源と、原石ならその精錬後の資源。
+        // 読み込みが例外になったときは、この節だけを読み込めなかった旨の 1 行にする (品の詳細の【ブループリント】と同じ)
+        void AppendUses()
+        {
+            string uses;
+            try
+            {
+                string? refined = null;
+                try
+                {
+                    using var cmd = _conn.CreateCommand();
+                    cmd.CommandText = "SELECT refined_uuid FROM resource_types WHERE uuid = @u COLLATE NOCASE";
+                    cmd.Parameters.AddWithValue("@u", res.Uuid);
+                    if (cmd.ExecuteScalar() is string s && s.Length > 0 && !s.Equals(res.Uuid, StringComparison.OrdinalIgnoreCase)) refined = s;
+                }
+                catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
+                var set = new List<string> { res.Uuid };
+                string? refinedName = null;
+                if (refined != null)
+                {
+                    set.Add(refined);
+                    var rr = resources.FirstOrDefault(x => x.Uuid.Equals(refined, StringComparison.OrdinalIgnoreCase));
+                    refinedName = rr != null ? rr.NameEn ?? OreService.ShortRecord(rr.RecordName) : refined;
+                }
+                uses = BlueprintDetail.ResourceSectionText(Path.GetDirectoryName(DbPath) ?? "", set, refinedName);
+            }
+            catch (Exception ex) { uses = "【この資源を使う BP】" + Environment.NewLine + $"  BP を読み込めなかった ({ex.Message})" + Environment.NewLine; }
+            if (uses.Length > 0) { sb.AppendLine(); sb.Append(uses); }
+        }
     }
 
     // 名前の行で item_index.name を括弧で添えるかを決めるための比べる形。
@@ -1170,19 +1204,28 @@ public partial class GameDataQueryService
                 }
             }
             // 店。franchise_name (franchise の英語名) の列が無い前の形の表では、表の name をそのまま使う (franchise の名前があるものとして扱う)
-            bool hasFranchiseName;
+            // 店の案内図の名札 (area_label) の列が無い前の形の表では、名札は無いものとして読む
+            bool hasFranchiseName, hasAreaLabel;
             using (var cmd = _conn.CreateCommand())
             {
                 cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('game_shops') WHERE name = 'franchise_name'";
                 hasFranchiseName = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) > 0;
+                cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('game_shops') WHERE name = 'area_label'";
+                hasAreaLabel = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) > 0;
             }
             using (var cmd = _conn.CreateCommand())
             {
-                cmd.CommandText = hasFranchiseName
-                    ? "SELECT shop_id, name, inventory_type, location_record, entity_name, franchise_name FROM game_shops"
-                    : "SELECT shop_id, name, inventory_type, location_record, entity_name, name FROM game_shops";
+                cmd.CommandText = "SELECT shop_id, name, inventory_type, location_record, entity_name, " + (hasFranchiseName ? "franchise_name" : "name") + ", "
+                    + (hasAreaLabel ? "area_label" : "''") + " FROM game_shops";
                 using var r = cmd.ExecuteReader();
-                while (r.Read()) tree.AddShop(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetString(5).Length > 0);
+                while (r.Read()) tree.AddShop(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetString(5).Length > 0, r.GetString(6));
+            }
+            // ゲームの店の名前 (global.ini の shop_name_*) を Entity 名の語から付け (ShopTree.ApplyGameNames)、
+            // それでも決まらない店に案内図の名札 (@area_name_* の英語) を付ける (ShopTree.ApplyAreaLabels)
+            using (var loc = new LocReader(_translationsDbPath))
+            {
+                tree.ApplyGameNames(loc.EnglishByPrefix("shop_name_"));
+                tree.ApplyAreaLabels(key => loc.English(key.TrimStart('@')));
             }
             // 店の売り場の出どころ (場所だけ結んだ価格の店の名前を決めるため: cstone は location の最後の段、uex は名前そのもの)
             var itemSource = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -1293,6 +1336,8 @@ public partial class GameDataQueryService
             }
             catch (SqliteException) { }
         }
+        // ここまでで名前の決まらない店は、売っている品目の種類 (無ければ店の種類) の名前にする
+        tree.ApplyFallbackNames();
         return tree;
     }
 
@@ -2007,15 +2052,16 @@ public sealed class ShopTree
         }
     }
 
-    // hasFranchiseName: 名前が franchise の英語名か (false なら Entity 名から作った名前。ApplyDataNames で販売データの店名に替えることがある)
-    public void AddShop(string shopId, string name, string inventoryType, string location, string entityName, bool hasFranchiseName)
+    // hasFranchiseName: 名前が franchise の英語名か (false なら Entity 名から作った名前。ApplyGameNames・ApplyAreaLabels・ApplyDataNames・ApplyFallbackNames で替える)。
+    // areaLabel: 店の案内図の名札の鍵 (game_shops.area_label。例 @area_name_WaterStall。無ければ "")
+    public void AddShop(string shopId, string name, string inventoryType, string location, string entityName, bool hasFranchiseName, string areaLabel = "")
     {
         if (!_byStarmapRecord.TryGetValue(location, out var node)) return;
         // ITEM / COMMODITY 以外 (ゲームデータに INVALID・空のものがある) は「不明 (値)」
         var kind = inventoryType.Equals("COMMODITY", StringComparison.OrdinalIgnoreCase) ? KindTerminal
             : inventoryType.Equals("ITEM", StringComparison.OrdinalIgnoreCase) ? KindEquipment
             : inventoryType.Length > 0 ? $"不明 ({inventoryType})" : "不明";
-        var s = new ShopTreeShop(shopId, name, kind, node, entityName, ShopPrefix) { HasFranchiseName = hasFranchiseName };
+        var s = new ShopTreeShop(shopId, name, kind, node, entityName, ShopPrefix) { HasFranchiseName = hasFranchiseName, AreaLabel = areaLabel };
         ShopsByRecord[s.Record] = s;
         node.Shops.Add(s);
     }
@@ -2045,12 +2091,121 @@ public sealed class ShopTree
         if (shopId.Length > 0) ShopsByRecord[record].LinkedDataNames.Add(dataShopName);
     }
 
-    // 店の表示名: franchise の英語名があればそれ。無い店で、店まで結べた価格のキーが 1 つだけなら、その販売データの店名
-    // (cstone は location の最後の段、trade は端末名、uex は名前)。それ以外は Entity 名から作った名前のまま。AddLink を全部終えてから呼ぶ
+    // 店の表示名は次の順で決める (Entity 名から作った開発の名前 (例 "stall rdwn small 14 water") は画面に出さない):
+    //   1. franchise の英語名 (game_shops.franchise_name)。ただし Entity 名に店ごとの鍵が当たれば 2 を先にする (ApplyGameNames の説明)
+    //   2. ゲームの店の名前: global.ini の shop_name_<語> の英語 (ApplyGameNames)
+    //   3. 店の案内図の名札: game_shops.area_label の @area_name_* の英語 (ApplyAreaLabels)
+    //   4. 店まで結べた価格のキーが 1 つだけなら、その販売データの店名 (ApplyDataNames)
+    //   5. 売っている品目の種類 (［詳細］の種類の言葉)「店（ドリンク・食べ物）」。品目が無ければ店の種類 (装備の店・コモディティの端末) (ApplyFallbackNames)
+
+    // 2. Entity 名の続いた語をつなげたもの (小文字) が、shop_name_<語> の <語>、またはその英語の英数字 (小文字) と同じなら、その英語を名前にする
+    //   (例 SCShop_Orison_KelTo → kelto → "Kel-To"、SCShop_ProvidenceSurplus_Orison → providencesurplus → "Providence Surplus")。
+    //   語: Entity 名を英数字以外で区切ったもの (区切りの塊) を、さらに大文字の始まり・数字の境で区切る (KelTo → kel / to)。
+    //   当たり方: つないだ語が区切りの塊を丸ごと覆うもの (塊の始まりから塊の終わりまで) だけ。ただし英語に空白のある鍵 (2 語以上。例 "Traveler Rentals") は
+    //   塊の一部でもよい (TravelerRentals の traveler)。1 語の鍵 ("Armor"・"Clothing"・"Kel-To" など) は塊の一部には当てない (WeaponsArmor・ClothingStand は当てない)。
+    //   当たるものが複数あれば、つないだ文字の長いもの、同じなら前のもの。英語が星図の場所の名前 (英数字だけ・小文字で比べる。例 "GrimHEX" と場所の "Grim HEX") と
+    //   同じ鍵は地名なので使わない (SCShop_AdminOffice_GrimHex は GrimHEX の店ではない)。
+    //   franchise のある店: 当たった鍵が「店ごとの鍵」(英語がどの店の franchise の名前とも同じでない鍵。例 Makau・Providence Surplus) で、franchise の名前と違うときだけ
+    //   鍵の名前にする (SF_clothing の「Clothing」のように、店の種類を表す汎用の franchise に入れられた個別の店)。franchise の名前どうしの鍵 (Armor・Casaba Outlet など) では替えない。
+    //   shopNameKeys は <語> (小文字) → 英語 (LocReader.EnglishByPrefix)。AddShop を全部終えてから呼ぶ
+    public void ApplyGameNames(IReadOnlyDictionary<string, string> shopNameKeys)
+    {
+        if (shopNameKeys.Count == 0) return;
+        var placeNames = new HashSet<string>(_byStarmapRecord.Values.Select(n => Alnum(n.Name)).Where(n => n.Length > 0), StringComparer.Ordinal);
+        // 当てる文字 (鍵の <語>、英語の英数字) → 英語
+        var targets = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (k, en) in shopNameKeys.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+        {
+            if (en.Length == 0 || placeNames.Contains(Alnum(en))) continue;
+            targets.TryAdd(k, en);
+            if (Alnum(en) is { Length: > 0 } a) targets.TryAdd(a, en);
+        }
+        if (targets.Count == 0) return;
+        var gameShops = ShopsByRecord.Values.Where(s => s.Record.StartsWith(ShopPrefix, StringComparison.Ordinal)).ToList();
+        var franchiseNames = new HashSet<string>(gameShops.Where(s => s.HasFranchiseName).Select(s => Alnum(s.Name)), StringComparer.Ordinal);
+        foreach (var s in gameShops)
+        {
+            if (s.NameSource.Length > 0) continue;
+            var words = EntityWords(s.EntityName);
+            string? best = null; int bestLen = 0;
+            for (int i = 0; i < words.Count; i++)
+            {
+                var joined = "";
+                for (int j = i; j < words.Count; j++)
+                {
+                    joined += words[j].Text;
+                    if (joined.Length <= bestLen || !targets.TryGetValue(joined, out var en)) continue;
+                    var whole = words[i].TokenStart && words[j].TokenEnd;
+                    if (!whole && !en.Trim().Contains(' ')) continue;
+                    best = en; bestLen = joined.Length;
+                }
+            }
+            if (best == null) continue;
+            if (s.HasFranchiseName && (franchiseNames.Contains(Alnum(best)) || Alnum(best) == Alnum(s.Name))) continue;
+            s.Name = best; s.NameSource = ShopTreeShop.NameFromGame;
+        }
+    }
+
+    // 3. franchise・ゲームの店の名前の無い店で、案内図の名札 (AreaLabel) の英語が引ければ、それを名前にする。english は鍵 (@ 付き) → 英語 (引けなければ null)
+    public void ApplyAreaLabels(Func<string, string?> english)
+    {
+        foreach (var s in ShopsByRecord.Values)
+        {
+            if (s.HasFranchiseName || s.NameSource.Length > 0 || s.AreaLabel.Length == 0) continue;
+            if (english(s.AreaLabel)?.Trim() is { Length: > 0 } en) { s.Name = en; s.NameSource = ShopTreeShop.NameFromLabel; }
+        }
+    }
+
+    // 英数字だけを小文字で
+    private static string Alnum(string s) => new(s.Where(char.IsAsciiLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+
+    // Entity 名の語 (小文字) と、区切りの塊 (英数字の続き) の始まり・終わりか
+    // (例 SCShop_Orison_KelTo → sc / shop / orison / kel / to。kel は塊 KelTo の始まり、to は終わり)
+    private static List<(string Text, bool TokenStart, bool TokenEnd)> EntityWords(string entityName)
+    {
+        var list = new List<(string, bool, bool)>();
+        foreach (System.Text.RegularExpressions.Match t in EntityTokenRx.Matches(entityName))
+        {
+            var ws = EntityWordRx.Matches(t.Value);
+            for (int i = 0; i < ws.Count; i++) list.Add((ws[i].Value.ToLowerInvariant(), i == 0, i == ws.Count - 1));
+        }
+        return list;
+    }
+    private static readonly System.Text.RegularExpressions.Regex EntityTokenRx =
+        new(@"[A-Za-z0-9]+", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    private static readonly System.Text.RegularExpressions.Regex EntityWordRx =
+        new(@"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    // 4. franchise・ゲームの店の名前・名札の無い店で、店まで結べた価格のキーが 1 つだけなら、その販売データの店名
+    // (cstone は location の最後の段、trade は端末名、uex は名前)。AddLink を全部終えてから呼ぶ
     public void ApplyDataNames()
     {
         foreach (var s in ShopsByRecord.Values)
-            if (!s.HasFranchiseName && s.LinkedDataNames.Count == 1 && s.LinkedDataNames[0].Length > 0) s.Name = s.LinkedDataNames[0];
+            if (!s.HasFranchiseName && s.NameSource.Length == 0 && s.LinkedDataNames.Count == 1 && s.LinkedDataNames[0].Length > 0)
+            { s.Name = s.LinkedDataNames[0]; s.NameSource = ShopTreeShop.NameFromData; }
+    }
+
+    // 5. ここまでで名前の決まらない店: 売っている品目の種類 (Item.Type。［詳細］の種類の言葉) を品目の数の多い順 (同じなら名前の順) に「・」でつなぎ「店（…）」。
+    //   種類が 3 つ以上なら先の 2 つと「など」(例「店（服・アーマー など）」)。品目が無ければ店の種類 (Kind。例「装備の店」「コモディティの端末」)。
+    //   販売データだけの店 (PriceShop:) で、販売データの店名が開発の名前の形 ("_" を含む。例 shop_terminal・medical_shop) のものも同じ決め方にし、
+    //   後ろに「（販売データ）」を付ける (例「店（医療用具・消耗品）（販売データ）」)。価格 (AddItemPrice) を全部入れてから呼ぶ
+    public void ApplyFallbackNames()
+    {
+        foreach (var s in ShopsByRecord.Values)
+        {
+            var priceShop = s.Record.StartsWith(PriceShopPrefix, StringComparison.Ordinal);
+            if (priceShop ? !s.Name.Contains('_') : s.HasFranchiseName || s.NameSource.Length > 0) continue;
+            var types = s.Items.Values.Where(x => x.Type.Length > 0).GroupBy(x => x.Type, StringComparer.Ordinal)
+                .OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.Ordinal).Select(g => g.Key).ToList();
+            string name;
+            if (types.Count > 0)
+            {
+                name = types.Count <= 2 ? $"店（{string.Join("・", types)}）" : $"店（{string.Join("・", types.Take(2))} など）";
+                s.NameSource = ShopTreeShop.NameFromItems;
+            }
+            else { name = s.Kind; s.NameSource = ShopTreeShop.NameFromKind; }
+            s.Name = priceShop ? $"{name}（販売データ）" : name;
+        }
     }
 
     public void AddItemPrice(string location, string uuid, (string Record, string Name, string Type) info, string kind, double price, int? rentDays)
@@ -2115,7 +2270,8 @@ public sealed class ShopTreeNode(string record, string recordName, string name, 
     public double? RotHours { get; set; }
     // Planet・Moon の半径 (メートル。starmap_locations.planet_radius = socpak の planetRadius。読めなければ null)。地表からの高さに使う (無ければ Radius)
     public double? PlanetRadius { get; set; }
-    // Planet・Moon の枠の回転 (恒星の回転 × 天体の回転。行の順の 3×3。starmap_locations.frame_matrix。無ければ null)
+    // Planet・Moon の枠の回転 (恒星からその天体までの socpak の Child の rot を親から子へ掛けたもの。惑星の下の衛星なら 恒星 × 惑星 × 衛星。
+    // 行の順の 3×3。starmap_locations.frame_matrix。無ければ null)
     public double[]? Frame { get; set; }
     // 地表からの高さに使う半径 (PlanetRadius、無ければ Radius)
     public double? SurfaceRadius => PlanetRadius ?? Radius;
@@ -2127,10 +2283,15 @@ public sealed class ShopTreeNode(string record, string recordName, string name, 
 public sealed class ShopTreeShop(string id, string name, string kind, ShopTreeNode location, string entityName, string recordPrefix)
 {
     public string Id { get; } = id;
-    // 表示名 (ShopTree.ApplyDataNames で販売データの店名に替えることがある)
+    // 表示名 (franchise の無い店は ShopTree.ApplyGameNames・ApplyDataNames・ApplyFallbackNames で替える)
     public string Name { get; set; } = name;
     // 名前が franchise の英語名か / 店まで結べた価格のキーの販売データの店名 (キーごとに 1 つ)
     public bool HasFranchiseName { get; init; } = true;
+    // franchise の無い店の名前の出どころ (NameFrom…。決まる前は "")
+    public const string NameFromGame = "game", NameFromLabel = "label", NameFromData = "data", NameFromItems = "items", NameFromKind = "kind";
+    public string NameSource { get; set; } = "";
+    // 店の案内図の名札の鍵 (game_shops.area_label。例 @area_name_WaterStall。無ければ "")
+    public string AreaLabel { get; init; } = "";
     public List<string> LinkedDataNames { get; } = new();
     public string Kind { get; } = kind;
     public ShopTreeNode Location { get; } = location;

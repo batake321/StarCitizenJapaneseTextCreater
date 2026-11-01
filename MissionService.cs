@@ -1534,6 +1534,30 @@ public class MissionService : IDisposable
         return string.Join("\n", lines);
     }
 
+    // 契約の行き先の地図 1 か所 (mission_map_places の 1 行。GameDataExtractor.MissionMapDdl)
+    public sealed record MapPlace(string MapRecord, string MapType, string System, string Name, bool Named, bool HasFloor);
+
+    // 契約 (まとめた行なら行の中の全部の契約) の行き先の地図を、全部の変数を合わせて重なりを除いたもの (mission_map_vars・mission_map_sets・
+    // mission_map_places をつなぐ。インデックス構築の Step 6c で作る表)。表が無い (前の版で構築した DB で、まだ作っていない) ときは空。読めなければ例外
+    public List<MapPlace> ReadMapPlaces(IReadOnlyCollection<string> missionRecords)
+    {
+        var list = new List<MapPlace>();
+        if (missionRecords.Count == 0) return list;
+        using var conn = new SqliteConnection($"Data Source={_dbPath};Mode=ReadOnly;Pooling=False");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('mission_map_vars', 'mission_map_sets', 'mission_map_places')";
+        if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) < 3) return list;
+        // 契約の record の並びは JSON の配列で 1 つの引数にして渡す (json_each)
+        cmd.CommandText = "SELECT p.map_record, p.map_type, p.system, p.name, p.named, p.has_floor FROM mission_map_places p WHERE p.map_record IN "
+            + "(SELECT s.map_record FROM mission_map_vars v JOIN mission_map_sets s ON s.set_id = v.set_id WHERE v.mission_record IN (SELECT value FROM json_each(@m)))";
+        cmd.Parameters.AddWithValue("@m", JsonSerializer.Serialize(missionRecords));
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            list.Add(new MapPlace(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetInt64(4) != 0, r.GetInt64(5) != 0));
+        return list;
+    }
+
     // 名前 (一覧の名前の列の日本語名と英語名の組) とカテゴリが同じ契約を 1 行にまとめる。行の順は各行の 1 件目が出てきた順、行の中も元の順
     public static List<MissionGroup> GroupByName(IEnumerable<MissionEntry> missions)
     {

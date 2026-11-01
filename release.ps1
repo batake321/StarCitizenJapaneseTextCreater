@@ -26,6 +26,22 @@ if ($running.Count -gt 0) {
     throw "アプリを閉じてから実行してください (起動中: $where)"
 }
 
+# 0.5. 日本語フォント (gfx) を確かめる
+# 各リリースに AppData\font の fonts_en.gfx と fonts_en.gfx.json を添付で載せる (アプリの［フォントを置く］が releases/latest から取る。載せるのは下の 5.4)。
+# どちらかが無い、または json の size・sha256 が gfx の実物と合わなければ、ビルドの前に止める。publish・インストーラー・ZIP・update-manifest には入れない
+Write-Host "=== Font (gfx) ===" -ForegroundColor Cyan
+$FontGfxPath = Join-Path $ProjectDir "AppData\font\fonts_en.gfx"
+$FontJsonPath = Join-Path $ProjectDir "AppData\font\fonts_en.gfx.json"
+foreach ($p in @($FontGfxPath, $FontJsonPath)) {
+    if (-not (Test-Path $p -PathType Leaf)) { throw "日本語フォントのファイルがありません: $p" }
+}
+$fontInfo = Get-Content $FontJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$fontSize = (Get-Item $FontGfxPath).Length
+$fontSha = (Get-FileHash $FontGfxPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ([long]$fontInfo.size -ne $fontSize) { throw "fonts_en.gfx.json の size ($($fontInfo.size)) が fonts_en.gfx の大きさ ($fontSize) と合いません" }
+if (([string]$fontInfo.sha256).ToLowerInvariant() -ne $fontSha) { throw "fonts_en.gfx.json の sha256 ($($fontInfo.sha256)) が fonts_en.gfx の SHA-256 ($fontSha) と合いません" }
+Write-Host "  fonts_en.gfx: $("{0:N0}" -f $fontSize) bytes / SHA-256 $fontSha (json と一致)" -ForegroundColor Green
+
 # 1. Build & Publish
 Write-Host "=== Build & Publish ===" -ForegroundColor Cyan
 dotnet publish -c Release -r win-x64 --self-contained false -o $PublishDir
@@ -385,6 +401,15 @@ if ($BackupZip) {
 $asset = Invoke-RestMethod -Uri $uploadUrl -Method Post -Headers $uploadHeaders -InFile $ZipPath
 
 Write-Host "Asset uploaded: $($asset.browser_download_url)" -ForegroundColor Green
+
+# 5.4. 日本語フォント (gfx) と、その記録 (json) を載せる (manifest より前。0.5 で確かめたもの)
+Write-Host "=== Upload font (gfx) ===" -ForegroundColor Cyan
+foreach ($f in @(@{ Name = "fonts_en.gfx"; Path = $FontGfxPath; Type = "application/octet-stream" },
+                 @{ Name = "fonts_en.gfx.json"; Path = $FontJsonPath; Type = "application/json" })) {
+    $upUrl = "https://uploads.github.com/repos/$Repo/releases/$releaseId/assets?name=$($f.Name)"
+    Invoke-RestMethod -Uri $upUrl -Method Post -Headers @{ "Authorization" = "token $token"; "Content-Type" = $f.Type } -InFile $f.Path | Out-Null
+    Write-Host "  $($f.Name)" -ForegroundColor Green
+}
 
 # 5.5. 自動更新の添付 (<SHA-256>.gz と DB の差分) を載せてから、最後に manifest を載せる (manifest の URL の先が先にそろうように)
 Write-Host "=== Upload update assets ===" -ForegroundColor Cyan

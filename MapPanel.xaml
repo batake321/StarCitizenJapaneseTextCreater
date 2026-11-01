@@ -19,9 +19,9 @@
             <!-- ゲームに /showlocation を送って現在位置を読み、そのまわりを出す (MapPanel.BtnCurrent_Click) -->
             <Button x:Name="btnCurrent" Content="現在位置" Padding="10,2" Margin="12,0,6,0" Click="BtnCurrent_Click"
                     ToolTip="ゲーム (Star Citizen) のチャットに /showlocation を打ち込んで座標を読み、現在位置のまわりを出します"/>
-            <!-- オンのとき、量子ジャンプの目的地の選択と到着の行を見たら 2 秒後に自動で座標を取る (MapPanel.OnQuantumEvent)。状態は Config.MapAutoCapture -->
-            <CheckBox x:Name="chkAutoCapture" Content="QT の前後で自動で現在位置を取る" VerticalAlignment="Center" Margin="6,0,6,0"
-                      ToolTip="量子ジャンプの目的地を選んだときはすぐ (取れなければ 3 秒おきにあと 2 回)、到着したときは 2 秒後に、［現在位置］と同じ取り方で座標を取ります (ゲームの窓が前にあるときだけ)"/>
+            <!-- オンのとき、量子ジャンプの目的地の選択・移動中・到着・区間 1 の終わり、着陸、ゲームの世界に出たときに自動で座標を取る (MapPanel.OnQuantumEvent)。状態は Config.MapAutoCapture -->
+            <CheckBox x:Name="chkAutoCapture" Content="QT・着陸・ゲーム開始のときに自動で現在位置を取る" VerticalAlignment="Center" Margin="6,0,6,0"
+                      ToolTip="量子ジャンプの目的地を選んだときはすぐ (取れなければ 3 秒おきにあと 2 回)、移動中になってから 15 秒後と 45 秒後、到着・区間 1 の終わり・着陸場に着いたとき・ゲームの世界に出たとき (読み込み画面が閉じた・復活) は 2 秒後に、［現在位置］と同じ取り方で座標を取ります (ゲームの窓が前にあり、mobiGlas が閉じているときだけ。前に自動で取り始めてから 10 秒以内は取りません)"/>
             <TextBlock x:Name="txtStatus" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
         </StackPanel>
 

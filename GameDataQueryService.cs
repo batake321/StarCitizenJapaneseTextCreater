@@ -457,6 +457,52 @@ public partial class GameDataQueryService : IDisposable
         return WeaponDamageTypes(ReadWeaponAmmo(component, raw), component);
     }
 
+    // 船のクラス (Game.log の船の名前から ID を除いたもの。例 AEGS_Tiburon) の初期の量子ドライブ: 名前 (item_index の名前。無ければ record 名)・
+    // driveSpeed (m/秒)・stageOneAccelRate (m/秒²)。ship_ports の QuantumDrive の equipped_item を items の raw_json の SCItemQuantumDriveParams.params で引く。
+    // 船・ドライブ・値が無ければ null (［マップ］の量子ジャンプの到着予定に使う)
+    public (string Name, double Speed, double Accel)? InitialQuantumDriveOf(string shipClass)
+    {
+        const string prefix = "EntityClassDefinition.";
+        var ship = (shipClass ?? "").Trim();
+        if (ship.Length == 0) return null;
+        string? drive;
+        using (var cmd = _conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT equipped_item FROM ship_ports WHERE ship_record_name = @s COLLATE NOCASE AND item_type = 'QuantumDrive' AND COALESCE(equipped_item, '') <> '' ORDER BY id LIMIT 1";
+            cmd.Parameters.AddWithValue("@s", prefix + ship);
+            drive = cmd.ExecuteScalar() as string;
+        }
+        if (string.IsNullOrWhiteSpace(drive)) return null;
+        var record = drive.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? drive : prefix + drive;
+        string? raw;
+        using (var cmd = _conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT raw_json FROM items WHERE record_name = @r COLLATE NOCASE LIMIT 1";
+            cmd.Parameters.AddWithValue("@r", record);
+            raw = cmd.ExecuteScalar() as string;
+        }
+        if (string.IsNullOrEmpty(raw)) return null;
+        double speed = 0, accel = 0;
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            if (!doc.RootElement.TryGetProperty("_RecordValue_", out var rv) || !rv.TryGetProperty("Components", out var cs) || cs.ValueKind != JsonValueKind.Array) return null;
+            var qd = cs.EnumerateArray().FirstOrDefault(c => c.ValueKind == JsonValueKind.Object && c.TryGetProperty("_Type_", out var t) && t.GetString() == "SCItemQuantumDriveParams");
+            if (qd.ValueKind != JsonValueKind.Object || !qd.TryGetProperty("params", out var qp)
+                || !TryNum(qp, "driveSpeed", out speed) || !TryNum(qp, "stageOneAccelRate", out accel)) return null;
+        }
+        catch (JsonException) { return null; }
+        if (!(speed > 0) || !(accel > 0)) return null;
+        string name = record[prefix.Length..];
+        using (var cmd = _conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT MIN(name) FROM item_index WHERE record_name = @r COLLATE NOCASE AND name IS NOT NULL AND name <> ''";
+            cmd.Parameters.AddWithValue("@r", record);
+            try { if (cmd.ExecuteScalar() is string n && n.Length > 0) name = n; } catch (SqliteException) { }
+        }
+        return (name, speed, accel);
+    }
+
     // 所持コンポーネントの表の「性能」の欄。種類 (itemType = my_components.item_type) ごとに 1 つの代表の値を「項目名 値」で返す。
     // 値は record の基本値 (品質による増減は入れない)。record 名は "EntityClassDefinition." の有無どちらでもよい。
     // 色違いで性能の JSON を空にしてある品目は、色違いの表 (item_variants) の基本品目の JSON で補う。値が無い・読めなければ ""
@@ -4179,6 +4225,33 @@ public partial class GameDataQueryService : IDisposable
         {
             var en = Get(key).En;
             return string.IsNullOrWhiteSpace(en) ? null : en;
+        }
+
+        // キーが prefix で始まる訳の英語 (キーの prefix の後ろ (",P" を除き小文字) → 英語)。英語が空のものは入れない。読めなければ空
+        // (店の名前の shop_name_* を引く。GameDataQueryService.BuildShopTree)
+        public Dictionary<string, string> EnglishByPrefix(string prefix)
+        {
+            var result = new Dictionary<string, string>(StringComparer.Ordinal);
+            try
+            {
+                if (_c != null)
+                {
+                    using var cmd = _c.CreateCommand();
+                    cmd.CommandText = "SELECT key, english FROM translations WHERE substr(key, 1, length(@p)) = @p ORDER BY key";
+                    cmd.Parameters.AddWithValue("@p", prefix);
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read())
+                    {
+                        if (r.IsDBNull(0) || r.IsDBNull(1)) continue;
+                        var key = r.GetString(0)[prefix.Length..];
+                        if (key.EndsWith(",P", StringComparison.OrdinalIgnoreCase)) key = key[..^2];
+                        var en = r.GetString(1).Trim();
+                        if (key.Length > 0 && en.Length > 0) result.TryAdd(key.ToLowerInvariant(), en);
+                    }
+                }
+            }
+            catch { }
+            return result;
         }
 
         // 「@キー」を日本語 (無ければ英語) にする。キーでなければそのまま

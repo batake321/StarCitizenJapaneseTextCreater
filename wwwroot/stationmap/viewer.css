@@ -1,0 +1,82 @@
+html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #eef0f2; font-family: "Yu Gothic UI", "Segoe UI", sans-serif; }
+#map { position: absolute; left: 0; top: 0; width: 100%; height: 100%; cursor: default; user-select: none; touch-action: none; }
+#map.dragging { cursor: grabbing; }
+#hint { position: absolute; left: 8px; bottom: 6px; font-size: 11px; color: #5f6368; background: rgba(255,255,255,0.85); padding: 2px 6px; border-radius: 3px; pointer-events: none; }
+#msg { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%); font-size: 14px; color: #3c4043; pointer-events: none; }
+
+/* 階の板 (案内図の斜めの面) */
+.slab { fill: #ffffff; stroke: #b8bec5; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.floor.dim .slab { fill: #f8f9fa; }
+.floor.sel .slab { stroke: #5f6368; stroke-width: 1.5; }
+
+/* 区画の床 */
+.sec { fill: #dfe3e8; stroke: #8f979f; stroke-width: 0.8; vector-effect: non-scaling-stroke; fill-rule: evenodd; cursor: pointer; }
+.sec.fallback { fill: #eceff1; stroke-dasharray: 3 2; }
+.sec:hover { fill: #cfd6de; }
+.sec.selsec { fill: #fde7b0; stroke: #e37400; stroke-width: 2; }
+.sec.dest { stroke: #d93025; stroke-width: 2.5; }
+.floor.dim { opacity: 0.3; }
+.floor.dim .sec { cursor: pointer; }
+
+/* 道順の線 (Google マップ風の青い太線と白い縁) */
+.route-case { fill: none; stroke: #ffffff; stroke-width: 9; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.route { fill: none; stroke: #1a73e8; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.route-up { fill: none; stroke: #1a73e8; stroke-width: 3; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
+
+/* 階段の上下を結ぶ細線・トラムの線路 */
+.stairlink { fill: none; stroke: #8d6e63; stroke-width: 1; stroke-dasharray: 2 2; vector-effect: non-scaling-stroke; }
+.track-bed { fill: none; stroke: #7b1fa2; stroke-width: 5; stroke-linecap: round; vector-effect: non-scaling-stroke; opacity: 0.85; }
+.track-tie { fill: none; stroke: #ffffff; stroke-width: 1.5; stroke-dasharray: 2 5; vector-effect: non-scaling-stroke; }
+
+/* 印 (画面の大きさで描く) */
+.mk { cursor: pointer; }
+/* 名札の字は画面の大きさで 13px (地図の倍率によらず一定。印は画面の座標で置くので拡大・縮小で変わらない) */
+.mk text { font-size: 13px; fill: #202124; paint-order: stroke; stroke: #ffffff; stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
+.mk.dim { opacity: 0.25; }
+.mk.dim text { display: none; }
+/* 名札の引き出し線とまとめた名札 (viewer.js の placeLabels) */
+.leader { stroke: #5f6368; stroke-width: 0.8; }
+.cluster { cursor: pointer; }
+.cluster rect { fill: #ffffff; stroke: #5f6368; stroke-width: 1; }
+.cluster text { font-size: 13px; fill: #202124; }
+.shop-dot { fill: #188038; stroke: #ffffff; stroke-width: 1.5; }
+.elev-box { fill: #455a64; stroke: #ffffff; stroke-width: 1; }
+.elev-arrow { fill: #ffffff; }
+/* 乗らないエレベーター (位置だけ。elevator-noride) */
+.elev-box.noride { fill: #b0bec5; stroke: #ffffff; }
+.tram-box { fill: #7b1fa2; stroke: #ffffff; stroke-width: 1; }
+.tram-text { font-size: 9px !important; fill: #ffffff !important; stroke: none !important; font-weight: bold; }
+.stair-icon { fill: none; stroke: #6d4c41; stroke-width: 2; stroke-linejoin: miter; }
+.stair-bg { fill: #ffffff; stroke: #6d4c41; stroke-width: 1; }
+.dest-ring { fill: none; stroke: #d93025; stroke-width: 2.5; }
+.start-ring { fill: none; stroke: #188038; stroke-width: 2.5; }
+.cur-halo { fill: rgba(234, 67, 53, 0.2); stroke: none; }
+.cur-dot { fill: #ea4335; stroke: #ffffff; stroke-width: 2.5; }
+.pin-body { fill: #f9ab00; stroke: #3c4043; stroke-width: 1.2; }
+.pin-hole { fill: #3c4043; }
+.mk .bold { font-weight: bold; }
+.mk text.seclabel { font-size: 14px; fill: #b06000; }
+/* 階の名前は薄い階でも出す */
+.mk.flabel { cursor: default; }
+.mk.flabel.dim { opacity: 0.5; }
+.mk.flabel.dim text { display: inline; }
+
+/* 都市の全体図 (viewer.js の drawOverview) */
+.district { fill-opacity: 0.12; stroke-width: 2; vector-effect: non-scaling-stroke; cursor: pointer; }
+.district:hover { fill-opacity: 0.22; }
+.district.hot { stroke-width: 4; }
+.dist-dot { stroke: #ffffff; stroke-width: 2; cursor: pointer; }
+.mk.dmark { cursor: pointer; }
+.mk text.dname { font-size: 22px; font-weight: bold; }
+.ov-track { fill: none; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; opacity: 0.9; }
+.ov-track.on-route { stroke: #1a73e8; stroke-width: 7; opacity: 1; }
+.dir-arrow { stroke: #ffffff; stroke-width: 1; }
+/* 左上のボタンの並び (全体図・地区の全体（真上）・上の階・下の階) */
+#tools { position: absolute; left: 8px; top: 8px; display: flex; gap: 6px; }
+#tools button { display: none; font-size: 14px; padding: 4px 10px; background: #ffffff; border: 1px solid #9aa0a6; border-radius: 4px; cursor: pointer; }
+#tools button:hover:not(:disabled) { background: #f1f3f4; }
+#tools button:disabled { color: #bdc1c6; border-color: #dadce0; cursor: default; }
+#legend { position: absolute; right: 8px; top: 8px; font-size: 13px; background: rgba(255,255,255,0.85); padding: 2px 8px; border-radius: 3px; pointer-events: none; }
+#legend:empty { display: none; }
+/* 地区の平面図で、同じ路線のエレベーターの並びを結ぶ線 */
+.elev-link { fill: none; stroke-width: 2; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; opacity: 0.9; }

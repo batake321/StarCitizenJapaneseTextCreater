@@ -7,8 +7,31 @@ namespace StarCitizenJapaneseTextCreater;
 // ブループリント (BP) の情報を、ほかの画面の詳細に足す文字にする。読み方・名前の出し方は［BP］タブ (BlueprintPanel) と同じものを使う。
 //   ［詳細］の品の詳細 (GameDataQueryService.GetItemDetailText) の末尾の「【ブループリント】」の節 (ItemSectionText)
 //   ミッションタブのミッション詳細 (MissionService.FormatDetail) の「■ 報酬の BP」の節 (MissionSectionLines)
+//   ［詳細］の資源の詳細 (GameDataQueryService.ResourceDetailText) の末尾の「【この資源を使う BP】」の節 (ResourceSectionText)
 internal static class BlueprintDetail
 {
+    // ［詳細］の資源の詳細の「【この資源を使う BP (n 件)】」の節 (n は BP の数)。材料の枠に resourceUuids のどれかを使う BP を、
+    // 1 枠 1 行の表 (できる品 (詳細へのリンク)・分類・枠・量・最低品質) にする。並びはできる品の名前の順。使う BP が無い・BP の表が無ければ ""。
+    // refinedName があれば (原石を選んだとき) 頭に「精錬後の <名前> として使います。」の 1 行を出す。
+    // 個人のデータ (在庫・所持) は読まない (データ API で LAN に出しても漏れない)
+    public static string ResourceSectionText(string workDir, IReadOnlyCollection<string> resourceUuids, string? refinedName)
+    {
+        var rows = BlueprintPanel.LoadResourceUses(workDir, resourceUuids);
+        if (rows.Count == 0) return "";
+        var sb = new StringBuilder();
+        sb.AppendLine($"【この資源を使う BP ({rows.Select(x => x.BpUuid).Distinct(StringComparer.OrdinalIgnoreCase).Count()} 件)】");
+        if (refinedName != null) sb.AppendLine($"  精錬後の {refinedName} として使います。");
+        sb.AppendLine();
+        sb.AppendLine("  | できる品 | 分類 | 枠 | 量 | 最低品質 |");
+        sb.AppendLine("  |---|---|---|---|---|");
+        foreach (var x in rows)
+        {
+            var name = x.OutputRecord.Length > 0 ? GameDataQueryService.DetailLink(x.OutputRecord, x.Name) : Cell(x.Name);
+            sb.AppendLine($"  | {name} | {Cell(BlueprintPanel.CategoryLabel(x.Category))} | {Cell(x.SlotName)} | {BlueprintPanel.FormatQuantity(x.Quantity)} {x.Unit} | {(x.MinQuality > 0 ? x.MinQuality.ToString(CultureInfo.InvariantCulture) : "")} |");
+        }
+        return sb.ToString();
+    }
+
     // ［詳細］の品の詳細の「【ブループリント】」の節 (GetItemDetailText の形。DetailHtml が「項目: 値」を表に、「|」の行をそのまま表にする)。
     // できる品が outputRecord (大文字小文字無視) の BP が無い・BP の表が無ければ ""。同じ品に BP が複数あれば全部出す。
     // includePersonal が false なら在庫・所持・手持ちを読まない (読めなかったときと同じく、その行・欄を出さない。データ API の LAN からの要求)
@@ -25,7 +48,7 @@ internal static class BlueprintDetail
             var (it, stockText, haves) = rows[i];
             if (i > 0) sb.AppendLine();
             sb.AppendLine(rows.Count > 1 ? $"【ブループリント ({i + 1}/{rows.Count})】" : "【ブループリント】");
-            if (it.Category.Length > 0) sb.AppendLine($"  分類: {it.Category}");
+            if (it.Category.Length > 0) sb.AppendLine($"  分類: {it.CategoryText}");
             sb.AppendLine($"  製作時間: {it.TimeText}");
             if (it.ChooseCount is { } cc) sb.AppendLine($"  材料の選び方: {it.Slots.Count} 枠のうち {cc} 枠選択");
 

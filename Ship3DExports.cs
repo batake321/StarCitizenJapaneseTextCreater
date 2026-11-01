@@ -21,7 +21,7 @@ namespace StarCitizenJapaneseTextCreater;
 //   キャッシュ: 置き場所 (設定の 3D モデルの置き場所。既定は TEMP の中) に「record の短い名前.glb」と、横に「同じ名前.json」(Sidecar)。
 //     横の記録にアプリの印 (SidecarMark) があり中身が読めるものだけをこのアプリのキャッシュとして扱う (使用量・古い順の削除・鮮度の判定)。印の無いファイルには触れない。
 //     書き出したときの Data.p4k の印 (パス・大きさ・更新日時) が今と同じなら最新。違う (パッチ) ときは、その船の元データを照合する (VerifyAsync):
-//       元ファイル (参照ジオメトリ・material・テクスチャ) の p4k の中の大きさと CRC32、--dump-hierarchy の内容のハッシュが、書き出したときと同じなら
+//       元ファイル (参照ジオメトリ・material・テクスチャ) の p4k の中の大きさと Data.p4k に記録された CRC、--dump-hierarchy の内容のハッシュが、書き出したときと同じなら
 //       記録の Data.p4k の印を新しいものに書き換えて使い続ける。違う・照合できないときは、その場でキャッシュを消す (表示中・書き出し中は後で消す)
 //     最大容量を超えたら、書き出しが終わるたびに古いもの (書き出した日時の古い順) から消す。表示中・書き出し中・今書き出したものは消さない
 //   進み具合: 船ごと (Jobs) と全体 (Overall*)。StarBreaker は進み具合を出さないので、-v のログの段階の行 (Ship3DStageTracker) と予想時間から出す (予想にもとづく)
@@ -224,7 +224,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         public double GeometryMb { get; set; }
         // --dump-hierarchy の内容のハッシュ (キーの並びをそろえた JSON の SHA-256。Ship3DEstimator.CanonicalHash)
         public string HierarchyHash { get; set; } = "";
-        // 元ファイルの一覧 (p4k の中の大きさと CRC32)
+        // 元ファイルの一覧 (p4k の中の大きさと Data.p4k に記録された CRC)
         public List<SourceFile> Sources { get; set; } = new();
     }
 
@@ -271,6 +271,23 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         if (s == null) return Ship3DCacheState.None;
         return string.Equals(s.P4kPath, stamp.Path, StringComparison.OrdinalIgnoreCase) && s.P4kSize == stamp.Size && s.P4kWriteUtcTicks == stamp.WriteUtcTicks
             ? Ship3DCacheState.Fresh : Ship3DCacheState.NeedsVerify;
+    }
+
+    // StateOf のうちファイルだけで決まる部分: 最新 (Fresh) か。UI スレッドの外から呼べる (設定タブのまとめて取り込むのボタンの数え直しに使う)。
+    // 照合中・後で消すもの (StateOf では最新にならない) はここでは見ないので、呼ぶ側で HeldBack を見る
+    internal static bool IsFreshOnDisk(string record, P4kStamp stamp)
+    {
+        var shortName = ShortName(record);
+        if (!File.Exists(GlbPath(shortName))) return false;
+        var s = ReadOurSidecar(shortName);
+        return s != null && string.Equals(s.P4kPath, stamp.Path, StringComparison.OrdinalIgnoreCase) && s.P4kSize == stamp.Size && s.P4kWriteUtcTicks == stamp.WriteUtcTicks;
+    }
+
+    // StateOf が照合中・後で消すもの (最新でない) とする船か。UI スレッドで呼ぶ
+    internal bool HeldBack(string record)
+    {
+        var shortName = ShortName(record);
+        return _verifying.ContainsKey(shortName) || _pendingDelete.Contains(shortName);
     }
 
     public bool IsExporting(string record) => _byShort.ContainsKey(ShortName(record));
@@ -409,9 +426,18 @@ public sealed class Ship3DExports : INotifyPropertyChanged
 
     private static void Log(string msg) => App.AppendStartupLog(App.Config.WorkingDirectory, $"[3D モデル] {msg}");
 
-    private static void ShowError(Window? owner, string msg)
+    // 取り込み 1 件のログ (船は [3D モデル]、ステーションの地図は [ステーションの地図] の頭。続けて「名前」(短い名前))
+    internal static void LogJob(Ship3DJob job, string msg) =>
+        App.AppendStartupLog(App.Config.WorkingDirectory, $"{(job.Kind == Ship3DJobKind.Station ? "[ステーションの地図]" : "[3D モデル]")} 「{job.Name}」({job.Short}) {msg}");
+
+    // ログに出す例外の中身: アプリが理由を書いて投げる種類 (InvalidOperationException・IOException) は型と文、それ以外は型・文・呼び出し履歴
+    internal static string Describe(Exception ex) =>
+        ex is InvalidOperationException or IOException ? $"{ex.GetType().FullName}: {ex.Message}" : ex.ToString();
+
+    // logMsg: ログに残す文言が窓と違うとき (まとめて取り込むの窓はボタンの名前で出し、ログは前の文言のまま)
+    private static void ShowError(Window? owner, string msg, string? logMsg = null)
     {
-        Log(msg);
+        Log(logMsg ?? msg);
         if (owner != null && owner.IsLoaded) MessageBox.Show(owner, msg, "3D 表示", MessageBoxButton.OK, MessageBoxImage.Warning);
         else MessageBox.Show(msg, "3D 表示", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
@@ -462,7 +488,21 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         }
         Pump();
         RefreshProgress();
+        // Data.p4k の印が変わった (パッチ・チャンネルの切り替え) かを見る (Data.p4k を探して大きさ・更新日時を見るだけ。開かない)
+        var stampKey = CurrentStamp()?.Key;
+        if (!_stampSeen) { _stampSeen = true; _lastStampKey = stampKey; }
+        else if (stampKey != _lastStampKey)
+        {
+            _lastStampKey = stampKey;
+            P4kStampChanged?.Invoke();
+        }
     }
+
+    // Data.p4k の印 (CurrentStamp().Key) が変わったとき (1 秒ごとの Tick で気づく。UI スレッドで呼ぶ)。
+    // 設定タブの［船舶・車両をまとめて取り込む］［マップをまとめて取り込む］の「全部取り込み済み」を出し直すのに使う
+    public event Action? P4kStampChanged;
+    private bool _stampSeen;
+    private string? _lastStampKey;
 
     // ===== 待ち行列 =====
 
@@ -472,10 +512,15 @@ public sealed class Ship3DExports : INotifyPropertyChanged
     private readonly List<Ship3DJob> _running = new();
 
     // 順番を待つ (CPU 使用率が 90% 未満で、動いている数が上限より少なくなったら始まる)。取り消されたら取り消しの例外
-    private async Task WaitTurnAsync(Ship3DJob job, CancellationToken ct)
+    internal async Task WaitTurnAsync(Ship3DJob job, CancellationToken ct)
     {
         var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _queue.Add((job, tcs));
+        job.LogStage = "順番待ち";
+        job.QueueWatch.Restart();
+        // まとめての中のものは 1 件ずつ出さない (並べた数はまとめての側で 1 行に出す)
+        if (!job.InBatch)
+            LogJob(job, $"待ち行列に入りました: {_queue.Count} 番目 (動いている {_running.Count} 本、同時数の上限 {MaxParallelExports().Limit} 本)");
         job.SetPhase(Ship3DJobPhase.Queued, "順番待ち");
         Pump();
         using (ct.Register(() => Application.Current?.Dispatcher.BeginInvoke(() =>
@@ -495,19 +540,30 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         while (_queue.Count > 0)
         {
             string? reason = null;
-            if (_cpuHigh) reason = $"CPU 使用率 {_cpuPercent:F0}% のため待っています (90% 未満になったら始めます)";
+            string? waitKind = null;   // ログ用: 待つ理由の種類 (cpu・memory・limit)
+            int limitNow = 0;
+            if (_cpuHigh) { reason = $"CPU 使用率 {_cpuPercent:F0}% のため待っています (90% 未満になったら始めます)"; waitKind = "cpu"; }
             else
             {
                 var (limit, byCpu, byMem, free) = MaxParallelExports();
-                if (_running.Count >= limit)
+                limitNow = limit;
+                // ステーションの地図が足して動かしている starbreaker (_extraRuns) も同時数に数える
+                if (_running.Count + _extraRuns >= limit)
                 {
                     reason = byMem is int m && m < byCpu
                         ? $"メモリ待ち (空き {free / (double)(1024 * MB):F1} GB。1 本 3GB と見込み、同時 {limit} 本まで)"
                         : $"同時数の上限 ({limit} 本) のため待っています";
+                    waitKind = byMem is int m2 && m2 < byCpu ? "memory" : "limit";
                 }
             }
             if (reason != null)
             {
+                // 理由の種類が変わったときだけ出す (CPU 使用率の数は毎秒変わるので、文ではなく種類で比べる)
+                if (waitKind != _lastWaitKind)
+                {
+                    _lastWaitKind = waitKind;
+                    Log($"待ち行列 (船・ステーションの地図 共通): {reason} (待ち {_queue.Count} 件、動いている {_running.Count} 本 + ステーションの地図が足した starbreaker {_extraRuns} 本)");
+                }
                 foreach (var (j, _) in _queue) j.SetPhase(Ship3DJobPhase.Queued, reason);
                 return;
             }
@@ -520,8 +576,43 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 foreach (var r in _running) r.Overlapped = true;
             }
             _running.Add(job);
+            job.QueueWatch.Stop();
+            job.LogStage = "順番が来た直後";
+            LogJob(job, $"順番が来たので始めます ({job.LogTag}): 待ち {job.QueueWatch.Elapsed.TotalSeconds:F1} 秒 (動いている {_running.Count} 本 / 上限 {limitNow} 本、残りの待ち {_queue.Count} 件)");
             start.TrySetResult();
         }
+        // 待ちが無くなった: 次に待ちが出たら、また理由を出す
+        _lastWaitKind = null;
+    }
+
+    // ログ用: 最後に出した待つ理由の種類 (Pump)
+    private string? _lastWaitKind;
+
+    // ステーションの地図の取り込み (StationFloorBuilder.ExportAsync) が、自分の枠 (_running の 1 本) のほかに足して動かしている starbreaker の数。
+    // starbreaker 1 本を 1 本として同時数の上限 (MaxParallelExports) に数える (Pump もこれを引く)
+    private int _extraRuns;
+
+    // starbreaker を 1 本足してよいか。よければ数に入れて true。UI スレッドで呼ぶ。
+    //   足さないとき: CPU 使用率が 90% 以上 (Pump と同じ決まり)・順番を待っている取り込みがある (待っているものを先に始めるため)・
+    //   動いている本数 (取り込みの枠 + 足した starbreaker) が同時数の上限に届いている
+    internal bool TryAcquireExtraRun()
+    {
+        if (_cpuHigh || _queue.Count > 0) return false;
+        if (_running.Count + _extraRuns >= MaxParallelExports().Limit) return false;
+        _extraRuns++;
+        return true;
+    }
+
+    // ステーションの地図の予想時間 (StationMapExports.EstimateSeconds) に使う、その取り込みで使える同時の本数 (UI スレッドで呼ぶ):
+    //   同時数の上限 (MaxParallelExports) − ほかの取り込みの分 (動いている取り込み (self を除く) + 足した starbreaker)、最低 1
+    internal int FreeRunSlots(Ship3DJob? self = null) =>
+        Math.Max(1, MaxParallelExports().Limit - (_running.Count(j => j != self) + _extraRuns));
+
+    // 足した starbreaker が終わった (UI スレッドで呼ぶ)。空いた枠で待っている取り込みを始める
+    internal void ReleaseExtraRun()
+    {
+        if (_extraRuns > 0) _extraRuns--;
+        Pump();
     }
 
     // ===== 船ごと・全体の進み具合 =====
@@ -534,9 +625,9 @@ public sealed class Ship3DExports : INotifyPropertyChanged
     public int OverallPercent => _overallPercent;
     public string OverallText => _overallText;
     // 進み具合の欄を出すか (書き出し・まとめての見積もり・知らせがあるとき)
-    public bool ShowPanel => Jobs.Count > 0 || _batchActive || HasNotice;
+    public bool ShowPanel => Jobs.Count > 0 || BatchActive || HasNotice;
 
-    private void AddJob(Ship3DJob job)
+    internal void AddJob(Ship3DJob job)
     {
         if (HasNotice) Notice = "";
         Jobs.Add(job);
@@ -547,7 +638,10 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         RaiseStateChanged();
     }
 
-    private void RemoveJob(Ship3DJob job)
+    // 動いている書き出しの枠を空ける (ステーションの地図 (StationMapExports) の StarBreaker の部分が終わったとき。船の ExportAsync の _running.Remove と同じ)
+    internal void EndRun(Ship3DJob j) => _running.Remove(j);
+
+    internal void RemoveJob(Ship3DJob job)
     {
         Jobs.Remove(job);
         _running.Remove(job);
@@ -582,15 +676,17 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         var running = Math.Max(1, _running.Count);
         var overallRemain = Math.Max(sumRemain / running, maxRunningRemain);
         int pct = sumTotal > 0 ? (int)Math.Min(99, Math.Floor(sumDone / sumTotal * 100)) : 0;
+        // 数の単位: 全部船なら「隻」、ステーションの地図が混じれば「件」
+        var unit = _session.All(j => j.Kind == Ship3DJobKind.Ship) ? "隻" : "件";
         var text = sumTotal > 0
-            ? $"全体 {pct}%  残り 約 {FormatSeconds(overallRemain)}  ({_session.Count(j => j.Phase == Ship3DJobPhase.Done)} / {_session.Count} 隻)"
+            ? $"全体 {pct}%  残り 約 {FormatSeconds(overallRemain)}  ({_session.Count(j => j.Phase == Ship3DJobPhase.Done)} / {_session.Count} {unit})"
             : Jobs.Count > 0 ? "全体: 見積もり中" : "";
         if (pct != _overallPercent) { _overallPercent = pct; Changed(nameof(OverallPercent)); }
         if (text != _overallText) { _overallText = text; Changed(nameof(OverallText)); }
         // 順番待ちの船は 1 行にまとめる: 「待ち N 隻: <理由> (予想 合計 約 …)」。理由は先頭の待ちの船のもの (Pump が全部に同じ理由を入れる)
         var queued = Jobs.Where(j => j.Phase == Ship3DJobPhase.Queued).ToList();
         var queuedText = queued.Count == 0 ? ""
-            : $"待ち {queued.Count} 隻: {queued[0].Reason} (予想 合計 約 {FormatSeconds(queued.Sum(j => j.EstimatedSeconds))})";
+            : $"待ち {queued.Count} {(queued.All(j => j.Kind == Ship3DJobKind.Ship) ? "隻" : "件")}: {queued[0].Reason} (予想 合計 約 {FormatSeconds(queued.Sum(j => j.EstimatedSeconds))})";
         if (queuedText != _queuedText) { _queuedText = queuedText; Changed(nameof(QueuedText)); Changed(nameof(HasQueued)); }
     }
 
@@ -630,10 +726,15 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         }
         if (_byShort.TryGetValue(shortName, out var running) && running.Task != null)
         {
+            Log($"「{name}」({shortName}) の［読み込み］: 同じ船の書き出しが動いているので、それに合流します ({running.LogTag})");
             try { return await running.Task; }
             catch { return null; }
         }
-        if (await GetCachedPathAsync(record) is { } cached) return cached;
+        if (await GetCachedPathAsync(record) is { } cached)
+        {
+            Log($"「{name}」({shortName}) の［読み込み］: 使えるキャッシュがあるので書き出しません ({cached})");
+            return cached;
+        }
         if (_cpuHigh)
         {
             ShowError(owner, $"CPU 使用率が {_cpuPercent:F0}% と高いため、書き出しを始めません。90% 未満に下がってからもう一度押してください。");
@@ -647,10 +748,12 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         // 照合の間に別の［読み込み］が始めていれば合流する
         if (_byShort.TryGetValue(shortName, out running) && running.Task != null)
         {
+            Log($"「{name}」({shortName}) の［読み込み］: 照合の間に同じ船の書き出しが始まったので、それに合流します ({running.LogTag})");
             try { return await running.Task; }
             catch { return null; }
         }
         var job = new Ship3DJob(record, shortName, string.IsNullOrWhiteSpace(name) ? shortName : name, batch: null);
+        LogJob(job, $"取り込みを始めます (単体、record {record}、Data.p4k {stamp.Path})");
         AddJob(job);
         job.Task = RunSingleAsync(job, stamp, owner);
         return await job.Task;
@@ -658,21 +761,30 @@ public sealed class Ship3DExports : INotifyPropertyChanged
 
     private async Task<string?> RunSingleAsync(Ship3DJob job, P4kStamp stamp, Window? owner)
     {
+        var total = Stopwatch.StartNew();   // ログ用: 取り込み全体の経過
         try
         {
+            job.LogStage = "StarBreaker の用意";
             var extractor = new GameDataExtractor(DetailPanel.WorkDir());
             try { await extractor.EnsureStarBreakerAsync(); }
             catch (Exception ex)
             {
+                LogJob(job, $"StarBreaker を用意できませんでした: {Describe(ex)}");
                 ShowError(owner, $"StarBreaker を用意できませんでした: {ex.Message}");
                 job.SetPhase(Ship3DJobPhase.Failed, "");
                 return null;
             }
             job.SetPhase(Ship3DJobPhase.Estimating, "見積もり中 (ゲームデータを調べています)");
+            job.LogStage = "見積もり (--dump-hierarchy)";
+            LogJob(job, "見積もり (--dump-hierarchy・p4k list) を始めます");
+            var swEst = Stopwatch.StartNew();
             var est = await Ship3DEstimator.EstimateAsync(extractor.StarBreakerExe, stamp, job.Record, job.Cts.Token);
             var c = Ship3DStats.Coefficients();
             job.Estimate = est;
             job.EstimatedSeconds = est.Seconds(c);
+            LogJob(job, $"見積もりが終わりました: {swEst.Elapsed.TotalSeconds:F1} 秒。参照ジオメトリ {est.GeometryMb:F1} MB、照合用の参照 {est.SourcePaths.Count} 個 → " +
+                        $"予想 {job.EstimatedSeconds:F0} 秒・約 {FormatBytes(est.GlbBytes(c))} (係数 {c.SecPerMb:F3} 秒/MB、大きさの倍率 {c.SizeRatio:F2})");
+            job.LogStage = "書き出すかの確認";
             job.SetPhase(Ship3DJobPhase.Estimating, "書き出すか確かめています");
             var msg = $"「{job.Name}」の 3D モデルをゲームデータから書き出します。\n\n" +
                       $"予想時間: 約 {FormatSeconds(job.EstimatedSeconds)}\n予想サイズ: 約 {FormatBytes(est.GlbBytes(c))}\n\n" +
@@ -680,7 +792,12 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             var ok = owner != null && owner.IsLoaded
                 ? MessageBox.Show(owner, msg, "3D 表示", MessageBoxButton.OKCancel, MessageBoxImage.Question)
                 : MessageBox.Show(msg, "3D 表示", MessageBoxButton.OKCancel, MessageBoxImage.Question);
-            if (ok != MessageBoxResult.OK) { job.SetPhase(Ship3DJobPhase.Cancelled, ""); return null; }
+            if (ok != MessageBoxResult.OK)
+            {
+                LogJob(job, "確認の窓で［キャンセル］が押されたので書き出しません");
+                job.SetPhase(Ship3DJobPhase.Cancelled, "");
+                return null;
+            }
             RefreshProgress();
             await WaitTurnAsync(job, job.Cts.Token);
             return await ExportAsync(job, extractor.StarBreakerExe, stamp);
@@ -688,12 +805,13 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         catch (OperationCanceledException)
         {
             job.SetPhase(Ship3DJobPhase.Cancelled, "");
-            Log($"「{job.Name}」({job.Short}) の書き出しを取り消しました");
+            Log($"「{job.Name}」({job.Short}) の書き出しを取り消しました (段階: {job.LogStage}、経過 {total.Elapsed.TotalSeconds:F1} 秒)");
             return null;
         }
         catch (Exception ex)
         {
             job.SetPhase(Ship3DJobPhase.Failed, "");
+            LogJob(job, $"失敗しました (段階: {job.LogStage}、経過 {total.Elapsed.TotalSeconds:F1} 秒): {Describe(ex)}");
             ShowError(owner, $"「{job.Name}」({job.Short}) の 3D モデルを書き出せませんでした: {ex.Message}");
             return null;
         }
@@ -709,7 +827,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
     // 順番が来た書き出しを動かす (WaitTurnAsync の後。_running に入っている)。終わったら GLB のパス。
     //   一時ファイル (置き場所の作業用のフォルダ) に書いてから名前を変える。StarBreaker の選んだ record が求めるものと違えば失敗 (GLB は消す)。
     //   同じ名前でこのアプリのものではないファイルがあれば上書きしない。
-    //   終わったら、横の記録 (印・Data.p4k の印・照合用の元ファイルの一覧と CRC32・--dump-hierarchy のハッシュ) を書き、
+    //   終わったら、横の記録 (印・Data.p4k の印・照合用の元ファイルの一覧と Data.p4k に記録された CRC・--dump-hierarchy のハッシュ) を書き、
     //   実績を記録し (並行で動いていなければ)、最大容量を超えていれば古いものから消す
     private async Task<string> ExportAsync(Ship3DJob job, string exe, P4kStamp stamp)
     {
@@ -725,6 +843,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         {
             // -v を付けると段階の行 (Assembling・children k/N・interiors done 等) が標準エラーに出る (Ship3DStageTracker)
             var args = $"-v entity export \"{job.Short}\" \"{tmp}\" --p4k \"{stamp.Path}\" --materials textures";
+            job.LogStage = "starbreaker entity export (1 / 1 回)";
+            LogJob(job, $"starbreaker の書き出し (1 / 1 回) を始めます: 予想 {job.EstimatedSeconds:F0} 秒。引数: {args}");
             var (exit, tail) = await StarBreakerRunner.RunAsync(exe, args, line =>
             {
                 job.Tracker.OnLine(line, job.Watch.Elapsed.TotalSeconds);
@@ -732,6 +852,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 if (resolvedTree == null && LoadoutTreeRegex.Match(line) is { Success: true } m2) resolvedTree = m2.Groups[1].Value;
             }, null, ct);
             job.Watch.Stop();
+            LogJob(job, $"starbreaker の書き出し (1 / 1 回) が終わりました: 終了コード {exit}、{job.Watch.Elapsed.TotalSeconds:F1} 秒、最後の段階 [{job.Tracker.StageText}]、" +
+                        $"選ばれた record {resolvedShortest ?? resolvedTree ?? "(標準エラーに出ず)"}、GLB {(File.Exists(tmp) ? FormatBytes(new FileInfo(tmp).Length) : "なし")}");
             if (exit != 0)
             {
                 Log($"「{job.Name}」({job.Short}) の書き出しが失敗しました (終了コード {exit})。標準エラーの末尾:\n{tail}");
@@ -744,11 +866,16 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 throw new InvalidOperationException($"StarBreaker が別の船 ({resolved}) を選びました。求める record は {job.Record} です。書き出した GLB は使いません");
             if (!File.Exists(tmp)) throw new InvalidOperationException("starbreaker は終わりましたが GLB ができていません");
 
-            // 照合用の元ファイルの一覧 (Data.p4k の中央ディレクトリの大きさと CRC32)
+            // 照合用の元ファイルの一覧 (Data.p4k の中央ディレクトリの大きさと記録された CRC)
             job.SetPhase(Ship3DJobPhase.Exporting, "元データの記録");
+            job.LogStage = "元データの記録";
+            var swSrc = Stopwatch.StartNew();
             var est = job.Estimate ?? throw new InvalidOperationException("見積もり (--dump-hierarchy) がありません");
             var index = await Ship3DP4kIndex.GetAsync(stamp);
             var sources = await Task.Run(() => Ship3DEstimator.BuildSources(est.SourcePaths, tmp, index), ct);
+            var srcSeconds = swSrc.Elapsed.TotalSeconds;
+            job.LogStage = "保存";
+            var swSave = Stopwatch.StartNew();
 
             // 同じ名前でこのアプリのものではないファイルがあれば上書きしない (書き出しの間に置かれた場合も)
             if (HasForeignFile(job.Short))
@@ -772,7 +899,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             });
             Log($"「{job.Name}」({job.Short}) を書き出しました: {job.Watch.Elapsed.TotalSeconds:F1} 秒、{FormatBytes(glbBytes)}" +
                 $" (予想 {job.EstimatedSeconds:F0} 秒、参照ジオメトリ {est.GeometryMb:F1} MB、照合用の元ファイル {sources.Count} 個" +
-                $"{(job.Overlapped ? "、並行で動いたので係数の実績には使いません" : "")})");
+                $"{(job.Overlapped ? "、並行で動いたので係数の実績には使いません" : "")})" +
+                $"。元データの記録 {srcSeconds:F1} 秒、保存 {swSave.Elapsed.TotalSeconds:F1} 秒 ({job.LogTag})");
             if (!job.Overlapped) Ship3DStats.Add(job.Short, est.GeometryMb, job.Watch.Elapsed.TotalSeconds, glbBytes);
             job.SetPhase(Ship3DJobPhase.Done, "");
             _running.Remove(job);
@@ -799,20 +927,37 @@ public sealed class Ship3DExports : INotifyPropertyChanged
 
     // 最大容量を超えていれば、書き出した日時 (GLB の更新日時) の古いものから消す (アプリの印のあるものだけ)。
     // 表示中・書き出し中 (今動いている・待っている船)・今書き出したものは消さない。消しても超えたままなら知らせる
-    private void EnforceLimit(string justExported)
+    // ステーションの地図 (StationMapExports。キーは "station:<短い名前>") も合わせて数え、古いものを消すときも対象にする (計画の案 a)。
+    // ステーションの表示中・照合中のもの (StationMapExports.ProtectedKeys) も消さない
+    internal void EnforceLimit(string justExported)
     {
         var max = MaxMb * MB;
         var files = CachedFiles();
-        long total = files.Sum(f => f.Length);
+        var stations = StationMapExports.CachedFiles();
+        long total = files.Sum(f => f.Length) + stations.Sum(f => f.Length);
         if (total <= max) return;
         var protect = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { justExported };
         foreach (var v in _views.Keys) protect.Add(v);
         foreach (var j in Jobs) protect.Add(j.Short);
+        foreach (var v in StationMapExports.Instance.ProtectedKeys()) protect.Add(v);
         var deleted = new List<string>();
-        foreach (var f in files.Where(f => !protect.Contains(Path.GetFileNameWithoutExtension(f.Name))).OrderBy(f => f.LastWriteTimeUtc))
+        var deletedStation = false;
+        var entries = files.Select(f => (File: f, Key: Path.GetFileNameWithoutExtension(f.Name)))
+            .Concat(stations.Select(f => (File: f, Key: StationMapExports.KeyOf(f))));
+        foreach (var (f, key) in entries.Where(e => !protect.Contains(e.Key)).OrderBy(e => e.File.LastWriteTimeUtc))
         {
             if (total <= max) break;
-            var shortName = Path.GetFileNameWithoutExtension(f.Name);
+            if (StationMapExports.IsKey(key))
+            {
+                // 大きさは消す前に取る
+                var len = f.Length;
+                if (!StationMapExports.Instance.DeleteForLimit(key)) continue;
+                total -= len;
+                deleted.Add(key);
+                deletedStation = true;
+                continue;
+            }
+            var shortName = key;
             try
             {
                 if (ReadOurSidecar(shortName) == null) continue;
@@ -825,17 +970,26 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             }
             catch (Exception ex) { Log($"最大容量を超えたので {f.Name} を消そうとしましたが、消せませんでした: {ex.Message}"); }
         }
-        if (deleted.Count > 0) Log($"最大容量 ({MaxMb:N0} MB) を超えたので、古いものから {deleted.Count} 隻を消しました: {string.Join(", ", deleted)}");
+        // 数の単位: 消したものが全部船なら「隻」、ステーションの地図が混じれば「件」
+        var unit = deletedStation ? "件" : "隻";
+        if (deleted.Count > 0) Log($"最大容量 ({MaxMb:N0} MB) を超えたので、古いものから {deleted.Count} {unit}を消しました: {string.Join(", ", deleted)}");
         if (total > max)
         {
             var left = CachedFiles();
-            var text = left.Count == 1
-                ? $"「{Path.GetFileNameWithoutExtension(left[0].Name)}」1 隻だけで最大容量 ({MaxMb:N0} MB) を超えています ({FormatBytes(left[0].Length)})。消さずに残します"
-                : $"最大容量 ({MaxMb:N0} MB) を超えていますが、表示中・書き出し中のものを除くと消せるものがありません (今 {FormatBytes(total)})";
+            var leftStations = StationMapExports.CachedFiles();
+            string text;
+            if (leftStations.Count == 0)
+                text = left.Count == 1
+                    ? $"「{Path.GetFileNameWithoutExtension(left[0].Name)}」1 隻だけで最大容量 ({MaxMb:N0} MB) を超えています ({FormatBytes(left[0].Length)})。消さずに残します"
+                    : $"最大容量 ({MaxMb:N0} MB) を超えていますが、表示中・書き出し中のものを除くと消せるものがありません (今 {FormatBytes(total)})";
+            else if (left.Count == 0 && leftStations.Count == 1)
+                text = $"「{StationMapExports.KeyOf(leftStations[0])}」1 件だけで最大容量 ({MaxMb:N0} MB) を超えています ({FormatBytes(leftStations[0].Length)})。消さずに残します";
+            else
+                text = $"最大容量 ({MaxMb:N0} MB) を超えていますが、表示中・書き出し中のものを除くと消せるものがありません (今 {FormatBytes(total)})";
             Notice = text;
             Log(text);
         }
-        else if (deleted.Count > 0) Notice = $"最大容量を超えたので、古いものから {deleted.Count} 隻を消しました";
+        else if (deleted.Count > 0) Notice = $"最大容量を超えたので、古いものから {deleted.Count} {unit}を消しました";
     }
 
     // ===== まとめて取り込む =====
@@ -843,11 +997,31 @@ public sealed class Ship3DExports : INotifyPropertyChanged
     private bool _batchActive;
     private string _batchText = "";
     private CancellationTokenSource? _batchCts;
-    public bool BatchActive => _batchActive;
-    // まとめて取り込むの今の段階 (見積もり中 i / N 等)
-    public string BatchText { get => _batchText; private set { _batchText = value; Changed(nameof(BatchText)); } }
+    // 進み具合の欄の［まとめて取り消し］の行を出すか: 船かステーションの地図 (StationMapExports) のまとめて取り込むが動いている間
+    public bool BatchActive => _batchActive || StationMapExports.Instance.BatchActive;
+    // 船のまとめて取り込むが動いているか (船の［まとめて取り込む］のボタンに使う)
+    internal bool ShipBatchActive => _batchActive;
+    // まとめて取り込むの今の段階 (見積もり中 i / N 等)。ステーションの地図のまとめても動いていれば「 / 」でつなぐ
+    public string BatchText
+    {
+        get => string.Join(" / ", new[] { _batchText, StationMapExports.Instance.BatchText }.Where(t => t.Length > 0));
+        private set { _batchText = value; Changed(nameof(BatchText)); }
+    }
 
-    public void CancelBatch() => _batchCts?.Cancel();
+    // ［まとめて取り消し］: 船とステーションの地図のまとめて取り込むを両方取り消す (取り込みのタスクは共通の欄に出るため)
+    public void CancelBatch()
+    {
+        _batchCts?.Cancel();
+        StationMapExports.Instance.CancelBatch();
+    }
+
+    // ステーションの地図のまとめて取り込むが始まった・終わった・段階が変わったとき (StationMapExports から)
+    internal void NotifyStationBatchChanged()
+    {
+        Changed(nameof(BatchActive));
+        Changed(nameof(BatchText));
+        Changed(nameof(ShowPanel));
+    }
 
     private void SetBatchActive(bool active)
     {
@@ -862,7 +1036,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
     //   今書き出し中の船は飛ばす。何隻・約何分・約何 GB かを聞いてから、並行に書き出す (同時数は MaxParallelExports。始めるのは並んだ順)
     public async Task RunBatchAsync(IReadOnlyList<(string Record, string Name)> owned, IReadOnlyList<(string Record, string Name)> rest, Window? owner)
     {
-        if (_batchActive) { ShowError(owner, "まとめて取り込むはすでに動いています。"); return; }
+        if (_batchActive) { ShowError(owner, "船舶・車両をまとめて取り込むはすでに動いています。", "まとめて取り込むはすでに動いています。"); return; }
         if (_cpuHigh)
         {
             ShowError(owner, $"CPU 使用率が {_cpuPercent:F0}% と高いため、書き出しを始めません。90% 未満に下がってからもう一度押してください。");
@@ -875,12 +1049,24 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         var ct = _batchCts.Token;
         SetBatchActive(true);
         var failures = new List<string>();
+        // ログ用: 全体の経過・今の段階・飛ばした船の名前 (理由ごと)
+        var swBatch = Stopwatch.StartNew();
+        var batchStage = "StarBreaker の用意";
+        var skippedFresh = new List<string>();
+        var skippedRunning = new List<string>();
+        var skippedForeign = new List<string>();
+        var notTakenNames = new List<string>();
+        var batchJobs = new List<Ship3DJob>();
+        // 対象の record の一覧 (BatchTargetRecord に書く。設定タブのボタンの「全部取り込み済み」の判定に使う)
+        List<string>? batchTargets = null;
+        Log($"まとめて取り込むを始めます: 保有船 {owned.Count} 隻、残りの船 {rest.Count} 隻 (Data.p4k {stamp.Path}、最大容量 {MaxMb:N0} MB、" +
+            $"今の使用量 {FormatBytes(CacheBytes() + StationMapExports.CacheBytes())})");
         try
         {
             var extractor = new GameDataExtractor(DetailPanel.WorkDir());
             BatchText = "StarBreaker を用意しています...";
             try { await extractor.EnsureStarBreakerAsync(); }
-            catch (Exception ex) { ShowError(owner, $"StarBreaker を用意できませんでした: {ex.Message}"); return; }
+            catch (Exception ex) { Log($"まとめて取り込む: StarBreaker を用意できませんでした: {Describe(ex)}"); ShowError(owner, $"StarBreaker を用意できませんでした: {ex.Message}"); return; }
 
             // 並び: 保有船 → 残り (同じ record は最初の 1 つ)
             var list = new List<(string Record, string Short, string Name, bool Owned)>();
@@ -889,28 +1075,36 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 if (!string.IsNullOrWhiteSpace(r) && seen.Add(ShortName(r))) list.Add((r, ShortName(r), n, true));
             foreach (var (r, n) in rest)
                 if (!string.IsNullOrWhiteSpace(r) && seen.Add(ShortName(r))) list.Add((r, ShortName(r), n, false));
+            batchTargets = list.Select(s => s.Record).ToList();
+            BatchTargetRecord.Write(BatchTargetRecord.Ships, stamp, batchTargets, StateOf);
 
             var c = Ship3DStats.Coefficients();
             double sumBytes = 0, sumSeconds = 0;
             int skipFresh = 0, skipRunning = 0, skipForeign = 0, notTaken = 0, ownedCount = 0;
             var selected = new List<(string Record, string Short, string Name, Ship3DEstimate Est)>();
             // 1. 飛ばす船を決める (照合が要る船は順に照合する)
+            batchStage = "飛ばす船を決める (照合)";
+            var swSkip = Stopwatch.StartNew();
             var candidates = new List<(string Record, string Short, string Name, bool Owned)>();
             for (int i = 0; i < list.Count; i++)
             {
                 ct.ThrowIfCancellationRequested();
                 var s = list[i];
-                if (_byShort.ContainsKey(s.Short)) { skipRunning++; continue; }
+                if (_byShort.ContainsKey(s.Short)) { skipRunning++; skippedRunning.Add(s.Short); continue; }
                 var state = StateOf(s.Record);
                 if (state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying)
                 {
-                    BatchText = $"まとめて取り込む: 照合中 {i + 1} / {list.Count} 隻目 ({s.Name})";
-                    if (await VerifyAsync(s.Record)) { skipFresh++; continue; }
+                    BatchText = $"船舶・車両をまとめて取り込む: 照合中 {i + 1} / {list.Count} 隻目 ({s.Name})";
+                    if (await VerifyAsync(s.Record)) { skipFresh++; skippedFresh.Add(s.Short); continue; }
                 }
-                else if (state == Ship3DCacheState.Fresh) { skipFresh++; continue; }
-                if (HasForeignFile(s.Short)) { skipForeign++; continue; }
+                else if (state == Ship3DCacheState.Fresh) { skipFresh++; skippedFresh.Add(s.Short); continue; }
+                if (HasForeignFile(s.Short)) { skipForeign++; skippedForeign.Add(s.Short); continue; }
                 candidates.Add(s);
             }
+            Log($"まとめて取り込む: 飛ばす船を決めました ({swSkip.Elapsed.TotalSeconds:F1} 秒): 全 {list.Count} 隻のうち、見積もる船 {candidates.Count} 隻、" +
+                $"最新のキャッシュがある {skipFresh} 隻、書き出し中 {skipRunning} 隻、このアプリのものではない同名のファイル {skipForeign} 隻");
+            batchStage = "見積もり";
+            var swEstAll = Stopwatch.StartNew();
 
             // 2. 見積もり (--dump-hierarchy。1 隻 約 2 秒) を同時数の上限 (MaxParallelExports) まで並行に、並んだ順に始める
             //    (1 隻ずつだと 278 隻で 9 分ほどかかり、その間は確認の窓も出なかった。利用者の指摘)。
@@ -932,7 +1126,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 {
                     ct.ThrowIfCancellationRequested();
                     var s = candidates[k];
-                    BatchText = $"まとめて取り込む: 見積もり中 {k + 1} / {candidates.Count} 隻目 (同時 {estLimit} 本。{s.Name})";
+                    BatchText = $"船舶・車両をまとめて取り込む: 見積もり中 {k + 1} / {candidates.Count} 隻目 (同時 {estLimit} 本。{s.Name})";
                     Ship3DEstimate est;
                     try { est = await estTasks[k]; }
                     catch (OperationCanceledException) { throw; }
@@ -943,10 +1137,11 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                         continue;
                     }
                     var bytes = est.GlbBytes(c);
-                    // 予想サイズの合計が最大容量を超える手前で止める (使用量は照合で消えた分を反映するため毎回測る)
-                    if (sumBytes + bytes > MaxMb * MB - CacheBytes())
+                    // 予想サイズの合計が最大容量を超える手前で止める (使用量は照合で消えた分を反映するため毎回測る。ステーションの地図の使用量も合わせる)
+                    if (sumBytes + bytes > MaxMb * MB - CacheBytes() - StationMapExports.CacheBytes())
                     {
                         notTaken = candidates.Count - k;
+                        notTakenNames.AddRange(candidates.Skip(k).Select(x => x.Short));
                         break;
                     }
                     sumBytes += bytes;
@@ -961,17 +1156,21 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 estCts.Cancel();
                 try { await Task.WhenAll(estTasks); } catch { }
             }
+            Log($"まとめて取り込む: 見積もりが終わりました ({swEstAll.Elapsed.TotalSeconds:F1} 秒、同時 {estLimit} 本): 書き出す船 {selected.Count} 隻 (うち保有船 {ownedCount} 隻)、" +
+                $"予想 合計 {sumSeconds:F0} 秒・約 {FormatBytes(sumBytes)}、最大容量を超えるので取り込まない {notTaken} 隻、見積もれなかった {failures.Count} 隻");
+            batchStage = "始めるかの確認";
 
             var parallel = MaxParallelExports().Limit;
-            var head = $"まとめて取り込む ({list.Count} 隻のうち)\n\n";
+            var head = $"船舶・車両をまとめて取り込む ({list.Count} 隻のうち)\n\n";
             var info = (skipFresh > 0 ? $"最新のキャッシュがあるので飛ばす: {skipFresh} 隻\n" : "") +
                        (skipRunning > 0 ? $"今書き出し中なので飛ばす: {skipRunning} 隻\n" : "") +
                        (skipForeign > 0 ? $"置き場所に同じ名前のこのアプリのものではないファイルがあるので飛ばす: {skipForeign} 隻\n" : "") +
-                       (notTaken > 0 ? $"最大容量 ({MaxMb:N0} MB。今の使用量 {FormatBytes(CacheBytes())}、残り {FormatBytes(Math.Max(0, MaxMb * MB - CacheBytes()))}) を超えるので取り込まない: {notTaken} 隻\n" +
+                       (notTaken > 0 ? $"最大容量 ({MaxMb:N0} MB。今の使用量 {FormatBytes(CacheBytes() + StationMapExports.CacheBytes())}、残り {FormatBytes(Math.Max(0, MaxMb * MB - CacheBytes() - StationMapExports.CacheBytes()))}) を超えるので取り込まない: {notTaken} 隻\n" +
                                        "　→ 全部取り込むには、設定タブの「3D モデル」の最大容量を上げてください (全船 279 隻で約 25.9 GB。2026-10 の LIVE での作者の PC の実測)\n" : "") +
                        (failures.Count > 0 ? $"見積もれなかった: {failures.Count} 隻 (アプリのログに記録)\n" : "");
             if (selected.Count == 0)
             {
+                Log("まとめて取り込む: 書き出す船がないので終わります。" + LogSkipLists(skippedFresh, skippedRunning, skippedForeign, notTakenNames, failures));
                 MessageBox.Show(head + "書き出す船がありません。\n\n" + info, "3D モデル", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
@@ -984,38 +1183,56 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             var ok = owner != null && owner.IsLoaded
                 ? MessageBox.Show(owner, ask, "3D モデル", MessageBoxButton.OKCancel, MessageBoxImage.Question)
                 : MessageBox.Show(ask, "3D モデル", MessageBoxButton.OKCancel, MessageBoxImage.Question);
-            if (ok != MessageBoxResult.OK) return;
+            if (ok != MessageBoxResult.OK)
+            {
+                Log("まとめて取り込む: 確認の窓で［キャンセル］が押されたので書き出しません");
+                return;
+            }
 
             // 船ごとの書き出しを全部並べ (全体のバーの分母に入る)、並んだ順に始める
-            BatchText = $"まとめて取り込む: {selected.Count} 隻";
+            batchStage = "書き出し";
+            BatchText = $"船舶・車両をまとめて取り込む: {selected.Count} 隻";
+            var queuedBefore = _queue.Count;
             var tasks = new List<Task<bool>>();
+            var no = 0;
             foreach (var s in selected)
             {
-                if (_byShort.ContainsKey(s.Short)) { skipRunning++; continue; }   // 見積もりの間に個別で始めた船
-                var job = new Ship3DJob(s.Record, s.Short, s.Name, _batchCts) { Estimate = s.Est, EstimatedSeconds = s.Est.Seconds(c) };
+                no++;
+                if (_byShort.ContainsKey(s.Short)) { skipRunning++; skippedRunning.Add(s.Short); continue; }   // 見積もりの間に個別で始めた船
+                var job = new Ship3DJob(s.Record, s.Short, s.Name, _batchCts) { Estimate = s.Est, EstimatedSeconds = s.Est.Seconds(c), LogTag = $"まとめての {no} / {selected.Count} 隻目" };
                 AddJob(job);
+                batchJobs.Add(job);
                 tasks.Add(RunBatchJobAsync(job, extractor.StarBreakerExe, stamp, failures));
             }
+            Log($"まとめて取り込む: {tasks.Count} 隻を待ち行列に並べました (前からの待ち {queuedBefore} 件の後ろ。動いている {_running.Count} 本、同時数の上限 {parallel} 本)");
             var results = await Task.WhenAll(tasks);
             var done = results.Count(r => r);
             var cancelled = ct.IsCancellationRequested;
-            var summary = $"まとめて取り込む: {(cancelled ? "取り消しました" : "終わりました")}。書き出した船 {done} / {tasks.Count} 隻" +
-                          (failures.Count > 0 ? $"、失敗・見積もれなかった船 {failures.Count} 隻" : "");
-            Log(summary + (failures.Count > 0 ? "\n" + string.Join("\n", failures) : ""));
+            // 窓はボタンの名前 (［船舶・車両をまとめて取り込む］) で出し、ログは前のログと比べられるよう前の文言のまま
+            var result = $"{(cancelled ? "取り消しました" : "終わりました")}。書き出した船 {done} / {tasks.Count} 隻" +
+                         (failures.Count > 0 ? $"、失敗・見積もれなかった船 {failures.Count} 隻" : "");
+            var summary = "船舶・車両をまとめて取り込む: " + result;
+            Log("まとめて取り込む: " + result + (failures.Count > 0 ? "\n" + string.Join("\n", failures) : ""));
+            Log($"まとめて取り込む: 全体 {swBatch.Elapsed.TotalSeconds:F1} 秒。書き出した {done} 隻、失敗 {batchJobs.Count(j => j.Phase == Ship3DJobPhase.Failed)} 隻、" +
+                $"取り消し {batchJobs.Count(j => j.Phase == Ship3DJobPhase.Cancelled)} 隻 (全 {list.Count} 隻のうち並べた {tasks.Count} 隻)。" +
+                LogSkipLists(skippedFresh, skippedRunning, skippedForeign, notTakenNames, null));
             MessageBox.Show(summary + (failures.Count > 0 ? "\n\n" + string.Join("\n", failures.Take(15)) + (failures.Count > 15 ? "\n…(続きはアプリのログ)" : "") : ""),
                 "3D モデル", MessageBoxButton.OK, failures.Count > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
         }
         catch (OperationCanceledException)
         {
-            Log("まとめて取り込むを取り消しました");
-            MessageBox.Show("まとめて取り込むを取り消しました。", "3D モデル", MessageBoxButton.OK, MessageBoxImage.Information);
+            Log($"まとめて取り込むを取り消しました (段階: {batchStage}、経過 {swBatch.Elapsed.TotalSeconds:F1} 秒)");
+            MessageBox.Show("船舶・車両をまとめて取り込むを取り消しました。", "3D モデル", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)
         {
-            ShowError(owner, $"まとめて取り込むが失敗しました: {ex.Message}");
+            Log($"まとめて取り込むが失敗しました (段階: {batchStage}、経過 {swBatch.Elapsed.TotalSeconds:F1} 秒): {Describe(ex)}");
+            ShowError(owner, $"船舶・車両をまとめて取り込むが失敗しました: {ex.Message}", $"まとめて取り込むが失敗しました: {ex.Message}");
         }
         finally
         {
+            // 終わったときの取り込んだ数・取り込んでいない数で書き直す (ボタンの判定は SetBatchActive(false) の知らせで決め直す)
+            if (batchTargets != null) BatchTargetRecord.Write(BatchTargetRecord.Ships, stamp, batchTargets, StateOf);
             BatchText = "";
             _batchCts?.Dispose();
             _batchCts = null;
@@ -1037,6 +1254,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         }
         catch (OperationCanceledException)
         {
+            // 順番待ちのまま取り消されたものは 1 件ずつ出さない (数はまとめての終わりの行に出す)
+            if (job.LogStage != "順番待ち") LogJob(job, $"書き出しを取り消しました ({job.LogTag}、段階: {job.LogStage})");
             job.SetPhase(Ship3DJobPhase.Cancelled, "");
             tcs.TrySetResult(null);
             return false;
@@ -1045,11 +1264,24 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         {
             job.SetPhase(Ship3DJobPhase.Failed, "");
             failures.Add($"{job.Name} ({job.Short}): {ex.Message}");
-            Log($"まとめて取り込む: 「{job.Name}」({job.Short}) を書き出せませんでした: {ex.Message}");
+            Log($"まとめて取り込む: 「{job.Name}」({job.Short}) を書き出せませんでした ({job.LogTag}、段階: {job.LogStage}): {Describe(ex)}");
             tcs.TrySetResult(null);
             return false;
         }
         finally { RemoveJob(job); }
+    }
+
+    // ログ用: 飛ばした・取り込まなかった・失敗したものの一覧 (理由ごとに 1 つの文。空の理由は出さない)
+    internal static string LogSkipLists(IReadOnlyCollection<string> fresh, IReadOnlyCollection<string> running, IReadOnlyCollection<string> foreign,
+        IReadOnlyCollection<string> notTaken, IReadOnlyCollection<string>? failures)
+    {
+        var parts = new List<string>();
+        if (fresh.Count > 0) parts.Add($"最新なので飛ばした {fresh.Count} 件: {string.Join(", ", fresh)}");
+        if (running.Count > 0) parts.Add($"取り込み中なので飛ばした {running.Count} 件: {string.Join(", ", running)}");
+        if (foreign.Count > 0) parts.Add($"このアプリのものではない同名のファイルがあるので飛ばした {foreign.Count} 件: {string.Join(", ", foreign)}");
+        if (notTaken.Count > 0) parts.Add($"最大容量を超えるので取り込まなかった {notTaken.Count} 件: {string.Join(", ", notTaken)}");
+        if (failures is { Count: > 0 }) parts.Add($"失敗・見積もれなかった {failures.Count} 件: {string.Join(" / ", failures)}");
+        return parts.Count == 0 ? "飛ばしたもの・失敗したものはありません" : string.Join("。", parts);
     }
 
     // ===== Win32 =====
@@ -1076,11 +1308,65 @@ public sealed class Ship3DExports : INotifyPropertyChanged
 // 船のキャッシュの状態: ゲーム (Data.p4k) が見つからない / キャッシュ無し / 最新 / Data.p4k が変わったので照合が要る / 照合中
 public enum Ship3DCacheState { NoGame, None, Fresh, NeedsVerify, Verifying }
 
-// Data.p4k の中央ディレクトリ (全エントリの大きさと CRC32)。照合と元ファイルの記録に使う。Data.p4k ごとに 1 回読んで使い回す。
+// まとめて取り込むの対象の記録 (設定タブの［船舶・車両をまとめて取り込む］［マップをまとめて取り込む］を、今の Data.p4k で全部取り込み済みなら使えなくするため。
+// 利用者の決定 (2026-11-01): 対象の一覧はゲームデータ・DB から作り直すと重い (マップは p4k を開いて socpak を辿る) ので、まとめて取り込むが作った一覧を覚えておく)。
+//   まとめて取り込むが対象の一覧を作ったときと終わったときに、置き場所 (Ship3DExports.Folder) の直下の batch_ships.json / batch_maps.json に書く:
+//   Data.p4k の印 (P4kStamp.Key)・対象の record の一覧・書いたときの取り込んだ数 (StateOf が最新のもの) と取り込んでいない数。
+//   ボタンの判定 (MainWindow.Ship3D.cs) は、これを読み、印が今の Data.p4k と同じなら、各 record の StateOf が最新 (Fresh) かを数え直す。
+//   船のキャッシュ (*.glb と横の記録) にもステーションの地図 (stations\ の印のある *.json) にも数えられない名前・場所に置く
+internal static class BatchTargetRecord
+{
+    public const string Ships = "batch_ships.json";
+    public const string Maps = "batch_maps.json";
+
+    internal sealed class Content
+    {
+        // 書いたときの Data.p4k の印 (P4kStamp.Key)
+        public string P4k { get; set; } = "";
+        public string WrittenUtc { get; set; } = "";
+        // 書いたときの取り込んだ数・取り込んでいない数 (ボタンの判定では使わず、今の StateOf で数え直す)
+        public int Done { get; set; }
+        public int NotDone { get; set; }
+        public List<string> Records { get; set; } = new();
+    }
+
+    private static string PathOf(string fileName) => Path.Combine(Ship3DExports.Folder, fileName);
+
+    // 書く (UI スレッドで呼ぶ。stateOf は Ship3DExports / StationMapExports の StateOf)。書けなくてもまとめて取り込むは止めない (ログに残すだけ)
+    public static void Write(string fileName, Ship3DExports.P4kStamp stamp, IReadOnlyList<string> records, Func<string, Ship3DCacheState> stateOf)
+    {
+        try
+        {
+            var done = records.Count(r => stateOf(r) == Ship3DCacheState.Fresh);
+            var c = new Content { P4k = stamp.Key, WrittenUtc = DateTime.UtcNow.ToString("o"), Done = done, NotDone = records.Count - done, Records = records.ToList() };
+            Directory.CreateDirectory(Ship3DExports.Folder);
+            var path = PathOf(fileName);
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(c, new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[3D モデル] まとめて取り込むの対象の記録 {fileName} を書けませんでした: {ex.Message}"); }
+    }
+
+    // 読む。無い・読めないときは null
+    public static Content? Read(string fileName)
+    {
+        try
+        {
+            var path = PathOf(fileName);
+            if (!File.Exists(path)) return null;
+            var c = JsonSerializer.Deserialize<Content>(File.ReadAllText(path));
+            return c == null || c.P4k.Length == 0 || c.Records == null ? null : c;
+        }
+        catch { return null; }
+    }
+}
+
+// Data.p4k の中央ディレクトリ (全エントリの大きさと記録された CRC)。照合と元ファイルの記録に使う。Data.p4k ごとに 1 回読んで使い回す。
 // ZIP の中央ディレクトリを自分で読む (System.IO.Compression.ZipArchive でも読めるが、約 138 万件のエントリを全部オブジェクトにして
 // 作業メモリが約 1GB になるため)。キーは p4k の中のパスを正規化したもの (Ship3DEstimator.Normalize) のハッシュ。
-// 実データで確かめたこと (LIVE の Data.p4k、2026-10-29): エントリ 1,379,308 件、中央ディレクトリ 447MB、CRC32 が 0 のものは 63 件だけ。
-// この読み方の大きさ・CRC32 は ZipArchive (ZipArchiveEntry.Length / Crc32) と全件一致。読むのに約 0.9 秒 (パスの文字列を持つ版で作業メモリ最大約 340MB)
+// 実データで確かめたこと (LIVE の Data.p4k、2026-10-29): エントリ 1,379,308 件、中央ディレクトリ 447MB、記録された CRC が 0 のものは 63 件だけ。
+// この読み方の大きさ・記録された CRC は ZipArchive (ZipArchiveEntry.Length / Crc32) と全件一致。読むのに約 0.9 秒 (パスの文字列を持つ版で作業メモリ最大約 340MB)
 internal static class Ship3DP4kIndex
 {
     private static readonly object Lock = new();
@@ -1170,6 +1456,9 @@ internal static class Ship3DP4kIndex
 
 public enum Ship3DJobPhase { Estimating, Queued, Exporting, Done, Failed, Cancelled }
 
+// 書き出しの種類: 船の 3D モデル / ステーションの地図 (StationMapExports)
+public enum Ship3DJobKind { Ship, Station }
+
 // 書き出し 1 隻 (進み具合の欄の 1 行)
 public sealed class Ship3DJob : INotifyPropertyChanged
 {
@@ -1177,8 +1466,11 @@ public sealed class Ship3DJob : INotifyPropertyChanged
     private void Changed(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
     public string Record { get; }
+    // ステーションの地図は "station:" を頭に付けた短い名前 (StationMapExports.KeyPrefix。船の短い名前と重ならないように)
     public string Short { get; }
     public string Name { get; }
+    // 船かステーションの地図か (既定は船)
+    public Ship3DJobKind Kind { get; init; } = Ship3DJobKind.Ship;
     // まとめて取り込むの中の船か
     public bool InBatch { get; }
     internal CancellationTokenSource Cts { get; }
@@ -1190,6 +1482,10 @@ public sealed class Ship3DJob : INotifyPropertyChanged
     internal Ship3DStageTracker? Tracker { get; set; }
     // ほかの書き出しと並行で動いた (係数の実績に使わない)
     internal bool Overlapped { get; set; }
+    // ログ用: 今の段階 (失敗・取り消しのときにどこで止まったかを出す)、単体かまとめての何件目か、待ち行列に入ってからの時間
+    internal string LogStage { get; set; } = "";
+    internal string LogTag { get; set; } = "単体";
+    internal Stopwatch QueueWatch { get; } = new();
 
     internal Ship3DJob(string record, string shortName, string name, CancellationTokenSource? batch)
     {
@@ -1529,7 +1825,7 @@ internal static class Ship3DEstimator
     private static readonly string[] DdsSuffixes =
         new[] { ".a" }.Concat(Enumerable.Range(1, 9).Select(i => $".{i}")).Concat(Enumerable.Range(1, 9).Select(i => $".{i}a")).ToArray();
 
-    // 照合用の元ファイルの一覧 (p4k の中の大きさと CRC32)。
+    // 照合用の元ファイルの一覧 (p4k の中の大きさと Data.p4k に記録された CRC)。
     //   参照ジオメトリ (--dump-hierarchy の .cga 等。同名に m を付けたものもあれば足す)・material (.mtl)
     //   GLB の materials の extras にあるテクスチャ (diffuse_tex・normal_tex 等の .tif は p4k では .dds。実データで確認) と、その番号付きの分割ファイル、
     //   extras の中の .mtl (layers の path)

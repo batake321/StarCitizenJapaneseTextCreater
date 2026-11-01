@@ -61,6 +61,23 @@
             </StackPanel>
         </StackPanel>
 
+        <!-- ステーションの地図 (ステーション・都市 (星図の Manmade 系・LandingZone)・前哨基地 (Outpost 系)・小惑星 (Asteroid 系) の詳細を出しているときだけ出す。DetailPanel.xaml.cs の IsStationPlace。船の 3D のバーにならう)。
+             ［読み込み］でゲームデータから取り込み、［地図表示］は下の欄で、［別ウィンドウ］は StationMapWindow で出す。地図を出している間は［表に戻る］で詳細の表に戻る -->
+        <StackPanel x:Name="pnlStation" Grid.Row="4" Margin="0,0,0,4" Visibility="Collapsed">
+            <TextBlock Text="ステーションの地図" FontWeight="Bold" Margin="0,0,0,3"/>
+            <StackPanel Orientation="Horizontal">
+            <Button x:Name="btnStationImport" Content="読み込み" Padding="10,2" Margin="0,0,6,0" Click="BtnStationImport_Click"
+                    ToolTip="この場所の地図 (床の形・店・乗り場・道順) をゲームデータ (選択中のチャンネルの Data.p4k) から取り込みます"/>
+            <Button x:Name="btnStationMap" Content="地図表示" Padding="10,2" Click="BtnStationMap_Click"
+                    ToolTip="この場所の地図を下の欄に出します (取り込み済みの場所だけ)"/>
+            <Button x:Name="btnStationWindow" Content="別ウィンドウ" Padding="10,2" Margin="6,0,0,0" Click="BtnStationWindow_Click"
+                    ToolTip="この場所の地図を別のウィンドウに出します (ウィンドウの上でほかのステーションに切り替えられます)"/>
+            <Button x:Name="btnStationBack" Content="表に戻る" Padding="10,2" Margin="6,0,0,0" Click="BtnStationBack_Click" Visibility="Collapsed"
+                    ToolTip="地図の表示をやめて、詳細の表に戻ります"/>
+            <TextBlock x:Name="txtStation" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
+            </StackPanel>
+        </StackPanel>
+
         <!-- 3D モデルの書き出しの進み具合 (設定タブの 3D モデルの欄と同じ中身。書き出しが無いときは出さない) -->
         <local:Ship3DProgressPanel Grid.Row="5" Margin="0,0,0,4"/>
 
@@ -70,6 +87,7 @@
             <Grid>
                 <wv2:WebView2 x:Name="webDetail"/>
                 <wv2:WebView2 x:Name="web3D" Visibility="Collapsed"/>
+                <local:StationMapPanel x:Name="stationMap" Visibility="Collapsed"/>
                 <TextBox x:Name="txtDetail" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, Yu Gothic UI" FontSize="13"
                          VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Padding="6"
                          Visibility="Collapsed"/>

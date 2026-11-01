@@ -49,6 +49,9 @@ internal static class CurrentLocation
 
     // 天体の補正値 (無ければ null)。list は読んだ時点の App.Config.MapSpinCorrections (null ならここで 1 回だけ読む)。
     // 補正値のリストは書くときに丸ごと入れ替える (Locate) ので、読んだリストはその後も変わらない
+    // 天体ごとの、最後に入れ替えられる前の補正値 (Locate が測り直して入れ替えたときの前の値。アプリを動かしている間だけ。キーは天体の record 名)
+    public static readonly Dictionary<string, MapSpinCorrection> PreviousCorrections = new(StringComparer.Ordinal);
+
     public static MapSpinCorrection? CorrectionOf(ShopTreeNode body, IReadOnlyList<MapSpinCorrection>? list = null) =>
         (list ?? App.Config.MapSpinCorrections).LastOrDefault(c => c.Body == body.RecordName && double.IsFinite(c.OffsetDeg));
 
@@ -264,6 +267,10 @@ internal static class CurrentLocation
                 var offset = Wrap180((m - dataTheta) * 180 / Math.PI);
                 // 今のリストは書き換えず、新しいリストを作って丸ごと入れ替える (読んでいる途中のリストが変わらないように)
                 var list = App.Config.MapSpinCorrections.Where(c => c.Body != planet.RecordName).ToList();
+                // 入れ替える前の補正値を覚える (ステーションの地図は、今回の点で測った補正値 (点 = 基準の場所の中心とみなすもの) でなく、前の補正値を使う。
+                // アプリを動かしている間だけ。測り直しそのものは変えない)
+                if (App.Config.MapSpinCorrections.LastOrDefault(c => c.Body == planet.RecordName) is { } before)
+                    lock (PreviousCorrections) PreviousCorrections[planet.RecordName] = before;
                 list.Add(new MapSpinCorrection { Body = planet.RecordName, OffsetDeg = offset, Utc = unix, Ref = refKind!, RefName = refNode!.Name });
                 App.Config.MapSpinCorrections = list;
             }
@@ -363,15 +370,17 @@ internal static class CurrentLocation
     // 量子ジャンプの状態: Line = 状態の行 (「QT 目的地 Orbituary: 設定」「…: 移動中」「QT 目的地 不明（地表の地点）: 設定」)、Target = 目的地 (引けなければ null)、
     // From / To = 線の出発地と目的地 (目的地が決まらない・出発地が決まらなければ null)、System = 線を描く星系 (恒星)、
     // Goal = 線の先が契約の目標 (推定。目的地が契約のビーコンで、目標の印から位置を求めた)
+    // Dest = 目的地の位置 (線の出発地が無くても入れる。到着予定に使う。目的地が決まらなければ null)
     // FromSource = 線の出発地の出どころ (「取った座標（22:34:42）」「推定（着陸場所 Orbituary）」「推定（覚えた居場所）」「Game.log の出発地の名前（Monox）」)
     public sealed record QtState(string Line, ShopTreeNode? Target, (double X, double Y, double Z)? From, (double X, double Y, double Z)? To,
-        ShopTreeNode? System = null, bool Goal = false, string? FromSource = null);
+        ShopTreeNode? System = null, bool Goal = false, string? FromSource = null, (double X, double Y, double Z)? Dest = null);
 
     // 量子ジャンプの状態 (目的地を選んでから到着するまで。到着の後・まだ選んでいなければ null)。
     //   状態: 途中で停止 (q.Stopped)、移動中 (q.Moving) か設定 (選んだが、まだ跳んでいない)。名前は星図の英語名。
     //   目的地を選んだ後にハンガー進入か、着陸場所に着いた (q.LandingSince と landingRaw) ら、状態を消す (null)。
-    //   目的地が引けなければ「不明（地表の地点 / 契約のビーコン）」で、線は無し。ただし契約のビーコン (MISSION_QT_Quantum_Beacon) で、目的地を選んだ時刻より前の
-    //   10 分以内に契約の目標の印 (q.ObjectiveMarkers) があれば、その目標の位置 (ObjectiveOf) を線の先にし、行は「QT 目的地 契約のビーコン（目標: Monox 地表付近）: 設定」。
+    //   目的地が引けなければ「不明（地表の地点 / 契約のビーコン）」で、線は無し。ただし目的地と組の契約の目標の印 (q.ObjectiveMarkers の NavPoint が目的地の名前。
+    //   名前の形・時刻は問わない。Bounty・Refuel・救難などのビーコンも) があるか、目的地が MISSION_QT_Quantum_Beacon で、目的地を選んだ時刻より前の 10 分以内に契約の目標の印があれば、
+    //   その目標の位置 (ObjectiveOf) を線の先にし、行は「QT 目的地 契約のビーコン（目標: Monox 地表付近）: 設定」。
     //   線の出発地: ［現在位置］で取った座標が、目的地の選択より新しいか、取った後に目的地の選択まで Location が変わっていない (q.LocationChangeAtSelection) ならその座標。
     //   ただし移動中か途中で停止で q.MovingSince があり、取った座標がそれより後に取ったもの (量子ジャンプの途中に取った座標) なら、取った座標は使わない。
     //   無ければ推定 (着陸場所 → 今の Location の番号で覚えた居場所 (場所の中) → Game.log の出発地の名前 (星図の英語名。星系の名前は引かない))。どれも無ければ線は無し
@@ -418,27 +427,44 @@ internal static class CurrentLocation
         var target = tree.NodeByEntityName(tn);
         if (target is not { Position: not null })
         {
-            var beacon = tn.StartsWith("MISSION_QT_Quantum_Beacon", StringComparison.Ordinal);
-            if (beacon && q.ObjectiveMarkers is { Count: > 0 } markers
-                && markers.Where(o => o.Time <= selected && selected - o.Time <= ObjectiveBeforeSelection).OrderByDescending(o => o.Time).FirstOrDefault() is { } marker)
+            // 選んだ目的地と組の印 (PairWithMissionNavpoint。名前の形は問わない。時刻も問わない。いちばん新しいもの)
+            var paired = q.ObjectiveMarkers?.Where(o => o.NavPoint == tn).OrderByDescending(o => o.Time).FirstOrDefault();
+            var quantumBeacon = tn.StartsWith("MISSION_QT_Quantum_Beacon", StringComparison.Ordinal);
+            var beacon = paired != null || quantumBeacon;
+            // 目標の印: 組の印、無ければ (MISSION_QT_Quantum_Beacon のときだけ) 選んだ時刻より前の 10 分以内のいちばん新しい印
+            if ((paired ?? (quantumBeacon && q.ObjectiveMarkers is { Count: > 0 } markers
+                    ? markers.Where(o => o.Time <= selected && selected - o.Time <= ObjectiveBeforeSelection).OrderByDescending(o => o.Time).FirstOrDefault() : null)) is { } marker)
             {
-                // 目標の星系: 出発地の名前の場所の星系、無ければ線の出発地の星系
+                // 目標の星系: 出発地の名前の場所の星系、出発地の名前が星系の名前 (「Stanton System」「Stanton 星系」「Stanton」) ならその星系、無ければ線の出発地の星系
                 // (線の出発地が取った座標で、取ったときの星系の名前 (taken.System) があれば、その星系で決める)
                 var takenSystem = fromTaken && !string.IsNullOrEmpty(taken.System)
                     ? tree.Systems.FirstOrDefault(s => s.System.Equals(taken.System, StringComparison.OrdinalIgnoreCase)) : null;
-                var system = startNode?.Root ?? (from is { } fp && systemNames != null ? Locate(tree, fp, nowUnix, systemNames, null, fresh: false, takenSystem)?.System : null);
+                var system = startNode?.Root ?? (q.StartName is { } sn1 ? SystemByStartName(tree, sn1) : null) ?? (from is { } fp && systemNames != null ? Locate(tree, fp, nowUnix, systemNames, null, fresh: false, takenSystem)?.System : null);
                 if (system != null && ObjectiveOf(tree, marker, system, BodyOf(startNode), from, nowUnix) is { } goal)
-                    return new QtState($"QT 目的地 契約のビーコン（目標: {goal.Where}）: {status}", null, from, from != null ? goal.Pos : null, system, Goal: true, FromSource: fromSource);
+                    return new QtState($"QT 目的地 契約のビーコン（目標: {goal.Where}）: {status}", null, from, from != null ? goal.Pos : null, system, Goal: true, FromSource: fromSource, Dest: goal.Pos);
             }
             var desc = tn.StartsWith("NavPoint_Dynamic", StringComparison.Ordinal) && q.TargetIsSurface ? "（地表の地点）"
                 : beacon ? "（契約のビーコン）" : "";
             return new QtState($"QT 目的地 不明{desc}: {status}", null, null, null);
         }
-        return new QtState($"QT 目的地 {target.Name}: {status}", target, from, from != null ? At(target) : null, target.Root, FromSource: fromSource);
+        return new QtState($"QT 目的地 {target.Name}: {status}", target, from, from != null ? At(target) : null, target.Root, FromSource: fromSource, Dest: At(target));
+    }
+
+    // Game.log の出発地の名前 (Projected Start Location is <名前>) が星系の名前のときの星系 (恒星)。全ログの形は「Stanton System」「Stanton 星系」「Stanton星系」「Stanton」。
+    // 末尾の「 System」「星系」を除いた名前が星系の名前 (大文字小文字は区別しない) と同じものだけ。無ければ null
+    public static ShopTreeNode? SystemByStartName(ShopTree tree, string name)
+    {
+        var n = name.Trim();
+        if (n.EndsWith(" System", StringComparison.OrdinalIgnoreCase)) n = n[..^" System".Length];
+        else if (n.EndsWith("星系", StringComparison.Ordinal)) n = n[..^"星系".Length];
+        n = n.Trim();
+        return n.Length == 0 ? null : tree.Systems.FirstOrDefault(s => s.System.Equals(n, StringComparison.OrdinalIgnoreCase));
     }
 
     // 量子ジャンプの状態の言葉 (状態の行の最後の「: 」より後ろ): 途中で停止・移動中・設定
-    public static string QtStatus(GameLogQuantumState q) => q.Stopped ? "途中で停止（もう一度 QT が必要）" : q.Moving ? "移動中" : "設定";
+    // 2 区間の経路の区間 1 の終わり (q.Leg1EndedAt。目的地を選んだ後で、まだ移動中でない) は「区間 1 の終わり（もう一度 QT が必要）」
+    public static string QtStatus(GameLogQuantumState q) => q.Stopped ? "途中で停止（もう一度 QT が必要）" : q.Moving ? "移動中"
+        : q.Leg1EndedAt is { } le && q.TargetTime is { } tt && le >= tt ? "区間 1 の終わり（もう一度 QT が必要）" : "設定";
 
     // 契約の目標の印を、目的地を選んだ時刻より前のどれだけまで見るか
     private static readonly TimeSpan ObjectiveBeforeSelection = TimeSpan.FromMinutes(10);
@@ -457,6 +483,7 @@ internal static class CurrentLocation
     //   絶対位置 = 天体の位置 + Rz(θ)·(枠の回転·ZonePos) (場所の位置 (PlacePosition) と同じ順。θ はその天体の時刻 unix の自転の角度 (データの式 + 補正値))
     //   当てはまる天体が無く、|ZonePos| が恒星の半径より大きければ、宇宙の目標とみなし ZonePos を星系の座標 (恒星が原点) のまま使う
     //   (2026-10-22 の小惑星基地の契約で、ZonePos が星図の RAB-TUNG の位置と一致した)。書き方は SpaceObjectiveWhere
+    //   それ以外 (恒星の半径以下) は、ラグランジュ点の区域の目標 (LagrangeObjective) として決まればその位置 (書き方は SpaceObjectiveWhere)
     public static ObjectivePoint? ObjectiveOf(ShopTree tree, GameLogObjectiveMarker m, ShopTreeNode system, ShopTreeNode? preferBody,
         (double X, double Y, double Z)? refPos, double unix)
     {
@@ -465,9 +492,13 @@ internal static class CurrentLocation
             && Math.Abs(len - r) <= r * ObjectiveRadiusTolerance && b.Frame != null).ToList();
         if (cands.Count == 0)
         {
-            if (system.Radius is not { } starRadius || !(len > starRadius)) return null;
-            var sp = (m.X, m.Y, m.Z);
-            return new ObjectivePoint(m, null, sp, SpaceObjectiveWhere(tree, system, sp, unix));
+            if (system.Radius is { } starRadius && len > starRadius)
+            {
+                var sp = (m.X, m.Y, m.Z);
+                return new ObjectivePoint(m, null, sp, SpaceObjectiveWhere(tree, system, sp, unix));
+            }
+            if (LagrangeObjective(tree, system, m, len, unix) is { } lp) return new ObjectivePoint(m, null, lp, SpaceObjectiveWhere(tree, system, lp, unix));
+            return null;
         }
         var body = cands.Count == 1 ? cands[0]
             : preferBody != null && cands.Contains(preferBody) ? preferBody
@@ -483,6 +514,32 @@ internal static class CurrentLocation
         var where = Math.Abs(alt) <= ObjectiveSurfaceBand ? $"{body.Name} 地表付近" : $"{body.Name} 上空 {GameDataQueryService.FormatDistance(alt)}";
         return new ObjectivePoint(m, body, pos, where);
     }
+
+    // ラグランジュ点の区域の目標: ZonePos をラグランジュ点 (record 名が _L1〜_L5 で終わり、親が恒星の場所。例 StarMapObject.Stanton2_L4 = CRU L4) からの
+    // 星系の向きのままの位置 (回さない) とみなし、ラグランジュ点の位置 + ZonePos が、ほかの場所 (惑星・衛星以外) から LagrangeObjectiveMatch 以内になる
+    // ラグランジュ点が 1 つだけなら、その位置を返す。無い・2 つ以上なら null。|ZonePos| が LagrangeObjectiveMinLength 以下なら使わない (原点そのものが場所の近くで決まらないため)。
+    // 根拠: 全ログで目標の文が「CRU-L4 Shallow Fields Station 付近…」などのサルベージの契約 58 回で、ラグランジュ点 + ZonePos がその文のステーション・クリニックなどから
+    // 9.8〜19.9 Km になり、ほかのラグランジュ点では 100 Km 以内の場所が無かった (ステーション − ラグランジュ点 と ZonePos がほぼ同じ向き・長さ)
+    private static (double X, double Y, double Z)? LagrangeObjective(ShopTree tree, ShopTreeNode system, GameLogObjectiveMarker m, double len, double unix)
+    {
+        if (!(len > LagrangeObjectiveMinLength)) return null;
+        var places = PlacesOf(tree, system).Where(p => p.Position.HasValue).ToList();
+        var thetas = ThetasAt(places, unix);
+        var others = places.Where(p => p.Type is not ("Planet" or "Moon")).Select(p => (Node: p, Pos: PlacePosition(p, thetas))).ToList();
+        (double X, double Y, double Z)? found = null;
+        foreach (var l in places.Where(p => p.Parent == system && LagrangeRecordRegex.IsMatch(p.RecordName)))
+        {
+            var o = PlacePosition(l, thetas);
+            var pos = (o.X + m.X, o.Y + m.Y, o.Z + m.Z);
+            if (!others.Any(x => x.Node != l && Dist(pos, x.Pos) <= LagrangeObjectiveMatch)) continue;
+            if (found != null) return null;
+            found = pos;
+        }
+        return found;
+    }
+    private static readonly System.Text.RegularExpressions.Regex LagrangeRecordRegex = new(@"_L[1-5]$", System.Text.RegularExpressions.RegexOptions.Compiled);
+    // ラグランジュ点 + ZonePos とほかの場所の距離の許し (実測 9.8〜19.9 Km)、|ZonePos| の下限
+    private const double LagrangeObjectiveMatch = 50000, LagrangeObjectiveMinLength = 100000;
 
     // 宇宙の目標の書き方: いちばん近い場所 (その時刻の自転を入れた位置) の中の距離 (InsideRange) 以内なら「RAB-TUNG 付近」、
     // それより遠ければ「宇宙（RAB-TUNG から 1.2 Gm）」、場所が無ければ「宇宙」
@@ -562,5 +619,184 @@ internal static class CurrentLocation
         if (logDist is { } ld2 && ld2 <= LogNearDistance) return new Whereabouts(logPlace, ld2, false, true, nearest?.Node, nearest?.Distance ?? 0);
         if (nearest != null && nearest.Distance <= NearestNearDistance) return new Whereabouts(nearest.Node, nearest.Distance, false, false, nearest.Node, nearest.Distance);
         return new Whereabouts(null, 0, false, false, nearest?.Node, nearest?.Distance ?? 0);
+    }
+
+    // ===== 量子ジャンプの到着予定 =====
+
+    // 量子ドライブの性能: Name = ドライブの名前、Speed = driveSpeed (巡航の速さ m/秒)、Accel = stageOneAccelRate (加速度 m/秒²)
+    public sealed record QtDrive(string Name, double Speed, double Accel);
+
+    // 到着予定の結果: Eta = 到着予定 (UNIX 秒。出せなければ null)、Speed = 今の速さ (m/秒。進んだ点が 2 つ以上なら最新の 2 点の実測、1 つなら式の上の速さ)、
+    // Remain = 最新の点から目的地までの距離 (m)、Basis = 根拠 (「Pontes [S3] の性能から」「実測から」など)、Reason = 出せない理由 (出せたら null)
+    public sealed record QtEtaEstimate(double? Eta, double Speed, double Remain, string Basis, string? Reason);
+
+    // 目的地の方向へこれ未満しか進んでいない点は「止まっている」とみなし、速さの計算から外す (m)
+    private const double QtProgressMin = 1e6;
+    // 目的地を選んだときの点 (出発の位置にする点) とみなす、選んだ時刻からの時間 (秒)。自動の取得は選んだらすぐ取り、取れなければ 3 秒おきにあと 2 回。
+    // 実測では選んでから 5.9〜12.0 秒で取れ、選んでから 51 秒・111 秒の最初の点は量子ジャンプの途中だった
+    private const double QtStartPointWindow = 20;
+    // 実測の巡航の速さが driveSpeed とこの割合以上違えば、ドライブを付け替えたとみなして実測の速さで計算し直す
+    private const double QtDriveMismatch = 0.05;
+    // ドライブが分からないとき、後の 2 点の速さが式の上の速さ (a × 経過時間) のこの割合より遅ければ、最高速が頭打ちになったとみなす
+    private const double QtPlateauRatio = 0.9;
+
+    // 等加速 a で速さ v まで加速 → v で巡航 → 同じ加速度で対称に減速、の式。距離 d が足りなければ三角形の速さの形 (最高速 √(a·d))。
+    // Total = 所要時間、RemainAt(s) = 出発から s 進んだところからの残り時間、SpeedAt(s) = そこでの速さ
+    private static (double Total, Func<double, double> RemainAt, Func<double, double> SpeedAt) QtProfile(double d, double v, double a)
+    {
+        double sa = v * v / (2 * a), ta, peak, total;
+        if (2 * sa <= d) { ta = v / a; peak = v; total = 2 * ta + (d - 2 * sa) / v; }
+        else { ta = Math.Sqrt(d / a); peak = a * ta; sa = d / 2; total = 2 * ta; }
+        double TimeAt(double s)
+        {
+            s = Math.Clamp(s, 0, d);
+            return s <= sa ? Math.Sqrt(2 * s / a) : s <= d - sa ? ta + (s - sa) / peak : total - Math.Sqrt(2 * Math.Max(d - s, 0) / a);
+        }
+        double SpeedAtS(double s)
+        {
+            s = Math.Clamp(s, 0, d);
+            return s <= sa ? Math.Sqrt(2 * a * s) : s <= d - sa ? peak : Math.Sqrt(2 * a * Math.Max(d - s, 0));
+        }
+        return (total, s => total - TimeAt(s), SpeedAtS);
+    }
+
+    // 量子ジャンプの到着予定。points = 目的地を選んだ後に取った点 (座標と UNIX 秒)、sinceUnix = 目的地を選んだ時刻 (2 区間の経路で区間 1 が終わっていれば、その時刻)、
+    // dest = 目的地の位置、drive = 乗っている船の初期の量子ドライブの性能 (分からなければ null)。
+    //   出発の位置: sinceUnix から QtStartPointWindow 秒以内に取った最初の点 (目的地を選んだときの点)。無ければ出発の位置は分からない。
+    //   進んだ点: 出発の位置が分かれば、出発の位置から目的地の方向へ QtProgressMin 以上進んだ点。分からなければ、最初の点より目的地に QtProgressMin 以上近づいた点と最初の点。
+    //   進んだ点が無ければ null (まだ跳んでいない)。
+    //   ドライブが分かるとき: 式 (QtProfile。driveSpeed・stageOneAccelRate) で、最新の進んだ点の「出発から進んだ距離」から式の上の残り時間を出し、到着予定 = その点の時刻 + 残り時間。
+    //     出発の位置が分からなければ、最新の点は巡航か減速の途中とみなし、目的地までの距離から残り時間を出す。
+    //     式の上で巡航の間に取った続きの 2 点の実測の速さが driveSpeed と QtDriveMismatch 以上違えば、ドライブを付け替えたとみなし、その速さで計算し直す。
+    //   ドライブが分からないとき: 出発の位置と進んだ点 2 つが要る。最初の 2 点から s = ½a(t − t0)² で加速度 a と開始時刻 t0 を出し、同じ加速度で対称に減速するとみなす。
+    //     その後の点の速さが a × 経過時間 の QtPlateauRatio より遅ければ、最高速が頭打ちになったとみなし、実測の最も速い速さで巡航させる。到着予定 = t0 + 所要時間。
+    //     出せなければ Eta が null で、Reason に理由
+    //   筋の通らない結果は返さず、Eta を null にして Reason に理由を入れる (QtEtaCheck):
+    //     有限の値でない、最新の点 (sinceUnix 以後に取った点のいちばん新しいもの。到着予定を出した時点) より前、
+    //     または最新の点 + QtEtaLimitFactor × (目的地までの距離 Remain ÷ 基準の速さ + 基準の速さに達する時間) より先。
+    //     基準の速さは、ドライブが分かればその driveSpeed (達する時間 = driveSpeed ÷ stageOneAccelRate)、分からなければ sinceUnix 以後の続きの 2 点の実測の最も速い速さ
+    //     (達する時間 = その 2 点の真ん中の時刻 − sinceUnix。止まった状態から加速してその速さになったので、それより短い時間で減速できる)。
+    //     「距離 ÷ 速さの 1/10」だけでは、大きな船 (driveSpeed 9.7〜12.6 億 m/s、加速度 2.1〜2.6 Mm/s²) の減速の途中の正しい予定も外すので、達する時間を足す
+    public static QtEtaEstimate? EstimateQtEta(IReadOnlyList<((double X, double Y, double Z) Pos, double Unix)> points, double sinceUnix,
+        (double X, double Y, double Z) dest, QtDrive? drive)
+    {
+        var r = EstimateQtEtaCore(points, sinceUnix, dest, drive);
+        return r is { Eta: { } eta } && QtEtaCheck(points, sinceUnix, drive, eta, r.Remain) is { } why ? r with { Eta = null, Reason = why } : r;
+    }
+
+    // 到着予定の上限の倍数 (EstimateQtEta の説明。基準の速さの 1/10 で進む時間)
+    private const double QtEtaLimitFactor = 10;
+
+    // 到着予定 eta が筋の通らないものなら、その理由 (EstimateQtEta の説明)。筋が通れば null
+    private static string? QtEtaCheck(IReadOnlyList<((double X, double Y, double Z) Pos, double Unix)> points, double sinceUnix, QtDrive? drive, double eta, double remain)
+    {
+        if (!double.IsFinite(eta)) return "計算の結果が有限の値になりません";
+        var pts = points.Where(p => p.Unix >= sinceUnix).OrderBy(p => p.Unix).ToList();
+        if (pts.Count == 0) return null;
+        var latest = pts[^1].Unix;
+        if (eta < latest) return "計算の結果が最新の点を取った時刻より前です";
+        double vRef, reachTime;
+        string basis;
+        if (drive != null) { vRef = drive.Speed; reachTime = drive.Speed / drive.Accel; basis = "量子ドライブの速さ"; }
+        else
+        {
+            vRef = 0;
+            reachTime = 0;
+            for (int i = 1; i < pts.Count; i++)
+            {
+                var dt = pts[i].Unix - pts[i - 1].Unix;
+                if (!(dt > 0)) continue;
+                var v = Dist(pts[i - 1].Pos, pts[i].Pos) / dt;
+                if (v > vRef) { vRef = v; reachTime = Math.Max((pts[i - 1].Unix + pts[i].Unix) / 2 - sinceUnix, 0); }
+            }
+            basis = "実測の最も速い速さ";
+        }
+        if (!(vRef > 0) || !double.IsFinite(vRef)) return "速さの基準が無いので、計算の結果を確かめられません";
+        var limit = latest + QtEtaLimitFactor * (remain / vRef + reachTime);
+        return eta > limit ? $"計算の結果が、残りの距離を{basis}の 1/{QtEtaLimitFactor:0} で進む時間（加速・減速の分を含む）より先です" : null;
+    }
+
+    private static QtEtaEstimate? EstimateQtEtaCore(IReadOnlyList<((double X, double Y, double Z) Pos, double Unix)> points, double sinceUnix,
+        (double X, double Y, double Z) dest, QtDrive? drive)
+    {
+        var pts = points.Where(p => p.Unix >= sinceUnix).OrderBy(p => p.Unix).ToList();
+        if (pts.Count == 0) return null;
+        (double X, double Y, double Z)? start = pts[0].Unix - sinceUnix <= QtStartPointWindow ? pts[0].Pos : null;
+        var moving = new List<(double S, double R, double Unix, (double X, double Y, double Z) Pos)>();
+        double d = 0;
+        if (start is { } st)
+        {
+            d = Dist(st, dest);
+            if (!(d > 0)) return null;
+            double ux = (dest.X - st.X) / d, uy = (dest.Y - st.Y) / d, uz = (dest.Z - st.Z) / d;
+            foreach (var p in pts)
+            {
+                var along = (p.Pos.X - st.X) * ux + (p.Pos.Y - st.Y) * uy + (p.Pos.Z - st.Z) * uz;
+                if (along >= QtProgressMin) moving.Add((Math.Min(along, d), Dist(p.Pos, dest), p.Unix, p.Pos));
+            }
+        }
+        else
+        {
+            var r0 = Dist(pts[0].Pos, dest);
+            if (pts.Skip(1).Any(p => Dist(p.Pos, dest) <= r0 - QtProgressMin))
+                foreach (var p in pts.Where((p, i) => i == 0 || Dist(p.Pos, dest) <= r0 - QtProgressMin))
+                    moving.Add((double.NaN, Dist(p.Pos, dest), p.Unix, p.Pos));
+        }
+        if (moving.Count == 0) return null;
+        var last = moving[^1];
+        // 今の速さ: 進んだ点が 2 つ以上なら最新の 2 点の実測
+        double? measured = moving.Count >= 2 && last.Unix > moving[^2].Unix ? Dist(moving[^2].Pos, last.Pos) / (last.Unix - moving[^2].Unix) : null;
+        if (drive != null)
+        {
+            var v = drive.Speed;
+            var a = drive.Accel;
+            var basis = $"{drive.Name} の性能から";
+            if (start != null)
+            {
+                // 式の上で巡航の間に取った続きの 2 点の実測の速さ (いちばん新しい組)
+                var sa = v * v / (2 * a);
+                for (int i = moving.Count - 1; i >= 1; i--)
+                {
+                    var (p1, p2) = (moving[i - 1], moving[i]);
+                    if (p1.S < sa || p2.S > d - sa || p2.Unix <= p1.Unix) continue;
+                    var vm = (p2.S - p1.S) / (p2.Unix - p1.Unix);
+                    if (vm > 0 && Math.Abs(vm - v) / v >= QtDriveMismatch)
+                    {
+                        v = vm;
+                        basis = $"実測の巡航の速さ {vm / 1e6:0.0} Mm/s から（{drive.Name} から付け替えたとみなす）";
+                    }
+                    break;
+                }
+                var prof = QtProfile(d, v, a);
+                return new QtEtaEstimate(last.Unix + prof.RemainAt(last.S), measured ?? prof.SpeedAt(last.S), last.R, basis, null);
+            }
+            // 出発の位置が分からない: 巡航か減速の途中とみなし、目的地までの距離から残り時間
+            var sDec = v * v / (2 * a);
+            var remain = last.R >= sDec ? (last.R - sDec) / v + v / a : Math.Sqrt(2 * last.R / a);
+            var speedNow = last.R >= sDec ? v : Math.Sqrt(2 * a * last.R);
+            return new QtEtaEstimate(last.Unix + remain, measured ?? speedNow, last.R, basis + "（出発の位置が分からないので、巡航か減速の途中とみなす）", null);
+        }
+        if (start == null) return new QtEtaEstimate(null, measured ?? 0, last.R, "", "船の量子ドライブが分からず、出発の位置も分かりません");
+        if (moving.Count < 2) return new QtEtaEstimate(null, 0, last.R, "", "船の量子ドライブが分からず、移動中の点が 2 つありません");
+        var (q1, q2) = (moving[0], moving[1]);
+        var k = q2.Unix > q1.Unix ? (Math.Sqrt(q2.S) - Math.Sqrt(q1.S)) / (q2.Unix - q1.Unix) : 0;
+        if (!(k > 0)) return new QtEtaEstimate(null, measured ?? 0, last.R, "", "船の量子ドライブが分からず、加速中の 2 点から加速度を出せません");
+        var accel = 2 * k * k;
+        var t0 = q1.Unix - Math.Sqrt(q1.S) / k;
+        // 頭打ち: その後の続きの 2 点の速さが式の上の速さ a × 経過時間 の QtPlateauRatio より遅ければ、実測の最も速い速さで巡航
+        var vmax = double.PositiveInfinity;
+        double fastest = 0;
+        var plateau = false;
+        for (int i = 2; i < moving.Count; i++)
+        {
+            var (p1, p2) = (moving[i - 1], moving[i]);
+            if (p2.Unix <= p1.Unix) continue;
+            var vm = (p2.S - p1.S) / (p2.Unix - p1.Unix);
+            fastest = Math.Max(fastest, vm);
+            if (vm < QtPlateauRatio * accel * ((p1.Unix + p2.Unix) / 2 - t0)) plateau = true;
+        }
+        if (plateau && fastest > 0) vmax = fastest;
+        var total = double.IsInfinity(vmax) ? 2 * Math.Sqrt(d / accel) : QtProfile(d, vmax, accel).Total;
+        return new QtEtaEstimate(t0 + total, measured ?? 0, last.R, $"実測から（加速度 {accel / 1e6:0.00} Mm/s²{(plateau ? $"、最高速 {vmax / 1e6:0.0} Mm/s" : "")}）", null);
     }
 }

@@ -18,6 +18,9 @@ public sealed class GridColumnSpec
     public bool Numeric { get; init; }
     // セルのツールチップ (null・空なら出さない)。指定が無い列は出さない
     public Func<object, string?>? Tooltip { get; init; }
+    // 表には出さず、検索だけに使う文字 (表の上の検索欄と、絞り込みの窓の検索欄で、Text に加えてこの文字でも当てる。null・空なら使わない)。
+    // 指定が無い列は Text だけで当てる
+    public Func<object, string?>? SearchText { get; init; }
     // ボタンの列にするとき: 行ごとに null = ボタンを出さない、true = 押せる、false = 押せない (文字は Text)。押されたら ButtonClick (引数は行の元のオブジェクト)
     public Func<object, bool?>? Button { get; init; }
     public Action<object>? ButtonClick { get; init; }
@@ -49,6 +52,7 @@ public partial class FilterSortGrid : UserControl
         public object Source { get; init; } = new();
         public string[] Cells { get; init; } = [];
         public string?[] Tips { get; init; } = [];          // セルのツールチップ (GridColumnSpec.Tooltip。無ければ null)
+        public string?[] Searches { get; init; } = [];      // 検索だけに使う文字 (GridColumnSpec.SearchText。無ければ null)
         public GridCellButton?[] Buttons { get; init; } = [];  // ボタンの列のセル (GridColumnSpec.Button。ボタンの列でなければ null)
     }
 
@@ -161,6 +165,7 @@ public partial class FilterSortGrid : UserControl
             Source = o,
             Cells = _columns.Select(c => c.Text(o) ?? "").ToArray(),
             Tips = _columns.Select(c => c.Tooltip?.Invoke(o) is { Length: > 0 } t ? t : null).ToArray(),
+            Searches = _columns.Select(c => c.SearchText?.Invoke(o) is { Length: > 0 } s ? s : null).ToArray(),
             Buttons = _columns.Select(c => MakeButton(c, o)).ToArray(),
         }).ToList();
         Refresh();
@@ -190,6 +195,7 @@ public partial class FilterSortGrid : UserControl
         {
             r.Cells[index] = spec.Text(r.Source) ?? "";
             r.Tips[index] = spec.Tooltip?.Invoke(r.Source) is { Length: > 0 } t ? t : null;
+            r.Searches[index] = spec.SearchText?.Invoke(r.Source) is { Length: > 0 } s ? s : null;
             r.Buttons[index] = MakeButton(spec, r.Source);
         }
         Refresh();
@@ -227,7 +233,8 @@ public partial class FilterSortGrid : UserControl
         IEnumerable<GridRow> rows = _rows;
         var q = txtSearch?.Text?.Trim() ?? "";
         if (q.Length > 0)
-            rows = rows.Where(r => r.Cells.Any(c => c.Contains(q, StringComparison.OrdinalIgnoreCase)));
+            rows = rows.Where(r => r.Cells.Any(c => c.Contains(q, StringComparison.OrdinalIgnoreCase))
+                || r.Searches.Any(s => s != null && s.Contains(q, StringComparison.OrdinalIgnoreCase)));
         foreach (var (col, values) in _excluded)
             if (values.Count > 0) rows = rows.Where(r => !values.Contains(r.Cells[col]));
         var list = rows.ToList();
@@ -269,7 +276,8 @@ public partial class FilterSortGrid : UserControl
         var spec = _columns[col];
         if (!_excluded.TryGetValue(col, out var excluded)) _excluded[col] = excluded = new HashSet<string>(StringComparer.Ordinal);
         var values = _rows.GroupBy(r => r.Cells[col])
-            .Select(g => (Value: g.Key, Count: g.Count(), Key: spec.Key(g.First().Source)))
+            .Select(g => (Value: g.Key, Count: g.Count(), Key: spec.Key(g.First().Source),
+                          Searches: g.Select(r => r.Searches[col]).OfType<string>().Distinct(StringComparer.Ordinal).ToList()))
             .OrderBy(v => v.Value.Length == 0 ? 1 : 0)
             .ThenBy(v => v.Key, Comparer<IComparable?>.Create((x, y) =>
                 x == null && y == null ? 0 : x == null ? 1 : y == null ? -1
@@ -281,6 +289,8 @@ public partial class FilterSortGrid : UserControl
         var all = new CheckBox { Content = "全て", Margin = new Thickness(0, 0, 0, 2) };
         var listPanel = new StackPanel();
         var boxes = new List<(string Value, CheckBox Box)>();
+        // 値ごとの検索だけに使う文字 (その値の行の SearchText)。窓の検索欄で、値の文字に加えてこれでも当てる
+        var searchesOf = values.ToDictionary(v => v.Value, v => v.Searches, StringComparer.Ordinal);
         bool updating = false;
 
         void UpdateAll()
@@ -293,7 +303,7 @@ public partial class FilterSortGrid : UserControl
             updating = false;
         }
 
-        foreach (var (value, count, _) in values)
+        foreach (var (value, count, _, _) in values)
         {
             var box = new CheckBox { Content = $"{(value.Length == 0 ? BlankLabel : value)} ({count})", IsChecked = !excluded.Contains(value), Margin = new Thickness(0, 1, 0, 1) };
             var v = value;
@@ -320,6 +330,7 @@ public partial class FilterSortGrid : UserControl
             var t = search.Text.Trim();
             foreach (var (value, box) in boxes)
                 box.Visibility = t.Length == 0 || (value.Length == 0 ? BlankLabel : value).Contains(t, StringComparison.OrdinalIgnoreCase)
+                    || searchesOf[value].Any(s => s.Contains(t, StringComparison.OrdinalIgnoreCase))
                     ? Visibility.Visible : Visibility.Collapsed;
             UpdateAll();
         };

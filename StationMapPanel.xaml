@@ -1,0 +1,63 @@
+<UserControl x:Class="StarCitizenJapaneseTextCreater.StationMapPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf">
+    <!-- ステーションの階層マップ (［詳細］の欄の中と、別ウィンドウ StationMapWindow で使う)。
+         左: 階・区画のリスト、道案内 (出発地・目的地・手順)。右: 地図 (StationMapWeb のビューア wwwroot\stationmap\viewer.html) -->
+    <DockPanel>
+    <!-- 注記 (地図はまだ十分ではない。欄の上に 1 行。見た目はほかの注意書き (設定タブの欄の説明) と同じ #666・12) -->
+    <TextBlock DockPanel.Dock="Top" TextWrapping="Wrap" Foreground="#666" FontSize="12" Margin="0,0,0,4"
+               Text="※ ステーションなどの地図は、まだ十分ではありません。階の分け方・名前・道順が実際と違うことがあります。参考としてお使いください。"/>
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="290" MinWidth="200"/>
+            <ColumnDefinition Width="5"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Margin="0,0,4,0">
+                <TextBlock x:Name="txtTitle" FontWeight="Bold" TextWrapping="Wrap" Margin="0,0,0,2"/>
+                <TextBlock x:Name="txtCurrent" TextWrapping="Wrap" Foreground="#B3261E" Margin="0,0,0,4"/>
+                <CheckBox x:Name="chkTop" Content="この階だけ（真上から）" Margin="0,0,0,4" Checked="ChkTop_Changed" Unchecked="ChkTop_Changed"
+                          ToolTip="オフ: 各階を斜めに重ねた案内図 (選んだ階を濃く)。オン: 選んだ階だけを真上から"/>
+
+                <TextBlock Text="階" FontWeight="Bold" Margin="0,2,0,2"/>
+                <ListBox x:Name="lstFloors" Height="110" DisplayMemberPath="Display" SelectionChanged="LstFloors_SelectionChanged"/>
+
+                <TextBlock Text="区画" FontWeight="Bold" Margin="0,6,0,2"/>
+                <TextBox x:Name="txtSectionFilter" TextChanged="TxtSectionFilter_TextChanged" ToolTip="区画の名前の一部で絞り込みます"/>
+                <ListBox x:Name="lstSections" Height="120" DisplayMemberPath="Display" SelectionChanged="LstSections_SelectionChanged"
+                         ToolTip="選んだ階の区画。選ぶと、その区画の店を囲む範囲を出します"/>
+
+                <TextBlock Text="道案内" FontWeight="Bold" Margin="0,8,0,2"/>
+                <DockPanel Margin="0,0,0,2">
+                    <Button x:Name="btnCurrent" DockPanel.Dock="Right" Content="現在位置" Padding="8,1" Click="BtnCurrent_Click"
+                            ToolTip="ゲームに /showlocation を送って現在位置を取り、出発地にします (マップタブの［現在位置］と同じ)"/>
+                    <TextBlock Text="出発地" VerticalAlignment="Center"/>
+                </DockPanel>
+                <TextBox x:Name="txtStartFilter" TextChanged="TxtStartFilter_TextChanged" ToolTip="出発地の名前の一部で絞り込みます"/>
+                <ListBox x:Name="lstStart" Height="100" DisplayMemberPath="Display" SelectionChanged="LstStart_SelectionChanged"/>
+                <TextBlock Text="目的地" Margin="0,4,0,2"/>
+                <TextBox x:Name="txtDestFilter" TextChanged="TxtDestFilter_TextChanged" ToolTip="目的地の名前の一部で絞り込みます"/>
+                <ListBox x:Name="lstDest" Height="120" DisplayMemberPath="Display" SelectionChanged="LstDest_SelectionChanged"
+                         ToolTip="店・区画・乗り場。地図の店・乗り場の印のクリックでも選べます"/>
+
+                <TextBlock Text="道順" FontWeight="Bold" Margin="0,8,0,2"/>
+                <TextBlock x:Name="txtRoute" TextWrapping="Wrap" Margin="0,0,0,2"/>
+                <ListBox x:Name="lstSteps" MinHeight="60" MaxHeight="200"/>
+            </StackPanel>
+        </ScrollViewer>
+
+        <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="#E0E0E0"/>
+
+        <Border Grid.Column="2" BorderBrush="#CCC" BorderThickness="1" Background="#EEF0F2">
+            <Grid>
+                <wv2:WebView2 x:Name="web"/>
+                <TextBlock x:Name="txtOverlay" Foreground="#3C4043" FontSize="14" TextWrapping="Wrap" Margin="16"
+                           HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+            </Grid>
+        </Border>
+    </Grid>
+    </DockPanel>
+</UserControl>

@@ -693,6 +693,17 @@ public partial class GameLogPanel : UserControl
                 // 量子ジャンプが移動中になった (MovingSince が新しくなった) ときも知らせる (到着予定の速さを測る座標を取るため)
                 if (nq.Moving && nq.MovingSince is { } ms && nq.MovingSince != prevQuantum.MovingSince && DateTime.UtcNow - ms < QuantumEventFreshness)
                     QuantumEventSeen?.Invoke("move");
+                // 目的地を選んだ後に離陸し、ステーション・着陸場の区域を出た (TakeoffExitAt が新しくなった) ときも知らせる (移動中にならないまま跳ぶことがあるので、
+                // 移動中になったときと同じく到着予定を出す座標を取るため)
+                if (nq.TakeoffExitAt is { } te && nq.TakeoffExitAt != prevQuantum.TakeoffExitAt && DateTime.UtcNow - te < QuantumEventFreshness)
+                    QuantumEventSeen?.Invoke("exit");
+                // 2 区間の経路の区間 1 の終わり・着陸場に着いた・ゲームの世界に出た (読み込み画面が閉じた・復活) ときも知らせる (位置合わせの座標を取るため)
+                if (nq.Leg1EndedAt is { } le && nq.Leg1EndedAt != prevQuantum.Leg1EndedAt && DateTime.UtcNow - le < QuantumEventFreshness)
+                    QuantumEventSeen?.Invoke("leg1");
+                if (nq.LandedAt is { } la && nq.LandedAt != prevQuantum.LandedAt && DateTime.UtcNow - la < QuantumEventFreshness)
+                    QuantumEventSeen?.Invoke("land");
+                if (nq.WorldEnteredAt is { } we && nq.WorldEnteredAt != prevQuantum.WorldEnteredAt && DateTime.UtcNow - we < QuantumEventFreshness)
+                    QuantumEventSeen?.Invoke("enter");
             }
             _pollError = null;
             var missingChanged = _logMissing != !result.Found;

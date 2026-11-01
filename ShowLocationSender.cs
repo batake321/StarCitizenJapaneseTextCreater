@@ -57,7 +57,8 @@ internal static class ShowLocationSender
     // キーを 1 つ送る前ごとにゲームの窓が前にあるか確かめ、前に無ければそこで止める (ほかの窓に打ち込まないため)。
     // 最初のキーの前 (600ms 待った後) に前に無ければ NotFront、途中なら Interrupted
     // bringToFront が偽 (自動の取得) なら、ゲームの窓を前に出さない (前に無ければ、最初のキーの前で NotFront になる)
-    public static SendResult Send(IntPtr gameWindow, bool bringToFront = true)
+    // enterUtc があれば、最後の Enter (ゲームが座標を出すキー) を押す直前の時刻 (UNIX 秒、ミリ秒まで) を入れる (送れなかったときは入れない)
+    public static SendResult Send(IntPtr gameWindow, bool bringToFront = true, System.Runtime.CompilerServices.StrongBox<double>? enterUtc = null)
     {
         if (bringToFront)
         {
@@ -69,7 +70,9 @@ internal static class ShowLocationSender
         foreach (var sc in ShowLocationScans)
             if (!Scan(gameWindow, sc)) return SendResult.Interrupted;
         Thread.Sleep(200);
+        var enterAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
         if (!Scan(gameWindow, ScanEnter)) return SendResult.Interrupted;
+        if (enterUtc != null) enterUtc.Value = enterAt;
         return SendResult.Sent;
     }
 

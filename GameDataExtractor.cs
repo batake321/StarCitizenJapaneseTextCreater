@@ -3181,7 +3181,7 @@ public partial class GameDataExtractor : IDisposable
         // 失敗しても構築は続ける (deliverable_sources は前のまま)。各段の時間は StatusChanged に出る
         try { await ExtractDeliverableSourcesAsync(dataP4kPath, ct); }
         catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { StatusChanged?.Invoke($"[納品物の入手場所] 取り込みに失敗しました (前のデータを残します): {ex.Message}"); }
+        catch (Exception ex) { StatusChanged?.Invoke($"[納品物の入手場所] 取り込みに失敗しました (前のデータを残します。星図の場所・店の表が今の形でできていなければ、次の起動でまた作ります): {ex.Message}"); }
 
         // Step 7: メタ情報
         step++;
@@ -3973,10 +3973,11 @@ public partial class GameDataExtractor : IDisposable
     // BlueprintModifiersMetaKey: BP の品質の増減を取り出した時刻 (構築の手順6の BP の取り出しで書き直す。失敗したら書かれない。
     // 起動後に取り直すのは、増減の行が 0 行で、この記録も無いとき (NeedsBlueprints))。
     // ExtraItemsMetaKey: 追加の品目を取り込んだ時刻 (構築の手順6b で書き直す。失敗したら書かれず、起動後に裏で取り込む: NeedsExtraItems)。
+    // MissionMapPlacesMetaKey: 契約の地図の表を作れた印 (構築の手順6c で書き直す。失敗したら書かれず、起動後に裏で作る: NeedsMissionMapPlaces)。
     internal static readonly string[] RebuiltDataMetaKeys =
     [
         "game_version", "p4k_last_modified", "indexed_at", "p4k_path", BuildVersionMetaKey, BuildChangeNumMetaKey,
-        "equipment_rebuilt_at", BlueprintModifiersMetaKey, ExtraItemsMetaKey,
+        "equipment_rebuilt_at", BlueprintModifiersMetaKey, ExtraItemsMetaKey, MissionMapPlacesMetaKey,
     ];
 
     // gamedata_meta に残すゲームの版 (build_manifest.id の Data.Version と Data.RequestedP4ChangeNum)

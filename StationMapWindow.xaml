@@ -1,0 +1,43 @@
+<Window x:Class="StarCitizenJapaneseTextCreater.StationMapWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:StarCitizenJapaneseTextCreater"
+        Title="ステーションの地図" Width="1400" Height="900"
+        WindowStartupLocation="CenterOwner">
+    <!-- ステーションの階層マップの別ウィンドウ (モードレス。［詳細］の［別ウィンドウ］から開く。船の 3D の Ship3DWindow にならう)。
+         左で 星系 → ステーション を選び、階と区画は右の StationMapPanel のリストで選ぶ。取り込んでいない場所は自動で取り込まず［読み込み］で取り込む -->
+    <Grid Margin="6">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="230" MinWidth="160"/>
+            <ColumnDefinition Width="5"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+        <Grid Grid.Column="0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="90"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <TextBlock Grid.Row="0" Text="星系" FontWeight="Bold" Margin="0,0,0,2"/>
+            <ListBox Grid.Row="1" x:Name="lstSystems" SelectionChanged="LstSystems_SelectionChanged"/>
+            <TextBlock Grid.Row="2" Text="ステーション" FontWeight="Bold" Margin="0,6,0,2"/>
+            <!-- 種類のチェック (全部・ステーション・都市・前哨基地・小惑星・名前の無い場所。武器の表の種類の絞り込み FilterSortGrid.OpenFilter と同じ作り。中身はコードで作る) -->
+            <StackPanel Grid.Row="3" x:Name="pnlKinds" Margin="0,0,0,4"/>
+            <TextBox Grid.Row="4" x:Name="txtFilter" TextChanged="TxtFilter_TextChanged" ToolTip="名前の一部で絞り込みます"/>
+            <ListBox Grid.Row="5" x:Name="lstStations" DisplayMemberPath="Display" SelectionChanged="LstStations_SelectionChanged"/>
+            <StackPanel Grid.Row="6" Margin="0,6,0,0">
+                <Button x:Name="btnImport" Content="読み込み" Padding="10,2" HorizontalAlignment="Left" IsEnabled="False" Click="BtnImport_Click"
+                        ToolTip="この場所の地図をゲームデータ (選択中のチャンネルの Data.p4k) から取り込みます"/>
+                <TextBlock x:Name="txtStatus" Foreground="#666" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                <!-- 同じ地図のまとめの状態 (調べている間・調べられなかったとき) -->
+                <TextBlock x:Name="txtGroupStatus" Foreground="#666" TextWrapping="Wrap" Margin="0,2,0,0"/>
+            </StackPanel>
+        </Grid>
+        <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="#E0E0E0"/>
+        <local:StationMapPanel Grid.Column="2" x:Name="panel"/>
+    </Grid>
+</Window>

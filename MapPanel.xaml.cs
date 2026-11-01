@@ -246,9 +246,16 @@ public partial class MapPanel : UserControl
     // 送る前に、今わかっている現在位置の星系 (KnownCurrentSystem) が今の表示 (3 星系の並びも含む) と違えば、先にその星系 1 つの表示にする
     // (星系のボタンと同じ切り替え方。中心・幅は MapViews に覚えた表示)。切り替えている間も取得中と同じ扱いにする
     // (ボタンを押せなくし、自動の取得を割り込ませない)。取得中 (自動の取得の途中) に押されたときは切り替えない
-    private async void BtnCurrent_Click(object sender, RoutedEventArgs e)
+    private async void BtnCurrent_Click(object sender, RoutedEventArgs e) => await CaptureCurrentAsync();
+
+    // ［現在位置］と同じ処理の公開の入口 (ステーションの地図の［現在位置］(StationMapWeb.CaptureHook) からも呼ぶ)。
+    // 戻り値: 座標を取れたか (取得中に呼ばれたときは false) と、そのときのマップタブの状態の欄の文 (取れなかった理由など)。
+    // マップタブが開かれていない (この欄が画面に無い) ときは、図の作り直しを次に開いたときに回す (RenderOrDeferAsync。
+    // 画面に無い WebView2 の初期化は画面に出るまで終わらないので、そのまま待つと取得中のまま止まり、自動の取得も動かなくなる)
+    // from: 押したボタンの画面 (アプリのログの「（ボタン・<from>）」に出す。既定は［マップ］タブの［現在位置］)
+    public async Task<(bool Ok, string Status)> CaptureCurrentAsync(string from = "［マップ］タブ")
     {
-        if (_capturing) return;
+        if (_capturing) return (false, "現在位置を取っている途中です");
         if (KnownCurrentSystem() is { } known && !known.Equals(CurrentView(), StringComparison.OrdinalIgnoreCase))
         {
             _capturing = true;
@@ -257,7 +264,7 @@ public partial class MapPanel : UserControl
             {
                 App.Config.MapView = known;
                 SaveConfig?.Invoke();
-                await RenderAsync();
+                await RenderOrDeferAsync();
             }
             finally
             {
@@ -265,7 +272,16 @@ public partial class MapPanel : UserControl
                 btnCurrent.IsEnabled = true;
             }
         }
-        await CaptureAsync(auto: false);
+        var ok = await CaptureAsync(auto: false, from);
+        return (ok, txtStatus.Text);
+    }
+
+    // 図を作り直す。この欄が画面に無いときは作り直さず、次に画面に出たとき (Loaded) に作る (知らせの文は状態の欄に出す)
+    private async Task RenderOrDeferAsync(string? statusAfter = null)
+    {
+        if (IsLoaded) { await RenderAsync(statusAfter); return; }
+        _stale = true;
+        txtStatus.Text = statusAfter ?? "";
     }
 
     // 今わかっている現在位置の星系 (SystemNames の 1 つ)。図と同じ求め方 (ComputeEffective。星系は MapState と同じく eff.System があればその星系、
@@ -281,27 +297,32 @@ public partial class MapPanel : UserControl
 
     // 座標を取っている途中か (［現在位置］と自動の取得を同時に動かさない)、最後に自動で取った時刻 (UNIX 秒)
     private bool _capturing;
+    // ［現在位置］のボタン (どの画面のものでも) で最後に取った座標の時刻 (App.Config.MapCurrent.Utc と同じ値。まだ無ければ 0。アプリを動かしている間だけ)
+    public static double LastButtonCaptureUtc { get; private set; }
     private double _lastAutoCapture;
 
     // ［ゲームログ］の追い読みで量子ジャンプの目的地の選択 (kind = "select") か到着 (kind = "arrive") の行を見た (GameLogPanel.QuantumEventSeen)。
-    // 「QT の前後で自動で現在位置を取る」がオンなら座標を取る (CaptureAsync(auto: true))。マップタブが見えていなくても動く。
+    // 「QT・着陸・ゲーム開始のときに自動で現在位置を取る」(旧「QT の前後で自動で現在位置を取る」) がオンなら座標を取る (CaptureAsync(auto: true))。マップタブが見えていなくても動く。
     //   目的地の選択: 行を見たらすぐ (跳ぶ前に出発地を取るため)。取れなかった (座標を読めない・ゲームの窓が前に無い) ら、3 秒おきにあと 2 回まで試す。
     //     量子ジャンプが移動中になったら、その時点でやめる。ボタンの取得の途中なら、その回は飛ばす
     //     (星図 (mobiGlas など) を開いている間はチャットに届かず取れないことがあるため)
-    //   到着: 2 秒後に 1 回。
-    //   前に自動で取り始めてから 10 秒以内なら始めない (同じ目的地の選び直しが続いたときは最初の 1 回だけ。再試行には当てない)
+    //   到着: 2 秒後に 1 回。2 区間の経路の区間 1 の終わり (kind = "leg1")・着陸場に着いた (kind = "land"。量子ジャンプの後でなくても。
+    //   到着の行が出ない最後の区間の着陸もこれ)・ゲームの世界に出た (kind = "enter"。読み込み画面が閉じた・復活) も同じく 2 秒後に 1 回 (自転の補正の位置合わせのため)。
+    //   前に自動で取り始めてから 10 秒以内なら始めない (着陸と到着が続いたときなどは最初の 1 回だけ) (同じ目的地の選び直しが続いたときは最初の 1 回だけ。再試行には当てない)
     //   移動中になった (kind = "move"): 到着予定の速さを測る座標を取る (OnQuantumMoving)。上の 10 秒の決まりは当てず、自動で取り始めた時刻も変えない
     //     (到着の自動の取得を妨げないため)
+    //   目的地を選んだ後に離陸してステーション・着陸場の区域を出た (kind = "exit"。GameLogQuantumState.TakeoffExitAt): 移動中になったときと同じ決まりで座標を取る (OnQuantumTakeoffExit)
     public void OnQuantumEvent(string kind)
     {
         if (!App.Config.MapAutoCapture) return;
         if (kind == "move") { OnQuantumMoving(); return; }
+        if (kind == "exit") { OnQuantumTakeoffExit(); return; }
         if (Now() - _lastAutoCapture < AutoCaptureMinIntervalSeconds) return;
         _lastAutoCapture = Now();
         var select = kind == "select";
         _ = Dispatcher.InvokeAsync(async () =>
         {
-            if (!select) await Task.Delay(TimeSpan.FromSeconds(2));   // 目的地の選択はすぐ取りに行く。到着は 2 秒後
+            if (!select) await Task.Delay(TimeSpan.FromSeconds(2));   // 目的地の選択はすぐ取りに行く。到着・区間 1 の終わり・着陸・ゲームの世界に出たときは 2 秒後
             var tries = select ? 3 : 1;
             for (int i = 0; i < tries; i++)
             {
@@ -338,6 +359,32 @@ public partial class MapPanel : UserControl
         });
     }
 
+    // 目的地を選んだ後に離陸し、ステーション・着陸場の区域を出た (TakeoffExitAt): 区域を出た時刻の 15 秒後と 45 秒後に座標を取る (今がもう過ぎていればすぐ)。
+    // 離陸の後の最初の Location の変化は移動中にしないので、そのまま跳ぶと移動中にならない (2026-10-31 15:14 の出発)。決まりは OnQuantumMoving と同じ:
+    // 各回、取れなかったら 3 秒おきにあと 2 回まで試す。試す前に、到着した (QtActive でない)・目的地を選び直した (TargetTime が変わった) ならやめる (その後の回もやめる)。
+    // ボタンの取得の途中なら、その試しは飛ばす
+    private void OnQuantumTakeoffExit()
+    {
+        if (QuantumStateProvider?.Invoke() is not { TakeoffExitAt: { } exitAt } q || !QtActive(q)) return;
+        var targetTime = q.TargetTime;
+        var sinceUnix = (exitAt - DateTime.UnixEpoch).TotalSeconds;   // TakeoffExitAt は UTC
+        _ = Dispatcher.InvokeAsync(async () =>
+        {
+            foreach (var after in MoveCaptureDelaysSeconds)
+            {
+                var wait = sinceUnix + after - Now();
+                if (wait > 0) await Task.Delay(TimeSpan.FromSeconds(wait));
+                for (int i = 0; i < 3; i++)
+                {
+                    if (i > 0) await Task.Delay(TimeSpan.FromSeconds(3));
+                    if (QuantumStateProvider?.Invoke() is not { } cq || !QtActive(cq) || cq.TargetTime != targetTime) return;   // 着いた・選び直した: この後の回もやめる
+                    if (_capturing) continue;   // ボタンの取得の途中: この試しは飛ばす
+                    if (await CaptureAsync(auto: true)) break;
+                }
+            }
+        });
+    }
+
     // 移動中になってから座標を取るまでの秒数 (この順)
     private static readonly double[] MoveCaptureDelaysSeconds = { 15, 45 };
 
@@ -359,12 +406,13 @@ public partial class MapPanel : UserControl
     // 量子ジャンプの途中 (ComputeQt が null でない) に取ったら、星系は線の星系 (QtState.System、無ければ目的地の星系) で決め、覚える居場所もその星系で決める
     // (取った座標に星系の名前 (MapCurrentState.System) を入れる)
     // 座標を取れたら true
-    private async Task<bool> CaptureAsync(bool auto)
+    // from: ボタンのとき、押したボタンの画面 (［マップ］タブ・ステーションの地図など。アプリのログに出す)
+    private async Task<bool> CaptureAsync(bool auto, string from = "［マップ］タブ")
     {
         if (_capturing) return false;
         _capturing = true;
-        // 取れなかったとき: 画面の知らせ (status) を出し、アプリのログに「[マップ] 現在位置を取れませんでした（自動 / ボタン）: <理由>」を出す (理由は無ければ status)
-        var mode = auto ? "自動" : "ボタン";
+        // 取れなかったとき: 画面の知らせ (status) を出し、アプリのログに「[マップ] 現在位置を取れませんでした（自動 / ボタン・<画面>）: <理由>」を出す (理由は無ければ status)
+        var mode = auto ? "自動" : $"ボタン・{from}";
         // クリップボードを元に戻せなかったときの知らせ (状態の欄の終わりに添える。戻せたときは空)
         var clipboardNote = "";
         bool Fail(string status, string? reason = null)
@@ -443,10 +491,12 @@ public partial class MapPanel : UserControl
             try { Clipboard.SetText(ClipboardPlaceholder); } catch (Exception) { }
             ShowLocationSender.SendResult sent;
             string? text = null;
+            // 最後の Enter を押した時刻 (ゲームが座標を出した時刻。取った座標の時刻にする)
+            var enterUtc = new System.Runtime.CompilerServices.StrongBox<double>(double.NaN);
             try
             {
                 // ゲームの窓はもう前にある (ボタンは上で前に出し、自動は前にあることを確かめた) ので、ここでは前に出さない
-                sent = await Task.Run(() => ShowLocationSender.Send(game, bringToFront: false));
+                sent = await Task.Run(() => ShowLocationSender.Send(game, bringToFront: false, enterUtc));
                 if (sent == ShowLocationSender.SendResult.Sent)
                 {
                     await Task.Delay(1500);   // 最後の Enter から 1500ms 後に読む
@@ -490,11 +540,14 @@ public partial class MapPanel : UserControl
             }
             var tree = await GetTreeAsync();
             if (tree == null || tree.IsEmpty) { ShowMessage("インデックスが未構築です (設定タブの［インデックス構築］)"); return Fail("", "インデックスが未構築です"); }
-            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
-            // 量子ジャンプが移動中 (途中で停止でない) なら、到着予定の速さを測る点 (座標, 取った時刻) に足す (目的地を選んだ時刻 TargetTime ごと。違えば前の点を捨てる)
+            // 取った座標の時刻: ゲームが座標を出した、最後の Enter を押した時刻 (ミリ秒まで)。前は 1.5 秒待ってクリップボードを読み、場所の木を取った後の時刻で、
+            // 1.5 秒以上遅れていた (自転・公転を当てる時刻がずれる)。Enter の時刻が無いとき (送った結果が Sent でない場合はここに来ない) だけ今の時刻
+            var now = double.IsFinite(enterUtc.Value) ? enterUtc.Value : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+            // 量子ジャンプの目的地を選んでから到着するまで (QtActive) なら、到着予定を出す点 (座標, 取った時刻) に足す (目的地を選んだ時刻 TargetTime ごと。違えば前の点を捨てる)。
+            // 移動中かどうかは問わない (量子ジャンプを始めた行は Game.log に出ない。目的地を選んだときの点は出発の位置に使う)
             var qNow = QuantumStateProvider?.Invoke();
             var pointAdded = false;
-            if (qNow is { Moving: true, Stopped: false })
+            if (qNow != null && QtActive(qNow))
             {
                 if (qNow.TargetTime != _qtPointsTargetTime) { _qtPoints.Clear(); _qtPointsTargetTime = qNow.TargetTime; }
                 _qtPoints.Add((pos, now));
@@ -502,21 +555,23 @@ public partial class MapPanel : UserControl
             }
             // 量子ジャンプの途中なら、星系は線の星系にする (App.Config.MapCurrent を入れ替える前に求める)
             var qt = ComputeQt(tree);
-            // 点が 2 つ以上になり、到着予定を出せれば、アプリのログに出す
-            if (pointAdded && _qtPoints.Count >= 2 && qNow != null && qt != null && QtEta(qNow, qt) is { } eta)
+            // 点を足して到着予定を出せれば、アプリのログに出す (根拠: ドライブの名前か「実測から」を添える)
+            if (pointAdded && qNow != null && qt != null && QtEta(qNow, qt) is { Eta: { } etaUnix } eta)
                 App.AppendStartupLog(App.Config.WorkingDirectory, string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                    $"[マップ] QT の到着予定: {LocalTime(eta.Eta)}（速さ {eta.Speed / 1e6:0.0} Mm/s、残り {GameDataQueryService.FormatDistance(eta.Remain)}）"));
+                    $"[マップ] QT の到着予定: {LocalTime(etaUnix)}（速さ {eta.Speed / 1e6:0.0} Mm/s、残り {GameDataQueryService.FormatDistance(eta.Remain)}、{eta.Basis}）"));
             var qtSystem = qt?.System ?? qt?.Target?.Root;
             var res = CurrentLocation.Locate(tree, pos, now, SystemNames, LogPlaceNode(tree, LandingPlaceProvider?.Invoke()), fresh: true, qtSystem);
             if (res == null) return Fail("現在位置の星系が分かりませんでした");
             // 取れた: アプリのログに座標・星系・いちばん近い場所を出す
             App.AppendStartupLog(App.Config.WorkingDirectory, string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                $"[マップ] 現在位置を取りました（{mode}）: x{pos.X:0.0} y{pos.Y:0.0} z{pos.Z:0.0}（星系 {res.System.System}、いちばん近い場所 {(res.Near.FirstOrDefault() is { } nr ? $"{nr.Node.Name} {GameDataQueryService.FormatDistance(nr.Distance)}" : "なし")}）"));
+                $"[マップ] 現在位置を取りました（{mode}）: 時刻 {DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(now * 1000)).ToLocalTime():HH:mm:ss.fff}（最後の Enter）、x{pos.X:0.0} y{pos.Y:0.0} z{pos.Z:0.0}（星系 {res.System.System}、いちばん近い場所 {(res.Near.FirstOrDefault() is { } nr ? $"{nr.Node.Name} {GameDataQueryService.FormatDistance(nr.Distance)}" : "なし")}）"));
             var system = SystemNames.First(n => n.Equals(res.System.System, StringComparison.OrdinalIgnoreCase));
             // 取ったときの Game.log の Location の番号と、そのときの「どこにいたか」を組にして覚える (番号ごとに最新の 1 つ。CurrentLocation.Classify)。
             // 覚えたリストは書き換えず、新しいリストに入れ替える
             var locationId = QuantumStateProvider?.Invoke()?.LocationId ?? "";
             App.Config.MapCurrent = new MapCurrentState { X = pos.X, Y = pos.Y, Z = pos.Z, Utc = now, LocationId = locationId, System = qtSystem?.System ?? "" };
+            // ボタンで取った座標の時刻 (ステーションの地図は、これが今の現在位置の時刻と同じなら、どの画面のボタンで取ったときも出発地を現在位置にする)
+            if (!auto) LastButtonCaptureUtc = now;
             if (locationId.Length > 0 && CurrentLocation.Classify(tree, pos, now, SystemNames, LogPlaceNode(tree, LandingPlaceProvider?.Invoke()), qtSystem) is { } where)
             {
                 var memories = App.Config.MapLocationMemories.Where(m => m.LocationId != locationId).ToList();
@@ -536,7 +591,7 @@ public partial class MapPanel : UserControl
             App.Config.MapViews.RemoveAll(v => string.Equals(v.System, system, StringComparison.OrdinalIgnoreCase));
             App.Config.MapViews.Add(new MapViewState { System = system, Cx = pos.X, Cy = pos.Y, W = Math.Max(res.NearestDistance * 6, 20000) });
             SaveConfig?.Invoke();
-            await RenderAsync($"現在位置を取得しました ({LocalTime(now)})" + ocrNote + clipboardNote);
+            await RenderOrDeferAsync($"現在位置を取得しました ({LocalTime(now)})" + ocrNote + clipboardNote);
             return true;
         }
         catch (Exception ex)
@@ -565,16 +620,43 @@ public partial class MapPanel : UserControl
     // ただし行 (Line) は、最後の「: 」より後ろを今の状態の言葉 (CurrentLocation.QtStatus) に置き換える。From か To が null の結果は覚えない (その回の結果を返す)。
     // Quantum が null・目的地を選び直した (TargetTime が変わった)・設定に戻った (移動中でも停止でもない)・ShopTree が作り直された なら覚えを捨て、その回の結果を返す。
     // 覚えはアプリの中だけ (保存しない)。
-    // 返す前に、到着予定を出せれば (QtEta) 行の末尾に「（到着予定 18:06:00 頃・推定）」を付ける (覚えた状態には付けない)
+    // 途中で停止 (q.Stopped) でも、到着予定 (QtEta) の時刻 + QtStopEtaMargin より前か、取った点が目的地へ進み続けている (StopOverridden) なら、
+    // 停止にしない (移動中として扱う。目的地の区域とは別の区域に入った後も量子ジャンプが続くことがあるため)。
+    // 返す前に、到着予定を出せれば (QtEta) 行の末尾に「（到着予定 18:06:00 頃・推定）」を付ける (覚えた状態には付けない)。2 区間の経路で区間 1 がまだ終わっていなければ
+    // 「（到着予定 18:06:00 頃・推定、途中で 1 回止まります）」。進んだ点があるのに出せなければ「（到着予定を出せません: <理由>）」
+    // 求める途中で例外が出たら、null を返し (マップの書き換え・タイマーは止めない)、アプリのログに出す (同じ内容が続く間は 1 回だけ)
     private CurrentLocation.QtState? ComputeQt(ShopTree tree)
+    {
+        try { return ComputeQtCore(tree); }
+        catch (Exception ex)
+        {
+            var msg = $"[マップ] 量子ジャンプの状態を求められませんでした: {ex.GetType().FullName}: {ex.Message}";
+            if (msg != _computeQtLastError)
+            {
+                _computeQtLastError = msg;
+                App.AppendStartupLog(App.Config.WorkingDirectory, msg);
+            }
+            return null;
+        }
+    }
+    // ComputeQt で最後にアプリのログに出した例外の内容 (同じ内容を 2 秒ごとに出し続けないため)
+    private string? _computeQtLastError;
+
+    private CurrentLocation.QtState? ComputeQtCore(ShopTree tree)
     {
         var q = QuantumStateProvider?.Invoke();
         var qt = q == null ? null : CurrentLocation.Quantum(tree, q, App.Config.MapCurrent, Now(), LandingPlaceProvider?.Invoke(), SystemNames);
+        if (q is { Stopped: true } && qt != null && StopOverridden(q, qt))
+        {
+            q = q with { Stopped = false };
+            qt = CurrentLocation.Quantum(tree, q, App.Config.MapCurrent, Now(), LandingPlaceProvider?.Invoke(), SystemNames);
+        }
         if (qt == null || !(q!.Moving || q.Stopped) || q.TargetTime != _qtFixedTargetTime || !ReferenceEquals(tree, _qtFixedTree))
         { _qtFixedTargetTime = null; _qtFixed = null; _qtFixedTree = null; }
-        if (qt == null || !(q!.Moving || q.Stopped)) return qt;
+        if (qt == null) return null;
         CurrentLocation.QtState result;
-        if (_qtFixed is { } fixedQt)
+        if (!(q!.Moving || q.Stopped)) result = qt;
+        else if (_qtFixed is { } fixedQt)
         {
             var cut = fixedQt.Line.LastIndexOf(": ", StringComparison.Ordinal);
             result = cut < 0 ? fixedQt : fixedQt with { Line = fixedQt.Line[..(cut + 2)] + CurrentLocation.QtStatus(q) };
@@ -589,27 +671,70 @@ public partial class MapPanel : UserControl
             }
             result = qt;
         }
-        return QtEta(q, result) is { } eta ? result with { Line = result.Line + $"（到着予定 {LocalTime(eta.Eta)} 頃・推定）" } : result;
+        var legNote = q.RouteFinalIndex >= 1 && !(q.Leg1EndedAt is { } le && le >= q.TargetTime) ? "、途中で 1 回止まります" : "";
+        return QtEta(q, result) switch
+        {
+            { Eta: { } eta } => result with { Line = result.Line + $"（到着予定 {LocalTime(eta)} 頃・推定{legNote}）" },
+            { Reason: { } reason } => result with { Line = result.Line + $"（到着予定を出せません: {reason}）" },
+            _ => result,
+        };
     }
 
-    // 到着予定 (UNIX 秒)・速さ (m/s)・残りの距離 (m)。量子ジャンプが移動中 (途中で停止でない) で、目的地の位置 (qt.To) があり、
-    // 今の QT (TargetTime) で移動中に取った点が 2 つ以上あるときだけ。最新の 2 点 p1 (t1)・p2 (t2) から速さ = 距離 (p1, p2) / (t2 - t1)
-    // (t2 > t1 で速さが正のときだけ)、到着予定 = t2 + 距離 (p2, 目的地) / 速さ。出せなければ null
-    private (double Eta, double Speed, double Remain)? QtEta(GameLogQuantumState q, CurrentLocation.QtState qt)
+    // 途中で停止を取り消す余裕 (秒): 到着予定の時刻からこれだけ過ぎるまでは停止にしない。停止の判定の待ち (GameLogParser.QuantumStopWait) と同じ 15 秒。
+    // 実測 (2026-10-21〜11-01 の点 35 個) では、実際の到着 (2 区間の経路は区間 1 の終わり) が到着予定より遅れたのは、出発の位置が分かる点で最大 2.2 秒、
+    // 出発の位置が分からない点 (2026-10-28 の Orison) で 11.8 秒。2 区間の経路で区間 1 の終わりが分からなかった回 (2026-10-26 の Pyro のビーコン) は 66〜67 秒遅れた
+    // (この回は停止になる。区間 1 の終わりで止まっているので「もう一度 QT が必要」は正しい)。
+    // 区域に入った後も QT が続いた 29 回 (区域に入ってから到着まで 23〜267 秒) は、到着予定より前に到着していれば停止にならない
+    private const double QtStopEtaMargin = 15;
+    // 「取った点が目的地へ進み続けている」に使う点の新しさ (秒): 最新の点が今からこれより古ければ使わない
+    private const double QtProgressFreshSeconds = 30;
+
+    // 途中で停止を取り消すか: 正しい到着予定 (EstimateQtEta が筋の通らない結果を外した後の Eta。有限の値) があり、今が到着予定 + QtStopEtaMargin より前。
+    // または、最後に Location が変わった (停止の候補になった) 後に取った続きの 2 点で、目的地までの距離が 1 Mm 以上縮んでいて、最新の点が QtProgressFreshSeconds 以内に取ったもの
+    private bool StopOverridden(GameLogQuantumState q, CurrentLocation.QtState qt)
     {
-        if (!q.Moving || q.Stopped || qt.To is not { } to || q.TargetTime != _qtPointsTargetTime || _qtPoints.Count < 2) return null;
-        var (p1, t1) = _qtPoints[^2];
-        var (p2, t2) = _qtPoints[^1];
-        if (t2 <= t1) return null;
+        if (QtEta(q, qt) is { Eta: { } eta } && double.IsFinite(eta) && Now() <= eta + QtStopEtaMargin) return true;
+        if ((qt.Dest ?? qt.To) is not { } dest || q.TargetTime != _qtPointsTargetTime || q.LastLocationChange is not { } changed) return false;
+        var since = (changed - DateTime.UnixEpoch).TotalSeconds;
+        var pts = _qtPoints.Where(p => p.Unix >= since).ToList();
+        if (pts.Count < 2 || Now() - pts[^1].Unix > QtProgressFreshSeconds) return false;
         static double Dist((double X, double Y, double Z) a, (double X, double Y, double Z) b) =>
             Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y) + (a.Z - b.Z) * (a.Z - b.Z));
-        var v = Dist(p1, p2) / (t2 - t1);
-        if (!(v > 0)) return null;
-        var remain = Dist(p2, to);
-        return (t2 + remain / v, v, remain);
+        return Dist(pts[^2].Pos, dest) - Dist(pts[^1].Pos, dest) >= 1e6;
     }
 
-    // 到着予定の速さを測る点 (量子ジャンプの移動中に取った座標と、取った時刻 (UNIX 秒)。古い順) と、その QT の目的地を選んだ時刻。アプリの中だけ (保存しない)
+    // 量子ジャンプの目的地を選んでから到着するまでか (到着・目的地を選んだ後の着陸・ハンガー進入の前)
+    private static bool QtActive(GameLogQuantumState q) =>
+        q.TargetTime is { } tt && !(q.ArrivedTime is { } a && a >= tt) && !(q.LandingSince is { } ls && ls > tt) && !(q.LastHangarEnter is { } he && he > tt);
+
+    // 到着予定 (CurrentLocation.EstimateQtEta)。今の QT (TargetTime) で取った点と、目的地の位置 (qt.Dest、無ければ qt.To)、目的地を選んだ船の初期の量子ドライブ (DriveOf) から出す。
+    // 2 区間の経路で区間 1 が終わっていれば、その後に取った点だけで、最終の目的地までを出す。QT の途中でない・目的地の位置が無い・点が無ければ null
+    private CurrentLocation.QtEtaEstimate? QtEta(GameLogQuantumState q, CurrentLocation.QtState qt)
+    {
+        if (!QtActive(q) || (qt.Dest ?? qt.To) is not { } dest || q.TargetTime != _qtPointsTargetTime || _qtPoints.Count == 0) return null;
+        var from = q.Leg1EndedAt is { } le && le >= q.TargetTime ? le : q.TargetTime!.Value;
+        return CurrentLocation.EstimateQtEta(_qtPoints, (from - DateTime.UnixEpoch).TotalSeconds, dest, DriveOf(q.ShipClass));
+    }
+
+    // 船のクラスごとの初期の量子ドライブ (GameDataQueryService.InitialQuantumDriveOf。引けた結果と、引けなかった (null) 結果を覚える。DB を読めなければ覚えずに null)
+    private readonly Dictionary<string, CurrentLocation.QtDrive?> _qtDrives = new(StringComparer.OrdinalIgnoreCase);
+    private CurrentLocation.QtDrive? DriveOf(string? shipClass)
+    {
+        if (string.IsNullOrWhiteSpace(shipClass)) return null;
+        if (_qtDrives.TryGetValue(shipClass, out var known)) return known;
+        try
+        {
+            var db = DetailPanel.DbPath();
+            if (!File.Exists(db)) return null;
+            using var gq = GameDataQueryService.OpenReadOnly(db);
+            var d = gq.InitialQuantumDriveOf(shipClass) is { } x ? new CurrentLocation.QtDrive(x.Name, x.Speed, x.Accel) : null;
+            _qtDrives[shipClass] = d;
+            return d;
+        }
+        catch (Exception) { return null; }
+    }
+
+    // 到着予定を出す点 (量子ジャンプの目的地を選んでから到着するまでに取った座標と、取った時刻 (UNIX 秒)。古い順) と、その QT の目的地を選んだ時刻。アプリの中だけ (保存しない)
     private readonly List<((double X, double Y, double Z) Pos, double Unix)> _qtPoints = new();
     private DateTime? _qtPointsTargetTime;
 
@@ -656,7 +781,12 @@ public partial class MapPanel : UserControl
     }
 
     private static DateTime ToLocal(double unix) => DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(unix * 1000)).LocalDateTime;
-    private static string LocalTime(double unix) => ToLocal(unix).ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+    // 時刻の文字 (HH:mm:ss)。有限でない・日時で表せない (DateTimeOffset の範囲の前後 1 日を除いた外) 値は、例外にせず「不明」
+    private static string LocalTime(double unix) =>
+        !double.IsFinite(unix) || unix < LocalTimeMinUnix || unix > LocalTimeMaxUnix ? "不明"
+        : ToLocal(unix).ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+    private static readonly double LocalTimeMinUnix = DateTimeOffset.MinValue.ToUnixTimeSeconds() + 86400.0;
+    private static readonly double LocalTimeMaxUnix = DateTimeOffset.MaxValue.ToUnixTimeSeconds() - 86400.0;
 
     // ページの中身の状態 (ページを作るとき (BuildPage) と、ページを作り直さずに書き換えるとき (UpdateJson) の両方で使う):
     //   表示 (view) の星系図ごとの重ねるもの (MapOverlay。自転の角度・現在位置の印・ラベルの距離・中にいる場所)、【現在位置の近く】の中身の HTML (打ち消し済み。無ければ null)。
@@ -712,6 +842,11 @@ public partial class MapPanel : UserControl
             }
         }
         var maps = new List<(ShopTreeNode, string, MapOverlay)>();
+        // 最近の契約の目標を描く星系: 現在位置の星系、無ければ量子ジャンプの線の星系、無ければ位置の無い推定 (覚えた居場所の「付近」「宇宙」) の場所の星系、
+        // 無ければ量子ジャンプの目的地の星系 (星図で引けるとき)
+        var objectiveSystem = loc?.System ?? qt?.System
+            ?? (eff is { Kind: CurrentLocation.PositionKind.EstMemory, NoPos: true, Place: { } memPlace } ? memPlace.Root : null)
+            ?? (q?.Target is { } qTarget ? tree.NodeByEntityName(qTarget)?.Root : null);
         foreach (var name in view == ViewAll ? SystemNames : new[] { view })
         {
             var star = tree.Systems.FirstOrDefault(s => s.System.Equals(name, StringComparison.OrdinalIgnoreCase));
@@ -721,8 +856,8 @@ public partial class MapPanel : UserControl
             // 量子ジャンプの線と目的地 (線を描く星系の図だけ)
             if (qt != null && (qt.System ?? qt.Target?.Root) == star)
                 overlay = overlay with { QtFrom = qt.From, QtTo = qt.To, QtDest = qt.Target, QtGoal = qt.Goal };
-            // 最近の契約の目標 (今いる星系 (現在位置の星系、無ければ量子ジャンプの線の星系) の図だけ)
-            if ((loc?.System ?? qt?.System) == star)
+            // 最近の契約の目標 (今いる星系 (objectiveSystem) の図だけ)
+            if (objectiveSystem == star)
             {
                 var objs = CurrentLocation.RecentObjectives(tree, q, star, null, eff is { NoPos: false } ep ? ep.Pos : null, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
                 if (objs.Count > 0) overlay = overlay with { Objectives = objs.Select(o => o.Pos).ToList() };
@@ -735,9 +870,10 @@ public partial class MapPanel : UserControl
             // 出発地も引けない量子ジャンプ: 印は出さず、一覧の上の行だけ
             near = "<h3>【現在位置の近く】</h3><p class=\"here\">" + WebUtility.HtmlEncode(MovingUnknownLine(eff)) + "</p>";
         else if (eff is { Kind: CurrentLocation.PositionKind.EstMemory, NoPos: true })
-            // 「天体の付近」「宇宙」として覚えた Location の番号: 位置は出さず、現在地の行だけ
+            // 「天体の付近」「宇宙」として覚えた Location の番号: 位置は出さず、現在地の行と星系 (覚えた場所の星系。NearInnerHtml の「星系: 」と同じ形) だけ
             near = "<h3>【現在位置の近く】</h3><p class=\"here\">" + WebUtility.HtmlEncode(eff.Memory == "near"
-                ? $"現在地: {eff.Place?.Name} 付近（推定: 覚えた居場所）" : "現在地: 宇宙（推定: 覚えた居場所）") + "</p>";
+                ? $"現在地: {eff.Place?.Name} 付近（推定: 覚えた居場所）" : "現在地: 宇宙（推定: 覚えた居場所）") + "</p>"
+                + (eff.Place is { } memNode ? "<p>星系: " + WebUtility.HtmlEncode(memNode.Root.System) + "</p>" : "");
         else if (eff == null && logRunning)
             // 推定位置なし: 地図に印は出さない
             near = "<h3>【現在位置の近く】</h3><p class=\"here\">現在地: 不明（［現在位置］を押すと座標を取ります）</p>";

@@ -2557,17 +2557,36 @@
                                 </StackPanel>
 
                                 <StackPanel Grid.Row="3" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="0,6,0,4">
-                                    <Button x:Name="btnShip3DBatch" Content="まとめて取り込む" Click="Ship3DBatch_Click" Padding="14,6"
+                                    <!-- 今の Data.p4k で全部取り込み済みのときも使えなくする (MainWindow.Ship3D.cs。理由はボタンの ToolTip に出すので、使えないときも出す) -->
+                                    <Button x:Name="btnShip3DBatch" Content="船舶・車両をまとめて取り込む" Click="Ship3DBatch_Click" Padding="14,6" ToolTipService.ShowOnDisabled="True"
                                             ToolTip="保有している船 (所持船と Hangar 同期の船) を先に、その後に［詳細］の船の一覧の残りを、ゲームデータから書き出してキャッシュに入れます。始める前に隻数・予想時間・予想サイズを出します"/>
+                                    <Button x:Name="btnStationBatch" Content="マップをまとめて取り込む" Click="StationBatch_Click" Padding="14,6" Margin="8,0,0,0" ToolTipService.ShowOnDisabled="True"
+                                            ToolTip="ゲームデータの中に見つかったステーション・都市の地図 (階ごとの床・道順) を、StarBreaker で床の形を取り出して作り、置き場所の stations フォルダに入れます。始める前に件数・予想時間・予想サイズを出します。取り消しは下の進み具合の欄の［まとめて取り消し］です"/>
                                     <TextBlock x:Name="txtShip3DBatchState" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
+                                    <TextBlock x:Name="txtStationBatchState" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
                                 </StackPanel>
 
                                 <!-- 書き出しの進み具合 (［詳細］タブと同じ中身) -->
                                 <local:Ship3DProgressPanel Grid.Row="4" Grid.ColumnSpan="3" Margin="0,4"/>
 
                                 <TextBlock Grid.Row="5" Grid.ColumnSpan="3" TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontSize="12"
-                                           Text="［詳細］タブで船を出しているときの［3D 表示］［別ウィンドウ］で使う 3D モデルを、選択中のチャンネルのゲームデータ (Data.p4k) から StarBreaker で書き出して置いておきます (テクスチャ付き・船内込み)。ゲームデータが変わると書き出し直します。まとめて取り込むは、予想サイズの合計が最大容量を超える手前で止めます (古いものを消して入れ替えません)。CPU 使用率が 90% 以上のときは書き出しを始めません。"/>
+                                           Text="［詳細］タブで船を出しているときの［3D 表示］［別ウィンドウ］で使う 3D モデルを、選択中のチャンネルのゲームデータ (Data.p4k) から StarBreaker で書き出して置いておきます (テクスチャ付き・船内込み)。ゲームデータが変わると書き出し直します。［船舶・車両をまとめて取り込む］［マップをまとめて取り込む］は、予想サイズの合計が最大容量を超える手前で止めます (古いものを消して入れ替えません)。CPU 使用率が 90% 以上のときは書き出しを始めません。ステーション・都市の地図 (階ごとの床・道順) も、同じゲームデータから StarBreaker で床の形を取り出して作り、結果だけを置き場所の stations フォルダに置きます (途中のファイルは済んだら消します)。最大容量・使用量は船とステーションの地図を合わせて数えます。"/>
                             </Grid>
+                        </GroupBox>
+
+                        <!-- 日本語フォント (gfx) (FontGfxInstaller / MainWindow.FontGfx.cs): 公開物の fonts_en.gfx (Noto Sans JP に置き換えたもの) をゲームのフォルダに置く・元に戻す -->
+                        <GroupBox Header="日本語フォント (gfx)" Margin="0,0,0,8">
+                            <StackPanel Margin="8">
+                                <StackPanel Orientation="Horizontal" Margin="0,4">
+                                    <Button x:Name="btnFontGfxInstall" Content="フォントを置く" Click="FontGfxInstall_Click" Padding="14,6" Margin="0,0,8,0"
+                                            ToolTip="最新の公開物のフォント (fonts_en.gfx) を取り、ゲームのフォルダの data\Localization\japanese_(japan)\UI\fonts\Shared に置きます。ゲームの起動中は置けません"/>
+                                    <Button x:Name="btnFontGfxRestore" Content="元に戻す" Click="FontGfxRestore_Click" Padding="14,6"
+                                            ToolTip="置いたフォントを消します (控え fonts_en.gfx.bak があれば戻します)。ゲームの起動中は戻せません"/>
+                                </StackPanel>
+                                <TextBlock x:Name="txtFontGfxStatus" TextWrapping="Wrap" Foreground="#666" Margin="0,4,0,0"/>
+                                <TextBlock TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontSize="12"
+                                           Text="字が足りず □ になる漢字を出すため、ゲームの日本語フォント (fonts_en.gfx) を、字がすべて入ったもの (Noto Sans JP) に置き換えます。効くのはゲームを起動し直してからです。CIG が公式に認めているのは global.ini と user.cfg だけです。gfx の置き換えは認められたものではありません。自己責任でお使いください。"/>
+                            </StackPanel>
                         </GroupBox>
 
                         <!-- 自動更新 (AppUpdater / MainWindow.Update.cs): 起動したときと毎日の時刻に新しい版を確かめ、差分だけを取って入れ替える -->

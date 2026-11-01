@@ -133,6 +133,8 @@ public partial class MainWindow : Window
         mapPanel.EnsureGameLogStarted = gameLogPanel.EnsureStarted;
         // ［マップ］の自動の取得: ［ゲームログ］の追い読みで量子ジャンプの目的地の選択・到着の行を見たら知らせる
         gameLogPanel.QuantumEventSeen += mapPanel.OnQuantumEvent;
+        // ステーションの地図の［現在位置］: ［マップ］の［現在位置］と同じ処理 (マップタブが開かれていなくても動く。MapPanel.CaptureCurrentAsync)
+        StationMapWeb.CaptureHook = mapPanel.CaptureCurrentAsync;
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -220,6 +222,8 @@ public partial class MainWindow : Window
         InitSync();
         // 3D モデル (MainWindow.Ship3D.cs): 設定タブの置き場所・最大容量の欄
         InitShip3DSettings();
+        // 日本語フォント (gfx) (MainWindow.FontGfx.cs): 設定タブの置き先の状態
+        InitFontGfx();
         // 自動更新 (MainWindow.Update.cs): 起動したときと毎日の時刻の確かめ
         InitAutoUpdate();
     }
@@ -2452,14 +2456,87 @@ public partial class MainWindow : Window
         return brush;
     }
 
-    private void SetMissionDetail(string text)
+    // map: 契約の詳細の後ろに付ける「■ 地図」の節 (無ければ付けない)。tail: その後ろに付ける文 (まとめた行の「■ 違い」の節)
+    private void SetMissionDetail(string text, MissionMapSection? map = null, string tail = "")
     {
         txtMissionDetail.Inlines.Clear();
+        AddMissionDetailRuns(text);
+        if (map != null) AddMissionMapSection(map);
+        if (tail.Length > 0) AddMissionDetailRuns(tail);
+    }
+
+    private void AddMissionDetailRuns(string text)
+    {
         foreach (var (chunk, emphasis) in MissionDisplayText.Parse(text))
         {
             var run = new System.Windows.Documents.Run(chunk);
             if (emphasis) run.Foreground = MissionEmphasisBrush;
             txtMissionDetail.Inlines.Add(run);
+        }
+    }
+
+    // ── 契約の詳細の地図のリンク (2026-11-01、利用者「契約に マップ のリンクがあると良い」) ──
+    // 契約の行き先の地図 (mission_map_vars・mission_map_sets・mission_map_places。インデックス構築の Step 6c で作る) のうち、階層マップの一覧に出す場所 (StationMapWindow.IsListedPlace) で
+    // 名前のある場所 (named。名前が record 名のままの場所は内部の名前なので出さない) を、地図の数が 10 か所以下なら全部リンクにし、
+    // それより多ければ「候補 N か所」と数だけ出す (利用者の決定「A」)。リンクの文字は地図の窓の一覧と同じ名前 (場所の名前は英語のまま)
+    private const int MissionMapLinkMax = 10;
+
+    // 「■ 地図」の節の中身: リンクにする地図 (record と名前。名前の順)・地図の数・読めなかったときの理由
+    private sealed record MissionMapSection(List<(string Record, string Name)> Links, int Count, string? Error);
+
+    // その契約 (まとめた行なら行の中の全部の契約。2026-11-01、親の決定) の「■ 地図」の節。地図は全部の契約の分を合わせて重なりを除き、
+    // 10 か所の決まりは合わせた後の数に当てる。出す地図が無ければ null。表が読めなければ理由を入れた節 (ログにも残す)
+    private MissionMapSection? BuildMissionMapSection(MissionService svc, IReadOnlyList<MissionService.MissionEntry> members)
+    {
+        try
+        {
+            var shown = svc.ReadMapPlaces(members.Select(x => x.RecordName).Distinct(StringComparer.Ordinal).ToList())
+                .Where(p => p.Named && StationMapWindow.IsListedPlace(p.MapType, p.MapRecord.StartsWith(StationPlace.UnlistedPrefix, StringComparison.Ordinal), p.HasFloor))
+                .GroupBy(p => p.MapRecord, StringComparer.Ordinal)
+                .Select(g => (Record: g.Key, g.First().Name))
+                .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Record, StringComparer.Ordinal)
+                .ToList();
+            return shown.Count == 0 ? null : new MissionMapSection(shown, shown.Count, null);
+        }
+        catch (Exception ex)
+        {
+            Log($"[契約の地図] {members[0].RecordName}{(members.Count > 1 ? $" ほか {members.Count - 1} 件" : "")} の地図を読めませんでした: {ex.Message}");
+            return new MissionMapSection(new List<(string, string)>(), 0, ex.Message);
+        }
+    }
+
+    private void AddMissionMapSection(MissionMapSection map)
+    {
+        var inl = txtMissionDetail.Inlines;
+        inl.Add(new System.Windows.Documents.Run("\n\n■ 地図\n"));
+        if (map.Error != null) { inl.Add(new System.Windows.Documents.Run($"  地図を読めませんでした ({map.Error})")); return; }
+        if (map.Count > MissionMapLinkMax) { inl.Add(new System.Windows.Documents.Run($"  候補 {map.Count} か所")); return; }
+        for (int i = 0; i < map.Links.Count; i++)
+        {
+            var (record, name) = map.Links[i];
+            var link = new System.Windows.Documents.Hyperlink(new System.Windows.Documents.Run(name)) { Foreground = MissionEmphasisBrush };
+            link.Click += (_, _) => OpenMissionMap(record, name);
+            inl.Add(new System.Windows.Documents.Run("  "));
+            inl.Add(link);
+            if (i < map.Links.Count - 1) inl.Add(new System.Windows.Documents.Run("\n"));
+        }
+    }
+
+    // 地図のリンク: 階層マップの窓を開いてその場所を選ぶ。取り込んでいなくても開く (2026-11-01、親の決定。星図に載っていない場所は［詳細］が無く、
+    // ここで開かないと［読み込み］へたどり着けないため)。取り込んでいない・照合中などは、窓の地図の欄の知らせと［読み込み］のボタンで扱う
+    // (StationMapPanel.ShowAsync・StationMapWindow.UpdateBar。［詳細］から開くときの、取り込み済みでなければ知らせて開かない動きは変えない)
+    private void OpenMissionMap(string record, string name)
+    {
+        try
+        {
+            var win = new StationMapWindow(record, name, null);
+            if (IsLoaded) win.Owner = this;
+            win.Show();
+        }
+        catch (Exception ex)
+        {
+            Log($"[契約の地図] 地図の窓を開けませんでした: {ex}");
+            MessageBox.Show(this, $"地図の窓を開けませんでした: {ex.Message}", "ステーションの地図", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
 
@@ -2525,7 +2602,7 @@ public partial class MainWindow : Window
             {
                 dgMissions.SelectedItem = null;
                 ++_missionDetailRequest;   // 待っている「違い」の節を捨てる
-                SetMissionDetail(_missionService.FormatDetail(m));
+                SetMissionDetail(_missionService.FormatDetail(m), BuildMissionMapSection(_missionService, [m]));
                 ShowMissionDeliverables(m);
                 return;
             }
@@ -2578,10 +2655,12 @@ public partial class MainWindow : Window
         var req = ++_missionDetailRequest;
         HighlightMissionCategory(rep);
         string detail;
+        MissionMapSection? map;
         try
         {
             detail = svc.FormatDetail(rep);
-            SetMissionDetail(detail);
+            map = BuildMissionMapSection(svc, row.Members);
+            SetMissionDetail(detail, map);
         }
         catch (Exception ex)
         {
@@ -2595,12 +2674,12 @@ public partial class MainWindow : Window
         {
             var diff = await Task.Run(() => svc.FormatGroupDifferences(row, rep));
             if (req != _missionDetailRequest || !ReferenceEquals(dgMissions.SelectedItem, row)) return;
-            if (diff.Length > 0) SetMissionDetail(detail + diff);
+            if (diff.Length > 0) SetMissionDetail(detail, map, diff);
         }
         catch (Exception ex)
         {
             if (req != _missionDetailRequest || !ReferenceEquals(dgMissions.SelectedItem, row)) return;
-            SetMissionDetail(detail + $"\n\n■ 違い\n  違いの一覧を作れなかった ({ex.Message})");
+            SetMissionDetail(detail, map, $"\n\n■ 違い\n  違いの一覧を作れなかった ({ex.Message})");
         }
     }
 
@@ -2745,7 +2824,9 @@ public partial class MainWindow : Window
     //     (GameDataExtractor.RebuildBlueprintsAsync。［BP］タブが使う)
     //  5. 星図の場所の名前 (starmap_names。［ゲームログ］の場所名) が無い・空なら、それだけを取り出す (GameDataExtractor.RebuildStarmapNamesAsync)
     //  (追加の品目の後) 資源の採掘できる場所 (ore_locations。［詳細］タブの資源) の表が無ければ、納品物の入手場所 (deliverable_sources) と一緒に作る
-    //     (GameDataExtractor.RebuildOreLocationsAsync。作れなかったときも表は空で作るので、毎回は走らない)
+    //     (GameDataExtractor.RebuildOreLocationsAsync。採掘できる場所の表は作れなかったときも空で作る。星図の場所・店の表は、今の形で作れなかったとき
+    //      (空き不足で飛ばした・例外・取り消し・0 行で前の形の表が残った) は作った印を書かないので、次の起動でまた試す。
+    //      契約の地図の表 (mission_map_vars など。契約の詳細の地図のリンク) も、表が無いか作れた印が無ければ一緒に作る)
     // 同時には走らせない (同じ Data.p4k を 2 本同時に読まないように。前が終わってから次を始める)。1 つが失敗しても次は行う。
     // インデックス構築・装備データの再抽出の最中は走らせない。starbreaker が入っていない・Data.p4k が見つからないときは走らせない (starbreaker を自動でダウンロードしない)。
     // 失敗はログに残す (cargo_scu は NULL・resource_types / item_ports は空のままなので、次の起動でまた試す)。終わったら積載量の覚えを捨てて一覧を描き直し、
@@ -2797,8 +2878,9 @@ public partial class MainWindow : Window
                     var needsBlueprints = extractor.NeedsBlueprints();
                     var needsStarmap = extractor.NeedsStarmapNames();
                     var needsExtra = extractor.NeedsExtraItems();
-                    // 星図の場所・ゲームの店の表 (starmap_locations / game_shops。［詳細］タブのお店) も同じ Step 6c で作るので、無ければ一緒に作る
-                    var needsOre = extractor.NeedsOreLocations() || extractor.NeedsShopTables();
+                    // 星図の場所・ゲームの店の表 (starmap_locations / game_shops。［詳細］タブのお店) と契約の地図の表 (mission_map_vars など。契約の詳細の地図のリンク) も
+                    // 同じ Step 6c で作るので、無ければ一緒に作る
+                    var needsOre = extractor.NeedsOreLocations() || extractor.NeedsShopTables() || extractor.NeedsMissionMapPlaces();
                     // 店と DB の価格の紐づけ (shop_price_links) だけが無い・前の形なら、それだけを作る (Data.p4k は読まない)
                     var needsShopLinks = !needsOre && extractor.NeedsShopPriceLinks();
                     if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints && !needsStarmap && !needsExtra && !needsOre && !needsShopLinks) return (0, 0, 0, 0, 0, 0, (string?)null);
@@ -2887,7 +2969,7 @@ public partial class MainWindow : Window
                         ct.ThrowIfCancellationRequested();
                         try
                         {
-                            Log("[採掘できる場所] 採掘できる場所・星図の場所・店の表がまだ無い・前の形なので、裏で作ります (納品物の入手場所も一緒に作り直します)");
+                            Log("[採掘できる場所] 採掘できる場所・星図の場所・店の表・契約の地図の表がまだ無い・前の形なので、裏で作ります (納品物の入手場所も一緒に作り直します)");
                             ore = await extractor.RebuildOreLocationsAsync(new Progress<string>(m => Log(m.StartsWith("[") ? m : $"[採掘できる場所] {m}")), ct);
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
