@@ -984,7 +984,8 @@ internal static class StationRouteGraph
     // 直前の Build の段ごとの時間 (秒。確かめ用。結果には使わない)
     public static readonly Dictionary<string, double> LastBuildSeconds = new(StringComparer.Ordinal);
     public static StationGraph Build(StationTree tree, IReadOnlyList<StationFloor> floors, IReadOnlyList<StationSection> sections,
-        IReadOnlyList<StationStair> stairs, IReadOnlyList<Line> lines, Dictionary<string, HashSet<(int I, int J)>>? floorCells = null)
+        IReadOnlyList<StationStair> stairs, IReadOnlyList<Line> lines, Dictionary<string, HashSet<(int I, int J)>>? floorCells = null,
+        IReadOnlyList<StationPlate>? plates = null)
     {
         var g = new StationGraph();
         LastBuildSeconds.Clear(); var buildSw = System.Diagnostics.Stopwatch.StartNew(); double buildPrev = 0;
@@ -1123,6 +1124,7 @@ internal static class StationRouteGraph
         // 線分の FloorLinkRatio 以上が床の上なら結ぶ。ほかの節点は、同じ階のいちばん近い経由点 WaypointLinks 個 (WaypointRadius m 以内、線分の 90 % 以上が床の上) と結ぶ
         if (floorCells != null) AddWaypoints(g, floors, floorCells);
         BuildLap("経由点");
+        if (plates != null) { LastTouchEdges = AddTouchEdges(g, floors, plates); BuildLap("接する床"); }
         // .rmxml: 部屋 − 出口の接続
         foreach (var (a, b) in RmxmlEdges(tree))
             if (pointNode.TryGetValue(a, out var na) && pointNode.TryGetValue(b, out var nb))
@@ -1314,6 +1316,54 @@ internal static class StationRouteGraph
     public const int WaypointStep = 6;
     public const double WaypointRadius = 6;
     public const int WaypointLinks = 3;
+
+    // (2026-11-02、利用者の原則「すき間の無い高低差が 0.5m 未満の続きの面はつながっている」) 違う階の床の板どうしが接していれば (StationFloorBuilder.SurfacesTouch)、
+    // 接する所のそばの両方の階の経由点 (TouchLinkRadius 以内でいちばん近いもの) を辺 (kind floor) で結ぶ。階の分け方は変えない。
+    // Area18 の Dumper's Depot の入口 (x 22.5〜25、y −155〜−143) で、店の床 roomsm_floor_straight_08x08x0025_a (−8.0 m) と Plaza の床 (−8.0 m) が
+    // 同じ高さで接しているのに、別の階 (f42・f43) になり、階をまたぐ道が無くて切れていた。同じ階の組と 8 m の升目ごとに 1 本だけ足す
+    public const double TouchLinkRadius = 4.0;
+    public static int LastTouchEdges;
+
+    private static int AddTouchEdges(StationGraph g, IReadOnlyList<StationFloor> floors, IReadOnlyList<StationPlate> plates)
+    {
+        var fp = plates.Where(p => !p.Stair).Select(p => (P: p, F: StationFloorBuilder.PlateFloor(p, floors))).Where(t => t.F != null).ToList();
+        var grid = new Dictionary<(int, int), List<int>>();
+        for (int i = 0; i < fp.Count; i++)
+        {
+            var h = fp[i].P.Hull;
+            for (int x = (int)Math.Floor((h.Min(q => q.X) - 1) / 8); x <= (int)Math.Floor((h.Max(q => q.X) + 1) / 8); x++)
+                for (int y = (int)Math.Floor((h.Min(q => q.Y) - 1) / 8); y <= (int)Math.Floor((h.Max(q => q.Y) + 1) / 8); y++)
+                    (grid.TryGetValue((x, y), out var l) ? l : grid[(x, y)] = new()).Add(i);
+        }
+        var wpByFloor = g.Nodes.Select((n, idx) => (n, idx)).Where(t => t.n.Kind == "waypoint").GroupBy(t => t.n.Floor).ToDictionary(x => x.Key, x => x.ToList(), StringComparer.Ordinal);
+        var done = new HashSet<(string, string, int, int)>();
+        int added = 0;
+        foreach (var cellList in grid.Values)
+            for (int a = 0; a < cellList.Count; a++)
+                for (int b = a + 1; b < cellList.Count; b++)
+                {
+                    var (pa, fa) = fp[cellList[a]]; var (pb, fb) = fp[cellList[b]];
+                    if (fa == fb || !StationFloorBuilder.SurfacesTouch(pa, pb)) continue;
+                    var c0 = (X: pa.Hull.Average(q => q.X), Y: pa.Hull.Average(q => q.Y));
+                    var cb = StationFloorBuilder.ClosestOnConvex(pb.Hull, c0.X, c0.Y);
+                    var ca = StationFloorBuilder.ClosestOnConvex(pa.Hull, cb.X, cb.Y);
+                    var mid = ((ca.X + cb.X) / 2, (ca.Y + cb.Y) / 2);
+                    var (f1, f2) = string.CompareOrdinal(fa!.Id, fb!.Id) < 0 ? (fa, fb) : (fb, fa);
+                    if (!done.Add((f1.Id, f2.Id, (int)Math.Floor(mid.Item1 / 8), (int)Math.Floor(mid.Item2 / 8)))) continue;
+                    int Near(StationFloor f)
+                    {
+                        if (!wpByFloor.TryGetValue(f.Id, out var l)) return -1;
+                        int best = -1; double bd = TouchLinkRadius;
+                        foreach (var (n, idx) in l) { var d = Math.Sqrt((n.Pos.X - mid.Item1) * (n.Pos.X - mid.Item1) + (n.Pos.Y - mid.Item2) * (n.Pos.Y - mid.Item2)); if (d < bd) { bd = d; best = idx; } }
+                        return best;
+                    }
+                    int na = Near(fa), nb = Near(fb);
+                    if (na < 0 || nb < 0) continue;
+                    g.Link(new StationEdge(na, nb, Dist(g.Nodes[na].Pos, g.Nodes[nb].Pos), "floor"));
+                    added++;
+                }
+        return added;
+    }
 
     private static void AddWaypoints(StationGraph g, IReadOnlyList<StationFloor> floors, Dictionary<string, HashSet<(int I, int J)>> cells)
     {

@@ -818,11 +818,12 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         Mark("乗り場");
         var cells = StationFloorBuilder.FloorCells(plates, floors);
         Mark("床の升目");
-        var graph = StationRouteGraph.Build(tree, floors, sections, stairs, lines, cells);
+        var graph = StationRouteGraph.Build(tree, floors, sections, stairs, lines, cells, plates);
         Mark("道順の網");
+        var shapeOnlyFloors = StationFloorBuilder.DropShapeOnlyFloors(set, floors, graph.Nodes.Select(n => n.Floor).ToHashSet(StringComparer.Ordinal));
         var json = StationMapJson.Write(index, tree, floors, sections, stairs, transit, graph);
         Mark("JSON");
-        if (floating != null) { floating.AddRange(StationFloorBuilder.FloatingItems(set, plates, floors, stairNoEnd)); Mark("浮いたもの"); }
+        if (floating != null) { floating.AddRange(StationFloorBuilder.FloatingItems(set, plates, floors, stairNoEnd).Where(x => x.Reason != StationFloorBuilder.UnreachableReason || !shapeOnlyFloors.Any(o => o.Kind == x.Kind))); floating.AddRange(shapeOnlyFloors); Mark("浮いたもの"); }
         // 一覧に出す数は、書いた JSON の "listed" を数える (StationMapJson.Write が Listed に面積・使える物の条件を足して決めるため、Listed の数とは違う)
         var (listedFloors, listedSections) = CountListed(json);
         Log($"「{ShortName(tree.Root.Place.Record)}」の床・階・道順の結果: " +

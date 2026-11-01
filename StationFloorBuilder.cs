@@ -56,6 +56,8 @@ internal sealed class StationMeshSet
     public Dictionary<string, StationMeshKind> ShapeAccepted { get; } = new(StringComparer.Ordinal);
     // この取り込みで、形で決めた種類の部品として候補にした名前
     public HashSet<string> ShapeSeen { get; } = new(StringComparer.Ordinal);
+    // この取り込みで、床と階段に分けた (Composite の) 部品の名前 (FinalizeKinds で表を composite にする)
+    public HashSet<string> CompositeKeys { get; } = new(StringComparer.Ordinal);
     // この取り込みで表に足した名前
     public HashSet<string> AddedKeys { get; } = new(StringComparer.Ordinal);
     // 浮いたもの: 床・階段の種類なのに上向きの面が無く、板にならなかった部品 (Plates が入れる。StationFloorBuilder.FloatingItems)
@@ -66,7 +68,8 @@ internal sealed class StationMeshSet
     public int NewKinds { get; set; }
 }
 
-internal enum StationMeshKind { None, Floor, Stair }
+// Composite (2026-11-02、親の指示): 1 つの部品に、広い平らな面 (床) と段・坂 (階段) の両方があるもの。板は形で床と階段に分ける (StationFloorBuilder.SurfacePlates)
+internal enum StationMeshKind { None, Floor, Stair, Composite }
 
 // (2026-11-02、利用者の指示「浮いたものリストを取り込み時にログ出力と DB 格納しとくようにすると将来のデバッグに使える」) 浮いたもの 1 つ。
 // Kind は種類と決め方 (floor:name・stair:shape・floor:bundled など。階は "floor:<階の id>")、X・Y・Z は局所の位置 (板・部品の中心と高さ)、Reason は浮いている理由
@@ -152,7 +155,7 @@ internal sealed class StationMeshKinds
             {
                 var v = kv.Value.GetString() ?? "";
                 var c = v.IndexOf(':');
-                var k = (c < 0 ? v : v[..c]) switch { "floor" => StationMeshKind.Floor, "stair" => StationMeshKind.Stair, _ => StationMeshKind.None };
+                var k = (c < 0 ? v : v[..c]) switch { "floor" => StationMeshKind.Floor, "stair" => StationMeshKind.Stair, "composite" => StationMeshKind.Composite, _ => StationMeshKind.None };
                 res[kv.Name] = new Entry(k, c < 0 ? "shape" : v[(c + 1)..]);
             }
         }
@@ -167,7 +170,7 @@ internal sealed class StationMeshKinds
         for (int i = 0; i < keys.Count; i++)
         {
             var e = entries[keys[i]];
-            var kind = e.Kind switch { StationMeshKind.Floor => "floor", StationMeshKind.Stair => "stair", _ => "none" };
+            var kind = e.Kind switch { StationMeshKind.Floor => "floor", StationMeshKind.Stair => "stair", StationMeshKind.Composite => "composite", _ => "none" };
             sb.Append("    ").Append(JsonSerializer.Serialize(keys[i])).Append(": \"").Append(kind).Append(':').Append(e.Source).Append('"').Append(i + 1 < keys.Count ? ",\n" : "\n");
         }
         sb.Append("  }\n}\n");
@@ -687,6 +690,11 @@ internal static class StationFloorBuilder
                 var k = set.ShapeAccepted.GetValueOrDefault(key, StationMeshKind.None);
                 if (k != e.Kind) { set.Kinds.Replace(key, new StationMeshKinds.Entry(k, "shape")); n++; }
             }
+        // (2026-11-02、親の指示) 床と階段に分けた部品は、表で composite にする (同梱の表のものは変えない。Replace は手元の表だけ)。
+        // 形で決めた名前は、たどりで残ったときだけ (ShapeAccepted)。名前の決まりの名前は Source を name のまま
+        foreach (var key in set.CompositeKeys)
+            if (set.Kinds.Get(key) is { } ce && ce.Kind != StationMeshKind.Composite && ce.Source != "bundled" && (ce.Source != "shape" || set.ShapeAccepted.ContainsKey(key)))
+            { set.Kinds.Replace(key, new StationMeshKinds.Entry(StationMeshKind.Composite, ce.Source)); n++; }
         // (2026-11-02、親の指示「形で決まった種類は確定にしない。どこかの置き方で階段・床と判定されたら、そちらへ上書き」) 前から表にある形の名前は、
         // この取り込みで階段・床になったときだけ上書きする (none → 床・階段、床 → 階段)。none に戻すことはしない
         foreach (var key in set.ShapeSeen)
@@ -881,6 +889,11 @@ internal static class StationFloorBuilder
         public (double X, double Y, double Z)[] MainHull = [];
         // 階段の下の端 (段の並びがあれば、いちばん下の段 − 段の高さの中央値 = 下の床の高さ。坂なら坂のいちばん低い所)
         public double StairLo = double.NaN;
+        // 広い平らな面 (短いほうの幅・長いほうの長さが FloorSideMin 以上の段。高さ・面積・その段の水平な面の凸包) と、それ以外の歩ける面 (段・坂) の凸包。床と階段を 1 つに持つ部品を分けるのに使う
+        public List<(double Z, double Area, (double X, double Y, double Z)[] Hull)> BigLevels = new();
+        public (double X, double Y, double Z)[] StepHull = [];
+        // 床と階段を 1 つに持つ部品か (段の並び・坂があり、広い平らな面もある)
+        public bool IsComposite;
     }
 
     // GLB のバイナリの部分を読む (先頭の JSON の後の 2 つ目のチャンク)。accessor を必要なときに読む
@@ -975,6 +988,7 @@ internal static class StationFloorBuilder
         double snx = 0, sny = 0, snl = 0;
         var walk = new List<(double X, double Y, double Z)>();
         var flatPts = new List<(double X, double Y, double Z)>();   // 水平な面の点 (z は三角形の中心の高さ)
+        var slopePts = new List<(double X, double Y, double Z)>();  // 歩ける坂の面の点
         double mnx = double.MaxValue, mxx = double.MinValue, mny = double.MaxValue, mxy = double.MinValue, mnz = double.MaxValue, mxz = double.MinValue;
         (double X, double Y, double Z) P(float[] t, int o) =>
             (w[0] * t[o] + w[4] * t[o + 1] + w[8] * t[o + 2] + w[12], w[1] * t[o] + w[5] * t[o + 1] + w[9] * t[o + 2] + w[13], w[2] * t[o] + w[6] * t[o + 1] + w[10] * t[o + 2] + w[14]);
@@ -1009,6 +1023,7 @@ internal static class StationFloorBuilder
                 else
                 {
                     s.SlopeArea += area;
+                    slopePts.Add(a); slopePts.Add(b); slopePts.Add(c);
                     var hl = Math.Sqrt(n.X * n.X + n.Y * n.Y);
                     if (hl > 0) { snx += area * n.X / hl; sny += area * n.Y / hl; snl += area; }
                     s.SlopeLo = Math.Min(s.SlopeLo, Math.Min(a.Z, Math.Min(b.Z, c.Z))); s.SlopeHi = Math.Max(s.SlopeHi, Math.Max(a.Z, Math.Max(b.Z, c.Z)));
@@ -1037,6 +1052,20 @@ internal static class StationFloorBuilder
             s.MainHull = ConvexHull3(flatPts.Where(p => Math.Abs(p.Z - main.Z) <= MainBand).Select(p => (p.X, p.Y, main.Z)).ToList());
         }
         GuessKind(s);
+        // (2026-11-02、親の指示) 床と階段を 1 つに持つ部品: 段の並び・坂 (Guess が階段) があり、縦横とも FloorSideMin 以上の平らな段もあるもの。
+        // Orison の base_16x16x04_stairs_001_a は、下の平らな面 −25.62 m (60.85 m²)・段 15 (2.66 m²、0.25 m おき)・上の平らな面 −21.57 m (192.68 m²) を 1 つに持つ
+        // (2026-11-02、利用者の指示「面積でなく、縦横の長さと形状がいい」) 広い平らな面は、段の水平な面の凸包の短いほうの幅と長いほうの長さが両方 FloorSideMin 以上のもの
+        foreach (var l in s.Levels.Where(l => l.Area >= StepMinArea))
+        {
+            var lh = ConvexHull3(flatPts.Where(p => Math.Abs(p.Z - l.Z) <= LevelJoin).Select(p => (p.X, p.Y, l.Z)).ToList());
+            if (lh.Length >= 3 && MinWidth(lh) >= FloorSideMin && MaxLength(lh) >= FloorSideMin) s.BigLevels.Add((l.Z, l.Area, lh));
+        }
+        if (s.Guess == StationMeshKind.Stair && s.BigLevels.Count > 0)
+        {
+            var stepPts = slopePts.Concat(flatPts.Where(p => !s.BigLevels.Any(b => Math.Abs(p.Z - b.Z) <= LevelJoin))).ToList();
+            s.StepHull = stepPts.Count >= 3 ? ConvexHull3(stepPts) : [];
+            s.IsComposite = s.StepHull.Length >= 3;
+        }
         return s;
     }
 
@@ -1228,8 +1257,9 @@ internal static class StationFloorBuilder
                 if (kind.Kind == StationMeshKind.None) continue;
                 if (m.Shape is { } shp)
                 {
-                    var sp = SurfacePlate(inst, m.Mesh, shp, kind.Kind);
-                    if (sp == null)
+                    var sps = SurfacePlates(inst, m.Mesh, shp, kind.Kind);
+                    if (shp.IsComposite && sps.Count > 0) set.CompositeKeys.Add(MeshKey(m.Mesh));
+                    if (sps.Count == 0)
                     {
                         // 候補 (形で決めた種類) でない、床・階段の種類の部品だけを浮いたものにする (候補は形で決まるので、上向きの面が無ければもともと候補にならない)
                         if (kind.Source != "shape")
@@ -1239,18 +1269,21 @@ internal static class StationFloorBuilder
                         }
                         continue;
                     }
-                    if (!sp.Stair && HullArea(sp.Hull) <= GatewayRoofMaxArea && gws.Any(g => sp.Top - g.Z >= 2.5 && sp.Top - g.Z <= 5 && DistToConvex(sp.Hull, g.X, g.Y) <= GatewayRoofMargin))
+                    foreach (var sp in sps)
                     {
-                        removed++;
-                        continue;
+                        if (!sp.Stair && HullArea(sp.Hull) <= GatewayRoofMaxArea && gws.Any(g => sp.Top - g.Z >= 2.5 && sp.Top - g.Z <= 5 && DistToConvex(sp.Hull, g.X, g.Y) <= GatewayRoofMargin))
+                        {
+                            removed++;
+                            continue;
+                        }
+                        // 1. 表に登録済みの部品 (前の取り込みで決めたもの・名前の決まり) は、そのままつなぐ。この取り込みで初めて見た部品は候補 (KeepTouching でたどる)
+                        if (kind.Source == "shape") { shapeOnly.Add(sp); set.ShapeSeen.Add(MeshKey(m.Mesh)); }
+                        res.Add(sp);
+                        LastShapePlates++;
                     }
-                    // 1. 表に登録済みの部品 (前の取り込みで決めたもの・名前の決まり) は、そのままつなぐ。この取り込みで初めて見た部品は候補 (KeepTouching でたどる)
-                    if (kind.Source == "shape") { shapeOnly.Add(sp); set.ShapeSeen.Add(MeshKey(m.Mesh)); }
-                    res.Add(sp);
-                    LastShapePlates++;
                     continue;
                 }
-                var stair = kind.Kind == StationMeshKind.Stair;
+                var stair = kind.Kind is StationMeshKind.Stair or StationMeshKind.Composite;
                 var pts = m.Corners.Select(c => inst.ToStation.Apply(c)).ToArray();
                 var hull = ConvexHull(pts.Select(p => (p.X, p.Y)).ToList());
                 if (hull.Length < 3) continue;
@@ -1392,24 +1425,83 @@ internal static class StationFloorBuilder
     //   1. 登録済みの部品の板でつなぐ (seeds)。
     //   2. 登録の無い部品のうち、上面が平らで人が乗れる大きさ (CandidateKind: 主な水平面 StandArea 以上。段の並び・坂の形のものも) の板で、
     //      今の歩ける面に接し (SurfacesTouch: すき間 SurfaceGap 以内、高さの差 SurfaceRise 0.5 m 未満 = 階段の一段くらい) ているものをたどる (繰り返す)。
-    //   3. たどった板のうち、広さ WideArea 未満のもの (段) と段の形・坂の形のものは、つながった段のまとまりごとに、まとまりの下の端と上の端の両方に
+    //   3. たどった板のうち、短いほうの幅か長いほうの長さが FloorSideMin 未満のもの (段) と段の形・坂の形のものは、つながった段のまとまりごとに、まとまりの下の端と上の端の両方に
     //      床 (登録済みの板・広い板) が接する (2 つの高さの床をつなぐ) ときだけ階段にする。つながる先の無い段 (床と同じ高さの敷物・行き止まりの台) は除いて、たどり直す。
     //   4. 広い板は床にする。その広い面の先に段が続き、店などが無ければ踊り場として階段の一部にするのは、前と同じ Landings (利用者の決定 C・板ごと) が行う。
     //   5. 決めた種類を result (名前 → 階段・床) に入れる (FinalizeKinds で表に登録する)。
     // StandArea 0.8 m²: 実例の階段の段の面積 (util_stairs_a_mid_04_a 1.67 m²、stair_straight_04x04x02_a 1.7 m²) の半分ほど。
-    // WideArea 3 m²: 実例でいちばん小さい踊り場の板 util_stairs_platform_01x02_a (Checkmate、3.19 m²)
-    public const double StandArea = 0.8, WideArea = 3.0;
+    public const double StandArea = 0.8;
+    // FloorSideMin 1.0 m: 床とみなす平らな面の短いほうの幅・長いほうの長さの下限。Seraphim の階段の 1 段の奥行き 0.5 m (TreadMin) の 2 倍
+    // (段は短いほうの幅が 1 段の奥行きくらい。Checkmate のいちばん小さい踊り場 util_stairs_platform_01x02_a は 1 m × 2 m で、床に入る)
+    public const double FloorSideMin = 1.0;
 
     // 候補の仮の種類: 段の並び・坂の形なら階段、主な水平面が StandArea 以上なら床、どちらでもなければ候補にしない
-    public static StationMeshKind CandidateKind(StationShape sh) =>
-        sh.Guess == StationMeshKind.Stair ? StationMeshKind.Stair : sh.MainArea >= StandArea || sh.Guess == StationMeshKind.Floor ? StationMeshKind.Floor : StationMeshKind.None;
+    public static StationMeshKind CandidateKind(StationShape sh)
+    {
+        var k = sh.Guess == StationMeshKind.Stair ? StationMeshKind.Stair : sh.MainArea >= StandArea || sh.Guess == StationMeshKind.Floor ? StationMeshKind.Floor : StationMeshKind.None;
+        return k != StationMeshKind.None && !WideEnough(sh, k) ? StationMeshKind.None : k;
+    }
+
+    // (2026-11-02、利用者の決まり「既存の階段の一段の奥行(Seraphim で私が位置を記録したもの) より短い幅や奥行きのものは歩けない部品として除外」)
+    // TreadMin 0.5 m: Seraphim (RR_CRU_LEO) のガレリア 1→2 層の stairs_04x04x08_a と上の stairs_04x02x01_a の 1 段の進み (段の中心の xy の差。どの段も 0.5 m)。
+    // 形で判定する部品 (候補) だけに当てる (名前の決まり・同梱の表で決まった部品には当てない)。測りの誤差に TreadTol (0.02 m) を見る
+    public const double TreadMin = 0.5, TreadTol = 0.02;
+
+    private static bool WideEnough(StationShape sh, StationMeshKind k)
+    {
+        double min = TreadMin - TreadTol;
+        if (k == StationMeshKind.Stair && !sh.GuessRamp)
+        {
+            // 段の並びの 1 段ずつ: 奥行き (段の中心の進み) と幅 (段の面積 ÷ 奥行き) の両方が基準以上の段が、StepMinCount 段以上続くこと
+            var lv = sh.Levels.Where(l => l.Area >= StepMinArea).ToList();
+            int run = 1, best = 1;
+            for (int j = 1; j < lv.Count; j++)
+            {
+                double dz = lv[j].Z - lv[j - 1].Z, d = Math.Sqrt(Sq(lv[j].X - lv[j - 1].X) + Sq(lv[j].Y - lv[j - 1].Y));
+                bool ok = dz >= StepRiseMin && dz <= StepRiseMax && d >= min && lv[j].Area / d >= min;
+                run = ok ? run + 1 : 1; best = Math.Max(best, run);
+            }
+            return best >= StepMinCount;
+        }
+        // 床・坂: 上向きの面の凸包の短いほうの幅
+        var h = k == StationMeshKind.Floor && sh.MainHull.Length >= 3 ? sh.MainHull : sh.Hull;
+        return h.Length >= 3 && MinWidth(h) >= min;
+    }
+
+    private static double MinWidth2((double X, double Y)[] h) => MinWidth(h.Select(p => (p.X, p.Y, 0.0)).ToArray());
+    private static double MaxLength2((double X, double Y)[] h) => MaxLength(h.Select(p => (p.X, p.Y, 0.0)).ToArray());
+
+    // 凸包の長いほうの長さ (頂点どうしのいちばん遠い距離)
+    private static double MaxLength((double X, double Y, double Z)[] h)
+    {
+        double best = 0;
+        for (int i = 0; i < h.Length; i++) for (int j = i + 1; j < h.Length; j++) best = Math.Max(best, Math.Sqrt(Sq(h[i].X - h[j].X) + Sq(h[i].Y - h[j].Y)));
+        return best;
+    }
+
+    // 凸包の短いほうの幅 (辺ごとに、その辺の直線から最も遠い点までの距離を取り、その最小)
+    private static double MinWidth((double X, double Y, double Z)[] h)
+    {
+        double best = double.MaxValue;
+        for (int i = 0; i < h.Length; i++)
+        {
+            var a = h[i]; var b = h[(i + 1) % h.Length];
+            double ex = b.X - a.X, ey = b.Y - a.Y, len = Math.Sqrt(ex * ex + ey * ey);
+            if (len < 1e-9) continue;
+            double far = 0;
+            foreach (var p in h) far = Math.Max(far, Math.Abs((p.X - a.X) * ey - (p.Y - a.Y) * ex) / len);
+            best = Math.Min(best, far);
+        }
+        return best == double.MaxValue ? 0 : best;
+    }
 
     private static List<StationPlate> KeepTouching(List<StationPlate> plates, HashSet<StationPlate> cand, Dictionary<string, StationMeshKind> result)
     {
         const double cell = 8;
         var seeds = plates.Where(p => !cand.Contains(p)).ToList();
         var excluded = new HashSet<StationPlate>(ReferenceEqualityComparer.Instance);
-        bool IsStep(StationPlate p) => p.Stair || HullArea(p.Hull) < WideArea;
+        // 段か: 階段の板か、床の板で短いほうの幅か長いほうの長さが FloorSideMin 未満のもの (面積でなく縦横の長さで見る。利用者の指示)
+        bool IsStep(StationPlate p) => p.Stair || MinWidth2(p.Hull) < FloorSideMin || MaxLength2(p.Hull) < FloorSideMin;
         Dictionary<(int, int), List<StationPlate>> Grid(IEnumerable<StationPlate> ps)
         {
             var g = new Dictionary<(int, int), List<StationPlate>>();
@@ -1499,9 +1591,27 @@ internal static class StationFloorBuilder
     //   ② 接する面なし: どの板とも接しない (SurfacesTouch) 床・階段・坂の板
     //   ③ 階段の端に床なし: 端の階が見つからず、階段にならなかった階段・坂のまとまり (StationRouteGraph.Stairs)
     //   ④ 乗り場からたどれない: 乗り場からたどれない階 (StationFloor.Reachable)
-    public const string NoUpFaceReason = "上向きの面なし", NoTouchReason = "接する面なし", StairNoEndReason = "階段の端に床なし", UnreachableReason = "乗り場からたどれない";
+    public const string NoUpFaceReason = "上向きの面なし", NoTouchReason = "接する面なし", StairNoEndReason = "階段の端に床なし", UnreachableReason = "乗り場からたどれない",
+        ShapeOnlyFloorReason = "形だけの階で道なし";
 
-    public static string KindLabel(StationMeshKinds.Entry e) => (e.Kind switch { StationMeshKind.Floor => "floor", StationMeshKind.Stair => "stair", _ => "none" }) + ":" + e.Source;
+    // (2026-11-02、親の指示) 形でだけ床・階段になった部品 (表の Source が shape、または表に無い) の板だけでできていて、道順の節点 (経由点を含む) が 1 つも無い階は、
+    // 階の一覧から外し (Listed・Reachable を false)、浮いたもの (⑤ 形だけの階で道なし) にする。Checkmate の砂の山 sand_pile_single_straight_fs が、どこにもつながらない階
+    // (−476.76 m・−109.01 m) になっていた。外した階を返す (graphFloors は道順の節点のある階の Id)
+    public static List<StationFloating> DropShapeOnlyFloors(StationMeshSet set, IReadOnlyList<StationFloor> floors, ISet<string> graphFloors)
+    {
+        var res = new List<StationFloating>();
+        foreach (var f in floors)
+        {
+            if (f.PlateSet == null || f.PlateSet.Count == 0 || graphFloors.Contains(f.Id)) continue;
+            if (set.Kinds == null || !f.PlateSet.All(p => KindOf(set.Kinds, p.Mesh).Source == "shape")) continue;
+            f.Listed = false; f.Reachable = false;
+            var big = f.PlateSet.MaxBy(p => HullArea(p.Hull))!;
+            res.Add(new StationFloating(big.Mesh, "floor:" + f.Id, big.Hull.Average(q => q.X), big.Hull.Average(q => q.Y), f.Z, ShapeOnlyFloorReason));
+        }
+        return res;
+    }
+
+    public static string KindLabel(StationMeshKinds.Entry e) => (e.Kind switch { StationMeshKind.Floor => "floor", StationMeshKind.Stair => "stair", StationMeshKind.Composite => "composite", _ => "none" }) + ":" + e.Source;
 
     public static List<StationFloating> FloatingItems(StationMeshSet set, IReadOnlyList<StationPlate> plates, IReadOnlyList<StationFloor> floors, IEnumerable<StationFloating> stairNoEnd)
     {
@@ -1537,6 +1647,52 @@ internal static class StationFloorBuilder
     //   床・通路: 主な水平な面 (MainZ) の高さで、その段 ± MainBand の水平な面の凸包。主な面より坂の面が広い (傾けて置いた床) ときは坂の板にする。
     //   階段・坂: 歩ける面の凸包。下の端は StairLo (段の並びが無ければ、面積 StepMinArea 以上の段のいちばん低いもの、それも無ければ歩ける面のいちばん低い所)、
     //   上の端は面積 StepMinArea 以上の段のいちばん高いもの (坂のほうが高ければ坂の上の端。どちらも無ければ歩ける面のいちばん高い所。手すりの上面を上の端にしないため)
+    // 床と階段を 1 つに持つ部品 (IsComposite) は、形で分ける: 広い平らな面 (BigLevels) はそれぞれ床の板、残りの段・坂は階段 (坂) の板 1 つ。
+    // 階段の板の下の端は、いちばん下の段 − 段の高さ (坂なら坂のいちばん低い所)、上の端はいちばん高い段 (坂の上の端)。
+    // 端から SurfaceRise 以内に広い平らな面があれば、端をその高さにする (床と階段がつながるように)
+    private static List<StationPlate> SurfacePlates(StationInstance inst, string mesh, StationShape sh, StationMeshKind kind)
+    {
+        var res = new List<StationPlate>();
+        if (kind != StationMeshKind.None && sh.IsComposite)
+        {
+            foreach (var b in sh.BigLevels)
+            {
+                if (b.Hull.Length < 3) continue;
+                var bp = b.Hull.Select(c => inst.ToStation.Apply(c)).ToList();
+                var bh = ConvexHull(bp.Select(p => (p.X, p.Y)).ToList());
+                if (bh.Length < 3) continue;
+                var bz = bp.Average(p => p.Z);
+                res.Add(new StationPlate(inst.Index, mesh, false, bh, bz, bz));
+            }
+            var rem = sh.Levels.Where(l => l.Area >= StepMinArea && !sh.BigLevels.Any(b => Math.Abs(b.Z - l.Z) <= LevelJoin)).OrderBy(l => l.Z).ToList();
+            double lo, hi;
+            if (rem.Count > 0)
+            {
+                var dz = Enumerable.Range(1, rem.Count - 1).Select(i => rem[i].Z - rem[i - 1].Z).Where(d => d >= StepRiseMin && d <= StepRiseMax).OrderBy(d => d).ToList();
+                var step = dz.Count > 0 ? dz[dz.Count / 2] : 0.25;
+                lo = rem[0].Z - step; hi = rem[^1].Z;
+                if (sh.SlopeArea > 0) { lo = Math.Min(lo, sh.SlopeLo); hi = Math.Max(hi, sh.SlopeHi); }
+            }
+            else { lo = sh.SlopeLo; hi = sh.SlopeHi; }
+            foreach (var b in sh.BigLevels)
+            {
+                if (Math.Abs(b.Z - lo) < SurfaceRise) lo = b.Z;
+                if (b.Z > hi && b.Z - hi < SurfaceRise) hi = b.Z;
+            }
+            var sp = sh.StepHull.Select(c => inst.ToStation.Apply(c)).ToList();
+            var shl = ConvexHull(sp.Select(p => (p.X, p.Y)).ToList());
+            if (shl.Length >= 3 && hi > lo)
+            {
+                double cx = sh.StepHull.Average(c => c.X), cy = sh.StepHull.Average(c => c.Y);
+                double top = inst.ToStation.Apply((cx, cy, hi)).Z, bottom = inst.ToStation.Apply((cx, cy, lo)).Z;
+                res.Add(new StationPlate(inst.Index, mesh, true, shl, Math.Max(top, bottom), Math.Min(top, bottom), sh.GuessRamp));
+            }
+            return res;
+        }
+        if (SurfacePlate(inst, mesh, sh, kind == StationMeshKind.Composite ? (sh.Guess == StationMeshKind.Stair ? StationMeshKind.Stair : StationMeshKind.Floor) : kind) is { } one) res.Add(one);
+        return res;
+    }
+
     private static StationPlate? SurfacePlate(StationInstance inst, string mesh, StationShape sh, StationMeshKind kind)
     {
         if (kind == StationMeshKind.Floor && sh.MainArea > 0 && sh.MainArea >= sh.SlopeArea && sh.MainHull.Length >= 3)
