@@ -90,9 +90,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v2.5.0-win-x64.zip (最新 v2.5.0 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.5.0/StarCitizenJapaneseTextCreater-v2.5.0-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v2.5.1-win-x64.zip (最新 v2.5.1 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.5.1/StarCitizenJapaneseTextCreater-v2.5.1-win-x64.zip)**
 >
-> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.5.0-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
+> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.5.1-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
 >
 > **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/21 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.2.0/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
 
