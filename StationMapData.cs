@@ -627,6 +627,8 @@ internal sealed record StationInstance(int Index, int Parent, string Socpak, str
     public string Guid { get; init; } = "";
     // 親の xml の Child 要素の starMapRecord 属性 (星図の場所の uuid、小文字。無ければ ""。ルートはルートの場所の uuid)。区画の名前に使う (StationRouteGraph.NameSections)
     public string StarMapRecord { get; init; } = "";
+    // 親の xml の Child 要素の tags 属性 (タグの GUID、小文字。無ければ空)。新しい乗り物の仕組み (sctransport*) の乗り場と行き先を結ぶのに使う (StationTree.LinkTransportSystem)
+    public IReadOnlyList<string> ChildTags { get; init; } = Array.Empty<string>();
 }
 
 // 木に入れない Child の class (xml の Child の class 属性)。HarvestableObjectContainer (タグ 1875c48f Engine/Components/HarvestableComponent) は
@@ -674,6 +676,8 @@ internal sealed class StationTree
         "sctransitmanager", "sctransitnavsplinedata",
         // 路線・階が実装されているかの判定 (2026-11-01) に使うもの: 使える物の印 (医療の場所・リスポン・任務・出入りの小部屋)
         "actionareacomponent", "entitycomponentspawnpoint", "entitycomponentslotspawnpoint", "subsumptionmissionlinkcomponent", "entitycomponentspawncloset",
+        // (2026-11-01) 新しい乗り物の仕組み (Area18 の電車・エレベーター)。読んだら上の sctransit* の種類に直す (SocpakContents.TransportKinds)
+        "sctransportmanager", "sctransportgateway", "sctransportdestination", "sctransportnavspline", "sctransportgatewaycontrolpanel", "sctransportgatewaytimerpanel",
     ];
 
     // ルート。ステーション・都市でない場所では、AlignToPlaceStructure が枠を回したものに置き換える
@@ -699,13 +703,17 @@ internal sealed class StationTree
         var tree = new StationTree { Root = root };
         var chain = new List<string>();
         // nestedEls は nested と同じ並びの xml の Child 要素 (guid を読むため。ReadContainerChildren は Child 要素の順に SocChild を作るので、同じ順に並べる)
-        void Add(int parent, string socpak, string entityName, int depth, StationXf toStation, List<SocChild> nested, List<XElement> nestedEls, string guid, string starMapRecord)
+        void Add(int parent, string socpak, string entityName, int depth, StationXf toStation, List<SocChild> nested, List<XElement> nestedEls, string guid, string starMapRecord, string childTags = "")
         {
             ct.ThrowIfCancellationRequested();
             socpak = index.Resolve(socpak);
             var head = socpak.Length > 0 ? index.Head(socpak) : null;
             var idx = tree.Instances.Count;
-            tree.Instances.Add(new StationInstance(idx, parent, socpak, entityName, depth, toStation, head?.MinBounds, head?.MaxBounds, head != null) { Guid = guid, StarMapRecord = starMapRecord });
+            tree.Instances.Add(new StationInstance(idx, parent, socpak, entityName, depth, toStation, head?.MinBounds, head?.MaxBounds, head != null)
+            {
+                Guid = guid, StarMapRecord = starMapRecord,
+                ChildTags = childTags.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(t => t.ToLowerInvariant()).ToList(),
+            });
             var kids = nested.Concat(head?.Children ?? Enumerable.Empty<SocChild>()).ToList();
             var kidEls = nestedEls.Concat(ChildElements(head?.Root)).ToList();
             if (kids.Count == 0) return;
@@ -718,7 +726,8 @@ internal sealed class StationTree
                 if (k.Socpak.Length > 0 && chain.Contains(index.Resolve(k.Socpak), StringComparer.Ordinal)) { tree.CycleCut++; continue; }
                 if (el != null && StationChildFilter.Skip((string?)el.Attribute("class") ?? "", root.Place.IsStation)) { tree.ClassCut++; tree.ClassCutNames.Add(index.Resolve(k.Socpak)); continue; }
                 Add(idx, k.Socpak, k.EntityName, depth + 1, toStation.Then(StationXf.Of(k.X, k.Y, k.Z, k.Rot)), k.Kids,
-                    el != null ? ChildElements(el) : new List<XElement>(), ((string?)el?.Attribute("guid") ?? "").Trim().ToLowerInvariant(), k.StarMapRecord);
+                    el != null ? ChildElements(el) : new List<XElement>(), ((string?)el?.Attribute("guid") ?? "").Trim().ToLowerInvariant(), k.StarMapRecord,
+                    (string?)el?.Attribute("tags") ?? "");
             }
             chain.RemoveAt(chain.Count - 1);
         }
@@ -726,7 +735,7 @@ internal sealed class StationTree
         // socpak のあるルートは前のまま (入れ子の Child を足すと、socpak の Child と xml の要素の並びが合わなくなり、class の絞り込みが効かなくなるため)
         Add(-1, root.Socpak, root.EntityName, 0, StationXf.Identity, root.Socpak.Length == 0 ? root.Kids.ToList() : new List<SocChild>(), new List<XElement>(), "", root.Place.Uuid.ToLowerInvariant());
         if (!root.Place.IsStation) { tree.KeepPlaceCluster(); tree.AlignToPlaceStructure(); }
-        if (contents) tree.LoadContents(index, ct);
+        if (contents) { tree.LoadContents(index, ct); tree.LinkTransportSystem(); }
         return tree;
     }
 
@@ -835,6 +844,37 @@ internal sealed class StationTree
             foreach (var r in c.Routes) RoomRoutes.Add(r with { Instance = inst.Index });
         }
     }
+
+    // 新しい乗り物の仕組み (metadata の sctransport*。Area18 で使われ、New Babbage・Orison・Lorville・Checkmate・Seraphim・Kaboos には無い) の乗り場を、
+    // 今の路線の作り方 (StationRouteGraph.TransitLines) で使えるようにする (2026-11-01、利用者の決まり「データで乗れる路線は乗れるようにする」)。データで確かめた結び付き:
+    //   ・路線の管理 (SCTransportManager) の DNF の正のタグ = 路線のタグ (電車 A 9dec21ba・B a25cc25e、Habs のエレベーター 0e52edb7 など)。行き先 (SCTransportDestination) の Tags にこのタグがある。
+    //   ・行き先の DNF の正のタグ = 乗り場のタグ。電車は乗り場の Entity の Tags (A 793660ad・B 78cafa1c)、エレベーターの乗り場 (transport_accesspoint_*) は
+    //     Entity の Tags が空で、親の xml の Child の tags 属性 (例 a18_habtower_lobby の Child の 37ade105…) にある。
+    //   ・乗り場の DNF の正のタグ = 操作盤 (SCTransportGatewayControlPanel・TimerPanel) の Tags のタグ。操作盤は同じインスタンスにある。
+    // 結び方: 乗り場のタグ (Entity の Tags と、インスタンスの ChildTags) に DNF の正のタグが当たる行き先のうち、いちばん近い行き先の Tags を乗り場の Tags に足す
+    // (行き先 1 つに乗り場が 6 つの階 (Habs のロビー) もあるので、乗り場ごとにいちばん近い行き先を選ぶ)。
+    // 操作盤: 同じインスタンスに、乗り場の DNF の正のタグを Tags に持つ操作盤があれば、乗り場の Attrs に panelLinked=1 を入れる (TransitLines が装置ありとみなす)
+    public void LinkTransportSystem()
+    {
+        static bool New(StationPoint p) => p.Attrs.TryGetValue(SocpakContents.TransportAttr, out var v) && v == "1";
+        static List<string> Dnf(StationPoint p) => p.Attrs.TryGetValue(SocpakContents.DnfAttr, out var v) ? v.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList() : new List<string>();
+        var gws = Enumerable.Range(0, Points.Count).Where(i => Points[i].Kind == "sctransitgateway" && New(Points[i]) && Points[i].Pos != null).ToList();
+        if (gws.Count == 0) return;
+        var dests = Points.Where(p => p.Kind == "sctransitdestination" && New(p) && p.Pos != null).ToList();
+        var panels = Points.Where(p => p.Kind == "sctransitperipheral" && New(p)).ToList();
+        static double D((double X, double Y, double Z) a, (double X, double Y, double Z) b) => Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y) + (a.Z - b.Z) * (a.Z - b.Z));
+        foreach (var i in gws)
+        {
+            var g = Points[i];
+            var own = g.Tags.Select(t => t.ToLowerInvariant()).Concat(Instances[g.Instance].ChildTags).ToHashSet(StringComparer.Ordinal);
+            var near = dests.Where(d => Dnf(d).Any(own.Contains)).OrderBy(d => D(d.Pos!.Value, g.Pos!.Value)).FirstOrDefault();
+            var tags = g.Tags.Concat(Instances[g.Instance].ChildTags).Concat(near?.Tags ?? Array.Empty<string>()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var attrs = new Dictionary<string, string>(g.Attrs, StringComparer.Ordinal);
+            var gd = Dnf(g);
+            if (panels.Any(p => p.Instance == g.Instance && p.Tags.Any(t => gd.Contains(t.ToLowerInvariant())))) attrs["panelLinked"] = "1";
+            Points[i] = g with { Tags = tags, Attrs = attrs };
+        }
+    }
 }
 
 // socpak 1 つの中身 (socpak の枠の値のまま)
@@ -893,10 +933,21 @@ internal sealed class SocpakContents
         catch (Exception ex) when (ex is InvalidDataException or System.Xml.XmlException or ArgumentException or IndexOutOfRangeException) { return null; }
     }
 
+    // 新しい乗り物の仕組みの種類 → 今の種類 (StationTree.LinkTransportSystem の説明)
+    public static readonly IReadOnlyDictionary<string, string> TransportKinds = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["sctransportmanager"] = "sctransitmanager", ["sctransportgateway"] = "sctransitgateway", ["sctransportdestination"] = "sctransitdestination",
+        ["sctransportnavspline"] = "sctransitnavsplinedata", ["sctransportgatewaycontrolpanel"] = "sctransitperipheral", ["sctransportgatewaytimerpanel"] = "sctransitperipheral",
+    };
+    // 新しい仕組みから直した点の Attrs の印 (値 "1") と、DNF の正のタグ (小文字、カンマ区切り)
+    public const string TransportAttr = "transportSystem";
+    public const string DnfAttr = "dnfTags";
+
     private void ReadMeta(string kind, byte[] bytes)
     {
         var doc = ParseAny(bytes);
         if (doc?.Root == null) return;
+        if (TransportKinds.TryGetValue(kind, out var oldKind)) { ReadTransportMeta(kind, oldKind, doc); return; }
         foreach (var ent in doc.Root.Elements("Entity"))
         {
             var attrs = ent.Attributes().ToDictionary(a => a.Name.LocalName, a => a.Value, StringComparer.Ordinal);
@@ -925,6 +976,43 @@ internal sealed class SocpakContents
             }
             var name = (string?)ent.Attribute("nameIdentifier") ?? (string?)ent.Attribute("name") ?? "";
             Meta.Add((kind, (string?)ent.Attribute("CryGUID") ?? "", name, pos, rot, tags, attrs, neg, path));
+        }
+    }
+
+    // 新しい乗り物の仕組みの metadata (位置は PivotRelativeTM="Q : w,x,y,z | T : x,y,z")。管理は DNF の正のタグを路線のタグ (Tags) に、行き先は locNameId を名前にする。
+    // 道筋の ControlPoint は SplineData の下にある (Area18 の TransportNavSpline_Area18_Train_A_Central-to-Bevic は Q 0,0,0,1 (z まわり 180°) で、
+    // 最後の点 (4623.4, 6533.7, -490.3) が Bevic の乗り場 (中央の乗り場から (-4623, -6534, -490)) に重なることで、w,x,y,z の順と確かめた)
+    private void ReadTransportMeta(string kind, string oldKind, XDocument doc)
+    {
+        static List<string> TagIds(IEnumerable<XElement> els) => els.Select(t => ((string?)t.Attribute("TagId") ?? "").ToLowerInvariant()).Where(t => t.Length > 0).ToList();
+        foreach (var ent in doc.Root!.Elements("Entity"))
+        {
+            var attrs = ent.Attributes().ToDictionary(a => a.Name.LocalName, a => a.Value, StringComparer.Ordinal);
+            (double X, double Y, double Z)? pos = null; (double W, double X, double Y, double Z)? rot = null;
+            if ((string?)ent.Attribute("PivotRelativeTM") is { } tm && TransformLsRegex.Match(tm) is { Success: true } m)
+            {
+                pos = StationIndex.ParseVec(m.Groups[2].Value.Trim());
+                rot = StationIndex.Normalize(StationIndex.ParseQuat(m.Groups[1].Value.Trim()));
+            }
+            var tags = TagIds(ent.Elements("Tags").Elements("Tag"));
+            var dnfPos = TagIds(ent.Elements("DNFTags").Elements("DNFTerm").Elements("DNFPositiveTags").Elements("Tag"));
+            var dnfNeg = TagIds(ent.Elements("DNFTags").Elements("DNFTerm").Elements("DNFNegativeTags").Elements("Tag"));
+            attrs[TransportAttr] = "1";
+            attrs[DnfAttr] = string.Join(",", dnfPos);
+            var neg = new List<string>();
+            if (kind == "sctransportmanager") { tags = dnfPos; neg = dnfNeg; }
+            var path = new List<(double X, double Y, double Z)>();
+            if (kind == "sctransportnavspline")
+            {
+                var ef = StationXf.Of(pos?.X ?? 0, pos?.Y ?? 0, pos?.Z ?? 0, rot);
+                foreach (var cp in ent.Descendants("ControlPoint"))
+                    if (StationIndex.ParseVec((string?)cp.Attribute("position")) is { } p) path.Add(ef.Apply(p));
+            }
+            // 番号を付ける行き先 (autoNumberedName="1"。名前の訳が「Floor %d」) は、ゲームが付ける番号の決め方をデータで確かめられていないので、名前を使わない ("")
+            var name = kind == "sctransportdestination"
+                ? ((string?)ent.Attribute("autoNumberedName") == "1" ? "" : (string?)ent.Attribute("locNameId") ?? "")
+                : (string?)ent.Attribute("name") ?? "";
+            Meta.Add((oldKind, (string?)ent.Attribute("CryGUID") ?? "", name, pos, rot, tags, attrs, neg, path));
         }
     }
 

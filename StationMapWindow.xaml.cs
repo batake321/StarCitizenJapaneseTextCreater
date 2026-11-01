@@ -12,7 +12,11 @@ namespace StarCitizenJapaneseTextCreater;
 public partial class StationMapWindow : Window
 {
     // 一覧の行: 場所 1 か所 (Record あり)、または同じ地図のまとまりの行 (IsGroup。Group はまとまりの鍵)。InGroup はまとまりの中の行か
-    private sealed record Row(string Record, string Name, string Label, string Display, string? Group = null, bool IsGroup = false, bool InGroup = false);
+    // NoFloor は床の形のデータの無い場所 (IsNoFloorPlace。名前に「（床なし）」を付け、選んだら地図の欄に知らせを出す)
+    private sealed record Row(string Record, string Name, string Label, string Display, string? Group = null, bool IsGroup = false, bool InGroup = false, bool NoFloor = false);
+    // 床の形のデータの無い場所の名前に付ける言葉と、選んだときに地図の欄に出す知らせ (2026-11-02、利用者の決定「床が出ないものは床なしと表示」)
+    internal const string NoFloorSuffix = "（床なし）";
+    internal const string NoFloorMessage = "この場所には床の形のデータがありません。";
 
     // 同じ地図を使いまわしている場所のまとまり (StationContentKey。ルートより下の中身の鍵)。Data.p4k の索引とルート探しで決める (数秒)。
     // Data.p4k が同じ間は使い回す (アプリを動かしている間だけ)。record 名 → 鍵 (ルートの見つからない場所は入らない)
@@ -32,9 +36,11 @@ public partial class StationMapWindow : Window
     // 洞窟・残骸・墜落現場は、今の床の決め方では床ができず空の地図になるので、v2.5.0 では一覧にもチェックにも出さない (2026-11-01、利用者「次バージョンでもよい」)。
     // ルート (FindRoots の規則 1) は見つけたままにしてあり、HiddenKinds から外せば出る
     private static readonly HashSet<string> HiddenKinds = new(StringComparer.Ordinal) { KindCave, KindWreck, KindCrash };
-    // 星図に載っていない場所のうち、床のメッシュの無い場所を一覧に出さない (BuildContentKeys。次の版で床の作り方を足すときに false にする)
+    // 床のメッシュの無い場所を調べて分けるか (BuildContentKeys。次の版で床の作り方を足すときに false にする)。
+    // v2.5.0 では一覧に出さなかった。2026-11-02 から一覧には「（床なし）」を付けて出す (IsNoFloorPlace)。まとめて取り込む (StationMapExports)・
+    // 契約の地図のリンク (IsListedPlace) は、まだこの値で床のメッシュの無い場所を外している
     internal const bool HideNoFloorPlaces = true;
-    // 床のメッシュの無い星図の場所 (ステーション・都市・前哨基地など) の record (2026-11-01、利用者の決定: 星図外と同じく、床のできない場所は出さない。BuildContentKeys で作る)
+    // 床のメッシュの無い星図の場所 (ステーション・都市・前哨基地など) の record (BuildContentKeys で作る。2026-11-02 から一覧には「（床なし）」で出す)
     private static HashSet<string> s_noFloor = new(StringComparer.Ordinal);
     private static readonly string[] Kinds = [KindStation, KindOutpost, KindAsteroid, KindPoi, KindAnomaly, KindJump, KindNav];
     // 名前の無い場所 (ゲームのデータに名前が無く、名前が record 名のままの場所。HasGameName が false)。種類とは別の軸で、付けたときだけ一覧に出す (内部名のまま)。
@@ -44,8 +50,10 @@ public partial class StationMapWindow : Window
     // 窓を閉じて開き直しても残るように static にする。最初は ステーション・都市 だけ (名前の無い場所は外す)
     private static readonly HashSet<string> s_excludedKinds = new(StringComparer.Ordinal)
         { KindOutpost, KindAsteroid, KindCave, KindWreck, KindCrash, KindPoi, KindAnomaly, KindJump, KindNav, KindUnnamed };
-    // 星図に載っていない場所 (StationPlace.IsUnlisted。FindRoots で見つけたもの): record・名前・種類のチェック・星系・中身の鍵。BuildContentKeys で作る
-    private sealed record UnlistedPlace(string Record, string Name, string Label, string Kind, string System);
+    // 星図に載っていない場所 (StationPlace.IsUnlisted。FindRoots で見つけたもの): record・名前・種類のチェック・星系・中身の鍵。BuildContentKeys で作る。
+    // Root はその場所のルート (［マップ］タブの星系図 (MapPanel) が、局所の原点を StationRoot.ToGlobal で星系の座標にして点を置く)
+    // NoFloor は床のメッシュの無い場所 (2026-11-02 から一覧に「（床なし）」で出す。［マップ］タブの星系図へ渡す UnlistedPlaces には入れない (前と同じ))
+    internal sealed record UnlistedPlace(string Record, string Name, string Label, string Kind, string System, StationRoot? Root = null, bool NoFloor = false);
     private static List<UnlistedPlace> s_unlisted = new();
     private CheckBox? _allKinds;
     private readonly List<(string Kind, CheckBox Box)> _kindBoxes = new();
@@ -67,12 +75,21 @@ public partial class StationMapWindow : Window
         var ex = StationMapExports.Instance;
         Action onState = () => { UpdateBar(); };
         System.ComponentModel.PropertyChangedEventHandler onProp = (_, e) => { if (e.PropertyName == nameof(Ship3DExports.OverallText)) UpdateBar(); };
+        // 取り込みが終わった場所が、一覧に出る階の無い空の地図 (IsNoFloorPlace) だったときは、地図の欄を知らせにし、一覧の「（床なし）」を付け直す (2026-11-02)。
+        // パネルの知らせ (Clear) で、パネルの取り込みの後の表示 (StationMapPanel.OnExported・ShowAsync) は止まる (_record が空になるため)
+        Action<string> onExported = shortName => Dispatcher.InvokeAsync(() =>
+        {
+            if (_closed || _record == null || !StationMapExports.ShortName(_record).Equals(shortName, StringComparison.OrdinalIgnoreCase)) return;
+            if (IsNoFloorPlace(_record)) { panel.Clear(NoFloorMessage); RefreshStations(); }
+        });
+        ex.Exported += onExported;
         ex.StateChanged += onState;
         Ship3DExports.Instance.StateChanged += onState;
         Ship3DExports.Instance.PropertyChanged += onProp;
         Closed += (_, _) =>
         {
             _closed = true;
+            ex.Exported -= onExported;
             ex.StateChanged -= onState;
             Ship3DExports.Instance.StateChanged -= onState;
             Ship3DExports.Instance.PropertyChanged -= onProp;
@@ -202,6 +219,42 @@ public partial class StationMapWindow : Window
         _kindUpdating = false;
     }
 
+    // ===== ［マップ］タブの星系図 (MapPanel) から使う =====
+    // 地図を出せる場所の調べ (BuildContentKeys。星図に載っていない場所の一覧・床の無い場所) を、無ければ裏で作って待つ (この窓と同じものを使い回す)。
+    // できたら true。Data.p4k が無い・調べられなかったら false
+    internal static async Task<bool> EnsureScanAsync()
+    {
+        var stamp = Ship3DExports.CurrentStamp();
+        if (stamp == null) return false;
+        if (s_contentKeys is { } c && c.Stamp == stamp) return true;
+        try
+        {
+            var task = s_keysTask;
+            if (task == null || task.IsFaulted || task.IsCompletedSuccessfully && task.Result.Stamp != stamp)
+                s_keysTask = task = Task.Run(() => BuildContentKeys(stamp));
+            var res = await task;
+            if (res.Stamp != stamp) return false;
+            s_contentKeys = res;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 地図を出せる場所を調べられませんでした: {ex}");
+            return false;
+        }
+    }
+    // 調べが済んでいるか (今の Data.p4k で)
+    internal static bool ScanReady => s_contentKeys is { } c && c.Stamp == Ship3DExports.CurrentStamp();
+    // 星図に載っていない場所の一覧 (調べの結果。床のメッシュの無い場所 (NoFloor) は前と同じく入れない)
+    internal static IReadOnlyList<UnlistedPlace> UnlistedPlaces => s_unlisted.Where(u => !u.NoFloor).ToList();
+    // 床の形のデータの無い場所か (2026-11-02、利用者の決定「取り込みは取り込もう。床が出ないものは床なしと表示」): 床のメッシュの無い星図の場所 (s_noFloor)・
+    // 床のメッシュの無い星図に載っていない場所 (UnlistedPlace.NoFloor。どちらも調べ (BuildContentKeys) が済んでから分かる) と、
+    // 取り込んで一覧に出る階が 0 だった場所 (StationMapExports.IsEmptyMap)。一覧では外さずに名前に「（床なし）」を付け、選んだら地図の欄に NoFloorMessage を出す
+    internal static bool IsNoFloorPlace(string record) =>
+        s_noFloor.Contains(record) || s_unlisted.Any(u => u.NoFloor && u.Record == record) || StationMapExports.IsEmptyMap(record);
+    // 一覧に出す種類の星図の場所で、床のある (床の無い場所 s_noFloor でない) ものか。別ウィンドウの一覧と同じ決まり (種類のチェック・名前の無い場所のチェックは見ない)
+    internal static bool IsMapPlace(ShopTreeNode n) => KindOf(n) is { } k && !HiddenKinds.Contains(k) && !s_noFloor.Contains(n.RecordName);
+
     // 同じ地図の鍵を (無ければ裏で) 作り、できたら一覧を作り直す。作れなければ (Data.p4k が無い等) まとめずに出す (状態の欄に知らせる)
     private async Task LoadContentKeysAsync()
     {
@@ -217,6 +270,8 @@ public partial class StationMapWindow : Window
             var res = await task;
             if (res.Stamp == stamp) { s_contentKeys = res; _keys = res.Keys; }
             txtGroupStatus.Text = "";
+            // 調べの前に選んでいた場所が、調べで床の形のデータの無い場所と分かったときは、地図の欄を知らせにする
+            if (!_closed && _record != null && IsNoFloorPlace(_record)) panel.Clear(NoFloorMessage);
         }
         catch (Exception ex)
         {
@@ -240,17 +295,19 @@ public partial class StationMapWindow : Window
         var byUuid = rows.Where(r => r.Place.Uuid.Length > 0).GroupBy(r => r.Place.Uuid.ToLowerInvariant()).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
         var byRecord = rows.GroupBy(r => r.Place.Record).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
         var unlisted = new List<UnlistedPlace>();
-        // 床のメッシュ (StationFloorBuilder.IsExportMesh) の無い場所は、取り込んでも空の地図になるので、v2.5.0 では出さない (2026-11-01、利用者の決定「A」)。
-        // 書き出しの計画 (PlanExports) と同じ調べ方 (socpak の .soc のメッシュ名) を、socpak ごとに 1 回だけする。HideNoFloorPlaces を false にすれば出る。
+        // 床のメッシュ (StationFloorBuilder.IsExportMesh) の無い場所は、取り込んでも空の地図になる。v2.5.0 では出さなかった (2026-11-01、利用者の決定「A」) が、
+        // 2026-11-02 から一覧に「（床なし）」で出す (利用者の決定「取り込みは取り込もう。床が出ないものは床なしと表示」。NoFloor・s_noFloor)。
+        // 書き出しの計画 (PlanExports) と同じ調べ方 (socpak の .soc のメッシュ名) を、socpak ごとに 1 回だけする。HideNoFloorPlaces を false にすれば床なしの印を付けない。
         // ハーネスで 931 か所 (洞窟・残骸・墜落現場を除く) を調べて 0.8 秒、床のメッシュの無い場所 486
         var hasFloorMesh = new Dictionary<string, bool>(StringComparer.Ordinal);
         foreach (var r in search.Roots.Values.Where(r => r.Place.IsUnlisted))
         {
             if (KindOfType(r.Place.Type) is not { } kind || HiddenKinds.Contains(kind)) continue;
-            if (HideNoFloorPlaces && !HasFloorMesh(idx, r, hasFloorMesh)) continue;
+            // (2026-11-02) 床のメッシュの無い場所も一覧に入れ、NoFloor の印を付ける (一覧で「（床なし）」と出す)
+            var noFloor = HideNoFloorPlaces && !HasFloorMesh(idx, r, hasFloorMesh);
             var (name, label) = UnlistedNames(r, rec => byRecord.TryGetValue(rec, out var src) ? src.Name : null,
                 uuid => byUuid.TryGetValue(uuid, out var b) ? b.Name : null);
-            unlisted.Add(new UnlistedPlace(r.Place.Record, name, label, kind, r.Place.System));
+            unlisted.Add(new UnlistedPlace(r.Place.Record, name, label, kind, r.Place.System, r, noFloor));
         }
         s_unlisted = unlisted;
         s_noFloor = HideNoFloorPlaces
@@ -288,8 +345,10 @@ public partial class StationMapWindow : Window
     // 一覧に出す場所か (契約の詳細の地図のリンクを、一覧と同じ決まりで出すため。2026-11-01)。種類のチェックのある種類で、
     // 一覧に出さない種類 (HiddenKinds) でなく、星図に載っていない場所 (isUnlisted) なら床のメッシュがあること (HideNoFloorPlaces のとき)。
     // 種類のチェック・名前の無い場所のチェック (利用者が付け外しするもの) は見ない
+    // (2026-11-02) 床のメッシュの無い場所も一覧に「（床なし）」で出すようになったので、契約のリンクも床では外さない (isUnlisted・hasFloor は見ない。
+    // 「（床なし）」の印は呼ぶ側 (MainWindow.BuildMissionMapSection) が NoFloorSuffix で付ける)
     internal static bool IsListedPlace(string type, bool isUnlisted, bool hasFloor) =>
-        KindOfType(type) is { } kind && !HiddenKinds.Contains(kind) && (!isUnlisted || !HideNoFloorPlaces || hasFloor);
+        KindOfType(type) is { } kind && !HiddenKinds.Contains(kind);
 
     // まとまりの名前: 名前が全部同じならその名前。違えば、全部の名前に共通する頭 (語の区切り (空白・「-」・「#」) までで切り、終わりの区切りは除く)。
     // 共通する頭が無ければ「名前の順でいちばん前の名前 など」
@@ -320,10 +379,10 @@ public partial class StationMapWindow : Window
         var system = lstSystems.SelectedItem as string;
         var q = txtFilter.Text.Trim();
         // 選んでいる星系の、種類のチェックに当たる場所 (チェックの有無によらず全部。件数と同じ名前の判定に使う)
-        var places = _tree.Places.Where(n => KindOf(n) != null && string.Equals(n.System, system, StringComparison.OrdinalIgnoreCase) && !s_noFloor.Contains(n.RecordName)
-            // 取り込んだら一覧に出る階の無い空の地図だった場所 (StationMapExports.IsEmptyMap。取り込む前には分からない通信アレイ・Rockcracker_Sandbox など) も出さない
-            && !(HideNoFloorPlaces && StationMapExports.IsEmptyMap(n.RecordName))).ToList();
-        var unlisted = s_unlisted.Where(u => string.Equals(u.System, system, StringComparison.OrdinalIgnoreCase) && !(HideNoFloorPlaces && StationMapExports.IsEmptyMap(u.Record))).ToList();
+        // 床の形のデータの無い場所 (床のメッシュの無い場所・取り込んだら一覧に出る階の無い空の地図だった場所 (取り込む前には分からない通信アレイ・Rockcracker_Sandbox など)) も
+        // 外さずに出し、名前に「（床なし）」を付ける (2026-11-02、利用者の決定。IsNoFloorPlace)
+        var places = _tree.Places.Where(n => KindOf(n) != null && string.Equals(n.System, system, StringComparison.OrdinalIgnoreCase)).ToList();
+        var unlisted = s_unlisted.Where(u => string.Equals(u.System, system, StringComparison.OrdinalIgnoreCase)).ToList();
         foreach (var (kind, box) in _kindBoxes)
             box.Content = $"{kind} ({(kind == KindUnnamed ? places.Count(n => !HasGameName(n)) : places.Count(n => KindOf(n) == kind) + unlisted.Count(u => u.Kind == kind))})";
         // 同じ名前の場所が 2 つ以上ある名前 (チェックで隠れている種類の場所も数える。チェックを変えても添え字が変わらないように)
@@ -335,13 +394,13 @@ public partial class StationMapWindow : Window
             {
                 var label = dupNames.Contains(n.Name) && n.Parent is { } p && HasGameName(p) ? $"{n.Name}（{p.Name}）" : n.Name;
                 var key = _keys != null && _keys.TryGetValue(n.RecordName, out var k) ? k : null;
-                return new Row(n.RecordName, n.Name, label, StationMapExports.Instance.StateOf(n.RecordName) == Ship3DCacheState.None ? $"{label}（未取り込み）" : label, key);
+                return MakeRow(n.RecordName, n.Name, label, key);
             })
             // 星図に載っていない場所 (名前は種類の言葉か、共有元の星図の場所の名前。名前の無い場所のチェックの対象にはしない)
             .Concat(unlisted.Where(u => !s_excludedKinds.Contains(u.Kind)).Select(u =>
             {
                 var key = _keys != null && _keys.TryGetValue(u.Record, out var k) ? k : null;
-                return new Row(u.Record, u.Name, u.Label, StationMapExports.Instance.StateOf(u.Record) == Ship3DCacheState.None ? $"{u.Label}（未取り込み）" : u.Label, key);
+                return MakeRow(u.Record, u.Name, u.Label, key);
             }))
             .Where(r => q.Length == 0 || r.Name.Contains(q, StringComparison.OrdinalIgnoreCase) || r.Label.Contains(q, StringComparison.OrdinalIgnoreCase))
             .ToList();
@@ -354,6 +413,13 @@ public partial class StationMapWindow : Window
             if (lstStations.SelectedItem != null) lstStations.ScrollIntoView(lstStations.SelectedItem);
         }
         finally { _suppress = false; }
+    }
+
+    // 一覧の 1 か所の行。床の形のデータの無い場所 (IsNoFloorPlace) は「（床なし）」、ほかは取り込んでいなければ「（未取り込み）」を付ける
+    private static Row MakeRow(string record, string name, string label, string? key)
+    {
+        if (IsNoFloorPlace(record)) return new Row(record, name, label, label + NoFloorSuffix, key, NoFloor: true);
+        return new Row(record, name, label, StationMapExports.Instance.StateOf(record) == Ship3DCacheState.None ? $"{label}（未取り込み）" : label, key);
     }
 
     // 同じ地図のまとまりにした一覧の行。まとまりは、一覧に残った行 (種類・名前の無い場所・名前の絞り込みの後) のうち同じ鍵が 2 つ以上あるもの。
@@ -422,6 +488,8 @@ public partial class StationMapWindow : Window
         _name = name;
         Title = $"ステーションの地図 - {name}";
         UpdateBar();
+        // 床の形のデータの無い場所は、地図の代わりに知らせを出す (2026-11-02、利用者の決定。取り込みは［読み込み］でできる)
+        if (IsNoFloorPlace(record)) { panel.Clear(NoFloorMessage); return; }
         await panel.ShowAsync(record, name, _tree);
     }
 

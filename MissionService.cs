@@ -1535,7 +1535,8 @@ public class MissionService : IDisposable
     }
 
     // 契約の行き先の地図 1 か所 (mission_map_places の 1 行。GameDataExtractor.MissionMapDdl)
-    public sealed record MapPlace(string MapRecord, string MapType, string System, string Name, bool Named, bool HasFloor);
+    // ContentKey は同じ地図の鍵 (地図の窓の一覧の ▼ のまとまりと同じ。StationContentKey)
+    public sealed record MapPlace(string MapRecord, string MapType, string System, string Name, bool Named, bool HasFloor, string ContentKey);
 
     // 契約 (まとめた行なら行の中の全部の契約) の行き先の地図を、全部の変数を合わせて重なりを除いたもの (mission_map_vars・mission_map_sets・
     // mission_map_places をつなぐ。インデックス構築の Step 6c で作る表)。表が無い (前の版で構築した DB で、まだ作っていない) ときは空。読めなければ例外
@@ -1549,12 +1550,15 @@ public class MissionService : IDisposable
         cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('mission_map_vars', 'mission_map_sets', 'mission_map_places')";
         if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) < 3) return list;
         // 契約の record の並びは JSON の配列で 1 つの引数にして渡す (json_each)
-        cmd.CommandText = "SELECT p.map_record, p.map_type, p.system, p.name, p.named, p.has_floor FROM mission_map_places p WHERE p.map_record IN "
+        // 前の形の表 (content_key の列が無い。起動後に作り直すまで) では、同じ地図の鍵は無いものとして読む (まとめずに 1 か所ずつ出す)
+        cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('mission_map_places') WHERE name = 'content_key'";
+        var hasKey = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) > 0;
+        cmd.CommandText = "SELECT p.map_record, p.map_type, p.system, p.name, p.named, p.has_floor, " + (hasKey ? "p.content_key" : "''") + " FROM mission_map_places p WHERE p.map_record IN "
             + "(SELECT s.map_record FROM mission_map_vars v JOIN mission_map_sets s ON s.set_id = v.set_id WHERE v.mission_record IN (SELECT value FROM json_each(@m)))";
         cmd.Parameters.AddWithValue("@m", JsonSerializer.Serialize(missionRecords));
         using var r = cmd.ExecuteReader();
         while (r.Read())
-            list.Add(new MapPlace(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetInt64(4) != 0, r.GetInt64(5) != 0));
+            list.Add(new MapPlace(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetInt64(4) != 0, r.GetInt64(5) != 0, r.GetString(6)));
         return list;
     }
 

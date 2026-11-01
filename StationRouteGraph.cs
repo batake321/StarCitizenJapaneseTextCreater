@@ -31,7 +31,10 @@ internal sealed record StationNode(string Id, string Kind, (double X, double Y, 
 internal sealed record StationEdge(int A, int B, double Cost, string Kind, string Line = "", string Dir = "", bool OneWay = false);
 
 // 階段 (Bottom・Top は下と上の端、From・To は階の Id)。Source: mesh (階段のメッシュ)・ramp (スロープだけ)・room・module
-internal sealed record StationStair((double X, double Y, double Z) Bottom, (double X, double Y, double Z) Top, string From, string To, string Source, int Instance);
+// Outline (2026-11-02、利用者の指示「階段の形がわかるなら、階段アイコンでなく階段を枠で囲んでフロア同様に扱う」): 真上から見た階段の板 (メッシュの階段・スロープの板) の
+// 凸包の環 (ステーションの局所の xy)。板から作れないもの (乗り場の縁 platform・部屋の組 room) は null (JSON に outline を書かない)
+internal sealed record StationStair((double X, double Y, double Z) Bottom, (double X, double Y, double Z) Top, string From, string To, string Source, int Instance,
+    IReadOnlyList<(double X, double Y)[]>? Outline = null, bool Landing = false);
 
 // 乗り場 (Kind は elevator・tram) と行き先 (Kind は destination)。Line は路線のキー、Stop は乗り場のいちばん近い同じ路線の行き先の名前
 internal sealed record StationTransit(string Kind, int Instance, string Guid, IReadOnlyList<string> Tags, (double X, double Y, double Z) Pos, string Floor,
@@ -157,6 +160,12 @@ internal static class StationRouteGraph
     public const double SplineSnap = 10;
     public const double ModuleEndRadius = 6;
     public const double PeripheralRadius = 1.5;
+    // 乗り場と同じインスタンス (同じ socpak の置き場) の装置なら、この距離 (各軸) まで乗り場の装置とみなす (2026-11-01)。
+    // New Babbage の路面電車の乗り場 ht_tran_plat_gateway (路線 c06371bb、8 か所) は、同じインスタンスに装置が 2 つあり、いちばん近いもので各軸 2.2〜2.3 m、
+    // Lorville の路面電車の乗り場 gate_01〜06_int (路線 27d5acc0・ae116a07) は 1.7〜2.1 m、lorville_sp_int (7dd60a48・84e9ea1f) は 1.5〜2.5 m で、
+    // PeripheralRadius (1.5 m) では外れていた。外れたままにするもの: Lorville の lorville_l19_int (いちばん近い装置 58 m)・lorville_cbd_int (281 m)
+    // (走る道筋のある路線の乗り場だけ。TransitLines)
+    public const double SameInstancePeripheralRadius = 3.0;
 
     // 利用者の情報で外す路線 (ステーションの record → 路線のタグ)。Orison: 「シャトルは同じ経路で向きが逆の 2 路線 (A 回り・B 回り) しか実装されていない」
     // (2026-11-01)。外すのは ae116a07 (DataCore のタグの名前 Locations/Transit/Lorville_WestLine。宇宙港 4037b0b5 ⇄ Vision Center 4b7f421a、
@@ -254,7 +263,7 @@ internal static class StationRouteGraph
         //   3 エレベーターの行き先のうち階を表すもの (floor_NN・ground_floor・lobby・foyer・roof。行き先 − 1.5 m)
         //   4 エレベーターの行き先のうち階を表さないもの (施設・区域の名前。行き先 − 1.5 m)
         //   5 interiormaplabel の @area_name_* (名札 − 1 m) と、interiormapsection の名前 (@*_Floor_* でないもの。箱の底 + 1 m)
-        //   6 その階の店の名前 (shopNames。店の位置 − 1 m)
+        //   6 その階の店の名前 (shopNames。店の位置 − 1 m)。階の名前にも候補 (Labels) にも使わない (2026-11-01)
         // どれも無い階は、まとまりの名前 (NameGroups)、無ければ近くの名前の付いたまとまりの「<名前> 付近」、無ければ場所 (ルート) の星図の名前。
         // 訳の引ける鍵だけを使う (Usable)。同じ規則の中では当たった数の多い名前、同じなら名前の順
         var hits = floors.ToDictionary(f => f.Id, _ => new List<(int Rule, string Name, string Line)>(), StringComparer.Ordinal);
@@ -272,7 +281,8 @@ internal static class StationRouteGraph
             else continue;
             // 行き先 (規則 3・4) は、行き先 − 1.5 m で階が無ければ行き先の高さでも探す (2026-11-01。Seraphim の居住区の行き先 @ui_interactor_floor_01〜05 は床の 0.7 m 上にあり、
             // − 1.5 m では床の 0.8 m 下になって (FloorAtXY の下の許し 0.6 m を超えて) 当たらなかった)
-            var hf = StationFloorBuilder.FloorAtXY(floors, pos.X, pos.Y, z) ?? (rule is 3 or 4 ? StationFloorBuilder.FloorAtXY(floors, pos.X, pos.Y, pos.Z) : null);
+            // (2026-11-02) 行き先は DestFloor (点の真下 0〜1.5 m の床を先に探す)
+            var hf = rule is 3 or 4 ? DestFloor(floors, pos) : StationFloorBuilder.FloorAtXY(floors, pos.X, pos.Y, z);
             if (hf is { } f) hits[f.Id].Add((rule, Display(p.Name, localize), rule == 3 ? p.Tags.FirstOrDefault() ?? "" : ""));
         }
         if (shopNames != null)
@@ -293,15 +303,20 @@ internal static class StationRouteGraph
             var h = hits[f.Id];
             // Labels はこの階の名前の候補を、使う順 (規則の順、同じ規則の中は当たった数の多い順) に並べたもの
             f.Labels.Clear();
-            f.Labels.AddRange(Cands(f));
+            // (2026-11-01、検証の指摘 F) 店の名前 (規則 6) は候補にも入れない (同じ名前の階の括弧に「Galleria（Bar）」のように店の名前が出ていた)
+            f.Labels.AddRange(Cands(f).Where(n => h.Any(x => x.Rule <= 5 && string.Equals(x.Name, n, StringComparison.OrdinalIgnoreCase))));
             var gname = groupNames.TryGetValue(f.Group, out var gn) ? gn : ("", "");
             f.GroupName = gname.Item2;
             if (gname.Item1.Length == 0 && NearGroupName(floors, f.Group, groupNames) is { } near) { gname = (near.Key, $"{near.Display} 付近"); nearOf[f.Group] = near.Group; f.GroupName = near.Display; }
-            if (h.Count > 0)
+            // (2026-11-01、利用者の指摘「Noodle Shop が階にある。これは区画のはず」) 店の名前 (規則 6) は階の名前にしない。店の名前しか当たらない階は、
+            // まとまりの名前 (無ければ下の「付近」・場所の名前) にする。
+            // Stanton Gateway (RR_JP_StantonMagnus) の Galleria (rs_comm_stan-magnus_jp1) は、−14〜−12 m・−7.75〜−4.82 m・−1〜1.16 m の 3 つの床の高さがあり、
+            // 上の 2 つの階が「Bar」「Noodle Shop」になっていた
+            if (h.Any(x => x.Rule <= 5))
             {
-                var best = h.Min(x => x.Rule);
-                f.DisplayName = Cands(f)[0];
-                f.NameSource = best switch { 1 => "section", 2 => "label", 3 => "elevator", 4 => "destination", 5 => "area", _ => "shop" };
+                var best = h.Where(x => x.Rule <= 5).Min(x => x.Rule);
+                f.DisplayName = Cands(f).First(n => h.Any(x => x.Rule <= 5 && string.Equals(x.Name, n, StringComparison.OrdinalIgnoreCase)));
+                f.NameSource = best switch { 1 => "section", 2 => "label", 3 => "elevator", 4 => "destination", _ => "area" };
             }
             else if (gname.Item1.Length > 0) { f.DisplayName = gname.Item2; f.NameSource = "group"; }
             else
@@ -360,6 +375,18 @@ internal static class StationRouteGraph
         {
             var pick = PreferCapital(g.Select(f => f.DisplayName));
             foreach (var f in g) f.DisplayName = pick;
+        }
+        // (2026-11-02、利用者の指示「名前での紐づけ」) 階の表示の名前 (データから付いたもの。括弧の添え書きの前) が、重ねる鍵 (StackKeys と StackKeyAliases) の訳と
+        // 同じ (大文字小文字は区別しない) なら、その階にその鍵の番号を付ける。名前どうしを比べるだけで、名前の決め打ちはしない。
+        // 訳の引けない鍵 (localize が無いときも) は比べない。使うのは StackOrder (その路線の行き先にその鍵があるときだけ)
+        var keyNames = StackKeys.Select((k, i) => (Key: k, Index: i)).Concat(StackKeyAliases.Select(kv => (kv.Key, Index: kv.Value)))
+            .Select(t => (Name: Loc(t.Key, localize), t.Index)).Where(t => t.Name is { Length: > 0 }).ToList();
+        foreach (var f in floors)
+        {
+            f.NameStackKey = -1;
+            if (f.DisplayName.Length == 0) continue;
+            foreach (var (name, idx) in keyNames)
+                if (string.Equals(name, f.DisplayName, StringComparison.OrdinalIgnoreCase)) { f.NameStackKey = f.NameStackKey < 0 ? idx : Math.Min(f.NameStackKey, idx); }
         }
     }
 
@@ -591,11 +618,12 @@ internal static class StationRouteGraph
     // Cloudview Center の橋の階段 (stair160) の上の端と Crusader Showroom の床のあいだは 2.7 m (あいだは橋 plate_trim_bridge_32m_c で、床の規則で拾えない)
     public const double StairEndSnap = 3.0;
     public const double StairEndLink = 4.0;
-    public static List<StationStair> Stairs(StationTree tree, IReadOnlyList<StationPlate> plates, IReadOnlyList<StationFloor> floors)
+    // noEnd: 端の階が見つからず階段にしなかったまとまり (浮いたもの。StationFloorBuilder.FloatingItems) を入れる先 (null なら入れない)
+    public static List<StationStair> Stairs(StationTree tree, IReadOnlyList<StationPlate> plates, IReadOnlyList<StationFloor> floors, List<StationFloating>? noEnd = null)
     {
         var res = new List<StationStair>();
         var floorPlates = plates.Where(p => !p.Stair).GroupBy(p => StationFloorBuilder.PlateFloor(p, floors)?.Id ?? "").Where(x => x.Key.Length > 0).ToDictionary(x => x.Key, x => x.ToList());
-        foreach (var g in plates.Where(p => p.Stair).GroupBy(p => p.Instance))
+        foreach (var g in plates.Where(p => p.Stair).GroupBy(StationFloorBuilder.StairKey))
         {
             var list = g.ToList();
             var parent = Enumerable.Range(0, list.Count).ToArray();
@@ -633,9 +661,32 @@ internal static class StationRouteGraph
                             }
                     return best;
                 }
-                var fb = EndFloor(lo.Bottom);
-                var ft = EndFloor(hi.Top);
-                if (fb == null || ft == null || fb == ft) continue;
+                // (2026-11-02、利用者の原則「すき間の無い高低差が 0.5m 未満の続きの面」「"つながってる" を軽視してるんじゃないのか」)
+                // 端の階は、先に、階段の板に接する床の板 (HullGap が JoinGap 以内で、上面が階段の板の Bottom − SurfaceRise 〜 Top + SurfaceRise) のうち、
+                // いちばん低いものの階 (下の端) といちばん高いものの階 (上の端)。2 つの階が無ければ前と同じ探し方 (EndFloor。まとまりの下の端・上の端の高さ ± 1.5 m)。
+                // 踊り場でつないだまとまりに、となりの階段の板が入り、まとまりの下の端が床の 2 m 下になって EndFloor で端の階が見つからず、階段ごと消えていた
+                // (fin45 の Area18 の Arccorp Tower の屋上の階段 rooftop_bg_small_01: まとまり 371.72〜381.60 m、接する床 373.75・381.25 m)
+                StationFloor? fb = null, ft = null;
+                if (own.Any(f => f.PlateSet != null))
+                {
+                    double tlo = double.MaxValue, thi = double.MinValue;
+                    foreach (var f in own)
+                        if (floorPlates.TryGetValue(f.Id, out var fl))
+                            foreach (var fp in fl)
+                                if (ps.Any(sp => fp.Top >= sp.Bottom - StationFloorBuilder.SurfaceRise && fp.Top <= sp.Top + StationFloorBuilder.SurfaceRise
+                                    && StationFloorBuilder.HullGap(sp.Hull, fp.Hull) <= StationFloorBuilder.JoinGap))
+                                {
+                                    if (fp.Top < tlo) { tlo = fp.Top; fb = f; }
+                                    if (fp.Top > thi) { thi = fp.Top; ft = f; }
+                                }
+                }
+                if (fb == null || ft == null || fb == ft) { fb = EndFloor(lo.Bottom); ft = EndFloor(hi.Top); }
+                if (fb == null || ft == null || fb == ft)
+                {
+                    noEnd?.Add(new StationFloating(lo.Mesh, lo.Ramp ? "ramp" : "stair", lo.Hull.Average(q => q.X), lo.Hull.Average(q => q.Y), lo.Bottom,
+                        StationFloorBuilder.StairNoEndReason + $" (下の端 {(fb == null ? "なし" : fb.Id)}・上の端 {(ft == null ? "なし" : ft.Id)}、{lo.Bottom:F2}〜{hi.Top:F2} m)"));
+                    continue;
+                }
                 // 端の位置 (2026-11-01): 階段の凸包の頂点のうち、その階の床の板 (階段でない板) にいちばん近いもの (2 m 以内) を、階段の中心へ 0.5 m 寄せた点。
                 // 無ければ前と同じく板の中心。Cloudview Center の広場と Crusader Showroom のあいだの橋の階段 (base_08x06x02_bridge_stairs_b) は、
                 // 中心が床の外で、床の経由点と結べず、Showroom の側が切れていた
@@ -654,8 +705,58 @@ internal static class StationRouteGraph
                     return best;
                 }
                 var eb = End(lo, fb); var et = End(hi, ft);
+                // 踊り場でつないだ階段 (StationFloorBuilder.Landings) は、いちばん下の板のインスタンスを使う (鍵は負の数)
+                var stInst = g.Key >= 0 ? g.Key : lo.Instance;
+                var landing = ps.Any(p => p.Landing);
+                var src = ps.All(p => p.Ramp) ? "ramp" : "mesh";
                 res.Add(new StationStair((eb.X, eb.Y, fb.Z), (et.X, et.Y, ft.Z),
-                    fb.Id, ft.Id, ps.All(p => p.Ramp) ? "ramp" : "mesh", g.Key));
+                    fb.Id, ft.Id, src, stInst, ps.Where(p => p.Hull.Length >= 3).Select(p => p.Hull).ToList() is { Count: > 0 } ol ? ol : null, landing));
+                // (2026-11-02) 端の階の床の板が、階段の別の所 (端の点から StairEndLink より離れた所) にも接していれば、そこへも結ぶ (形 outline は書かない)。
+                // 同じ階の床が階段の両脇に分かれているとき、片方にしか端の点が無く、もう片方 (店のある側) が道でつながらなかった
+                // (ARC_LEO の Galleria 77.8 m: 階段の上の端が x −1024 の側だけになり、Admin と Bar のある x −1015 の側が乗り場からたどれなかった)
+                foreach (var (endF, endPt, other, otherF, isTop) in new[] { (ft, et, eb, fb, true), (fb, eb, et, ft, false) })
+                {
+                    if (!floorPlates.TryGetValue(endF.Id, out var efl)) continue;
+                    var added = new List<(double X, double Y)> { endPt };
+                    foreach (var fp in efl)
+                    {
+                        if (Math.Abs(fp.Top - endF.Z) > StationFloorBuilder.SurfaceRise && !(fp.Top >= endF.ZMin && fp.Top <= endF.ZMax)) continue;
+                        var sp = ps.Where(q => fp.Top >= q.Bottom - StationFloorBuilder.SurfaceRise && fp.Top <= q.Top + StationFloorBuilder.SurfaceRise
+                            && StationFloorBuilder.HullGap(q.Hull, fp.Hull) <= StationFloorBuilder.JoinGap).FirstOrDefault();
+                        if (sp == null) continue;
+                        var v = sp.Hull.MinBy(h => StationFloorBuilder.DistToConvex(fp.Hull, h.X, h.Y));
+                        if (added.Any(a => Math.Sqrt((a.X - v.X) * (a.X - v.X) + (a.Y - v.Y) * (a.Y - v.Y)) <= StairEndLink)) continue;
+                        added.Add(v);
+                        res.Add(isTop ? new StationStair((other.X, other.Y, otherF.Z), (v.X, v.Y, endF.Z), otherF.Id, endF.Id, src, stInst, null, landing)
+                                      : new StationStair((v.X, v.Y, endF.Z), (other.X, other.Y, otherF.Z), endF.Id, otherF.Id, src, stInst, null, landing));
+                    }
+                }
+                // (2026-11-02、親の決定 d) 階段の途中に接する階も、その階段で結ぶ: 端の階でない階の床の板で、上面が階段の下の端 + JoinRise より上・上の端 − JoinRise より下にあり、
+                // 階段の板 (上面か底が板の上面 ± JoinRise のもの) から JoinGap 以内のもの。その階と下の端・上の端を、それぞれ結ぶ (形 outline は書かない。形は上の 1 本に書く)。
+                // Checkmate の Floor 13 (傾いた格子の通路の途中に接する) と、踊り場に接する ADMIN の部屋の床がこれでつながる
+                foreach (var f in own)
+                {
+                    if (f == fb || f == ft || !floorPlates.TryGetValue(f.Id, out var fl)) continue;
+                    StationPlate? bestSp = null; StationPlate? bestFp = null; double bg = StationFloorBuilder.JoinGap;
+                    foreach (var fp in fl)
+                    {
+                        if (fp.Top <= lo.Bottom + StationFloorBuilder.JoinRise || fp.Top >= hi.Top - StationFloorBuilder.JoinRise) continue;
+                        foreach (var sp in ps)
+                        {
+                            if (Math.Abs(sp.Top - fp.Top) > StationFloorBuilder.JoinRise && Math.Abs(sp.Bottom - fp.Top) > StationFloorBuilder.JoinRise) continue;
+                            var d = StationFloorBuilder.HullGap(sp.Hull, fp.Hull);
+                            if (d <= bg) { bg = d; bestSp = sp; bestFp = fp; }
+                        }
+                    }
+                    if (bestSp == null || bestFp == null) continue;
+                    // 途中の点: 階段の板の凸包の頂点のうち、その床の板にいちばん近いものを、板の中心へ 0.5 m 寄せた点
+                    double sx = bestSp.Hull.Average(q => q.X), sy = bestSp.Hull.Average(q => q.Y);
+                    var v = bestSp.Hull.MinBy(h => StationFloorBuilder.DistToConvex(bestFp.Hull, h.X, h.Y));
+                    var vl = Math.Sqrt((sx - v.X) * (sx - v.X) + (sy - v.Y) * (sy - v.Y)); var vk = vl > 0.5 ? 0.5 / vl : 0;
+                    var mid = (v.X + (sx - v.X) * vk, v.Y + (sy - v.Y) * vk, f.Z);
+                    res.Add(new StationStair((eb.X, eb.Y, fb.Z), mid, fb.Id, f.Id, src, stInst, null, landing));
+                    res.Add(new StationStair(mid, (et.X, et.Y, ft.Z), f.Id, ft.Id, src, stInst, null, landing));
+                }
             }
         }
         // 乗り場の縁 (StationFloorBuilder.IsBalcony) と、同じまとまりのいちばん近い床の板 (PlatformLinkGap 以内) を結ぶ (source "platform")。
@@ -720,6 +821,20 @@ internal static class StationRouteGraph
         public bool NoRide { get; set; }
     }
 
+    // 点から折れ線 (道筋) までのいちばん近い距離
+    private static double PolylineDist(IReadOnlyList<(double X, double Y, double Z)> path, (double X, double Y, double Z) q)
+    {
+        double best = double.MaxValue;
+        for (int k = 0; k + 1 < path.Count; k++)
+        {
+            var p0 = path[k]; var p1 = path[k + 1];
+            double vx = p1.X - p0.X, vy = p1.Y - p0.Y, vz = p1.Z - p0.Z, len2 = vx * vx + vy * vy + vz * vz;
+            var u = len2 > 0 ? Math.Clamp(((q.X - p0.X) * vx + (q.Y - p0.Y) * vy + (q.Z - p0.Z) * vz) / len2, 0, 1) : 0;
+            best = Math.Min(best, Dist((p0.X + u * vx, p0.Y + u * vy, p0.Z + u * vz), q));
+        }
+        return best;
+    }
+
     public static List<Line> TransitLines(StationTree tree) => TransitLines(tree, out _);
 
     // excluded: 管理の無い乗り場 (キーは乗り場のタグ、タグが無ければ "inst:<インスタンス>")
@@ -737,12 +852,29 @@ internal static class StationRouteGraph
         var lines = new Dictionary<string, Line>(StringComparer.Ordinal);
         var periph = tree.Points.Where(p => p.Kind == "sctransitperipheral" && p.Pos != null).Select(p => p.Pos!.Value).ToList();
         bool HasPanel((double X, double Y, double Z) q) => periph.Any(p => Math.Abs(p.X - q.X) <= PeripheralRadius && Math.Abs(p.Y - q.Y) <= PeripheralRadius && Math.Abs(p.Z - q.Z) <= PeripheralRadius);
+        var periphByInst = tree.Points.Where(p => p.Kind == "sctransitperipheral" && p.Pos != null).GroupBy(p => p.Instance).ToDictionary(g => g.Key, g => g.Select(p => p.Pos!.Value).ToList());
+        // 同じインスタンスの装置で見るのは、3 つ以上の乗り場の近く (SplineSnap 以内) を通る道筋のある路線の乗り場だけ (駅を回る形の路面電車)。
+        // New Babbage の TransitNavSpline-004・005 と Lorville の PERI_Line_East・West がこの形。駅から駅への道筋 (Orison の Looping_A_・B_、
+        // Station_Internal (aea96340) の道筋) の路線は前のまま (Orison の voyager_bar_orison の乗り場 (aea96340) は同じインスタンスの装置まで 3 m 以内だが、外したまま)。
+        // 道筋のタグのうち、路線の管理のタグ (mgrTags) になっているものだけを見る (どの道筋にも付く共通のタグ 00ead468… は路線ではない)
+        var allGw = tree.Points.Where(p => p.Kind == "sctransitgateway" && p.Pos != null).ToList();
+        var splineTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in tree.Points.Where(p => p.Kind == "sctransitnavsplinedata" && p.Path.Count >= 2))
+            foreach (var t in s.Tags.Where(mgrTags.Contains))
+            {
+                var near = allGw.Count(g => g.Tags.Contains(t, StringComparer.OrdinalIgnoreCase) && PolylineDist(s.Path, g.Pos!.Value) <= SplineSnap);
+                if (near >= 3) splineTags.Add(t);
+            }
+        bool HasOwnPanel(int inst, (double X, double Y, double Z) q) => periphByInst.TryGetValue(inst, out var own)
+            && own.Any(p => Math.Abs(p.X - q.X) <= SameInstancePeripheralRadius && Math.Abs(p.Y - q.Y) <= SameInstancePeripheralRadius && Math.Abs(p.Z - q.Z) <= SameInstancePeripheralRadius);
         foreach (var g in tree.Points.Where(p => p.Kind == "sctransitgateway" && p.Pos != null))
         {
             // 乗り場の装置 (sctransitperipheral。扉・操作盤など) が PeripheralRadius (1.5 m) 以内に無い乗り場は使わない (Excluded に "noperipheral:<タグ>" で入れる)。
             // Checkmate の乗り場 89 個は全部ある。Orison で無いのは 26 個: orison_all の直下 24 個 (タグも路線の管理の PositiveTags も無く、全部が 1 つのエレベーターに
             // まとまっていた)・Station_Internal (aea96340) の orison_arcade_int_001 と voyager_bar_orison の 2 個
-            if (!HasPanel(g.Pos!.Value))
+            // 新しい乗り物の仕組み (sctransport*) の乗り場は、データの結び付き (乗り場の DNF のタグを持つ同じインスタンスの操作盤。StationTree.LinkTransportSystem) で装置ありとみなす
+            var linked = g.Attrs.TryGetValue("panelLinked", out var pl) && pl == "1";
+            if (!linked && !HasPanel(g.Pos!.Value) && !(g.Tags.Any(splineTags.Contains) && HasOwnPanel(g.Instance, g.Pos!.Value)))
             {
                 var nk = "noperipheral:" + (g.Tags.Count > 0 ? string.Join(",", g.Tags.Select(t => t.ToLowerInvariant())) : "inst:" + g.Instance);
                 if (!excluded.TryGetValue(nk, out var nl)) excluded[nk] = nl = new Line { Key = nk };
@@ -783,9 +915,33 @@ internal static class StationRouteGraph
                     return bi;
                 }
                 int a = Near(s.Path[0]), b = Near(s.Path[^1]);
-                if (a < 0 || b < 0 || a == b) continue;
                 var m = dirRx.Match(s.Name);
-                l.Legs.Add((a, b, m.Success ? m.Groups[1].Value : "", s.Name));
+                if (a >= 0 && b >= 0 && a != b) { l.Legs.Add((a, b, m.Success ? m.Groups[1].Value : "", s.Name)); continue; }
+                // (2026-11-01) 道筋の両端が乗り場に無いときは、道筋が乗り場の近く (SplineSnap 以内) を通る順に、隣どうしの乗り場を結ぶ。
+                // New Babbage の路面電車 (TransitNavSpline-004・005、点 183・198) と Lorville の環状線 (PERI_Line_East・West_TransitNavSpline_T1・T2、点 380〜440) は、
+                // 1 本の道筋が全部の駅を回る形で、Orison の駅から駅への道筋 (Looping_A_・B_) と違い、端が乗り場に無かった。
+                // 道筋の始めと終わりが SplineSnap 以内なら (閉じた環)、最後の駅から最初の駅へも結ぶ
+                var along = new List<(double T, int Gw)>();
+                for (int gi = 0; gi < l.Gateways.Count; gi++)
+                {
+                    var q = l.Gateways[gi].Gateway.Pos!.Value;
+                    double bestD = SplineSnap, bestT = -1;
+                    for (int k = 0; k + 1 < s.Path.Count; k++)
+                    {
+                        var p0 = s.Path[k]; var p1 = s.Path[k + 1];
+                        double vx = p1.X - p0.X, vy = p1.Y - p0.Y, vz = p1.Z - p0.Z, len2 = vx * vx + vy * vy + vz * vz;
+                        var u = len2 > 0 ? Math.Clamp(((q.X - p0.X) * vx + (q.Y - p0.Y) * vy + (q.Z - p0.Z) * vz) / len2, 0, 1) : 0;
+                        var d = Dist((p0.X + u * vx, p0.Y + u * vy, p0.Z + u * vz), q);
+                        if (d <= bestD) { bestD = d; bestT = k + u; }
+                    }
+                    if (bestT >= 0) along.Add((bestT, gi));
+                }
+                // 同じ場所の乗り場 (1 つの駅の両側など) は、道筋の上で続いて並ぶ。隣どうしで乗り場が違えば結ぶ
+                var seq = along.OrderBy(x => x.T).ThenBy(x => x.Gw).Select(x => x.Gw).ToList();
+                for (int k = 0; k + 1 < seq.Count; k++)
+                    if (seq[k] != seq[k + 1]) l.Legs.Add((seq[k], seq[k + 1], m.Success ? m.Groups[1].Value : "", s.Name));
+                if (seq.Count >= 2 && Dist(s.Path[0], s.Path[^1]) <= SplineSnap && seq[^1] != seq[0])
+                    l.Legs.Add((seq[^1], seq[0], m.Success ? m.Groups[1].Value : "", s.Name));
             }
             // (2026-11-01 にやめたもの) socpak の名前 (hab・clinic・hangar など) で決め打ちして乗らない路線にしていた。
             // いまは、乗り場ごとに実装されているかをデータで判定する (Build の ImplementedGateways)
@@ -798,12 +954,16 @@ internal static class StationRouteGraph
     {
         var res = new List<StationTransit>();
         var dests = tree.Points.Where(p => p.Kind == "sctransitdestination" && p.Pos != null).ToList();
+        // 行き先の点の階は DestFloor (NameFloors の規則 3・4、StackOrder と同じ)
         foreach (var l in lines)
             foreach (var (inst, g) in l.Gateways)
                 res.Add(new StationTransit(l.Tram ? "tram" : l.NoRide ? "elevator-noride" : "elevator", inst, g.Guid, g.Tags, g.Pos!.Value,
                     (StationFloorBuilder.FloorAtXY(floors, g.Pos!.Value.X, g.Pos!.Value.Y, g.Pos!.Value.Z) ?? GatewayFloorByBounds(floors, g.Pos!.Value))?.Id ?? "", l.Key, StopName(dests, l.Key, g.Pos!.Value)));
         foreach (var d in dests)
-            res.Add(new StationTransit("destination", d.Instance, d.Guid, d.Tags, d.Pos!.Value, StationFloorBuilder.FloorAtXY(floors, d.Pos!.Value.X, d.Pos!.Value.Y, d.Pos!.Value.Z - 1.5)?.Id ?? "",
+            // 行き先 − 1.5 m で階が無ければ行き先の高さでも探す (NameFloors の規則 3・4 と同じ。2026-11-02: 床の灯りの直しの後、New Babbage の宿泊棟の行き先
+            // @ui_interactor_floor_02〜10 (床の 0.5 m 上) が、灯りの偽の床 (行き先の 3.25 m 下) に乗っていたのが外れ、階が空になっていた)
+            res.Add(new StationTransit("destination", d.Instance, d.Guid, d.Tags, d.Pos!.Value,
+                DestFloor(floors, d.Pos!.Value)?.Id ?? "",
                 d.Tags.FirstOrDefault()?.ToLowerInvariant() ?? "", d.Name));
         return res;
     }
@@ -850,10 +1010,13 @@ internal static class StationRouteGraph
             }
             return best;
         }
+        // エレベーター (トラムでない路線。乗らないものも含む) の乗り場 (インスタンス, CryGUID)
+        var elevatorGw = lines.Where(l => !l.Tram).SelectMany(l => l.Gateways.Select(x => (x.Instance, x.Gateway.Guid))).ToHashSet();
         // floorId があればその階 (階段の端は階段の From・To の階)。無ければ NodeFloor
         int AddNode(string kind, int inst, string guid, string name, (double X, double Y, double Z) pos, string idSuffix = "", string? floorId = null)
         {
-            var fid = floorId ?? NodeFloor(floors, floorCells, pos)?.Id ?? (kind == "gateway" ? GatewayFloor(floors, floorCells, pos)?.Id : null) ?? "";
+            var fid = floorId ?? (kind == "gateway" && elevatorGw.Contains((inst, guid)) ? ElevatorGatewayFloor(floors, floorCells, pos)?.Id : null)
+                ?? NodeFloor(floors, floorCells, pos)?.Id ?? (kind == "gateway" ? GatewayFloor(floors, floorCells, pos)?.Id : null) ?? "";
             return g.Add(new StationNode($"{kind[0]}:{inst}:{guid}{idSuffix}", kind, pos, fid, SectionOf(inst, pos), name, inst, guid));
         }
         var pointNode = new Dictionary<(int, string), int>();
@@ -985,6 +1148,7 @@ internal static class StationRouteGraph
         // 実装されていない行き先の階 (乗り場はあるが、実装されている乗り場も使える物も無い階) は一覧に出さない
         MarkImplemented(floors, g, impl);
         MarkReachable(floors, g);
+        HideIsolatedShopFloors(floors, g);
         BuildLap("印");
         return g;
     }
@@ -1125,6 +1289,28 @@ internal static class StationRouteGraph
         }
     }
 
+    // (2026-11-02、利用者の決まり「店のフロアでどこともつながってないものは無視」(案 2)) 一覧に出る店の階 (店の節点がある) で、乗り場の節点 (乗らないエレベーターも含む) が無く、
+    // ほかの階の節点への辺が 1 本も無いものを、一覧から外す (Listed = false。階・店・道は消さない)。Build の最後 (踊り場・道の直しの後) に当てる
+    public static int LastIsolatedShopFloors;
+    public static void HideIsolatedShopFloors(IReadOnlyList<StationFloor> floors, StationGraph g)
+    {
+        LastIsolatedShopFloors = 0;
+        var shop = new HashSet<string>(StringComparer.Ordinal); var gw = new HashSet<string>(StringComparer.Ordinal); var linked = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var n in g.Nodes)
+        {
+            if (n.Floor.Length == 0) continue;
+            if (n.Kind == "shop") shop.Add(n.Floor);
+            if (n.Kind == "gateway") gw.Add(n.Floor);
+        }
+        foreach (var e in g.Edges)
+        {
+            string fa = g.Nodes[e.A].Floor, fb = g.Nodes[e.B].Floor;
+            if (fa.Length > 0 && fb.Length > 0 && fa != fb) { linked.Add(fa); linked.Add(fb); }
+        }
+        foreach (var f in floors)
+            if (f.Listed && shop.Contains(f.Id) && !gw.Contains(f.Id) && !linked.Contains(f.Id)) { f.Listed = false; LastIsolatedShopFloors++; }
+    }
+
     public const int WaypointStep = 6;
     public const double WaypointRadius = 6;
     public const int WaypointLinks = 3;
@@ -1179,6 +1365,7 @@ internal static class StationRouteGraph
         });
         foreach (var list in wpEdges) foreach (var e in list) g.Link(e);
         int r = (int)Math.Ceiling(WaypointRadius / c / WaypointStep) + 1;
+        int rg = (int)Math.Ceiling(ElevatorSameRadius / c / WaypointStep) + 1;
         static int FloorDiv(int a, int b) => (int)Math.Floor((double)a / b);
         var nodeEdges = new List<StationEdge>?[n0];
         Parallel.For(0, n0, n =>
@@ -1187,16 +1374,21 @@ internal static class StationRouteGraph
             if (node.Floor.Length == 0 || !cells.TryGetValue(node.Floor, out var fc)) return;
             int bi = (int)Math.Floor(node.Pos.X / c / WaypointStep), bj = (int)Math.Floor(node.Pos.Y / c / WaypointStep);
             var cand = new List<(int W, double D)>();
-            for (int a = -r; a <= r; a++)
-                for (int b = -r; b <= r; b++)
+            // (2026-11-02、親の決定 a) 乗り場は、WaypointRadius 以内に経由点が無ければ ElevatorSameRadius (16 m) 以内のいちばん近いものと結ぶ
+            var far = new List<(int W, double D)>();
+            int rr = node.Kind == "gateway" ? rg : r;
+            for (int a = -rr; a <= rr; a++)
+                for (int b = -rr; b <= rr; b++)
                     if (wp.TryGetValue((node.Floor, bi + a, bj + b), out var w))
                     {
                         var d = Dist(g.Nodes[w].Pos, node.Pos);
                         // 乗り場 (gateway) は床の上の割合を見ない (シャトルの乗り場は線路の側で、乗り場の縁の床から 4〜5 m 外。Orison の 4bb021eb)。
                         // 階段の端は階段の板の上、出入口の接続 (roomconnector) は扉の下の床の途切れ (Checkmate の bulkh_004 の扉で約 1.5〜2 m) にあり、
                         // どちらも床のセルの外なので、床の上の割合を 0.5 まで緩める。接続は両側の経由点と結ばれ、扉を渡る道になる
+                        if (node.Kind == "gateway" && d > WaypointRadius && d <= ElevatorSameRadius) far.Add((w, d));
                         if (d <= WaypointRadius && StationFloorBuilder.OnFloorRatio(fc, (node.Pos.X, node.Pos.Y), (g.Nodes[w].Pos.X, g.Nodes[w].Pos.Y)) >= (node.Kind == "gateway" ? 0 : node.Kind == "stair" && d <= StairEndLink ? 0 : node.Kind is "stair" or "connector" ? 0.5 : 0.9)) cand.Add((w, d));
                     }
+            if (cand.Count == 0 && far.Count > 0) cand.Add(far.MinBy(t => t.D));
             // 接続は扉の両側に結ぶため多めに (WaypointLinks の 2 倍)
             nodeEdges[n] = cand.OrderBy(t => t.D).Take(node.Kind == "connector" ? WaypointLinks * 2 : WaypointLinks).Select(t => new StationEdge(n, t.W, t.D, "floor")).ToList();
         });
@@ -1259,6 +1451,34 @@ internal static class StationRouteGraph
         floors.Where(f => pos.Z >= f.ZMin - 2 && pos.Z <= f.ZMax + 2 && f.Bounds != null && f.Contains(pos.X, pos.Y, GatewayFloorRadius))
             .OrderBy(f => (f.Bounds!.Value.MaxX - f.Bounds!.Value.MinX) * (f.Bounds!.Value.MaxY - f.Bounds!.Value.MinY)).FirstOrDefault();
 
+    // (2026-11-02、親の決定 a) エレベーターの乗り場の階: NodeFloor の階の高さの範囲が乗り場の高さ ± ElevatorSameRise (1 m) にかからず、乗り場と同じ高さ (± 1 m) の床の升目 (CellZ) が
+    // xy で ElevatorSameRadius (16 m) 以内にある階があれば、そのうちいちばん近い階。無ければ null (NodeFloor に任せる)。
+    // Orison の Crusader Showroom のエレベーター 4 つ (−19.67 m) は、Showroom の床の端 (x −16.3) から 4〜16 m 離れ (あいだは部屋のメッシュ showroom_elev_lobby_a で床の名前でない)、
+    // NodeFloor では 5 m 下の階に当たっていた
+    public const double ElevatorSameRise = 1.0;
+    public const double ElevatorSameRadius = 16;
+    public static StationFloor? ElevatorGatewayFloor(IReadOnlyList<StationFloor> floors, Dictionary<string, HashSet<(int I, int J)>>? cells, (double X, double Y, double Z) pos)
+    {
+        var nf = NodeFloor(floors, cells, pos);
+        if (nf != null && nf.ZMin <= pos.Z + ElevatorSameRise && nf.ZMax >= pos.Z - ElevatorSameRise) return null;
+        int r = (int)Math.Ceiling(ElevatorSameRadius / StationFloorBuilder.LayerCell);
+        int ci = (int)Math.Floor(pos.X / StationFloorBuilder.LayerCell), cj = (int)Math.Floor(pos.Y / StationFloorBuilder.LayerCell);
+        StationFloor? best = null; double bd = double.MaxValue;
+        foreach (var f in floors)
+        {
+            if (f.CellZ == null || f.ZMin > pos.Z + ElevatorSameRise || f.ZMax < pos.Z - ElevatorSameRise) continue;
+            for (int di = -r; di <= r; di++)
+                for (int dj = -r; dj <= r; dj++)
+                    if (f.CellZ.TryGetValue((ci + di, cj + dj), out var z) && z.Min <= pos.Z + ElevatorSameRise && z.Max >= pos.Z - ElevatorSameRise)
+                    {
+                        double dx = (ci + di + 0.5) * StationFloorBuilder.LayerCell - pos.X, dy = (cj + dj + 0.5) * StationFloorBuilder.LayerCell - pos.Y;
+                        var d = Math.Sqrt(dx * dx + dy * dy);
+                        if (d <= ElevatorSameRadius && d < bd) { bd = d; best = f; }
+                    }
+        }
+        return best;
+    }
+
     public static StationFloor? GatewayFloor(IReadOnlyList<StationFloor> floors, Dictionary<string, HashSet<(int I, int J)>>? cells, (double X, double Y, double Z) pos)
     {
         if (cells == null) return null;
@@ -1282,19 +1502,45 @@ internal static class StationRouteGraph
     // 地区 (利用者の決定 2026-11-01、都市の全体図のため)。輪の路線 (外していないトラム) の乗り場を、いちばん近い同じ路線の行き先 (駅) ごとにまとめ、駅ごとに 1 地区。
     // 地区に入る床のまとまり: 駅の乗り場の節点から、トラムの辺と乗らないエレベーター (NoRide。グラフに辺が無い) を使わずにつながる節点を、いちばん近い駅から
     // 順に集め (多点のダイクストラ)、節点の階のまとまりをその地区に入れる (1 つのまとまりは 1 つの地区だけ)。
-    // 名前: 駅の乗り場の階のまとまりの名前 (StationFloor.GroupName。「付近」は元のまとまりの名前)。無ければ駅の行き先の名前 (鍵のまま。表示の側で訳す)。
-    // main: 輪の路線の駅の地区なので全部 true
+    // 名前: 駅の乗り場の階のまとまりの名前 (StationFloor.GroupName。「付近」は元のまとまりの名前)。無ければ、またはほかの地区と名前が重なれば駅の行き先の名前 (鍵のまま。表示の側で訳す)。
+    // 一覧に出る階の無い地区は作らず、その駅は乗り場の階のまとまりを持つ地区に入れる。
+    // main: 輪の路線の駅の地区なので全部 true。都市 (LandingZone) の、輪になっている路線 (どの駅からもほかの全部の駅へ行ける) だけで作る
     public const double DistrictNearRadius = 300;
 
     public sealed record District(string Id, string Name, string NameKey, List<string> Groups, List<string> Stations,
-        (double MinX, double MinY, double MaxX, double MaxY) Bounds, (double X, double Y) Center, bool Main);
+        (double MinX, double MinY, double MaxX, double MaxY) Bounds, (double X, double Y) Center, bool Main)
+    {
+        // 乗り場の節点 (JSON には書かない)。New Babbage の乗り場は CryGUID がほかの区画の乗り場と同じなので、CryGUID でなく節点で地区を引く
+        public IReadOnlyList<int> StationNodes { get; init; } = Array.Empty<int>();
+    }
 
     public static List<District> Districts(StationTree tree, IReadOnlyList<StationFloor> floors, StationGraph g)
     {
         var res = new List<District>();
-        var lines = TransitLines(tree).Where(l => l.Tram).ToList();
-        if (lines.Count == 0) return res;
+        // 地区を作るのは都市 (星図の種類 LandingZone) だけ (2026-11-01)。ステーション・施設の中のトラムは地区にしない。
+        // Orbituary (RR_P3_LEO。星図の種類 Manmade) は、階の行き先 (@ui_interactor_floor_01・02) の 2 駅のトラムで、どちらも「Contested Access 04」の地区になり、
+        // 片方は床のまとまりの無い点だけの地区だった。Onyx Facility (Stanton1d_ASD_Delve_Facility_009。Outpost) も、施設の中のトラムの駅で 4 地区になっていた
+        if (tree.Root.Place.Type != "LandingZone") return res;
         var dests = tree.Points.Where(p => p.Kind == "sctransitdestination" && p.Pos != null).ToList();
+        // 輪の路線だけ: 区間 (Legs) を駅 (乗り場のいちばん近い同じ路線の行き先) から駅への向きの辺として、どの駅からもほかの全部の駅へ行ける路線。
+        // ContestedZone_RR_P3_LEO は星図の種類が LandingZone だが、トラムは Floor 01 から Floor 02 への片道だけで輪になっていない (地区が 2 つとも「Contested Access 04」になっていた)
+        string StationOf(Line l, int gi) { var (_, gw) = l.Gateways[gi]; var st = StopName(dests, l.Key, gw.Pos!.Value); return st.Length > 0 ? st : gw.Guid; }
+        bool IsLoop(Line l)
+        {
+            var next = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            for (int i = 0; i < l.Gateways.Count; i++) next.TryAdd(StationOf(l, i), new HashSet<string>(StringComparer.Ordinal));
+            foreach (var (a, b, _, _) in l.Legs) { var sa = StationOf(l, a); var sb = StationOf(l, b); if (sa != sb) next[sa].Add(sb); }
+            if (next.Count < 2) return false;
+            foreach (var s0 in next.Keys)
+            {
+                var seen = new HashSet<string>(StringComparer.Ordinal) { s0 }; var q = new Queue<string>(); q.Enqueue(s0);
+                while (q.Count > 0) foreach (var v in next[q.Dequeue()]) if (seen.Add(v)) q.Enqueue(v);
+                if (seen.Count != next.Count) return false;
+            }
+            return true;
+        }
+        var lines = TransitLines(tree).Where(l => l.Tram && IsLoop(l)).ToList();
+        if (lines.Count == 0) return res;
         var stations = new Dictionary<string, List<int>>(StringComparer.Ordinal);
         foreach (var l in lines)
             foreach (var (inst, gw) in l.Gateways)
@@ -1347,18 +1593,39 @@ internal static class StationRouteGraph
                 }
             if (bestK >= 0) groupOwner[grp.Key] = bestK;
         }
+        // 床のまとまりの無い地区は作らない (親の決定 (b) 2026-11-01。押すと空の地図になっていた)。
+        // 床のまとまりの無い地区 = 入る床のまとまりに一覧に出る階が 1 つも無い地区。その駅は、駅の乗り場の階のまとまりを持つ別の地区 (一覧に出る階のある地区) に入れる。
+        // 入れる先が無ければ地区にしない (その駅は地区に入らない)。
+        // Lorville: City Gates 05 と 06、Metro Center と Leavsden Station は、乗り場の階が同じ床のまとまり (歩いてつながる) にあり、片方の地区が空だった。
+        // Central Business District は乗り場が階の上に無かった。New Babbage の Tobin Center は、まとまりに一覧に出る階が無かった
+        var groupsOf = Enumerable.Range(0, keys.Count).Select(k => groupOwner.Where(kv => kv.Value == k).Select(kv => kv.Key).OrderBy(x => x, StringComparer.Ordinal).ToList()).ToList();
+        var hasFloor = groupsOf.Select(gs => floors.Any(f => f.Listed && gs.Contains(f.Group))).ToList();
+        var nameOf = Enumerable.Range(0, keys.Count).Select(k => stations[keys[k]].Select(n => g.Nodes[n].Floor).Where(floorById.ContainsKey).Select(id => floorById[id].GroupName)
+            .Where(n => n.Length > 0).GroupBy(n => n).OrderByDescending(x => x.Count()).Select(x => x.Key).FirstOrDefault() ?? "").ToList();
+        // 名前がほかの地区と重なる地区は、駅の行き先の名前 (鍵のまま。表示の側で訳す) にする (Lorville の City Gates 06 の地区が「City Gates 05」、
+        // Leavsden Station と Metro Center の地区が両方「Maria Pure of Heart」になっていた)。重なりは、まとめる前の地区どうしで見る
+        var clash = nameOf.Where(n => n.Length > 0).GroupBy(n => n, StringComparer.Ordinal).Where(x => x.Count() > 1).Select(x => x.Key).ToHashSet(StringComparer.Ordinal);
+        var stNodesOf = Enumerable.Range(0, keys.Count).Select(k => new List<int>(stations[keys[k]])).ToList();
         for (int k = 0; k < keys.Count; k++)
         {
-            var groups = groupOwner.Where(kv => kv.Value == k).Select(kv => kv.Key).OrderBy(x => x, StringComparer.Ordinal).ToList();
+            if (hasFloor[k]) continue;
+            var into = stations[keys[k]].Select(n => g.Nodes[n].Floor).Where(floorById.ContainsKey).Select(id => floorById[id].Group)
+                .Where(gr => gr.Length > 0 && groupOwner.TryGetValue(gr, out var o) && o != k && hasFloor[o]).Select(gr => groupOwner[gr]).GroupBy(o => o)
+                .OrderByDescending(x => x.Count()).ThenBy(x => x.Key).Select(x => (int?)x.Key).FirstOrDefault();
+            if (into is int k2) stNodesOf[k2].AddRange(stations[keys[k]]);
+        }
+        for (int k = 0; k < keys.Count; k++)
+        {
+            if (!hasFloor[k]) continue;
+            var groups = groupsOf[k];
             var gfl = floors.Where(f => groups.Contains(f.Group) && f.Bounds != null).ToList();
-            var stNodes = stations[keys[k]];
-            var stFloors = stNodes.Select(n => g.Nodes[n].Floor).Where(floorById.ContainsKey).Select(id => floorById[id]).ToList();
-            var name = stFloors.Select(f => f.GroupName).Where(n => n.Length > 0).GroupBy(n => n).OrderByDescending(x => x.Count()).Select(x => x.Key).FirstOrDefault() ?? "";
+            var stNodes = stNodesOf[k];
+            var name = clash.Contains(nameOf[k]) ? "" : nameOf[k];
             (double, double, double, double) b = gfl.Count > 0
                 ? (gfl.Min(f => f.Bounds!.Value.MinX), gfl.Min(f => f.Bounds!.Value.MinY), gfl.Max(f => f.Bounds!.Value.MaxX), gfl.Max(f => f.Bounds!.Value.MaxY))
                 : (stNodes.Min(n => g.Nodes[n].Pos.X), stNodes.Min(n => g.Nodes[n].Pos.Y), stNodes.Max(n => g.Nodes[n].Pos.X), stNodes.Max(n => g.Nodes[n].Pos.Y));
-            res.Add(new District($"d{k}", name.Length > 0 ? name : keys[k], keys[k], groups, stNodes.Select(n => g.Nodes[n].Guid).Distinct().ToList(),
-                b, ((b.Item1 + b.Item3) / 2, (b.Item2 + b.Item4) / 2), true));
+            res.Add(new District($"d{res.Count}", name.Length > 0 ? name : keys[k], keys[k], groups, stNodes.Select(n => g.Nodes[n].Guid).Distinct().ToList(),
+                b, ((b.Item1 + b.Item3) / 2, (b.Item2 + b.Item4) / 2), true) { StationNodes = stNodes.Distinct().ToList() });
         }
         return res;
     }
@@ -1367,6 +1634,15 @@ internal static class StationRouteGraph
     // いちばん近い節点から NearSlack (5 m) 以内の候補のうち、つながっている節点がいちばん多いもの (床の小さな切れ端の経由点を出発に選ばないため。
     // Orison の August Spaceport のロビーの点で、10 節点だけの切れ端の経由点がいちばん近かった)
     public const double NearSlack = 5;
+
+    // 行き先の点 (sctransitdestination) の階 (2026-11-02、親の指示): 点の真下で、点の高さから DestFloorBelow (1.5 m) 下までに床のある階を先に探す。
+    // 無ければ前と同じく、行き先 − 1.5 m の階、それも無ければ行き先の高さの階。
+    // RR_CRU_L5 の Galleria 行きの行き先 (−512.29 m) は、止まる床 (−513.04 m、乗り場の階) の 0.75 m 上にある。前は − 1.5 m (−513.79 m) で
+    // 探したので、止まる床が FloorAtXY の下の許し (0.6 m) から外れ、6 m 下の階 (−519.04 m) に当たっていた (RR_HUR_L3 も同じ。行き先 −105.0 m・止まる床 −105.75 m)
+    public const double DestFloorBelow = 1.5;
+    public static StationFloor? DestFloor(IReadOnlyList<StationFloor> floors, (double X, double Y, double Z) p) =>
+        StationFloorBuilder.FloorAtXY(floors, p.X, p.Y, p.Z, tolBelow: 0, maxAbove: DestFloorBelow)
+        ?? StationFloorBuilder.FloorAtXY(floors, p.X, p.Y, p.Z - 1.5) ?? StationFloorBuilder.FloorAtXY(floors, p.X, p.Y, p.Z);
 
     // 重ねる順番 (利用者の決定 2026-11-01): ステーションの階は、下から 精錬所 → ハンガー → ガレリア → 配送センター の順に重ねる (データの高さの上下は見ない)。
     // 見分けは、エレベーター (トラムでない路線) の乗り場のいちばん近い同じ路線の行き先の鍵 (StackKeys)。1 本の路線で 2 つ以上の鍵が当たったときだけ、
@@ -1382,34 +1658,145 @@ internal static class StationRouteGraph
     private static int StackIndex(string stop) =>
         Array.FindIndex(StackKeys, s => string.Equals(s, stop, StringComparison.OrdinalIgnoreCase)) is var k && k >= 0 ? k : StackKeyAliases.TryGetValue(stop, out var a) ? a : -1;
 
-    public static Dictionary<string, (string Stack, int Level)> StackOrder(StationTree tree, IReadOnlyList<StationFloor> floors)
+    // nameKeyOverrides (確かめ用。無くてよい): 名前で付いた鍵が、乗り場・行き先の点で付いた別の鍵を置き換えた階 (階の Id、前の鍵、名前の鍵) を足す
+    public static Dictionary<string, (string Stack, int Level)> StackOrder(StationTree tree, IReadOnlyList<StationFloor> floors,
+        List<(string Floor, int Before, int ByName)>? nameKeyOverrides = null)
     {
         var res = new Dictionary<string, (string, int)>(StringComparer.Ordinal);
         var dests = tree.Points.Where(p => p.Kind == "sctransitdestination" && p.Pos != null).ToList();
         int n = 0;
         foreach (var l in TransitLines(tree).Where(l => !l.Tram))
         {
-            var byKey = new Dictionary<int, HashSet<string>>();
+            // 階ごとの鍵 (その階の乗り場の行き先の鍵。2 つ以上なら小さいほう)
+            var floorKey = new Dictionary<string, int>(StringComparer.Ordinal);
             foreach (var (_, g) in l.Gateways)
             {
                 var k = StackIndex(StopName(dests, l.Key, g.Pos!.Value));
                 if (k < 0) continue;
                 var f = StationFloorBuilder.FloorAtXY(floors, g.Pos!.Value.X, g.Pos!.Value.Y, g.Pos!.Value.Z) ?? GatewayFloorByBounds(floors, g.Pos!.Value);
                 if (f == null || f.Group.Length == 0) continue;
-                if (!byKey.TryGetValue(k, out var set)) byKey[k] = set = new HashSet<string>(StringComparer.Ordinal);
-                set.Add(f.Group);
+                floorKey[f.Id] = floorKey.TryGetValue(f.Id, out var o) ? Math.Min(o, k) : k;
             }
-            if (byKey.Count < 2) continue;
-            var id = $"k{n++}"; int lv = 0;
-            var placed = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var k in byKey.Keys.OrderBy(k => k))
-                foreach (var grp in byKey[k].OrderBy(g => floors.Where(f => f.Group == g).Min(f => f.ZMin)))
+            // (2026-11-02) その路線の行き先の点 (同じ路線のタグを持つ sctransitdestination。タグの無い路線は StopName と同じくタグの無い行き先) の階にも鍵を付ける。
+            // 行き先の点の階は TransitList と同じ (DestFloor)。RR_CRU_L5 で、Galleria 行き (@ui_dest_commercial) の乗り場 (−513.04 m) は
+            // 「Clinic」の階に当たり、行き先の点 (−512.29 m) の当たる「Galleria」の階 (−519 m) に鍵が無く、Lobby の鍵を借りて Lobby の下に重なっていた
+            var untaggedLine = l.Key.StartsWith("inst:", StringComparison.Ordinal);
+            foreach (var d in dests.Where(x => untaggedLine ? x.Tags.Count == 0 && !NoNameKeys.Contains(x.Name) : x.Tags.Any(t => string.Equals(t, l.Key, StringComparison.OrdinalIgnoreCase))))
+            {
+                var k = StackIndex(d.Name);
+                if (k < 0) continue;
+                var p = d.Pos!.Value;
+                var f = DestFloor(floors, p);
+                if (f == null || f.Group.Length == 0) continue;
+                floorKey[f.Id] = floorKey.TryGetValue(f.Id, out var o) ? Math.Min(o, k) : k;
+            }
+            // (2026-11-02、利用者の指示「”Galleria の階は行き先が分からず” Galleria と繋げていいと思う。…名前での紐づけ」) この路線の行き先にある鍵 (乗り場・行き先の点で
+            // 当たった鍵) について、名前で結び付いた階 (StationFloor.NameStackKey。NameFloors) にもその鍵を付ける。乗り場・行き先の点で別の鍵が付いていても、
+            // 名前で付いた鍵にする (名前で付いた階をその行き先の階とみなす)。RR_CRU_L5 の「Galleria」の階 (−519 m) は乗り場が無く、行き先の点も当たらず、
+            // Lobby の鍵を借りて Lobby の下に重なっていた
+            var served = floorKey.Values.ToHashSet();
+            foreach (var f in floors)
+            {
+                if (f.NameStackKey < 0 || !served.Contains(f.NameStackKey) || f.Group.Length == 0) continue;
+                if (floorKey.TryGetValue(f.Id, out var o) && o != f.NameStackKey) nameKeyOverrides?.Add((f.Id, o, f.NameStackKey));
+                floorKey[f.Id] = f.NameStackKey;
+            }
+            // (2026-11-02、利用者の決定「エレベーターとつながった名前優先」) 階段でつながるエレベーターの止まる階 (StairPartner。NameByStairs) の名前を借りた階は、
+            // その階の鍵を借りる (上下は同じまとまりの中の下からの番号、つまりデータの高さで決まる)
+            foreach (var f in floors)
+                if (f.StairPartner.Length > 0 && !floorKey.ContainsKey(f.Id) && floorKey.TryGetValue(f.StairPartner, out var pk)) floorKey[f.Id] = pk;
+            if (floorKey.Values.Distinct().Count() < 2) continue;
+            // (2026-11-01、検証の指摘 B) 階の単位で鍵の順に重ねる。前はまとまりの単位で重ね、2 つの鍵の乗り場が同じまとまりにあると後の鍵を飛ばし、
+            // まとまりの中は高さの順になっていた (RR_ARC_LEO で Cargo Center が Lobby の下、RR_CRU_L5・RR_HUR_L3 で Galleria が Lobby の下)。
+            // 鍵の無い階 (乗り場の無い階) は、同じまとまりの下からの番号 (Level) でいちばん近い下の鍵のある階の鍵 (下に無ければ上の鍵のある階の鍵) にする。
+            // 並び: 鍵 → まとまりのいちばん低い高さ → まとまりの中の下からの番号
+            var groups = floors.Where(f => floorKey.ContainsKey(f.Id)).Select(f => f.Group).Distinct(StringComparer.Ordinal)
+                .Where(grp => !floors.Where(f => f.Group == grp).Any(f => res.ContainsKey(f.Id))).ToList();
+            var order = new List<(int Key, double GroupZ, int Level, StationFloor F)>();
+            foreach (var grp in groups)
+            {
+                var gf = floors.Where(f => f.Group == grp).OrderBy(f => f.Level).ToList();
+                var gz = gf.Min(f => f.ZMin);
+                for (int i = 0; i < gf.Count; i++)
                 {
-                    if (!placed.Add(grp) || floors.Where(f => f.Group == grp).Any(f => res.ContainsKey(f.Id))) continue;
-                    foreach (var f in floors.Where(f => f.Group == grp).OrderBy(f => f.Level)) res[f.Id] = (id, ++lv);
+                    int key = -1;
+                    for (int j = i; j >= 0 && key < 0; j--) if (floorKey.TryGetValue(gf[j].Id, out var kb)) key = kb;
+                    for (int j = i + 1; j < gf.Count && key < 0; j++) if (floorKey.TryGetValue(gf[j].Id, out var ka)) key = ka;
+                    order.Add((key, gz, gf[i].Level, gf[i]));
                 }
+            }
+            var id = $"k{n++}"; int lv = 0;
+            foreach (var t in order.OrderBy(t => t.Key).ThenBy(t => t.GroupZ).ThenBy(t => t.Level)) res[t.F.Id] = (id, ++lv);
         }
         return res;
+    }
+
+    // (2026-11-02、利用者の決定「エレベーターとつながった名前優先」(案 A)) エレベーターが止まらず、行き先の名前も無い階 (名前がまとまりの名前・「付近」・場所の名前・
+    // 種類の言葉・無し) で、階段 (stairs の from・to。層の決まりで分かれた階どうし) でエレベーターの止まる階 (名前がエレベーターの行き先から付いた階) とつながる階に、
+    // その階の名前を付ける (NameSource "stairs"、StairPartner)。一覧に出ない階は通り道とみなし、その先の一覧に出る階を相手にする (画面の担当の決め方と同じ)。
+    // 一覧に出る階で相手でないものの先へはたどらない。相手が 2 つ以上あるときは、たどった階段の数の少ないもの、次に高さ (Z) の差の小さいもの。
+    // 一覧に出すか (Listed) は変えない。RR_CRU_L5・RR_HUR_L3 の下の Galleria の層 (Galleria の止まる階と階段でつながる) が、まとまりの名前
+    // 「CRU-L5 Beautiful Glen Clinic」になり、重ねる順で Lobby の下に入っていた。
+    // changes (確かめ用。無くてよい): (階の Id、前の名前、相手の階の Id、相手の名前、相手の候補の数) を足す
+    public static void NameByStairs(StationTree tree, IReadOnlyList<StationFloor> floors, IReadOnlyList<StationStair> stairs,
+        List<(string Floor, string Before, string Partner, string Name, int Candidates)>? changes = null)
+    {
+        var byId = floors.ToDictionary(f => f.Id, StringComparer.Ordinal);
+        // エレベーター (トラムでない路線) の止まる階: 乗り場の階 (TransitList と同じ当て方) と、その路線の行き先の点の階 (DestFloor)
+        var served = new HashSet<string>(StringComparer.Ordinal);
+        var dests = tree.Points.Where(p => p.Kind == "sctransitdestination" && p.Pos != null).ToList();
+        foreach (var l in TransitLines(tree).Where(l => !l.Tram && !l.NoRide))
+        {
+            foreach (var (_, g) in l.Gateways)
+                if ((StationFloorBuilder.FloorAtXY(floors, g.Pos!.Value.X, g.Pos!.Value.Y, g.Pos!.Value.Z) ?? GatewayFloorByBounds(floors, g.Pos!.Value)) is { } f) served.Add(f.Id);
+            var untagged = l.Key.StartsWith("inst:", StringComparison.Ordinal);
+            foreach (var d in dests.Where(x => untagged ? x.Tags.Count == 0 && !NoNameKeys.Contains(x.Name) : x.Tags.Any(t => string.Equals(t, l.Key, StringComparison.OrdinalIgnoreCase))))
+                if (DestFloor(floors, d.Pos!.Value) is { } f) served.Add(f.Id);
+        }
+        bool IsPartner(StationFloor f) => served.Contains(f.Id) && f.NameSource is "elevator" or "destination" && f.DisplayName.Length > 0;
+        // (2026-11-02、利用者の決定「踊り場を含む階段でつながる階はサブネームの決まりが優先」) 踊り場を含む階段 (StationStair.Landing) の両端の階は対象にせず、その階段はたどらない
+        var byLanding = stairs.Where(s => s.Landing).SelectMany(s => new[] { s.From, s.To }).ToHashSet(StringComparer.Ordinal);
+        bool IsTarget(StationFloor f) => !served.Contains(f.Id) && !byLanding.Contains(f.Id) && f.Group.Length > 0 && f.NameSource is "group" or "near" or "place" or "type" or "none";
+        var adj = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var s in stairs)
+        {
+            if (s.Landing) continue;
+            if (s.From == s.To || !byId.ContainsKey(s.From) || !byId.ContainsKey(s.To)) continue;
+            (adj.TryGetValue(s.From, out var a) ? a : adj[s.From] = new()).Add(s.To);
+            (adj.TryGetValue(s.To, out var b) ? b : adj[s.To] = new()).Add(s.From);
+        }
+        var picks = new List<(StationFloor F, StationFloor P, int Cands)>();
+        foreach (var f in floors.Where(IsTarget))
+        {
+            if (!adj.ContainsKey(f.Id)) continue;
+            var dist = new Dictionary<string, int>(StringComparer.Ordinal) { [f.Id] = 0 };
+            var q = new Queue<string>(); q.Enqueue(f.Id);
+            var cands = new List<(StationFloor P, int D)>();
+            while (q.Count > 0)
+            {
+                var cur = q.Dequeue();
+                foreach (var nx in adj.GetValueOrDefault(cur) ?? new())
+                {
+                    if (dist.ContainsKey(nx)) continue;
+                    dist[nx] = dist[cur] + 1;
+                    var nf = byId[nx];
+                    if (nf.Listed) { if (IsPartner(nf)) cands.Add((nf, dist[nx])); continue; }
+                    q.Enqueue(nx);
+                }
+            }
+            if (cands.Count == 0) continue;
+            var pick = cands.OrderBy(c => c.D).ThenBy(c => Math.Abs(c.P.Z - f.Z)).ThenBy(c => c.P.Id, StringComparer.Ordinal).First().P;
+            picks.Add((f, pick, cands.Select(c => c.P.DisplayName).Distinct(StringComparer.OrdinalIgnoreCase).Count()));
+        }
+        // 名前を変えるのは全部の相手を決めてから (変えた階を相手にしない)
+        foreach (var (f, p, n) in picks)
+        {
+            changes?.Add((f.Id, f.DisplayName, p.Id, p.DisplayName, n));
+            f.Name = f.DisplayName = p.DisplayName;
+            f.NameSource = "stairs";
+            f.StairPartner = p.Id;
+            f.NameStackKey = p.NameStackKey;
+        }
     }
 
     public static int NearestNode(StationGraph g, IReadOnlyList<StationFloor> floors, (double X, double Y, double Z) p, params string[] kinds)
@@ -1466,7 +1853,8 @@ internal static class StationRouteGraph
             {
                 "walk" => $"徒歩 {s.Distance:F0} m",
                 "elevator" => $"エレベーターで {s.Floor} へ",
-                "tram" => $"シャトル（{(s.Dir.Length > 0 ? s.Dir : "?")}回り）で {stop}",
+                // 回りの向き (Orison の道筋の名前 Looping_A_・B_) が無い路線 (New Babbage・Lorville) は向きを書かない
+                "tram" => s.Dir.Length > 0 ? $"シャトル（{s.Dir}回り）で {stop}" : $"シャトルで {stop}",
                 "stair" => $"階段で {s.Floor} へ",
                 _ => s.Kind,
             });
@@ -1483,7 +1871,7 @@ internal static class StationMapJson
     // 一覧に出す階の、描く床の形の面積の下限 (m²)。値: Checkmate の Cargo Deck の 3 階 (9 m²)・Contested Zone の 8 階 (24 m²) などの小さな切れ端は出さず、
     // 貨物のエレベーターの階 (Ext. Freight の 1 階、47〜50 m²。乗り場と行き先がある) は出す値として決めた
     public const double MinListedFloorArea = 30;
-    public const int Format = 12;   // 2: 道順のグラフの経由点を waypoints にまとめた形 (Write の graph の説明)。3: 階・区画の名前を訳と星図の場所の名前で付けるようにした (取り込みが NameFloors・NameSections に localize・placeNames を渡す。2026-11-01)。4: 区画の name を表示の名前にし、Child の entityName を entity に移した。階の名前を代表の 1 つ・訳のある名前だけにした (2026-11-01)。5: 地区 (districts) を足した (2026-11-01)。6: transit に lineInternal を足し、タグの無いエレベーターの行き先の名前を引くようにした (2026-11-01)。7: floors に reachable (乗り場からたどれない階は false。その階の区画の多角形は書かない)、transit のエレベーターに place (乗り場を含む区画の名前) を足した。床も店も無い箱だけの区画の多角形を書かないようにした (2026-11-01)。8: 階を真上から見た重なりで分けるようにした (Levels)。floors に implemented を足し、transit の kind (elevator・elevator-noride) を実装されているかの判定で決めるようにした (2026-11-01) 9: transit のトラムの乗り場に nextGateway・nextStop・nextDistrict (次の駅)、floors に stackGroup・stackLevel (行き先の鍵で決めた重ねる順番) を足した (2026-11-01) 10: 階を、数段の階段 (1.3 m 未満) でつながる床を高さの範囲 3 m 未満のあいだ足す作り方にした (利用者の規則、2026-11-01)。 11: 何も無い層を一覧から外し、階の名前をデータの名前だけにした。店の名前に area_label・販売データの名前を足した (2026-11-01)。 12: 頭に一覧に出る階の数 (listedFloors。StationMapExports.Finish が書く) を足した。
+    public const int Format = 16;   // 2: 道順のグラフの経由点を waypoints にまとめた形 (Write の graph の説明)。3: 階・区画の名前を訳と星図の場所の名前で付けるようにした (取り込みが NameFloors・NameSections に localize・placeNames を渡す。2026-11-01)。4: 区画の name を表示の名前にし、Child の entityName を entity に移した。階の名前を代表の 1 つ・訳のある名前だけにした (2026-11-01)。5: 地区 (districts) を足した (2026-11-01)。6: transit に lineInternal を足し、タグの無いエレベーターの行き先の名前を引くようにした (2026-11-01)。7: floors に reachable (乗り場からたどれない階は false。その階の区画の多角形は書かない)、transit のエレベーターに place (乗り場を含む区画の名前) を足した。床も店も無い箱だけの区画の多角形を書かないようにした (2026-11-01)。8: 階を真上から見た重なりで分けるようにした (Levels)。floors に implemented を足し、transit の kind (elevator・elevator-noride) を実装されているかの判定で決めるようにした (2026-11-01) 9: transit のトラムの乗り場に nextGateway・nextStop・nextDistrict (次の駅)、floors に stackGroup・stackLevel (行き先の鍵で決めた重ねる順番) を足した (2026-11-01) 10: 階を、数段の階段 (1.3 m 未満) でつながる床を高さの範囲 3 m 未満のあいだ足す作り方にした (利用者の規則、2026-11-01)。 11: 何も無い層を一覧から外し、階の名前をデータの名前だけにした。店の名前に area_label・販売データの名前を足した (2026-11-01)。 12: 頭に一覧に出る階の数 (listedFloors。StationMapExports.Finish が書く) を足した。 13: 乗り場の判定・地区の条件を直した (2026-11-01)。 14: 通路の部品 (corridor_*) を床にし、店の名前を階の名前・括弧の候補に使わないようにし、重ねる順を階の単位にし、新しい乗り物の仕組み (sctransport*) の乗り場を拾うようにした (2026-11-01)。 15: stairs に outline (階段の板の真上から見た形) を足し、明らかに階が違う階段の両端の床を別の層にし、エレベーターとつながった階の名前を階段でつながる階に付けるようにした (2026-11-02)。 16: 床・階段を部品の形 (GLB の三角形の上向きの面) で判定し、板を実際の面の高さで作り、部品の名前と種類を表に登録するようにした (2026-11-02)。
 
     public static string Write(StationIndex index, StationTree tree, IReadOnlyList<StationFloor> floors, IReadOnlyList<StationSection> sections,
         IReadOnlyList<StationStair> stairs, IReadOnlyList<StationTransit> transit, StationGraph graph, StarRotRule rule = StationIndex.DefaultRule)
@@ -1577,6 +1965,8 @@ internal static class StationMapJson
             // (2026-11-01、まとめて取り込んだ 88 か所のうち、一覧に出る階が 0 の場所の直し) ステーション・都市にも当てる。Security Post Kareah (9 階)・
             // Covalex Shipping Hub Gundo (6 階)・Wikelo Emporium (TheCollectorAsteroid_Stanton1/2/4) は、階の名前が全部場所の名前 (NameSource「place」) で
             // Listed が false になり、店・乗り場・名札の当たる階も無く、一覧が空だった。ContestedZone の RewardRoom 2 か所も同じく 0 だった
+            // (2026-11-02、利用者の決定「A」) 一覧に出す階が 1 つも無いステーション (Kareah など) は、この決まりのまま形のある床を全部出す。
+            // 同じ名前 (場所の名前) の階が並ぶので、画面の一覧 (StationMapPanel) で ▼ にまとまる
             var listAllDrawn = !floors.Any(IsListed);
             bool IsListedFinal(StationFloor f) => listAllDrawn ? !f.FromTransit && drawnArea.GetValueOrDefault(f.Id) >= MinListedFloorArea : IsListed(f);
             // 一覧に出す階の名前 (2026-11-01、利用者の指示): 一覧に出る階どうしで同じ名前 (大文字小文字は区別しない) があれば、データにある違いを括弧で添える。
@@ -1588,6 +1978,9 @@ internal static class StationMapJson
             foreach (var s in sections)
             {
                 if (s.DisplayName.Length == 0 || s.BoxFallback && !HasThing(s)) continue;
+                // (2026-11-02) 店の名前から付けた区画の名前 (NameSource「shop」) は括弧に使わない (利用者の決定「店の名前を階の名前にも括弧の候補にも使わない」。
+                // 規則 6 を外した後も、この ② から Stanton Gateway の「Galleria（Casaba Outlet）」・Area18 の「Lobby（Traveler Rentals）」のように店の名前が出ていた)
+                if (s.NameSource == "shop") continue;
                 foreach (var (fid, rings) in s.Polygons)
                 {
                     if (unreachable.Contains(fid)) continue;
@@ -1696,8 +2089,12 @@ internal static class StationMapJson
                 {
                     var from = l.Gateways[fa]; var to = l.Gateways[fb];
                     var stop = transit.FirstOrDefault(x => x.Kind != "destination" && x.Instance == to.Instance && x.Guid == to.Gateway.Guid)?.Stop ?? "";
-                    var dist = districtList.FirstOrDefault(d => d.Stations.Contains(to.Gateway.Guid))?.Id ?? "";
-                    nextOf.TryAdd((from.Instance, from.Gateway.Guid), (to.Gateway.Guid, stop, dist));
+                    // 節点のある乗り場は節点で引く (地区にしなかった駅 (New Babbage の Tobin Center) は、CryGUID の同じ別の地区に当てない)。節点の無い乗り場だけ CryGUID で引く
+                    var dist = graph.ById.TryGetValue($"g:{to.Instance}:{to.Gateway.Guid}", out var toNode)
+                        ? districtList.FirstOrDefault(d => d.StationNodes.Contains(toNode))
+                        : districtList.FirstOrDefault(d => d.Stations.Contains(to.Gateway.Guid));
+                    var distId = dist?.Id ?? "";
+                    nextOf.TryAdd((from.Instance, from.Gateway.Guid), (to.Gateway.Guid, stop, distId));
                 }
             foreach (var t in transit)
             {
@@ -1755,6 +2152,18 @@ internal static class StationMapJson
                 Vec(w, "pos", ((s.Bottom.X + s.Top.X) / 2, (s.Bottom.Y + s.Top.Y) / 2, (s.Bottom.Z + s.Top.Z) / 2));
                 Vec(w, "bottom", s.Bottom); Vec(w, "top", s.Top);
                 w.WriteString("from", s.From); w.WriteString("to", s.To); w.WriteString("source", s.Source);
+                // 形 15: 階段の板の真上から見た形 (区画の floors の環と同じ書き方 [[[x, y], …], …])。形の無い階段は書かない (画面は印のまま)
+                if (s.Outline is { Count: > 0 } ol)
+                {
+                    w.WriteStartArray("outline");
+                    foreach (var r in ol)
+                    {
+                        w.WriteStartArray();
+                        foreach (var p in r) { w.WriteStartArray(); w.WriteNumberValue(Math.Round(p.X, 2)); w.WriteNumberValue(Math.Round(p.Y, 2)); w.WriteEndArray(); }
+                        w.WriteEndArray();
+                    }
+                    w.WriteEndArray();
+                }
                 w.WriteEndObject();
             }
             w.WriteEndArray();

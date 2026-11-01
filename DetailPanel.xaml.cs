@@ -785,6 +785,9 @@ public partial class DetailPanel : UserControl
         if (itemType.StartsWith("NOITEM_Vehicle", StringComparison.OrdinalIgnoreCase)) SetShip3DTarget(record, ShipNameFor(record));
         // ステーション・都市・前哨基地・小惑星 (星図の Manmade 系・LandingZone・Outpost 系・Asteroid 系。IsStationPlace) なら［読み込み］［地図表示］［別ウィンドウ］を出す
         if (isTreeRecord && tree != null && tree.NodesByRecord.TryGetValue(record, out var place) && IsStationPlace(place)) SetStationTarget(place, tree);
+        // 店で、店のある場所 (かその上) が地図の一覧に出る場所 (StationMapPlaceOf) なら［マップに表示］を出す
+        else if (isTreeRecord && tree != null && tree.ShopsByRecord.TryGetValue(record, out var shopHere) && StationMapPlaceOf(shopHere) is { } shopPlace)
+            SetStationTarget(shopPlace, tree, shopHere);
 
         // 保存データに購入の売り場が無ければ、UEX の値段 (チャット・表と同じ取得・キャッシュ) を取ってから出し直す
         if (!text.Contains("店の販売データ無し")) return;
@@ -989,22 +992,35 @@ public partial class DetailPanel : UserControl
     private string? _stationDetailRecord;
     private ShopTreeNode? _stationPlace;
     private ShopTree? _stationTree;
-    private bool _stationShown;
 
     // バー (［読み込み］［地図表示］［別ウィンドウ］) を出す場所: 別ウィンドウの一覧と同じ種類 (ステーション・都市 (Manmade 系・LandingZone)・前哨基地 (Outpost 系)・小惑星 (Asteroid 系))。
     // 取り込みのルート探し (StationMapData の FindRoots) がこの種類 (StationPlace.IsMapPlace) を対象にしている
     private static bool IsStationPlace(ShopTreeNode n) => n.Type.StartsWith("Manmade", StringComparison.Ordinal) || n.Type == "LandingZone"
         || n.Type is "Outpost" or "Outpost_InvalidQT" or "Asteroid" or "Asteroid_ValidQT";
 
-    // バーの場所を決める (null なら隠し、地図の表示もやめる)
-    private void SetStationTarget(ShopTreeNode? place, ShopTree? tree)
+    // バーを出している店 (店の詳細のとき。［マップに表示］だけを出す。場所の詳細のときは null)
+    private ShopTreeShop? _stationShop;
+
+    // 店のある場所: 店の場所かその上で、最初の、地図の一覧に出る場所 (IsStationPlace の種類で、別ウィンドウの一覧と同じ決まり StationMapWindow.IsMapPlace)。無ければ null
+    private static ShopTreeNode? StationMapPlaceOf(ShopTreeShop shop)
     {
-        _stationDetailRecord = place?.Record;
+        for (var n = shop.Location; n != null && !n.IsStar; n = n.Parent)
+            if (IsStationPlace(n) && StationMapWindow.IsMapPlace(n)) return n;
+        return null;
+    }
+
+    // バーの場所を決める (null なら隠す)。shop があれば店の詳細 (place は店のある場所。［読み込み］［地図表示］［別ウィンドウ］は隠し、［マップに表示］だけを出す)
+    private void SetStationTarget(ShopTreeNode? place, ShopTree? tree, ShopTreeShop? shop = null)
+    {
+        _stationDetailRecord = shop?.Record ?? place?.Record;
         _stationPlace = place;
         _stationTree = tree;
+        _stationShop = place == null ? null : shop;
+        var placeButtons = _stationShop != null ? Visibility.Collapsed : Visibility.Visible;
+        btnStationImport.Visibility = btnStationMap.Visibility = btnStationWindow.Visibility = placeButtons;
+        btnShopMap.Visibility = _stationShop != null ? Visibility.Visible : Visibility.Collapsed;
         if (place == null)
         {
-            HideStationMap();
             pnlStation.Visibility = Visibility.Collapsed;
             return;
         }
@@ -1032,6 +1048,19 @@ public partial class DetailPanel : UserControl
         var key = StationMapExports.KeyOf(StationMapExports.ShortName(_stationPlace.RecordName));
         var job = Ship3DExports.Instance.Jobs.FirstOrDefault(j => j.Short.Equals(key, StringComparison.OrdinalIgnoreCase));
         btnStationImport.IsEnabled = state == Ship3DCacheState.None && job == null && !Ship3DExports.Instance.CpuHigh;
+        if (_stationShop != null)
+        {
+            // 店の詳細: 店のある場所の地図の状態 (取り込みは［マップ］タブの［読み込み］で)
+            txtStation.Text = $"「{_stationPlace.Name}」の地図: " + (job != null ? $"取り込み中 {job.Text}"
+                : state switch
+                {
+                    Ship3DCacheState.Fresh => "取り込み済み",
+                    Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying => "照合中 (パッチで Data.p4k が変わったので元データを確かめています)",
+                    Ship3DCacheState.NoGame => "ゲームの Data.p4k が見つかりません",
+                    _ => "未取り込み (［マップに表示］で出る［マップ］タブの［読み込み］で取り込めます)",
+                });
+            return;
+        }
         txtStation.Text = job != null ? $"地図: 取り込み中 {job.Text}"
             : state switch
             {
@@ -1058,7 +1087,8 @@ public partial class DetailPanel : UserControl
         return false;
     }
 
-    // ［読み込み］: 予想を出して確かめてから裏で取り込む。終わったとき、まだその場所の詳細を出していれば下の欄に地図を出す
+    // ［読み込み］: 予想を出して確かめてから裏で取り込む。終わったとき、まだその場所の詳細を出していれば［マップ］タブに切り替えて地図を出す
+    // (2026-11-01、利用者の指示「詳細の欄の地図はマップに切り替える方式にする」による親の決定「A」)
     private async void BtnStationImport_Click(object sender, RoutedEventArgs e)
     {
         var place = _stationPlace;
@@ -1072,18 +1102,26 @@ public partial class DetailPanel : UserControl
             txtStatus.Text = $"「{place.Name}」の地図を取り込みました (その場所の詳細の［地図表示］で出せます)";
             return;
         }
-        await ShowStationMapAsync(place);
+        MapPanel.ShowPlaceInMapTab(place.RecordName, place.Name);
     }
 
-    private async void BtnStationMap_Click(object sender, RoutedEventArgs e)
+    // ［地図表示］: ［マップ］タブに切り替えて、その場所の地図を出す (MapPanel.ShowPlaceInMapTab)。
+    // 取り込み済みかどうかは見ない (未取り込みなら［マップ］タブが地図の欄に知らせと上の帯に［読み込み］を出す。店の［マップに表示］と同じ。2026-11-02、利用者の決定)
+    private void BtnStationMap_Click(object sender, RoutedEventArgs e)
     {
-        var place = _stationPlace;
-        if (place == null || !await StationReadyOrNotifyAsync(place)) return;
-        if (!ReferenceEquals(place, _stationPlace)) return;
-        await ShowStationMapAsync(place);
+        if (_stationPlace is not { } place) return;
+        MapPanel.ShowPlaceInMapTab(place.RecordName, place.Name);
     }
 
-    // ［別ウィンドウ］: 取り込み済みなら別のウィンドウ (モードレス) に出し、この欄は詳細の表に戻す (同じ地図を 2 か所で出さない)
+    // ［マップに表示］(店の詳細): ［マップ］タブに切り替えて、店のある場所の地図を出し、その店を選ぶ (MapPanel.ShowShopInMapTab)。
+    // 取り込み済みかどうかは見ない (未取り込みなら［マップ］タブが地図の欄に知らせと上の帯に［読み込み］を出す)
+    private void BtnShopMap_Click(object sender, RoutedEventArgs e)
+    {
+        if (_stationPlace is not { } place || _stationShop is not { } shop) return;
+        MapPanel.ShowShopInMapTab(place.RecordName, place.Name, shop);
+    }
+
+    // ［別ウィンドウ］: 取り込み済みなら別のウィンドウ (モードレス) に出す
     private async void BtnStationWindow_Click(object sender, RoutedEventArgs e)
     {
         var place = _stationPlace;
@@ -1095,7 +1133,6 @@ public partial class DetailPanel : UserControl
             var win = new StationMapWindow(place.RecordName, place.Name, _stationTree);
             if (owner != null && owner.IsLoaded) win.Owner = owner;
             win.Show();
-            HideStationMap();
         }
         catch (Exception ex)
         {
@@ -1104,29 +1141,6 @@ public partial class DetailPanel : UserControl
         }
     }
 
-    private void BtnStationBack_Click(object sender, RoutedEventArgs e) => HideStationMap();
-
-    // 下の欄に地図を出す (詳細の表の WebView2 は隠すだけ)
-    private async Task ShowStationMapAsync(ShopTreeNode place)
-    {
-        webDetail.Visibility = Visibility.Collapsed;
-        txtDetail.Visibility = Visibility.Collapsed;
-        stationMap.Visibility = Visibility.Visible;
-        btnStationBack.Visibility = Visibility.Visible;
-        _stationShown = true;
-        await stationMap.ShowAsync(place.RecordName, place.Name, _stationTree);
-    }
-
-    private void HideStationMap()
-    {
-        if (!_stationShown) return;
-        _stationShown = false;
-        stationMap.Clear();
-        stationMap.Visibility = Visibility.Collapsed;
-        btnStationBack.Visibility = Visibility.Collapsed;
-        if (_webFailed) txtDetail.Visibility = Visibility.Visible;
-        else webDetail.Visibility = Visibility.Visible;
-    }
 }
 
 // ［詳細］タブの詳細の文字 (GetItemDetailText の形) を Markdown にし、Markdig で HTML にする。
@@ -1218,11 +1232,12 @@ internal static class DetailHtml
 
     // 図 1 つの HTML のブロック (1 行): <div class="map"> の中に svg (GameDataQueryService.SystemMapSvg / NearMapSvg) と、右上に重ねる［全体］［＋］［－］の HTML のボタン。
     // ボタンは CSS (.mapctl) で枠の右上に置く (svg の中の座標には頼らない)。押したときの動きは MapScript。
-    // 左下に凡例 (GameDataQueryService.MapLegendHtml。CSS の .maplegend。拡大・移動では動かない)。詳細タブとマップタブ (MapPanel) で使う
-    public static string MapBlock(string svg) =>
+    // 左下に凡例 (GameDataQueryService.MapLegendHtml。CSS の .maplegend。拡大・移動では動かない)。詳細タブとマップタブ (MapPanel) で使う。
+    // withMapLegend: 凡例に地図のある場所の枠も入れる (マップタブだけ)
+    public static string MapBlock(string svg, bool withMapLegend = false) =>
         "<div class=\"map\">" + svg.Replace("\r", "").Replace("\n", " ") +
         "<div class=\"mapctl\"><button type=\"button\" data-act=\"fit\">全体</button><button type=\"button\" data-act=\"in\">＋</button><button type=\"button\" data-act=\"out\">－</button></div>" +
-        GameDataQueryService.MapLegendHtml() + "</div>";
+        GameDataQueryService.MapLegendHtml(withMapLegend) + "</div>";
 
     public static string ToMarkdown(string text)
     {
@@ -1449,10 +1464,26 @@ internal static class DetailHtml
     // ・svg に data-save があれば (マップタブの図だけ)、操作 (ホイール・ドラッグ・ボタン) が止まって 500ms 後に
     //   window.chrome.webview.postMessage({ map: data-save の値, cx, cy, w }) で今の中心と幅 (メートル) をアプリへ送る (MapPanel が受けて覚える)
     // ・表示を変えるたびに、ラベルを data-pri の小さい順 (同じなら data-sub の多い順、同じなら data-no の順) に置き、先に置いたものと重なるものは隠す (点と <title> は残す)
+    // ・マップタブの図 (data-save) だけ: 拡大の上限でさらに拡大したとき (ホイール・［＋］)、操作の位置 (ホイールはカーソル、［＋］は図の真ん中) から
+    //   ENTER_PX 以内に地図のある場所の印 (a[data-map]) があれば、いちばん近いものを postMessage({ type: 'enterplace', rec }) でアプリへ知らせる
+    //   (MapPanel がその場所の階層マップへ移る)。アプリからの { type: 'mapfocus', save, x, y } で、その位置を真ん中に拡大の上限で出す (地図から戻るとき・検索)
     private const string MapScript = """
         (function () {
           'use strict';
+          // スクリプトのエラーをアプリへ知らせる ({ type: 'scripterror', where, message, stack }。［マップ］タブ (MapPanel) がアプリのログに書く)
+          function reportError(where, e) {
+            try {
+              if (!(window.chrome && window.chrome.webview)) return;
+              var message = (e && e.message !== undefined) ? String(e.message) : String(e);
+              window.chrome.webview.postMessage({ type: 'scripterror', where: where, message: message, stack: (e && e.stack) ? String(e.stack) : '' });
+            } catch (x) { }
+          }
+          window.addEventListener('error', function (ev) { reportError('event', ev.error || ev.message); });
+          window.addEventListener('unhandledrejection', function (ev) { reportError('promise', ev.reason); });
           var FIT = 260 / 300, MARGIN = 1;
+          // 拡大の上限でさらに拡大したときに、地図へ移る場所を探す範囲 (画面の px)。印のアイコン (外径 12px) と枠 (20px) の外に指 1 本ぶんの余裕を見て 40px
+          // (仮の値。2026-11-01、利用者の決めた案 1 で親と決めた。動かしてみて直す)。同じ知らせを続けて送らないための間 (ms)
+          var ENTER_PX = 40, ENTER_GAP_MS = 1500;
           function num(el, name, def) { var v = parseFloat(el.getAttribute(name)); return isNaN(v) ? def : v; }
           function setup(svg) {
             var st = { W: 600, H: 500, cx: 0, cy: 0, s: 1, min: 1, max: 1, ready: false };
@@ -1611,11 +1642,18 @@ internal static class DetailHtml
               render();
               notify();
             }
+            var pendingFocus = null;
+            function applyFocus(d) {
+              st.cx = d.x; st.cy = d.y; st.s = st.max;
+              render();
+              notify();
+            }
             function start() {
               if (st.ready || !measure()) return;
               st.ready = true;
               initial();
               render();
+              if (pendingFocus) { var pf = pendingFocus; pendingFocus = null; applyFocus(pf); }
               // ページを作ったときに量子ジャンプの線が出ていれば、それにも同じ決まりを当てる
               var qg0 = svg.querySelector('g.qtgroup');
               if (qg0 && qg0.getAttribute('visibility') !== 'hidden')
@@ -1628,10 +1666,27 @@ internal static class DetailHtml
               st.s = clamp(st.s);
               render();
             }
+            // 拡大の上限でさらに拡大した: 操作の位置 (px, py) から ENTER_PX 以内の地図のある場所のうち、いちばん近いものをアプリへ知らせる (マップタブの図だけ)
+            var lastEnter = 0;
+            function enterNear(px, py) {
+              if (saveKey === null || !(window.chrome && window.chrome.webview)) return;
+              var now = Date.now();
+              if (now - lastEnter < ENTER_GAP_MS) return;
+              var best = null, bd = ENTER_PX;
+              Array.prototype.forEach.call(svg.querySelectorAll('a[data-map]'), function (a) {
+                var ic = a.querySelector('g.icon, circle[data-x]');
+                if (!ic || !ic._zm) return;
+                var d = Math.sqrt(Math.pow(ic._zm.sx - px, 2) + Math.pow(ic._zm.sy - py, 2));
+                if (d <= bd) { bd = d; best = a; }
+              });
+              if (!best) return;
+              lastEnter = now;
+              window.chrome.webview.postMessage({ type: 'enterplace', rec: best.getAttribute('data-rec') });
+            }
             function zoomAt(px, py, f) {
               if (!st.ready) return;
               var ns = clamp(st.s * f);
-              if (ns === st.s) return;
+              if (ns === st.s) { if (f > 1 && st.s >= st.max) enterNear(px, py); return; }
               var wx = st.cx + (px - st.W / 2) / st.s, wy = st.cy - (py - st.H / 2) / st.s;
               st.s = ns;
               st.cx = wx - (px - st.W / 2) / ns; st.cy = wy + (py - st.H / 2) / ns;
@@ -1780,6 +1835,13 @@ internal static class DetailHtml
             if (saveKey !== null && window.chrome && window.chrome.webview) {
               window.chrome.webview.addEventListener('message', function (e) {
                 var d = e.data;
+                // その位置 (ゲームの座標) を真ん中に、拡大の上限で出す (地図から星系図へ戻るとき・検索で選んだとき)。
+                // 図が隠れていて大きさを測れていない (st.ready が false) ときは覚えておき、図が出たとき (start) に当てる
+                if (d && d.type === 'mapfocus' && d.save === saveKey && isFinite(d.x) && isFinite(d.y)) {
+                  if (!st.ready) { pendingFocus = d; return; }
+                  applyFocus(d);
+                  return;
+                }
                 if (!d || d.type !== 'mapupdate' || !d.maps) return;
                 for (var i = 0; i < d.maps.length; i++) if (d.maps[i].save === saveKey) { applyUpdate(d.maps[i]); break; }
               });

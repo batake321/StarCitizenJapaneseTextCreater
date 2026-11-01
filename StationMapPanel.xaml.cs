@@ -73,6 +73,28 @@ public partial class StationMapPanel : UserControl
     private readonly DispatcherTimer _curTimer = new() { Interval = TimeSpan.FromSeconds(2) };
 
     private const string StartCurrentId = "current", StartPinId = "pin";
+    // 地図の表示 (WebView2) の用意を待つ上限 (ShowCoreAsync。終わらないときに「読み込み中...」のままにしないための区切り)
+    private static readonly TimeSpan WebViewInitLimit = TimeSpan.FromSeconds(30);
+
+    // 地図の WebView2 を合成で描く版 (WebView2CompositionControl) にするか。［マップ］タブ (MapPanel) は true (星系図と重ねて透明度を変える (クロスフェード) ため。
+    // HWND の WebView2 は WPF の透明度が効かない)。別ウィンドウは false (今の HWND の WebView2 のまま)。XAML で設定し、最初に地図を出す前に決める
+    public bool UseComposition { get; set; }
+    private Microsoft.Web.WebView2.Wpf.IWebView2? _web;
+    // 地図の WebView2 (初めて使うときに作って webHost に入れる)
+    private Microsoft.Web.WebView2.Wpf.IWebView2 Web
+    {
+        get
+        {
+            if (_web != null) return _web;
+            _web = UseComposition ? new Microsoft.Web.WebView2.Wpf.WebView2CompositionControl() : new Microsoft.Web.WebView2.Wpf.WebView2();
+            webHost.Content = _web;
+            return _web;
+        }
+    }
+    private FrameworkElement WebElement => (FrameworkElement)Web;
+
+    // ビューアで縮小して、描いている図の全体が小さくなった (viewer.js の zoomout の知らせ)。［マップ］タブ (MapPanel) が星系図へ戻るのに使う。別ウィンドウは使わない
+    public event Action? ZoomedOut;
 
     public StationMapPanel()
     {
@@ -186,7 +208,26 @@ public partial class StationMapPanel : UserControl
         _startFromButtonUtc = MapPanel.LastButtonCaptureUtc;
         BuildLists();
         UpdateCurrent(send: false);
-        try { await (_webInit ??= StationMapWeb.InitAsync(web, OnViewerMessage)); }
+        // 現在位置がこの場所の中 (区画の中・区画の外でも範囲の中。ApplyButtonCapture の gotoCurrent と同じ判定) なら、初めの階を現在位置の階にする。
+        // ステーションの外なら初めの階 (店のいちばん多い階) のまま、現在位置の印も出さない (SendCurrent)
+        if (_cur is { State: not "Outside" } cur0 && cur0.Floor.Length > 0) SelectFloorInList(cur0.Floor);
+        // 合成で描く WebView2 (WebView2CompositionControl。［マップ］タブ) は、隠したまま (Collapsed) だと EnsureCoreWebView2Async が終わらない
+        // (2026-11-02 に小さな試しのアプリで確かめた: Collapsed のままでは 8 秒たっても終わらず、Visible にすると終わる。HWND の WebView2 は Collapsed でも終わる)。
+        // 「読み込み中...」の知らせ (ShowOverlay) で隠しているので、用意の前に出す (知らせの文は上に重ねて出たまま。HWND の WebView2 は文の上に出てしまうので今までどおり)
+        if (UseComposition) WebElement.Visibility = Visibility.Visible;
+        try
+        {
+            var init = _webInit ??= StationMapWeb.InitAsync(Web, OnViewerMessage, () => $"{_name} ({_record})");
+            // 用意が終わらないときに「読み込み中...」のままにしない (WebViewInitLimit たっても終わらなければ、知らせとログを出してやめる。用意はそのまま続き、次に出すときに使う)
+            if (await Task.WhenAny(init, Task.Delay(WebViewInitLimit)) != init)
+            {
+                if (_disposed || record != _record) return false;
+                App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの地図] 「{name}」({record}): 地図の表示 (WebView2) の用意が {WebViewInitLimit.TotalSeconds:0} 秒たっても終わりません");
+                ShowOverlay($"地図の表示 (WebView2) の用意が {WebViewInitLimit.TotalSeconds:0} 秒たっても終わりません。もう一度開いてください。");
+                return false;
+            }
+            await init;
+        }
         catch (Exception ex)
         {
             _webInit = null;
@@ -195,7 +236,7 @@ public partial class StationMapPanel : UserControl
             return false;
         }
         txtOverlay.Visibility = Visibility.Collapsed;
-        web.Visibility = Visibility.Visible;
+        WebElement.Visibility = Visibility.Visible;
         if (_viewerReady) SendLoad();   // まだならビューアの ready で送る
         return true;
     }
@@ -205,6 +246,7 @@ public partial class StationMapPanel : UserControl
     {
         _model = null;
         _viewerMap = null;
+        _pendingFocus = null;
         _record = "";
         if (_viewShort != null) { StationMapExports.Instance.ReleaseView(_viewShort); _viewShort = null; }
         _routeVersion++;
@@ -215,7 +257,7 @@ public partial class StationMapPanel : UserControl
         }
         finally { _suppress = false; }
         txtRoute.Text = ""; txtCurrent.Text = "";
-        if (_viewerReady) StationMapWeb.Post(web, "{\"type\":\"load\",\"map\":{\"sections\":[],\"floors\":[]}}");
+        if (_viewerReady) StationMapWeb.Post(Web, "{\"type\":\"load\",\"map\":{\"sections\":[],\"floors\":[]}}");
         ShowOverlay(text);
     }
 
@@ -224,14 +266,14 @@ public partial class StationMapPanel : UserControl
         _disposed = true;
         _curTimer.Stop();
         if (_viewShort != null) { StationMapExports.Instance.ReleaseView(_viewShort); _viewShort = null; }
-        try { web.Dispose(); } catch { }
+        try { (_web as IDisposable)?.Dispose(); } catch { }
     }
 
     private void ShowOverlay(string text)
     {
         txtOverlay.Text = text;
         txtOverlay.Visibility = text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-        if (text.Length > 0 && _model == null) web.Visibility = Visibility.Collapsed;
+        if (text.Length > 0 && _model == null) WebElement.Visibility = Visibility.Collapsed;
     }
 
     // ===== 名前 =====
@@ -281,8 +323,8 @@ public partial class StationMapPanel : UserControl
             }
             _floorDisplay[f.Id] = FixShops(name);
         }
-        // 同じ名前の階に高さを添える処理はしない (一覧に出る階どうしの同じ名前は、データ側が displayName の括弧で見分けている。
-        // 括弧で見分けられない同じ名前の階は、階の一覧で ▼ のまとまりにまとめる (RefreshFloors))
+        // 階の名前そのものには高さを添えない (一覧に出る階どうしの同じ名前は、データ側が displayName の括弧で見分けている。
+        // 括弧で見分けられない同じ名前の階は、階の一覧で ▼ のまとまりにまとめ、中の行にだけ高さを添える (RefreshFloors・FloorHeight))
         // Describe が「◯階」と付けるので、名前の終わりの「階」は外して渡す
         foreach (var f in m.Floors) _floorStepName[f.Id] = _floorDisplay[f.Id].EndsWith('階') ? _floorDisplay[f.Id][..^1] : _floorDisplay[f.Id];
 
@@ -453,8 +495,9 @@ public partial class StationMapPanel : UserControl
     // 「▼ 名前（N 件）」の 1 行にまとめる (数の言葉は「階」にしない。「（2 階）」が 2 階目と読めるため) (利用者の指示。ステーションの別ウィンドウの場所の一覧 (StationMapWindow.GroupRows) と同じ見た目と動き:
     // 閉じているときは ▼ (押すと開く)、開いているときは ▲ (押すと閉じる)、中の行は一段下げる)。
     // まとまりの行は、まとまりの中のいちばん上の階 (重ねる並びで最初の階) の所に出す。ほかの階の並びは変えない。
-    // 開いた中の行は重ねる並びの順で、名前に「（上から n 番目）」(まとまりの中の、一覧の上からの順番) を添えて見分ける
-    // (高さは見分けに使わない。同じ高さの同じ名前の階がある: RR_P6_L5 の Maintenance Shaft 02 の 2 つ)。
+    // 開いた中の行は重ねる並びの順で、名前にその階の高さ (StationFloor.Z = 板の上面の中央値。一覧の並び StackOrder・区画の階 SectionFloor と同じ値) を
+    // 「名前（-14.0 m）」の形 (小数 1 桁、符号付き。0 は「0.0 m」) で添える (2026-11-01、利用者の決定「C」)。
+    // 同じ高さになる階 (例: RR_P6_L5 の Maintenance Shaft 02 の 2 つは、どちらも -98.6 m) は、そのまま同じ高さを出す (番号などは足さない)。
     // 選んでいる階 (_floor) の行を選ぶ (閉じたまとまりの中なら、何も選ばない)。scroll: 選んだ行が見えるようにする
     private void RefreshFloors(bool scroll = false)
     {
@@ -463,11 +506,11 @@ public partial class StationMapPanel : UserControl
         var done = new HashSet<string>(StringComparer.Ordinal);
         foreach (var r in _floorItems)
         {
-            if (!groups.TryGetValue(r.Name, out var members)) { rows.Add(r); continue; }
+            if (!groups.TryGetValue(r.Name, out var members)) { rows.Add(r with { Display = r.Name + StairPartners(r.Id) }); continue; }
             if (!done.Add(r.Name)) continue;
             var open = _openFloorGroups.Contains(r.Name);
             rows.Add(new FloorRow("", r.Name, $"{(open ? "▲" : "▼")} {r.Name}（{members.Count} 件）", r.Name, IsGroup: true));
-            if (open) rows.AddRange(members.Select((x, i) => x with { Display = $"　　{x.Name}（上から {i + 1} 番目）", Group = r.Name }));
+            if (open) rows.AddRange(members.Select(x => x with { Display = $"　　{x.Name}（{FloorHeight(x.Id)}）{StairPartners(x.Id)}", Group = r.Name }));
         }
         _suppress = true;
         try
@@ -478,6 +521,49 @@ public partial class StationMapPanel : UserControl
         }
         finally { _suppress = false; }
     }
+
+    // 階段でつながる階の名前 (2026-11-01、利用者の決まり「階段でつながっているフロアには双方にサブの名前として相手の名前を付けるルールにする」)。
+    // 相手: 保存した地図の階段 (JSON の stairs の from・to。層の決まりで分かれた階どうしの階段だけが入る。同じ層の中の数段の階段は床に入るので入らない) で、
+    //   この階とつながる、階の一覧に出る階 (_floorItems)。一覧に出ない階 (listed でない「付近」の階など) は相手に入れず、階段の道の途中とみなしてたどり、
+    //   最初に着いた一覧に出る階で止める (2026-11-01、親の決定「B」: 一覧に出ない階をはさんでつながる階も、階段でつながっている。一度たどった階はたどらない)。
+    // 文字: 「（階段で: A・B・C）」(一覧の並びの順。同じ文字は 1 回。4 つ以上なら 3 つと「ほか N」)。相手の名前が一覧に 2 つ以上ある名前 (▼ のまとまりになる名前) なら、
+    //   どの階か分かるよう高さ (FloorHeight) を添える (例「Aparelli +13.0 m」)。相手が無ければ ""。
+    // 地図の階の名札 (viewer.js の stairPartners) も同じ決まり
+    private const int StairPartnerMax = 3;
+    private string StairPartners(string fid)
+    {
+        var m = _model;
+        if (m == null) return "";
+        var order = _floorItems.Select((r, i) => (r.Id, i)).ToDictionary(t => t.Id, t => t.i, StringComparer.Ordinal);
+        var next = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var st in m.Stairs.Where(st => st.From != st.To))
+        {
+            (next.TryGetValue(st.From, out var a) ? a : next[st.From] = new()).Add(st.To);
+            (next.TryGetValue(st.To, out var b) ? b : next[st.To] = new()).Add(st.From);
+        }
+        var found = new HashSet<string>(StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal) { fid };
+        var queue = new Queue<string>();
+        queue.Enqueue(fid);
+        while (queue.Count > 0)
+            foreach (var g in next.TryGetValue(queue.Dequeue(), out var ns) ? ns : new List<string>())
+            {
+                if (!seen.Add(g)) continue;
+                if (order.ContainsKey(g)) found.Add(g); else queue.Enqueue(g);
+            }
+        var partners = found.OrderBy(g => order[g]).ToList();
+        if (partners.Count == 0) return "";
+        var dupNames = _floorItems.GroupBy(r => r.Name, StringComparer.Ordinal).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet(StringComparer.Ordinal);
+        var names = partners.Select(g => FloorDisplay(g) is var n && dupNames.Contains(n) ? $"{n} {FloorHeight(g)}" : FloorDisplay(g))
+            .Distinct(StringComparer.Ordinal).ToList();
+        var shown = string.Join("・", names.Take(StairPartnerMax));
+        return names.Count > StairPartnerMax ? $"（階段で: {shown} ほか {names.Count - StairPartnerMax}）" : $"（階段で: {shown}）";
+    }
+
+    // 階の高さの文字 (RefreshFloors のまとまりの中の行): StationFloor.Z を小数 1 桁、符号付きで「-14.0 m」「+4.3 m」「0.0 m」。階が引けなければ ""
+    private string FloorHeight(string fid) =>
+        _model?.Floors.FirstOrDefault(f => f.Id == fid) is { } f
+            ? f.Z.ToString("+0.0;-0.0;0.0", System.Globalization.CultureInfo.InvariantCulture) + " m" : "";
 
     // 階が同じ名前の階のまとまりの中なら、そのまとまりを開く。新しく開いたら true
     private bool RevealFloor(string? fid)
@@ -636,7 +722,7 @@ public partial class StationMapPanel : UserControl
     private void Send(object msg)
     {
         if (!_viewerReady || _model == null) return;
-        StationMapWeb.Post(web, JsonSerializer.Serialize(msg));
+        StationMapWeb.Post(Web, JsonSerializer.Serialize(msg));
     }
 
     private void SendLoad()
@@ -648,10 +734,11 @@ public partial class StationMapPanel : UserControl
         sb.Append("{\"type\":\"load\",\"map\":").Append(_viewerMap)
           .Append(",\"floor\":").Append(JsonSerializer.Serialize(_floor))
           .Append(",\"top\":").Append(chkTop.IsChecked == true ? "true" : "false").Append('}');
-        StationMapWeb.Post(web, sb.ToString());
+        StationMapWeb.Post(Web, sb.ToString());
         SendCurrent();
         if (_pin is { } pin) Send(new { type = "pin", pos = new[] { pin.Pos.X, pin.Pos.Y, pin.Pos.Z }, floor = pin.Floor });
         SendEnds();
+        if (_pendingFocus is { } focus) { _pendingFocus = null; Send(focus); }
     }
 
     private void SendCurrent()
@@ -683,6 +770,9 @@ public partial class StationMapPanel : UserControl
                 break;
             case "floor":
                 if (msg.TryGetProperty("id", out var fid) && fid.GetString() is { } f) SelectFloorInList(f);
+                break;
+            case "zoomout":
+                ZoomedOut?.Invoke();
                 break;
             case "mode":
                 // ビューアの［全体図］で斜めの図に戻したとき: 「この階だけ（真上から）」の欄を合わせる (欄の変更の知らせは送り返さない)
@@ -735,6 +825,38 @@ public partial class StationMapPanel : UserControl
                 }
         }
     }
+
+    // ［詳細］の店の［マップに表示］(MapPanel.ShowShopInMapTab): 出している地図の中のその店を目的地にし (地図の上で店を押したとき (ビューアの pick) と同じ)、
+    // 店の階を開いて店に寄せる (区画の一覧で区画を選んだときと同じく、階の一覧を合わせてビューアに floor と focus を送る)。
+    // 店は名札の名前と同じ結び方 (ShopOf: CryGUID と Entity 名) で地図の店に結ぶ。同じ店に結べる地図の店が 2 つ以上あれば、階のあるものの最初。
+    // 戻り値: 状態の欄に出す知らせ (選べたときは null)
+    public string? SelectShop(ShopTreeShop shop)
+    {
+        var m = _model;
+        if (m == null) return $"「{shop.Name}」を出す地図がありません";
+        var hits = m.Shops.Where(s => ShopOf(_tree, m.Record, s)?.Record == shop.Record).ToList();
+        if (hits.Count == 0) return $"「{shop.Name}」は、この地図の店の中に見つかりませんでした (場所の地図だけ出しています)";
+        var hit = hits.FirstOrDefault(s => s.Floor.Length > 0) ?? hits[0];
+        if (_places.FirstOrDefault(p => p.Kind == "shop" && p.Index == hit.Index) is not { } place) return $"「{shop.Name}」は、この地図の店の中に見つかりませんでした (場所の地図だけ出しています)";
+        _dest = place;
+        txtDestFilter.Text = "";
+        RefreshPlaceLists();
+        string? note = null;
+        if (hit.Floor.Length > 0)
+        {
+            SelectFloorInList(hit.Floor);
+            object focus = new { type = "focus", pos = new[] { hit.Pos.X, hit.Pos.Y, hit.Pos.Z }, floor = hit.Floor, size = 40 };
+            // ビューアの用意がまだなら、地図を送るとき (SendLoad) に寄せる (階は load の floor で開く)
+            if (_viewerReady) { Send(new { type = "floor", id = hit.Floor }); Send(focus); }
+            else _pendingFocus = focus;
+        }
+        else note = $"「{shop.Name}」は地図のどの階にも載っていないので、目的地にだけしました";
+        SendEnds();
+        _ = RouteAsync();
+        return note;
+    }
+    // ビューアの用意の前に頼まれた、店に寄せる知らせ (SelectShop。SendLoad で送る)
+    private object? _pendingFocus;
 
     private void SelectFloorInList(string fid)
     {
@@ -986,6 +1108,9 @@ public partial class StationMapPanel : UserControl
         txtRoute.Text = r.Summary;
         lstSteps.ItemsSource = lines;
         Send(new { type = "route", pts = r.Points.Select(p => new object[] { Math.Round(p.X, 1), Math.Round(p.Y, 1), Math.Round(p.Z, 1), p.Floor }).ToList(),
-            trams = r.TramLegs ?? new List<int>(), fit, withCur = withCurrent });
+            trams = r.TramLegs ?? new List<int>(),
+            // 乗った区間: [道筋の番号, 乗る乗り場の x, y, 降りる乗り場の x, y] (全体図で、道筋のうちこの間だけを太くする)
+            tramSpans = (r.TramSpans ?? new()).Select(s => new double[] { s.Track, Math.Round(s.AX, 1), Math.Round(s.AY, 1), Math.Round(s.BX, 1), Math.Round(s.BY, 1) }).ToList(),
+            fit, withCur = withCurrent });
     }
 }

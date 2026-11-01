@@ -37,8 +37,10 @@ public partial class GameDataExtractor
     //     map_type: 場所の種類 (星図の種類の名前か、StationPlace.TypeCave などの星図に無い種類)。system: 星系 (starmap_locations.system)
     //     name: リンクの文字 (地図の窓の一覧の表示と同じ決まり。星図の場所は英語名 (同じ星系に同じ名前があれば親の名前を（）で添える)、
     //       星図に載っていない場所は種類の言葉か共有元の場所の名前に、乗っている天体の名前を（）で添えたもの)
-    //     named: 名前がゲームの名前か (0 なら名前が record 名のままの「名前の無い場所」。内部の名前なので画面には出さない)
-    //     has_floor: 床のメッシュがあるか (星図に載っていない場所だけ調べる。ほかは 1)。画面は StationMapWindow.IsListedPlace で一覧に出す場所だけを出す
+    //     named: 名前がゲームの名前か (星図の名前が record 名のままの「名前の無い場所」は、名前を星図外の場所と同じ決まり (StationMapWindow.UnlistedNames。
+    //       種類の言葉と、自転する天体の名前) で作り、1 にする (2026-11-02、親の決定「B」・名前は案 A)。0 の行は今は作らない)
+    //     has_floor: 床のメッシュがあるか (StationMapWindow.HasFloorMesh。星図の場所も星図外の場所も調べる (2026-11-02))。画面は 0 の場所に「（床なし）」を付ける
+    //     content_key: 同じ地図の鍵 (StationContentKey.Of。地図の窓の一覧の ▼ のまとまりと同じ鍵)。画面は同じ鍵の場所を 1 つのリンクにまとめる
     // インデックス構築 (Step 6c) で作り直す (作れなかったときは前の表を残す)。書くときは 3 つとも消して今の形で作り直す
     internal static readonly string[] MissionMapTables = ["mission_map_vars", "mission_map_sets", "mission_map_places"];
     internal const string MissionMapDdl = """
@@ -61,12 +63,14 @@ public partial class GameDataExtractor
             system TEXT NOT NULL,
             name TEXT NOT NULL,
             named INTEGER NOT NULL,
-            has_floor INTEGER NOT NULL
+            has_floor INTEGER NOT NULL,
+            content_key TEXT NOT NULL
         );
         """;
 
     // 表の形と作り方の番号。表・列・決まりを変えたら上げる (作った印の値。印と違えば起動後に作り直す: NeedsMissionMapPlaces)
-    private const string MissionMapPlacesFormat = "2";
+    // 3: mission_map_places に content_key (同じ地図の鍵) を足した。4: 星図の場所の床も調べる (has_floor)・名前の無い場所に種類の言葉の名前を付ける
+    private const string MissionMapPlacesFormat = "4";
 
     // 契約の地図の表を作れた印 (gamedata_meta。値は MissionMapPlacesFormat)。作れたときだけ書く。インデックス構築の最初に消す (RebuiltDataMetaKeys) ので、
     // 構築の中で作れなければ印が無いまま残り、次の起動で作り直す (星図の場所・店の表と同じく Step 6c を走らせる: RebuildOreLocationsAsync)
@@ -109,7 +113,7 @@ public partial class GameDataExtractor
 
     // 書き込むもの: 変数の行 (地図の組の番号)、地図の組 (番号 → 地図の record)、地図
     private readonly record struct MissionMapVar(string Mission, string Variable, int PlaceCount, int SetId);
-    private readonly record struct MissionMapPlace(string MapRecord, string MapType, string System, string Name, bool Named, bool HasFloor);
+    private readonly record struct MissionMapPlace(string MapRecord, string MapType, string System, string Name, bool Named, bool HasFloor, string ContentKey);
     private sealed record MissionMapData(List<MissionMapVar> Vars, List<List<string>> Sets, List<MissionMapPlace> Places);
 
     private static readonly Regex MissionMapUuidRegex = new("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
@@ -255,16 +259,18 @@ public partial class GameDataExtractor
             using (var ins = _db.CreateCommand())
             {
                 ins.Transaction = tx;
-                ins.CommandText = "INSERT OR IGNORE INTO mission_map_places(map_record,map_type,system,name,named,has_floor) VALUES(@r,@t,@s,@n,@nd,@f)";
+                ins.CommandText = "INSERT OR IGNORE INTO mission_map_places(map_record,map_type,system,name,named,has_floor,content_key) VALUES(@r,@t,@s,@n,@nd,@f,@k)";
                 var pR = ins.Parameters.Add("@r", SqliteType.Text);
                 var pT = ins.Parameters.Add("@t", SqliteType.Text);
                 var pS = ins.Parameters.Add("@s", SqliteType.Text);
                 var pN = ins.Parameters.Add("@n", SqliteType.Text);
                 var pNd = ins.Parameters.Add("@nd", SqliteType.Integer);
                 var pF = ins.Parameters.Add("@f", SqliteType.Integer);
+                var pK = ins.Parameters.Add("@k", SqliteType.Text);
                 foreach (var pl in data.Places)
                 {
                     pR.Value = pl.MapRecord; pT.Value = pl.MapType; pS.Value = pl.System; pN.Value = pl.Name; pNd.Value = pl.Named ? 1 : 0; pF.Value = pl.HasFloor ? 1 : 0;
+                    pK.Value = pl.ContentKey;
                     ins.ExecuteNonQuery();
                 }
             }
@@ -273,13 +279,14 @@ public partial class GameDataExtractor
         }
         var tWrite = sw.Elapsed.TotalSeconds;
 
-        // 画面に出る数 (StationMapWindow.IsListedPlace と名前のある場所だけ。契約ごとの地図の数)
+        // 画面に出る数 (StationMapWindow.IsListedPlace と名前のある場所だけ。契約ごとの地図の数。同じ地図の鍵の場所は 1 つと数える (画面と同じ))
         var placeBy = data.Places.ToDictionary(x => x.MapRecord, StringComparer.Ordinal);
         int show1to10 = 0, showMany = 0, hiddenOnly = 0;
         foreach (var g in data.Vars.GroupBy(v => v.Mission))
         {
             var shown = g.SelectMany(v => data.Sets[v.SetId]).Distinct(StringComparer.Ordinal)
-                .Count(rec => placeBy[rec] is var pl && pl.Named && StationMapWindow.IsListedPlace(pl.MapType, rec.StartsWith(StationPlace.UnlistedPrefix, StringComparison.Ordinal), pl.HasFloor));
+                .Where(rec => placeBy[rec] is var pl && pl.Named && StationMapWindow.IsListedPlace(pl.MapType, rec.StartsWith(StationPlace.UnlistedPrefix, StringComparison.Ordinal), pl.HasFloor))
+                .Select(rec => placeBy[rec].ContentKey).Distinct(StringComparer.Ordinal).Count();
             if (shown == 0) hiddenOnly++;
             else if (shown <= 10) show1to10++;
             else showMany++;
@@ -676,7 +683,8 @@ public partial class GameDataExtractor
 
     // 契約ごとの行。リンクの文字は地図の窓の一覧と同じ決まり: 星図の場所は英語名で、同じ星系に地図を作る種類の同じ名前 (大文字小文字を区別しない) の場所が
     // 2 つ以上あれば、親の場所の名前 (ゲームの名前のあるとき) を（）で添える (StationMapWindow.RefreshStations)。星図に載っていない場所は
-    // StationMapWindow.UnlistedNames の表示。床のメッシュは星図に載っていない場所だけ調べる (StationMapWindow.HasFloorMesh)
+    // StationMapWindow.UnlistedNames の表示 (星図の場所で名前の無いものも同じ決まり)。床のメッシュは全部の場所で調べる (StationMapWindow.HasFloorMesh。
+    // 地図の窓の一覧の床なしの判定 (s_noFloor・UnlistedPlace.NoFloor) と同じ調べ方)
     private static MissionMapData BuildMissionMapRows(List<(string Mission, List<(string Variable, HashSet<int> Cands)> Vars)> matched,
         List<List<string>> instRoots, StationRootSearch search, List<(StationPlace Place, string Name, string Parent)> starmap, StationIndex idx, CancellationToken ct)
     {
@@ -709,7 +717,11 @@ public partial class GameDataExtractor
                 if (dupNames.Contains((row.Place.System.ToLowerInvariant(), row.Name.ToLowerInvariant()))
                     && byRecord.TryGetValue(row.Parent, out var parent) && HasGameName(parent.Place.Record, parent.Name))
                     name = $"{row.Name}（{parent.Name}）";
-                v = (row.Place.Type, row.Place.System, name, HasGameName(record, row.Name), true);
+                // 名前の無い場所 (星図の名前が record 名のまま) は、内部の名前を出さないよう、星図外の場所と同じ決まりの名前にする
+                if (!HasGameName(record, row.Name))
+                    name = StationMapWindow.UnlistedNames(root, rec => byRecord.TryGetValue(rec, out var s) ? s.Name : null,
+                        uuid => byUuid.TryGetValue(uuid, out var b) ? b.Name : null).Label;
+                v = (row.Place.Type, row.Place.System, name, true, StationMapWindow.HasFloorMesh(idx, root, floorCache));
             }
             return info[record] = v;
         }
@@ -734,7 +746,8 @@ public partial class GameDataExtractor
                     {
                         if (info.ContainsKey(rec)) continue;
                         var (type, system, name, named, hasFloor) = Info(rec);
-                        places.Add(new MissionMapPlace(rec, type, system, name, named, hasFloor));
+                        // 同じ地図の鍵は地図の窓の一覧 (StationMapWindow.BuildContentKeys) と同じく、FindRoots のルートから StationContentKey.Of で作る
+                        places.Add(new MissionMapPlace(rec, type, system, name, named, hasFloor, StationContentKey.Of(search.Roots[rec])));
                     }
                 }
                 vars.Add(new MissionMapVar(mission, variable, cands.Count, id));

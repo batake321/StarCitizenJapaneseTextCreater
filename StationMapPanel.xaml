@@ -23,7 +23,14 @@
                           ToolTip="オフ: 各階を斜めに重ねた案内図 (選んだ階を濃く)。オン: 選んだ階だけを真上から"/>
 
                 <TextBlock Text="階" FontWeight="Bold" Margin="0,2,0,2"/>
-                <ListBox x:Name="lstFloors" Height="110" DisplayMemberPath="Display" SelectionChanged="LstFloors_SelectionChanged"/>
+                <!-- 行の文字 (階の名前・高さ・階段でつながる階) は欄の幅に入らないことがあるので、マウスを乗せると全文をツールチップで出す -->
+                <ListBox x:Name="lstFloors" Height="110" DisplayMemberPath="Display" SelectionChanged="LstFloors_SelectionChanged">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
+                            <Setter Property="ToolTip" Value="{Binding Display}"/>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                </ListBox>
 
                 <TextBlock Text="区画" FontWeight="Bold" Margin="0,6,0,2"/>
                 <TextBox x:Name="txtSectionFilter" TextChanged="TxtSectionFilter_TextChanged" ToolTip="区画の名前の一部で絞り込みます"/>
@@ -53,7 +60,8 @@
 
         <Border Grid.Column="2" BorderBrush="#CCC" BorderThickness="1" Background="#EEF0F2">
             <Grid>
-                <wv2:WebView2 x:Name="web"/>
+                <!-- 地図の WebView2 (StationMapPanel.Web が作って入れる。UseComposition なら合成で描く WebView2CompositionControl、無ければ HWND の WebView2) -->
+                <ContentControl x:Name="webHost" Focusable="False"/>
                 <TextBlock x:Name="txtOverlay" Foreground="#3C4043" FontSize="14" TextWrapping="Wrap" Margin="16"
                            HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
             </Grid>

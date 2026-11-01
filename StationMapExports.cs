@@ -90,6 +90,8 @@ internal sealed class StationMapExports : INotifyPropertyChanged
     // ===== 置き場所 =====
 
     public static string Folder => Path.Combine(Ship3DExports.Folder, "stations");
+    // 部品の名前 → 種類の表 (同梱の表と、置き場所の stations\station_mesh_kinds_user.json。StationMeshKinds の説明)
+    internal static StationMeshKinds MeshKinds() => StationMeshKinds.ForUser(Path.Combine(Folder, StationMeshKinds.UserFile));
     public static string ShortName(string record) =>
         record.StartsWith("StarMapObject.", StringComparison.OrdinalIgnoreCase) ? record["StarMapObject.".Length..] : record;
     public static string JsonPath(string shortName) => Path.Combine(Folder, shortName + ".json");
@@ -601,7 +603,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         var tree = StationTree.Load(index, root, ct: ct);
         var tTree = sw.Elapsed.TotalSeconds;
         ct.ThrowIfCancellationRequested();
-        var need = StationFloorBuilder.PlanExports(index, tree).SelectMany(j => j.Socpaks).Distinct(StringComparer.Ordinal).ToList();
+        var need = StationFloorBuilder.PlanExports(index, tree, kinds: MeshKinds()).SelectMany(j => j.Socpaks).Distinct(StringComparer.Ordinal).ToList();
         var tNeed = sw.Elapsed.TotalSeconds;
         ct.ThrowIfCancellationRequested();
         var jobs = PlanGrouped(index, need, p4k, MaxSocpaksPerRun, MaxGeometryBytesPerRun, ct);
@@ -779,12 +781,24 @@ internal sealed class StationMapExports : INotifyPropertyChanged
     // 並びは段階 3・4 の確かめ (scratchpad\stage34 の harness の route) と同じ。階の候補に乗り場の高さは足さない (harness の既定)
     //   階の名前・区画の名前は names (英語の global.ini の訳と、星図の場所の名前) で付ける (StationRouteGraph.NameFloors・NameSections。NameSections は Sections の後)
     //   ログ: 段階ごとの秒と、返ってきたものの数 (公開の型からそのまま数えたもの) を 1 行に出す
-    internal static string ComposeJson(StationIndex index, StationTree tree, StationMeshSet set, MapNames? names)
+    // floating: 浮いたもの (StationFloorBuilder.FloatingItems) を入れる先 (null なら作らない)
+    internal static string ComposeJson(StationIndex index, StationTree tree, StationMeshSet set, MapNames? names, List<StationFloating>? floating = null)
     {
         var sw = Stopwatch.StartNew();
         var t = new List<string>();
         void Mark(string step) { t.Add($"{step} {sw.Elapsed.TotalSeconds:F1}"); sw.Restart(); }
         var plates = StationFloorBuilder.DropOverheadPlates(StationFloorBuilder.Plates(tree, set), out var droppedPlates);
+        // (2026-11-02) 形で判定して表に足した部品の名前を決め直し (歩ける面につながらなかったものは「どれでもない」)、手元の表 (置き場所の stations\station_mesh_kinds_user.json) に書く。
+        // 書けなくても取り込みは続ける
+        // (2026-11-02) 前から表にある形の名前も、この取り込みで階段・床になれば上書きするので、足した名前が無くても決め直す
+        var fixedN = StationFloorBuilder.FinalizeKinds(set);
+        if (set.NewKinds > 0 || fixedN > 0)
+        {
+            try { set.Kinds?.SaveUser(); Log($"部品の名前の表に {set.NewKinds} 件を足し、{fixedN} 件の種類を決め直しました ({set.Kinds?.UserPath})"); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log($"部品の名前の表を書けませんでした: {ex.Message}"); }
+        }
+        // (2026-11-02、利用者の決定) 踊り場の板を階段の一部にする (階を作る前)
+        plates = StationFloorBuilder.Landings(tree, plates);
         Mark("板");
         var floors = StationFloorBuilder.Levels(plates);
         Mark("階");
@@ -794,7 +808,10 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         Mark("区画");
         StationRouteGraph.NameSections(tree, sections, names?.Localize, names?.PlaceNames, names?.ShopNames);
         Mark("区画の名前");
-        var stairs = StationRouteGraph.Stairs(tree, plates, floors);
+        var stairNoEnd = new List<StationFloating>();
+        var stairs = StationRouteGraph.Stairs(tree, plates, floors, stairNoEnd);
+        // (2026-11-02、利用者の決定「エレベーターとつながった名前優先」) 階段でエレベーターの止まる階とつながる階に、その階の名前を付ける (階段が決まってから)
+        StationRouteGraph.NameByStairs(tree, floors, stairs);
         Mark("階段");
         var lines = StationRouteGraph.TransitLines(tree);
         var transit = StationRouteGraph.TransitList(tree, lines, floors);
@@ -805,6 +822,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         Mark("道順の網");
         var json = StationMapJson.Write(index, tree, floors, sections, stairs, transit, graph);
         Mark("JSON");
+        if (floating != null) { floating.AddRange(StationFloorBuilder.FloatingItems(set, plates, floors, stairNoEnd)); Mark("浮いたもの"); }
         // 一覧に出す数は、書いた JSON の "listed" を数える (StationMapJson.Write が Listed に面積・使える物の条件を足して決めるため、Listed の数とは違う)
         var (listedFloors, listedSections) = CountListed(json);
         Log($"「{ShortName(tree.Root.Place.Record)}」の床・階・道順の結果: " +
@@ -815,6 +833,64 @@ internal sealed class StationMapExports : INotifyPropertyChanged
             string.Join("・", transit.GroupBy(x => x.Kind).OrderBy(g => g.Key, StringComparer.Ordinal).Select(g => $"{g.Key} {g.Count()}")) + ")、" +
             $"道順の節点 {graph.Nodes.Count}・辺 {graph.Edges.Count}。秒: {string.Join("、", t)}");
         return json;
+    }
+
+    // ===== 浮いたもの (2026-11-02、利用者の指示「浮いたものリストを取り込み時にログ出力と DB 格納しとくようにすると将来のデバッグに使える」) =====
+    // ログ: 理由ごとの数と、はじめの FloatingLogMax (20) 件。DB: gamedata_cache.db の station_map_floating に、その場所 (record) の行を消してから全部入れる。
+    // DB に書けなくても取り込みは続ける (ログに出す)
+    public const int FloatingLogMax = 20;
+    public const string FloatingTable = "station_map_floating";
+
+    private static void LogAndStoreFloating(string record, List<StationFloating> items)
+    {
+        var who = $"「{ShortName(record)}」";
+        var byReason = items.GroupBy(i => i.Reason.Split(' ')[0]).OrderByDescending(g => g.Count()).Select(g => $"{g.Key} {g.Count()}");
+        Log($"{who} 浮いたもの {items.Count} 件 ({string.Join("・", byReason)})" + (items.Count > 0 ? "。はじめの " + Math.Min(items.Count, FloatingLogMax) + " 件:\n" +
+            string.Join("\n", items.Take(FloatingLogMax).Select(i => $"  {i.Reason}: {i.Mesh} [{i.Kind}] ({i.X:F1}, {i.Y:F1}, {i.Z:F2})")) : ""));
+        try
+        {
+            using var db = new TrackedSqliteConnection($"Data Source={DetailPanel.DbPath()}");
+            db.Open();
+            using var tx = db.BeginTransaction();
+            using (var cmd = db.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = $@"CREATE TABLE IF NOT EXISTS {FloatingTable} (
+                    record TEXT NOT NULL,
+                    mesh TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    x REAL, y REAL, z REAL,
+                    reason TEXT NOT NULL,
+                    imported_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_{FloatingTable}_record ON {FloatingTable} (record);
+                DELETE FROM {FloatingTable} WHERE record = @r;";
+                cmd.Parameters.AddWithValue("@r", record);
+                cmd.ExecuteNonQuery();
+            }
+            using (var ins = db.CreateCommand())
+            {
+                ins.Transaction = tx;
+                ins.CommandText = $"INSERT INTO {FloatingTable} (record, mesh, kind, x, y, z, reason, imported_at) VALUES (@r, @m, @k, @x, @y, @z, @why, @t)";
+                var pr = ins.Parameters.Add("@r", Microsoft.Data.Sqlite.SqliteType.Text); var pm = ins.Parameters.Add("@m", Microsoft.Data.Sqlite.SqliteType.Text);
+                var pk = ins.Parameters.Add("@k", Microsoft.Data.Sqlite.SqliteType.Text); var px = ins.Parameters.Add("@x", Microsoft.Data.Sqlite.SqliteType.Real);
+                var py = ins.Parameters.Add("@y", Microsoft.Data.Sqlite.SqliteType.Real); var pz = ins.Parameters.Add("@z", Microsoft.Data.Sqlite.SqliteType.Real);
+                var pw = ins.Parameters.Add("@why", Microsoft.Data.Sqlite.SqliteType.Text); var pt = ins.Parameters.Add("@t", Microsoft.Data.Sqlite.SqliteType.Text);
+                var now = DateTime.UtcNow.ToString("o");
+                foreach (var i in items)
+                {
+                    pr.Value = record; pm.Value = i.Mesh; pk.Value = i.Kind;
+                    px.Value = double.IsFinite(i.X) ? i.X : DBNull.Value; py.Value = double.IsFinite(i.Y) ? i.Y : DBNull.Value; pz.Value = double.IsFinite(i.Z) ? i.Z : DBNull.Value;
+                    pw.Value = i.Reason; pt.Value = now;
+                    ins.ExecuteNonQuery();
+                }
+            }
+            tx.Commit();
+        }
+        catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or IOException or InvalidOperationException)
+        {
+            Log($"{who} 浮いたものを DB ({FloatingTable}) に書けませんでした: {ex.Message}");
+        }
     }
 
     // ログ用: 地図の JSON の floors・sections のうち "listed" が true のものの数 (読めなければ -1)
@@ -1010,7 +1086,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         }
         Log($"{who} starbreaker の書き出しを始めます: 全 {totalRuns} 回 (終わった数で {RunLogBlock} 回ごとに 1 行で出します。{(tryExtra != null ? "同時数の上限まで並行に動かします" : "1 本ずつ")})");
         onStage?.Invoke("starbreaker の書き出し");
-        var set = await StationFloorBuilder.ExportAsync(Run, stamp.Path, prep.Jobs, workDir, progress, ct, tryExtra, releaseExtra);
+        var set = await StationFloorBuilder.ExportAsync(Run, stamp.Path, prep.Jobs, workDir, progress, ct, tryExtra, releaseExtra, MeshKinds());
         Log($"{who} starbreaker の書き出しが終わりました: {set.Runs} / {totalRuns} 回、{set.Seconds:F1} 秒 (starbreaker の時間の足し合わせ {sumRun:F1} 秒、同時に動いた最大 {maxActive} 本)、" +
             $"GLB 合計 {Ship3DExports.FormatBytes(set.TotalGlbBytes)}・最大 {Ship3DExports.FormatBytes(set.MaxGlbBytes)}、床・階段のメッシュのある socpak {set.Meshes.Count(m => m.Value.Count > 0)} / {set.Meshes.Count}、" +
             $"GLB に出てこなかった socpak {set.Missing.Count}、失敗 {set.Errors.Count} 回");
@@ -1026,7 +1102,9 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         var p4k = await Ship3DP4kIndex.GetAsync(stamp);
         onStage?.Invoke("床・階・道順の作成 (ComposeJson)");
         Log($"{who} 床・階・道順の作成を始めます");
-        var json = ComposeJson(prep.Index, prep.Tree, set, prep.Names);
+        var floating = new List<StationFloating>();
+        var json = ComposeJson(prep.Index, prep.Tree, set, prep.Names, floating);
+        LogAndStoreFloating(prep.Root.Place.Record, floating);
         var tCompose = sw.Elapsed.TotalSeconds;
         ct.ThrowIfCancellationRequested();
         onStage?.Invoke("照合用の元ファイル (BuildSources)");

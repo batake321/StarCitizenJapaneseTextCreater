@@ -2482,7 +2482,8 @@ public partial class MainWindow : Window
     private const int MissionMapLinkMax = 10;
 
     // 「■ 地図」の節の中身: リンクにする地図 (record と名前。名前の順)・地図の数・読めなかったときの理由
-    private sealed record MissionMapSection(List<(string Record, string Name)> Links, int Count, string? Error);
+    // Name は窓に渡す場所の名前、Label はリンクの文字 (同じ地図をまとめたものは「▼ 名前（N か所）」)。Count は地図の数
+    private sealed record MissionMapSection(List<(string Record, string Name, string Label)> Links, int Count, string? Error);
 
     // その契約 (まとめた行なら行の中の全部の契約。2026-11-01、親の決定) の「■ 地図」の節。地図は全部の契約の分を合わせて重なりを除き、
     // 10 か所の決まりは合わせた後の数に当てる。出す地図が無ければ null。表が読めなければ理由を入れた節 (ログにも残す)
@@ -2490,18 +2491,34 @@ public partial class MainWindow : Window
     {
         try
         {
-            var shown = svc.ReadMapPlaces(members.Select(x => x.RecordName).Distinct(StringComparer.Ordinal).ToList())
+            var places = svc.ReadMapPlaces(members.Select(x => x.RecordName).Distinct(StringComparer.Ordinal).ToList())
                 .Where(p => p.Named && StationMapWindow.IsListedPlace(p.MapType, p.MapRecord.StartsWith(StationPlace.UnlistedPrefix, StringComparison.Ordinal), p.HasFloor))
-                .GroupBy(p => p.MapRecord, StringComparer.Ordinal)
-                .Select(g => (Record: g.Key, g.First().Name))
-                .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Record, StringComparer.Ordinal)
+                .GroupBy(p => p.MapRecord, StringComparer.Ordinal).Select(g => g.First())
+                .ToList();
+            // 同じ地図 (同じ地図の鍵 ContentKey。地図の窓の一覧の ▼ のまとまりと同じ) の場所は 1 つのリンクにまとめる (2026-11-01、利用者
+            // 「地図自体は全て同じもののはず」。Onyx Facility 120 か所が「候補 120 か所」になっていた)。10 か所の決まりは地図の数に当てる。
+            // まとめたリンクの文字は「▼ まとまりの名前（N か所）」(名前は一覧と同じ GroupName。N はこの契約の候補のうちその地図の場所の数)。
+            // 押すと、そのまとまりの名前の順でいちばん前の場所を選んで窓を開く (窓はその場所のまとまりを開く)
+            var shown = places.GroupBy(p => p.ContentKey.Length > 0 ? p.ContentKey : "\u0001" + p.MapRecord, StringComparer.Ordinal)
+                .Select(g =>
+                {
+                    var first = g.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ThenBy(p => p.MapRecord, StringComparer.Ordinal).First();
+                    var count = g.Count();
+                    var label = count == 1 ? first.Name : $"▼ {StationMapWindow.GroupName(g.Select(p => p.Name))}（{count} か所）";
+                    // 床の形のデータの無い場所 (2026-11-02、利用者「床が出ないものは床なしと表示」): 床のメッシュの無い場所 (has_floor) と、取り込んだら
+                    // 空の地図だった場所 (StationMapExports.IsEmptyMap)。地図の窓の一覧 (StationMapWindow.IsNoFloorPlace) と同じ。
+                    // 同じ地図のまとまりは、全部の場所が床なしのときだけ付ける (親の決定「A」)
+                    if (g.All(p => !p.HasFloor || StationMapExports.IsEmptyMap(p.MapRecord))) label += StationMapWindow.NoFloorSuffix;
+                    return (Record: first.MapRecord, first.Name, Label: label);
+                })
+                .OrderBy(x => x.Label.TrimStart('▼', ' '), StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Record, StringComparer.Ordinal)
                 .ToList();
             return shown.Count == 0 ? null : new MissionMapSection(shown, shown.Count, null);
         }
         catch (Exception ex)
         {
             Log($"[契約の地図] {members[0].RecordName}{(members.Count > 1 ? $" ほか {members.Count - 1} 件" : "")} の地図を読めませんでした: {ex.Message}");
-            return new MissionMapSection(new List<(string, string)>(), 0, ex.Message);
+            return new MissionMapSection(new List<(string, string, string)>(), 0, ex.Message);
         }
     }
 
@@ -2513,8 +2530,8 @@ public partial class MainWindow : Window
         if (map.Count > MissionMapLinkMax) { inl.Add(new System.Windows.Documents.Run($"  候補 {map.Count} か所")); return; }
         for (int i = 0; i < map.Links.Count; i++)
         {
-            var (record, name) = map.Links[i];
-            var link = new System.Windows.Documents.Hyperlink(new System.Windows.Documents.Run(name)) { Foreground = MissionEmphasisBrush };
+            var (record, name, label) = map.Links[i];
+            var link = new System.Windows.Documents.Hyperlink(new System.Windows.Documents.Run(label)) { Foreground = MissionEmphasisBrush };
             link.Click += (_, _) => OpenMissionMap(record, name);
             inl.Add(new System.Windows.Documents.Run("  "));
             inl.Add(link);

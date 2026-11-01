@@ -62,18 +62,20 @@
         </StackPanel>
 
         <!-- ステーションの地図 (ステーション・都市 (星図の Manmade 系・LandingZone)・前哨基地 (Outpost 系)・小惑星 (Asteroid 系) の詳細を出しているときだけ出す。DetailPanel.xaml.cs の IsStationPlace。船の 3D のバーにならう)。
-             ［読み込み］でゲームデータから取り込み、［地図表示］は下の欄で、［別ウィンドウ］は StationMapWindow で出す。地図を出している間は［表に戻る］で詳細の表に戻る -->
+             ［読み込み］でゲームデータから取り込み (終わったら［マップ］タブに出す)、［地図表示］は［マップ］タブ (MapPanel) で、［別ウィンドウ］は StationMapWindow で出す。
+             この欄の中には地図を出さない (2026-11-01、利用者の指示「詳細の欄の地図はマップに切り替える方式にする」) -->
         <StackPanel x:Name="pnlStation" Grid.Row="4" Margin="0,0,0,4" Visibility="Collapsed">
             <TextBlock Text="ステーションの地図" FontWeight="Bold" Margin="0,0,0,3"/>
             <StackPanel Orientation="Horizontal">
             <Button x:Name="btnStationImport" Content="読み込み" Padding="10,2" Margin="0,0,6,0" Click="BtnStationImport_Click"
                     ToolTip="この場所の地図 (床の形・店・乗り場・道順) をゲームデータ (選択中のチャンネルの Data.p4k) から取り込みます"/>
             <Button x:Name="btnStationMap" Content="地図表示" Padding="10,2" Click="BtnStationMap_Click"
-                    ToolTip="この場所の地図を下の欄に出します (取り込み済みの場所だけ)"/>
+                    ToolTip="［マップ］タブに切り替えて、この場所の地図を出します (未取り込みなら［マップ］タブに［読み込み］を出します)"/>
             <Button x:Name="btnStationWindow" Content="別ウィンドウ" Padding="10,2" Margin="6,0,0,0" Click="BtnStationWindow_Click"
                     ToolTip="この場所の地図を別のウィンドウに出します (ウィンドウの上でほかのステーションに切り替えられます)"/>
-            <Button x:Name="btnStationBack" Content="表に戻る" Padding="10,2" Margin="6,0,0,0" Click="BtnStationBack_Click" Visibility="Collapsed"
-                    ToolTip="地図の表示をやめて、詳細の表に戻ります"/>
+            <!-- 店の詳細のときだけ出す (上の 3 つは隠す): 店のある場所の地図を［マップ］タブに出し、その店を選ぶ (DetailPanel.xaml.cs の BtnShopMap_Click) -->
+            <Button x:Name="btnShopMap" Content="マップに表示" Padding="10,2" Click="BtnShopMap_Click" Visibility="Collapsed"
+                    ToolTip="［マップ］タブに切り替えて、この店のある場所の地図を出し、この店を目的地にして店の階を開きます"/>
             <TextBlock x:Name="txtStation" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
             </StackPanel>
         </StackPanel>
@@ -87,7 +89,6 @@
             <Grid>
                 <wv2:WebView2 x:Name="webDetail"/>
                 <wv2:WebView2 x:Name="web3D" Visibility="Collapsed"/>
-                <local:StationMapPanel x:Name="stationMap" Visibility="Collapsed"/>
                 <TextBox x:Name="txtDetail" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, Yu Gothic UI" FontSize="13"
                          VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Padding="6"
                          Visibility="Collapsed"/>

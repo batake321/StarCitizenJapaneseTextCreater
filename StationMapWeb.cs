@@ -15,8 +15,10 @@ internal static class StationMapWeb
     public const string ViewerHost = Ship3DWeb.ViewerHost;
     public const string ViewerUrl = $"https://{ViewerHost}/stationmap/viewer.html";
 
-    // WebView2 を用意してビューアを開く (一度だけ)。onMessage はビューアからの知らせ (error 以外)。使えなければ例外
-    public static async Task InitAsync(WebView2 web, Action<JsonElement> onMessage)
+    // WebView2 を用意してビューアを開く (一度だけ)。onMessage はビューアからの知らせ (error 以外)。使えなければ例外。
+    // web は HWND の WebView2 (別ウィンドウ) か、合成で描く WebView2CompositionControl (［マップ］タブ。重ねて透明度を変えられる) のどちらか (IWebView2)
+    // context: ログに書く、今出している場所 (名前と record)。無ければ空
+    public static async Task InitAsync(IWebView2 web, Action<JsonElement> onMessage, Func<string>? context = null)
     {
         if (web.CoreWebView2 != null) return;
         var folder = Path.Combine(DetailPanel.WorkDir(), "webview2_station");
@@ -45,9 +47,10 @@ internal static class StationMapWeb
                 using var doc = JsonDocument.Parse(e.WebMessageAsJson);
                 var root = doc.RootElement;
                 var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
-                if (type == "error" && root.TryGetProperty("message", out var m))
+                if (type == "error")
                 {
-                    App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの地図] 表示: {m.GetString()}");
+                    string Str(string name) => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+                    LogScriptError("[ステーションの地図] 表示のエラー", context?.Invoke() ?? "", Str("where"), Str("message"), Str("stack"));
                     return;
                 }
                 onMessage(root.Clone());
@@ -62,7 +65,35 @@ internal static class StationMapWeb
         core.Navigate(ViewerUrl);
     }
 
-    public static void Post(WebView2 web, string json)
+    // ページのスクリプトのエラー (ステーションの地図の viewer.js・［マップ］タブの星系図の MapScript) をアプリのログに書く。
+    // 書くもの: 場所 (place)・処理 (where)・エラーの文・スタックの先頭 ScriptErrorStackLines 行。
+    // 同じ文 (prefix・場所・処理・エラーの文が同じ) は ScriptErrorGap に 1 回だけ書く (続けて出てもログがあふれないように。抑えた数は次に書くときに添える)
+    private const int ScriptErrorStackLines = 5;
+    private static readonly TimeSpan ScriptErrorGap = TimeSpan.FromSeconds(5);
+    private static readonly Dictionary<string, (DateTime At, int Skipped)> s_scriptErrors = new(StringComparer.Ordinal);
+    public static void LogScriptError(string prefix, string place, string where, string message, string stack)
+    {
+        var key = $"{prefix}\n{place}\n{where}\n{message}";
+        var now = DateTime.UtcNow;
+        int skipped;
+        lock (s_scriptErrors)
+        {
+            if (s_scriptErrors.TryGetValue(key, out var last) && now - last.At < ScriptErrorGap)
+            {
+                s_scriptErrors[key] = (last.At, last.Skipped + 1);
+                return;
+            }
+            skipped = last.Skipped;
+            s_scriptErrors[key] = (now, 0);
+        }
+        var lines = stack.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Trim()).Take(ScriptErrorStackLines).ToList();
+        var sb = new StringBuilder($"{prefix}: 場所 {(place.Length > 0 ? place : "(無し)")}、処理 {(where.Length > 0 ? where : "(不明)")}、{message}");
+        if (skipped > 0) sb.Append($" (前に書いてから同じエラーをあと {skipped} 回抑えました)");
+        if (lines.Count > 0) sb.Append(" | スタック: ").Append(string.Join(" / ", lines));
+        App.AppendStartupLog(App.Config.WorkingDirectory, sb.ToString());
+    }
+
+    public static void Post(IWebView2 web, string json)
     {
         try { web.CoreWebView2?.PostWebMessageAsJson(json); }
         catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの地図] ビューアへ送れませんでした: {ex.Message}"); }
@@ -92,16 +123,19 @@ internal sealed class StationMapModel
     public sealed record TransitInfo(int Index, string Kind, string Guid, (double X, double Y, double Z) Pos, string Floor, string Dest, string Line, int Node,
         bool LineInternal = false, string Place = "", string NextGateway = "", string NextStop = "", string NextDistrict = "");
     // 道順の結果: Points は線に使う節点の位置と階 (出発から到着まで)、Steps は区切り、Summary は「徒歩 → … → 目的地」の文
-    // TramLegs は道順で乗るシャトルの区間 (TransitPaths の番号。全体図で太く見せる)
+    // TramLegs は道順で乗るシャトルの区間 (TransitPaths の番号)。
+    // TramSpans は乗った区間 1 つずつの、道筋の番号と乗る乗り場・降りる乗り場の xy (全体図で、道筋のうち乗る所から降りる所までだけを太く見せる)
     public sealed record RouteResult(List<(double X, double Y, double Z, string Floor)> Points, List<StationRouteStep> Steps, double Cost, string Summary,
-        List<int>? TramLegs = null);
+        List<int>? TramLegs = null, List<(int Track, double AX, double AY, double BX, double BY)>? TramSpans = null);
     // シャトルの道筋 1 区間 (JSON の transitPaths): 路線・向きの名前 (A・B)・乗り場 (from・to の CryGUID)・点
     public sealed record TransitPath(string Line, string Dir, string From, string To, List<(double X, double Y, double Z)> Points);
     // 地区 (JSON の districts。データ側が付ける): 名前・床のまとまり (group)・シャトルの乗り場 (CryGUID)・xy の箱・全体図の印の位置・主要な地区か
     public sealed record District(string Id, string Name, string NameKey, List<string> Groups, List<string> Stations,
         (double MinX, double MinY, double MaxX, double MaxY)? Bounds, (double X, double Y, double Z)? Center, bool Main);
 
-    public sealed record StairInfo((double X, double Y, double Z) Bottom, (double X, double Y, double Z) Top, string From, string To);
+    // Outline は階段の板を真上から見た外形の輪 (JSON の stairs の outline。板ごとに 1 つの凸包の輪。局所の xy)。板から作れない階段 (乗り場の縁の platform など) と前の版の JSON では null
+    public sealed record StairInfo((double X, double Y, double Z) Bottom, (double X, double Y, double Z) Top, string From, string To,
+        List<List<(double X, double Y)>>? Outline = null);
 
     public string Record { get; private set; } = "";
     public string SystemName { get; private set; } = "";
@@ -222,7 +256,18 @@ internal sealed class StationMapModel
                 db, dc, d.TryGetProperty("main", out var mv) && mv.ValueKind == JsonValueKind.True));
         }
         foreach (var st in Arr(r, "stairs"))
-            m.Stairs.Add(new StairInfo(Vec(st, "bottom"), Vec(st, "top"), Str(st, "from"), Str(st, "to")));
+        {
+            // 外形 (outline: [[[x, y], …], …]。区画の floors の輪と同じ書き方)。点が 3 つ未満の輪は使わない
+            List<List<(double X, double Y)>>? outline = null;
+            foreach (var ring in Arr(st, "outline"))
+            {
+                var pts = ring.ValueKind == JsonValueKind.Array
+                    ? ring.EnumerateArray().Where(p => p.ValueKind == JsonValueKind.Array && p.GetArrayLength() >= 2).Select(p => (p[0].GetDouble(), p[1].GetDouble())).ToList()
+                    : new List<(double, double)>();
+                if (pts.Count >= 3) (outline ??= new()).Add(pts);
+            }
+            m.Stairs.Add(new StairInfo(Vec(st, "bottom"), Vec(st, "top"), Str(st, "from"), Str(st, "to"), outline));
+        }
         // 節点 (形 2: 経由点は waypoints に、ほかは nodes に番号の順。StationMapJson.Write の graph の説明)
         var g = r.GetProperty("graph");
         var byKey = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -312,7 +357,7 @@ internal sealed class StationMapModel
 
     // ビューアへ送る地図 (描くのに要るものだけ。座標は 0.1 m に丸める。道順のグラフは送らない)。
     // floors: 描く階 {id, name, z}、sections: {id, name, fallback, floors: {階: [[x, y, …], …]}} (輪は x, y を並べた 1 次元)、
-    // shops: {i, name, pos, floor, section}、transit: 乗り場 {i, kind, name, pos, floor}、stairs: {bottom, top, from, to}、
+    // shops: {i, name, pos, floor, section}、transit: 乗り場 {i, kind, name, pos, floor}、stairs: {bottom, top, from, to, outline (あれば)}、
     // tracks: シャトルの線 [[[x, y], …], …] (道筋の点。無い JSON では tram の辺の両端)。floors には床のまとまり (group・level) も入れる
     public string ViewerMap(IReadOnlyDictionary<string, string> floorNames, IReadOnlyDictionary<int, string> shopNames,
         IReadOnlyDictionary<int, string> transitNames, IReadOnlyDictionary<string, string> sectionNames, IReadOnlyDictionary<string, string>? districtNames = null)
@@ -385,6 +430,13 @@ internal sealed class StationMapModel
             {
                 w.WriteStartObject();
                 Pt("bottom", s.Bottom); Pt("top", s.Top); w.WriteString("from", s.From); w.WriteString("to", s.To);
+                // 外形があれば outline: [[x, y, x, y, …], …] (区画の床の輪と同じく x, y を並べた 1 次元。ビューアは輪を枠で描き、階段のアイコンは出さない)
+                if (s.Outline is { Count: > 0 } ol)
+                {
+                    w.WriteStartArray("outline");
+                    foreach (var ring in ol) { w.WriteStartArray(); foreach (var q in ring) { R(q.X); R(q.Y); } w.WriteEndArray(); }
+                    w.WriteEndArray();
+                }
                 w.WriteEndObject();
             }
             w.WriteEndArray();
@@ -668,15 +720,40 @@ internal sealed class StationMapModel
         var steps = StationRouteGraph.Steps(Graph, floors, path);
         AddPt(from);
         foreach (var (_, t, _) in path) AddPt(t);
-        // 乗るシャトルの区間: 道順の tram の辺 (乗り場 → 乗り場) と、乗り場の CryGUID が同じ道筋
+        // 乗るシャトルの区間: 道順の tram の辺 (乗り場 → 乗り場) と、乗り場の CryGUID が同じ道筋。
+        // 同じ CryGUID の道筋が 2 本以上あるときは、辺の両端の乗り場に xy でいちばん近い道筋 (乗り場までの距離の和が最小のもの)。
+        // (New Babbage は 8 つの乗り場が同じ CryGUID で、道筋 8 本はどれも乗り場から出て乗り場に戻る環 (約 45 km)。両端から 1 m の道筋と 31 m の道筋 (反対向きの線) がある。
+        // 2026-11-01 の取り込みの写しで確かめた)。乗る乗り場・降りる乗り場の xy も渡し、ビューアがその間だけを太くする
         var legs = new List<int>();
+        var spans = new List<(int Track, double AX, double AY, double BX, double BY)>();
         foreach (var (a, b, e) in path.Where(p => p.Edge.Kind == "tram"))
         {
-            var i = TransitPaths.FindIndex(tp => string.Equals(tp.From, Graph.Nodes[a].Guid, StringComparison.OrdinalIgnoreCase)
-                                              && string.Equals(tp.To, Graph.Nodes[b].Guid, StringComparison.OrdinalIgnoreCase));
-            if (i >= 0 && !legs.Contains(i)) legs.Add(i);
+            var na = Graph.Nodes[a]; var nb = Graph.Nodes[b];
+            var cands = Enumerable.Range(0, TransitPaths.Count).Where(k => string.Equals(TransitPaths[k].From, na.Guid, StringComparison.OrdinalIgnoreCase)
+                                                                       && string.Equals(TransitPaths[k].To, nb.Guid, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (cands.Count == 0) continue;
+            var i = cands.MinBy(k => PolylineDistance(TransitPaths[k].Points, na.Pos.X, na.Pos.Y) + PolylineDistance(TransitPaths[k].Points, nb.Pos.X, nb.Pos.Y));
+            if (!legs.Contains(i)) legs.Add(i);
+            spans.Add((i, na.Pos.X, na.Pos.Y, nb.Pos.X, nb.Pos.Y));
         }
-        return new RouteResult(pts, steps, Graph.Cost(path), StationRouteGraph.Describe(Graph, steps, target, stopNames ?? StopNames), legs);
+        return new RouteResult(pts, steps, Graph.Cost(path), StationRouteGraph.Describe(Graph, steps, target, stopNames ?? StopNames), legs, spans);
+    }
+
+    // 点 (x, y) から折れ線 (xy) までのいちばん近い距離。点が無ければ無限大
+    private static double PolylineDistance(List<(double X, double Y, double Z)> pts, double x, double y)
+    {
+        if (pts.Count == 0) return double.PositiveInfinity;
+        if (pts.Count == 1) return Math.Sqrt((pts[0].X - x) * (pts[0].X - x) + (pts[0].Y - y) * (pts[0].Y - y));
+        var best = double.PositiveInfinity;
+        for (int k = 1; k < pts.Count; k++)
+        {
+            var (ax, ay) = (pts[k - 1].X, pts[k - 1].Y); var (dx, dy) = (pts[k].X - ax, pts[k].Y - ay);
+            var l2 = dx * dx + dy * dy;
+            var t = l2 > 0 ? Math.Clamp(((x - ax) * dx + (y - ay) * dy) / l2, 0, 1) : 0;
+            var qx = ax + t * dx - x; var qy = ay + t * dy - y;
+            best = Math.Min(best, Math.Sqrt(qx * qx + qy * qy));
+        }
+        return best;
     }
 
     // 区切り 1 つの文 (Describe の 1 区切り分。「 → 」の前まで)

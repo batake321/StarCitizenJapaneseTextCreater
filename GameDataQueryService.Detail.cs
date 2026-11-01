@@ -1643,7 +1643,8 @@ public partial class GameDataQueryService
     }
 
     // 図の左下の凡例 (HTML。DetailHtml.MapBlock が図の枠に重ねる。拡大・移動では動かない): ステーション・ジャンプポイント・都市・惑星・衛星の印と名前
-    internal static string MapLegendHtml()
+    // withMap: 地図のある場所の枠 (取り込み済み・未取り込み) も入れる (［マップ］タブだけ)
+    internal static string MapLegendHtml(bool withMap = false)
     {
         static string Item(string shapes, string name) =>
             $"<span class=\"lg\"><svg class=\"lgicon\" viewBox=\"-8 -8 16 16\" width=\"16\" height=\"16\">{shapes}</svg>{name}</span>";
@@ -1654,6 +1655,8 @@ public partial class GameDataQueryService
                Item("<circle class=\"planet\" r=\"6\"/>", "惑星") +
                Item("<circle class=\"planet\" r=\"5\"/>", "衛星") +
                Item("<g class=\"obj\"><path class=\"flag\" d=\"M-4,7 V-7 M-4,-7 L6,-4 L-4,-1 Z\"/></g>", "契約の目標") +
+               (withMap ? Item("<g class=\"mapmark\"><rect x=\"-7\" y=\"-7\" width=\"14\" height=\"14\" rx=\"2\"/></g>", "地図（取り込み済み）") +
+                          Item("<g class=\"mapmark todo\"><rect x=\"-7\" y=\"-7\" width=\"14\" height=\"14\" rx=\"2\"/></g>", "地図（未取り込み）") : "") +
                "</div>";
     }
 
@@ -1679,7 +1682,7 @@ public partial class GameDataQueryService
         for (var n = highlight; n != null && n != star; n = n.Parent) if (n.Position.HasValue) { hl = n; break; }
         if (hl != null && hl.Root != star) hl = null;
         var here = overlay?.InsidePlace;
-        var items = SystemMapNodes(star, hl, here);
+        var items = SystemMapNodes(star, hl, here, overlay?.Marks);
         if (items.Count == 0) return null;
         double Dxy(ShopTreeNode n) => Math.Sqrt(Math.Pow(n.Position!.Value.X - origin.X, 2) + Math.Pow(n.Position!.Value.Y - origin.Y, 2));
         // 描く位置 (overlay があれば自転の角度で回したもの)
@@ -1767,8 +1770,31 @@ public partial class GameDataQueryService
                 text = $"<text {textAttr} data-ox=\"{F2(lx)}\" data-oy=\"8\" x=\"{F(x + lx)}\" y=\"{F(y + 8)}\">{Xml(label)}</text>";
             }
             sb.Append(AreaCircle(n, at, x, y, s, isHere));
-            // data-rec: 場所の record 名 (マップタブの書き換えで、どの場所かを見分ける)
-            sb.Append($"<a data-rec=\"{Xml(n.RecordName)}\" href=\"{Href(n)}\"><title>{Xml(label)}</title>{shape}{text}</a>");
+            // data-rec: 場所の record 名 (マップタブの書き換えで、どの場所かを見分ける)。
+            // 地図のある場所 (overlay.Marks。［マップ］タブだけ) は data-map (1 = 取り込み済み、0 = 未取り込み。スクリプトが拡大で地図へ移る場所を探す) と枠の印を付ける
+            var mapAttr = "";
+            var mapMark = "";
+            if (overlay?.Marks is { } mks && mks.Has.TryGetValue(n.RecordName, out var imported))
+            {
+                mapAttr = $" data-map=\"{(imported ? 1 : 0)}\"";
+                mapMark = MapMarkSvg(at, x, y, imported);
+            }
+            sb.Append($"<a data-rec=\"{Xml(n.RecordName)}\"{mapAttr} href=\"{Href(n)}\"><title>{Xml(label)}</title>{shape}{mapMark}{text}</a>");
+        }
+        // 星図に載っていない場所 (overlay.Marks.Unlisted のうちこの星系のもの。［マップ］タブだけ): 小さな三角の印・地図の枠・名前。
+        // リンクは record (Unlisted.…) を詳細のリンクの形で持つ (MapPanel が押されたときに地図へ移る。詳細は無い)
+        if (overlay?.Marks is { } umk)
+        {
+            var no = items.Count;
+            foreach (var u in umk.Unlisted.Where(u => string.Equals(u.System, star.System, StringComparison.OrdinalIgnoreCase)))
+            {
+                var x = Sx(u.Pos.X); var y = Sy(u.Pos.Y);
+                var at = $"data-x=\"{F(u.Pos.X)}\" data-y=\"{F(u.Pos.Y)}\"";
+                var lx = IconHalf("other", false) + 4;
+                var shape = IconSvg("other", false, at, x, y);
+                var text = $"<text class=\"small\" data-pri=\"4\" data-opri=\"4\" data-sub=\"0\" data-no=\"{no++}\" {at} data-ox=\"{F2(lx)}\" data-oy=\"8\" x=\"{F(x + lx)}\" y=\"{F(y + 8)}\">{Xml(u.Name)}</text>";
+                sb.Append($"<a data-rec=\"{Xml(u.Record)}\" data-map=\"{(u.Imported ? 1 : 0)}\" href=\"scjt://detail/{Uri.EscapeDataString(u.Record)}\"><title>{Xml(u.Name)}</title>{shape}{MapMarkSvg(at, x, y, u.Imported)}{text}</a>");
+            }
         }
         // 現在位置の印 (g.curmark): 取った座標の赤い照準 (g.cur)、推定位置の赤い白抜きの丸 (g.est)、量子ジャンプ中の出発地から目的地への矢印 (line.qt。先の三角は marker)、
         // そのラベル (text.mk。優先 0)。大きさ・太さは画面の px で固定。マップタブの図 (saveKey あり) は、使わない部分も隠して置いておく
@@ -1831,9 +1857,16 @@ public partial class GameDataQueryService
     // マップタブの図に置いておく最近の契約の目標の入れ物の数
     internal const int ObjectiveSlots = 5;
 
-    // 星系図に描く場所: その星系で座標のある場所のうち SystemPointTypes のもの全部と、目立つ色の場所 (hl)・現在位置がその中にある場所 (here)
-    private static List<ShopTreeNode> SystemMapNodes(ShopTreeNode star, ShopTreeNode? hl, ShopTreeNode? here) =>
-        Descendants(star).Where(c => c.Position.HasValue && (SystemPointTypes.Contains(c.Type) || c == hl || c == here)).ToList();
+    // 星系図に描く場所: その星系で座標のある場所のうち SystemPointTypes のもの全部と、目立つ色の場所 (hl)・現在位置がその中にある場所 (here)・
+    // 地図のある場所 (marks。［マップ］タブだけ。前哨基地など SystemPointTypes に無い種類も描く)
+    private static List<ShopTreeNode> SystemMapNodes(ShopTreeNode star, ShopTreeNode? hl, ShopTreeNode? here, MapMarks? marks = null) =>
+        Descendants(star).Where(c => c.Position.HasValue && (SystemPointTypes.Contains(c.Type) || c == hl || c == here
+            || marks != null && marks.Has.ContainsKey(c.RecordName))).ToList();
+
+    // 地図のある場所の印 (場所の印の外の四角い枠。取り込み済みは実線、未取り込みは破線 (CSS の g.mapmark・g.mapmark.todo。［マップ］タブの MapCss))。
+    // 大きさは画面の px で固定 (data-pr。スクリプトが transform で置き直す)
+    private static string MapMarkSvg(string at, double x, double y, bool imported) =>
+        $"<g class=\"mapmark{(imported ? "" : " todo")}\" {at} data-pr=\"10\" transform=\"translate({F(x)},{F(y)})\"><rect x=\"-10\" y=\"-10\" width=\"20\" height=\"20\" rx=\"3\"/></g>";
 
     // 星系図の場所のラベル: 現在位置がその中にある場所は overlay.CurrentLabel、overlay に距離の基準 (現在位置) があれば「名前 (そこからの距離 + DistanceSuffix)」、
     // 無ければ今どおり (惑星は「名前 (恒星からの xy の距離 dxy)」、ほかは名前)。pp はその場所を描く位置
@@ -1856,12 +1889,16 @@ public partial class GameDataQueryService
     {
         var origin = star.Position ?? (0, 0, 0);
         var list = new List<(string, double, double, string)>();
-        foreach (var n in SystemMapNodes(star, null, overlay.InsidePlace))
+        foreach (var n in SystemMapNodes(star, null, overlay.InsidePlace, overlay.Marks))
         {
             var pp = CurrentLocation.PlacePosition(n, overlay.Thetas);
             var dxy = Math.Sqrt(Math.Pow(n.Position!.Value.X - origin.X, 2) + Math.Pow(n.Position!.Value.Y - origin.Y, 2));
             list.Add((n.RecordName, pp.X, pp.Y, MapPointLabel(n, overlay, pp, dxy)));
         }
+        // 星図に載っていない場所 (［マップ］タブだけ。位置は MapPanel がその時刻で入れたもの)
+        if (overlay.Marks is { } mk)
+            foreach (var u in mk.Unlisted.Where(u => string.Equals(u.System, star.System, StringComparison.OrdinalIgnoreCase)))
+                list.Add((u.Record, u.Pos.X, u.Pos.Y, u.Name));
         return list;
     }
 
@@ -2236,14 +2273,21 @@ public sealed class ShopTree
 // CurrentLabel = その印のラベル、Kind = 印の形 (taken = 取った座標の照準、est = 推定位置の白抜きの丸、moving = 量子ジャンプ中の矢印)、ArrowFrom = 矢印の出発地、
 // DistanceFrom / DistanceSuffix = 各場所のラベルの距離の基準と、距離に添える文字 (無ければ今どおり)、InsidePlace = 現在位置がその中にある場所 (赤で描き、ラベルを CurrentLabel にする)
 // QtFrom / QtTo = 量子ジャンプの線の出発地と目的地 (無ければ線は無し)、QtDest = 量子ジャンプの目的地 (目立たせる)、
-// QtGoal = 線の先が契約の目標 (推定。旗と「契約の目標（推定）」を出す)、Objectives = 地図に出す最近の契約の目標の位置 (橙の旗と「契約の目標」)
+// QtGoal = 線の先が契約の目標 (推定。旗と「契約の目標（推定）」を出す)、Objectives = 地図に出す最近の契約の目標の位置 (橙の旗と「契約の目標」)、
+// Marks = 地図 (ステーションなどの階層マップ) のある場所の印 (［マップ］タブの星系図だけ。MapPanel が入れる。無ければ印も足す点も無し)
 internal sealed record MapOverlay(IReadOnlyDictionary<ShopTreeNode, double> Thetas, (double X, double Y, double Z)? Current, string CurrentLabel,
     string Kind = MapOverlay.KindTaken, (double X, double Y, double Z)? ArrowFrom = null, (double X, double Y, double Z)? DistanceFrom = null,
     string DistanceSuffix = "", ShopTreeNode? InsidePlace = null, (double X, double Y, double Z)? QtFrom = null, (double X, double Y, double Z)? QtTo = null,
-    ShopTreeNode? QtDest = null, bool QtGoal = false, IReadOnlyList<(double X, double Y, double Z)>? Objectives = null)
+    ShopTreeNode? QtDest = null, bool QtGoal = false, IReadOnlyList<(double X, double Y, double Z)>? Objectives = null, MapMarks? Marks = null)
 {
     public const string KindTaken = "taken", KindEstimated = "est", KindMoving = "moving";
 }
+
+// ［マップ］タブの星系図の、地図 (ステーションなどの階層マップ) のある場所 (MapPanel が作る)。
+// Has = 地図を出せる星図の場所の record 名 → 取り込み済みか (true は実線の枠、false は破線の枠)。星図に描かない種類 (前哨基地など) も、ここにあれば描く。
+// Unlisted = 星図に載っていない場所の点 (record (Unlisted.…)・名前・星系・描く位置 (StationRoot.ToGlobal で局所の原点を星系の座標にしたもの)・取り込み済みか)
+internal sealed record MapMarks(IReadOnlyDictionary<string, bool> Has,
+    IReadOnlyList<(string Record, string Name, string System, (double X, double Y, double Z) Pos, bool Imported)> Unlisted);
 
 // 星図の場所 1 つ (starmap_locations の 1 行)。Record は詳細の record (根の Star は System:<星系>、ほかは Place:<record 名>)
 public sealed class ShopTreeNode(string record, string recordName, string name, string type, string typeLabel, string parentRecord, string system, bool isStar)

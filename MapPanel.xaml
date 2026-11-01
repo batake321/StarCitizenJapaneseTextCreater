@@ -1,10 +1,14 @@
 <UserControl x:Class="StarCitizenJapaneseTextCreater.MapPanel"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf">
+             xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+             xmlns:local="clr-namespace:StarCitizenJapaneseTextCreater">
     <!-- ［マップ］タブ。
          上: ［3 星系］［Stanton］［Pyro］［Nyx］。［3 星系］は 3 つの星系図を横に並べる (狭ければ折り返す)、星系のボタンはその星系図 1 つを枠いっぱいに出す。
-         下: 星系図 (WebView2。詳細タブと同じ図・スクリプト・CSS・CSP)。点・ラベルを押すと［詳細］タブでその場所の詳細を開く -->
+             ［場所の地図］／［星系図］の切り替えと、場所の検索 (MapPanel の「星系図と場所の階層マップ」)。
+         下: 星系図 (WebView2。詳細タブと同じ図・スクリプト・CSS・CSP)。点・ラベルを押すと［詳細］タブでその場所の詳細を開く (地図のある場所はその場所の階層マップへ)。
+             場所の階層マップ (pnlPlace。上に場所の名前・状態・［読み込み］［情報］、下に StationMapPanel) を同じ所に重ね、透明度を変えて切り替える (クロスフェード)。
+             重ねて透明度を変えるため、星系図とステーションの地図はどちらも合成で描く WebView2CompositionControl (HWND の WebView2 は WPF の透明度が効かない) -->
     <Grid Margin="8">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -22,10 +26,36 @@
             <!-- オンのとき、量子ジャンプの目的地の選択・移動中・到着・区間 1 の終わり、着陸、ゲームの世界に出たときに自動で座標を取る (MapPanel.OnQuantumEvent)。状態は Config.MapAutoCapture -->
             <CheckBox x:Name="chkAutoCapture" Content="QT・着陸・ゲーム開始のときに自動で現在位置を取る" VerticalAlignment="Center" Margin="6,0,6,0"
                       ToolTip="量子ジャンプの目的地を選んだときはすぐ (取れなければ 3 秒おきにあと 2 回)、移動中になってから 15 秒後と 45 秒後、到着・区間 1 の終わり・着陸場に着いたとき・ゲームの世界に出たとき (読み込み画面が閉じた・復活) は 2 秒後に、［現在位置］と同じ取り方で座標を取ります (ゲームの窓が前にあり、mobiGlas が閉じているときだけ。前に自動で取り始めてから 10 秒以内は取りません)"/>
+            <!-- 星系図 ⇔ 場所の階層マップ (MapPanel.BtnSwitch_Click)。星系図のときは、最後に出した場所の地図へ (まだ無ければ押せない) -->
+            <Button x:Name="btnSwitch" Content="場所の地図" Padding="10,2" Margin="12,0,6,0" Click="BtnSwitch_Click" IsEnabled="False"
+                    ToolTip="星系図と、最後に出した場所の地図 (ステーションなどの階層マップ) を切り替えます"/>
+            <!-- 場所の検索 (MapPanel.TxtSearch_TextChanged)。名前の一部で探し、選ぶと地図のある場所はその地図、ほかは星系図のその位置へ -->
+            <TextBlock Text="場所" VerticalAlignment="Center" Margin="6,0,4,0"/>
+            <Grid>
+                <TextBox x:Name="txtSearch" Width="220" VerticalContentAlignment="Center" TextChanged="TxtSearch_TextChanged" PreviewKeyDown="TxtSearch_PreviewKeyDown"
+                         ToolTip="場所の名前の一部を入れると候補を出します。選ぶと、地図のある場所はその地図を、ほかの場所は星系図のその位置を出します"/>
+                <Popup x:Name="popSearch" PlacementTarget="{Binding ElementName=txtSearch}" Placement="Bottom" StaysOpen="False" AllowsTransparency="False">
+                    <ListBox x:Name="lstSearch" MinWidth="320" MaxHeight="360" DisplayMemberPath="Display"
+                             PreviewMouseLeftButtonUp="LstSearch_PreviewMouseLeftButtonUp" PreviewKeyDown="LstSearch_PreviewKeyDown"/>
+                </Popup>
+            </Grid>
             <TextBlock x:Name="txtStatus" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
         </StackPanel>
 
-        <wv2:WebView2 x:Name="webMap" Grid.Row="1"/>
+        <wv2:WebView2CompositionControl x:Name="webMap" Grid.Row="1"/>
+        <!-- 場所の階層マップ (星系図と同じ所に重ねる。初めは隠す) -->
+        <DockPanel x:Name="pnlPlace" Grid.Row="1" Visibility="Collapsed" Opacity="0" Background="White">
+            <!-- 場所の名前・地図の状態 (取り込み済み・未取り込みなど。別ウィンドウのバーと同じ決まり)・［読み込み］・［情報］ -->
+            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,4">
+                <TextBlock x:Name="txtPlaceName" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <Button x:Name="btnPlaceImport" Content="読み込み" Padding="10,2" Margin="0,0,6,0" Click="BtnPlaceImport_Click" IsEnabled="False"
+                        ToolTip="この場所の地図 (床の形・店・乗り場・道順) をゲームデータ (選択中のチャンネルの Data.p4k) から取り込みます"/>
+                <Button x:Name="btnPlaceInfo" Content="情報" Padding="10,2" Margin="0,0,6,0" Click="BtnPlaceInfo_Click"
+                        ToolTip="この場所の詳細を［詳細］タブで開きます"/>
+                <TextBlock x:Name="txtPlaceState" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
+            </StackPanel>
+            <local:StationMapPanel x:Name="placeMap" UseComposition="True"/>
+        </DockPanel>
         <!-- 図を出せないとき (インデックスが未構築・WebView2 が使えない) の文字 -->
         <TextBlock x:Name="txtMessage" Grid.Row="1" Visibility="Collapsed" Margin="4" TextWrapping="Wrap" FontSize="14"/>
     </Grid>

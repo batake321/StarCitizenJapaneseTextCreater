@@ -48,6 +48,15 @@ html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
 .tram-text { font-size: 9px !important; fill: #ffffff !important; stroke: none !important; font-weight: bold; }
 .stair-icon { fill: none; stroke: #6d4c41; stroke-width: 2; stroke-linejoin: miter; }
 .stair-bg { fill: #ffffff; stroke: #6d4c41; stroke-width: 1; }
+/* 階段の外形 (外形のある階段。下の端の階は実線、上の端の階は破線)。1 本の階段の板は 1 つの形に見せる: 太めの枠 (edge) の上に、枠なし・不透明の塗り (fill) を重ね、
+   板の内側の境目を隠して外側の縁 (枠の外の半分) だけを出す。枠は階段のアイコンと同じ茶色、塗りは薄い茶色。上の端の階は破線と、より薄い色。
+   押す区画の床の上に重ねるので、押せないようにする */
+.stairshape { pointer-events: none; }
+.stairshape-edge { fill: none; stroke: #6d4c41; stroke-width: 3.4; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+/* 塗りには塗りと同じ色の細い線 (1 px) を付ける: 板どうしが辺で接する所の塗りのにじみから、下の枠の線がのぞかないように。外側の縁はその分細くなるので、枠を 3.4 px にして約 1.2 px 残す */
+.stairshape-fill { fill: #d7ccc8; stroke: #d7ccc8; stroke-width: 1; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.stairshape.upper .stairshape-edge { stroke: #8d6e63; stroke-dasharray: 5 3; }
+.stairshape.upper .stairshape-fill { fill: #efebe9; stroke: #efebe9; }
 .dest-ring { fill: none; stroke: #d93025; stroke-width: 2.5; }
 .start-ring { fill: none; stroke: #188038; stroke-width: 2.5; }
 .cur-halo { fill: rgba(234, 67, 53, 0.2); stroke: none; }

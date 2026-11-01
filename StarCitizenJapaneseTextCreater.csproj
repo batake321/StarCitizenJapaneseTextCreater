@@ -42,6 +42,10 @@
     <None Update="sc48_stations_facilities.csv">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- ステーションの階層マップ: 部品の名前 → 床・階段の種類の同梱の表 (StationMeshKinds) -->
+    <None Update="station_mesh_kinds.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Update="hangar_selectors.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

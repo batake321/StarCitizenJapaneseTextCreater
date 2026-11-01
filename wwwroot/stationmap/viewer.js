@@ -5,13 +5,14 @@
 //     斜め: 平らな座標 (px, py) = (x, -y) から U = px - py·SHEAR、V = (px·A + py·B)·K - 階の順番 × GAP (GAP は各階の広がりの中央値から決める)。
 //     斜めの図で描くのは、選んだ階と同じ床のまとまり (group。建物・地区) の上下 WINDOW 階まで。重ねる順番はまとまりの中の番号 (level)。
 //     シャトルの線 (tracks。道筋の点) は選んだ階の面の上に描く。階段の印は選んだ階にあるものだけ。
-//   地区のある都市: 全体図 (overview) → 地区を押すと、地区を真上から見た平面図 (plan。地区のすべての階の床・区画・店・シャトルの駅) →
+//   地区のある都市: 開いたときは選んだ階の地図 (floors)。［← 全体図へ戻る］で全体図 (overview) → 地区を押すと、地区を真上から見た平面図 (plan。地区のすべての階の床・区画・店・シャトルの駅) →
 //     区画を押すか階を選ぶと、その階の斜めに重ねた図 (floors。地区の階だけ、地区の広がりで決めた間隔で重ねる)。
 //     選んだ階は濃く、ほかは薄く (viewer.css の .floor.dim)。描かない階へ続く道順は、境の点に「↑ / ↓ 行き先の階」を出す。
 //   名前の札: 隠さずに空いている所へ置き、ずらしたときは引き出し線でつなぐ (placeLabels の説明)。置けない札はまとめた名札 (「店 5 件」) にする。
 //   操作: 左クリック (短く押す) = 区画を選ぶ・印 (店・乗り場) を目的地にする。左ボタンの長押し (LONG_MS) = ピンを立てる (長押しのまま動かすとドラッグで地図を動かす)。
 //     押してすぐ動かしたらドラッグ。右クリック = 押した所を中心に 1 段 (ZOOM_STEP 倍) 拡大。ホイール = 拡大・縮小。右クリックのメニューは出さない。
-//   アプリへの知らせ (chrome.webview.postMessage): ready・error・section {id, floor}・pick {kind, index}・pin {pos, floor}・floor {id}
+//   アプリへの知らせ (chrome.webview.postMessage): ready・error・section {id, floor}・pick {kind, index}・pin {pos, floor}・floor {id}・
+//     zoomout (縮小して図の全体が小さくなった。checkZoomOut。［マップ］タブが星系図へ戻る)
 'use strict';
 
 const SHEAR = 0.5, A = 0.3, B = 0.6, K = 0.6;
@@ -35,6 +36,7 @@ const st = {
   groupDist: {},      // 床のまとまり → 地区の Id
   district: null,     // 階の地図で見ている地区 (無ければ null)
   routeTrams: [],     // 道順で乗るシャトルの区間 (map.tracks の番号)
+  routeSpans: [],     // 乗った区間 [[map.tracks の番号, 乗る乗り場の x, y, 降りる乗り場の x, y], …] (全体図で、その間だけを太くする)
   sel: null,          // 選んでいる階の Id
   top: false,         // この階だけ (真上から)
   gap: 60,
@@ -52,12 +54,17 @@ function post(m) {
   try { if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(m); else console.log('[post] ' + JSON.stringify(m)); }
   catch (e) { console.log('post failed: ' + e); }
 }
-function fail(e) {
-  const text = (e && e.stack) ? e.stack : String(e);
-  console.error('[stationmap] ' + text);
-  post({ type: 'error', message: text });
+// 失敗をアプリへ知らせる (アプリがログに書く。StationMapWeb.LogScriptError)。where: どの処理か (アプリからの知らせの種類 load・floor・route など、
+// または event (クリック・ホイールなどの操作)・promise)。画面の下にも短く出す (何も出ないまま止まって見えないように)
+function fail(e, where) {
+  const message = (e && e.message !== undefined) ? String(e.message) : String(e);
+  const stack = (e && e.stack) ? String(e.stack) : '';
+  console.error('[stationmap] ' + (where || '') + ' ' + (stack || message));
+  post({ type: 'error', where: where || '', message, stack });
+  try { msgEl.textContent = '地図の表示でエラーが起きました (' + (where || '') + '): ' + message; } catch (x) { }
 }
-window.addEventListener('error', e => fail(e.error || e.message));
+window.addEventListener('error', e => fail(e.error || e.message, 'event'));
+window.addEventListener('unhandledrejection', e => fail(e.reason, 'promise'));
 
 function el(name, attrs, parent) {
   const n = document.createElementNS(SVGNS, name);
@@ -183,24 +190,33 @@ function load(m) {
   for (const s of map.sections || [])
     for (const fid in (s.floors || {}))
       s.floors[fid] = s.floors[fid].map(r => { const a = []; for (let i = 0; i + 1 < r.length; i += 2) a.push([r[i], r[i + 1]]); return a; });
+  // 階段の外形の輪も [x, y, x, y, …] で来るので [[x, y], …] にする (外形の無い階段は outline が無い)
+  for (const s of map.stairs || [])
+    if (s.outline) s.outline = s.outline.map(r => { const a = []; for (let i = 0; i + 1 < r.length; i += 2) a.push([r[i], r[i + 1]]); return a; }).filter(r => r.length >= 3)
+      // 輪の向きをそろえる (1 つの path にまとめて nonzero で塗るとき、向きの違う輪の重なりが穴にならないように)
+      .map(r => { let a2 = 0; for (let i = 0; i < r.length; i++) { const p = r[i], q = r[(i + 1) % r.length]; a2 += p[0] * q[1] - q[0] * p[1]; } return a2 < 0 ? r.slice().reverse() : r; });
   st.map = map;
   st.floors = (map.floors || []).map((f, i) => ({ id: f.id, name: f.name || f.id, z: f.z, idx: i, group: f.group || '', level: f.level || 0,
     sg: f.stackGroup || '', sl: f.stackLevel || 0, listed: f.listed !== false }));
   st.fidx = {}; st.stack = {};
   // 重ねる順番: データの重ねる並び (stackGroup・stackLevel。行き先から決めたもの) があればその順、無ければ床のまとまりの中の番号、無ければ全体の順
   for (const f of st.floors) { st.fidx[f.id] = f.idx; st.stack[f.id] = f.sg ? f.sl : f.group ? f.level : f.idx; }
+  // 階段でつながる高さの近い階は同じ段にする (sameTiers)。地区の中の並びは setDistrictFor で同じようにする
+  const bySet = {};
+  for (const f of st.floors) { const k = f.sg ? 's:' + f.sg : f.group ? 'g:' + f.group : ''; (bySet[k] = bySet[k] || []).push(f); }
+  for (const k in bySet) sameTiers(bySet[k]);
   st.stack0 = Object.assign({}, st.stack);
   st.sel = (m.floor && st.fidx[m.floor] !== undefined) ? m.floor : (st.floors.length ? st.floors[st.floors.length - 1].id : null);
   st.top = !!m.top;
-  st.selSec = null; st.route = null; st.cur = null; st.pin = null; st.dest = null; st.start = null; st.routeTrams = [];
+  st.selSec = null; st.route = null; st.cur = null; st.pin = null; st.dest = null; st.start = null; st.routeTrams = []; st.routeSpans = [];
   st.dists = map.districts || [];
   st.groupDist = {};
   for (const d of st.dists) for (const g of d.groups || []) st.groupDist[g] = d.id;
   st.gap = st.gapAll = computeGap();
   msgEl.textContent = st.floors.length ? '' : '床の形がありません';
-  // 主要な地区があれば都市の全体図から、無ければ今までどおり階の地図
-  if (st.dists.some(d => d.main)) { st.mode = 'overview'; setDistrictFor(null); rebuild(); fitOverview(); }
-  else { st.mode = 'floors'; setDistrictFor(st.sel); rebuild(); fitFloor(st.sel); }
+  // 初めは、主要な地区のある都市でも階の地図 (選んだ階を濃く、斜めに重ねた図。地区のある都市ではその階の地区の階)。
+  // 都市の全体図は［← 全体図へ戻る］で出す (利用者の指示 2026-11-01: Orbituary を開いて全体図が出たのを見て「全体が意味不明　2枚目スクショならわかる」)
+  st.mode = 'floors'; setDistrictFor(st.sel); rebuild(); fitFloor(st.sel);
 }
 
 // 階の間隔: 各階の床の斜めの図での縦の広がりの中央値 × 0.9 + 15 (20 m 以上)。広がりは床の点の 5〜95 % の範囲 (遠くの小さな床で広がらないように)
@@ -257,7 +273,7 @@ function ringPath(r, idx) {
 
 // ===== 地区 (都市の全体図) =====
 // 全体図: 主要な地区 (main) を箱 (bounds) の輪郭と大きな名前で、地区ごとに色を分けて出す。シャトルの線 (tracks) は向きの名前 (A・B) ごとの色と矢印。
-// 道順で乗るシャトルの区間 (routeTrams) は太く、道順の出発地・目的地のある地区は縁を太くする。地区を押すとその地区の階の地図に入る。
+// 道順で乗るシャトルの区間は、道筋のうち乗る所から降りる所まで (routeSpans) だけを太く、道順の出発地・目的地のある地区は縁を太くする。地区を押すとその地区の階の地図に入る。
 // 地区の階の地図: その地区の床のまとまり (groups) の階だけを、下からの順に重ねる (選んだ階の上下 WINDOW 階)。［全体図へ戻る］で全体図へ
 const DIST_COLORS = ['#d93025', '#1a73e8', '#188038', '#e37400', '#9334e6', '#00897b'];
 const DIR_COLORS = { A: '#7b1fa2', B: '#00838f' };
@@ -265,6 +281,34 @@ const DIR_COLORS = { A: '#7b1fa2', B: '#00838f' };
 function distOf(fid) {
   const i = st.fidx[fid];
   return i === undefined ? null : (st.groupDist[st.floors[i].group] || null);
+}
+
+// 同じ段 (2026-11-02、利用者の決定「重ねる順とぶつかるのは、高い方を上にずらして書く」「『隣と 1 m 以内なら同じ段』階段でつながっている場合のみに適応。
+// エレベーターのみでつながっている場合は除外」): 重ねる並びの組 fs (同じ stackGroup・床のまとまり・地区) を重ねる順番 (st.stack) の順にたどり、
+// 階段 (map.stairs の from・to) で今の段の階とつながっていて、高さの差が SAME_TIER_DZ 以内の階は、その段に入れる (段の上下の位置 st.stack を同じにする。連鎖する)。
+// エレベーターだけでつながる階・何もつながらない階は同じ段にしない。並びの上で間に別の階がはさまる組 (例: RR_CRU_L5 の Lobby（Clinic）と Galleria) は、
+// 並びの順を守って同じ段にせず、並びの順の段のまま (並びで上の階が上) にする (重ねる並びとぶつかる所は並びに従う。2026-11-02、利用者の決定「A」:
+// fin42 では RR_CRU_L5 の Lobby（Clinic）と Galleria、RR_HUR_L3 の Lobby（Clinic）と Lobby（Galleria）。ずらしもしない)。
+// 段にまとめた分だけ、後の階の位置を詰める (ほかの所の stackLevel のすき間はそのまま)。左の一覧の並び・［上の階］［下の階］は変えない (描く位置だけ)
+const SAME_TIER_DZ = 1;
+function sameTiers(fs) {
+  if (!fs || fs.length < 2 || !st.map) return;
+  const zOf = {};
+  for (const f of st.floors) zOf[f.id] = f.z;
+  const near = {};
+  for (const s of st.map.stairs || []) {
+    const a = s.from, b = s.to;
+    if (a === b || zOf[a] === undefined || zOf[b] === undefined || Math.abs(zOf[a] - zOf[b]) > SAME_TIER_DZ) continue;
+    near[a + '|' + b] = near[b + '|' + a] = true;
+  }
+  const sorted = fs.slice().sort((a, b) => (st.stack[a.id] - st.stack[b.id]) || (a.z - b.z));
+  let shift = 0, tier = null, tierPos = 0, lastOrig = 0;
+  for (const f of sorted) {
+    const orig = st.stack[f.id];
+    if (tier && tier.some(t => near[t.id + '|' + f.id])) { shift += orig - lastOrig; st.stack[f.id] = tierPos; tier.push(f); }
+    else { tierPos = orig - shift; st.stack[f.id] = tierPos; tier = [f]; }
+    lastOrig = orig;
+  }
 }
 
 // 階の地図で見る地区を決め、重ねる順番を地区の中の順にする (地区の無い階なら元の順番)
@@ -277,6 +321,7 @@ function setDistrictFor(fid, dist) {
   const fs0 = st.floors.filter(f => st.groupDist[f.group] === st.district);
   const fs = fs0.every(f => f.sg) ? fs0.sort((a, b) => a.sl - b.sl) : fs0.sort((a, b) => a.z - b.z);
   fs.forEach((f, i) => { st.stack[f.id] = i; });
+  sameTiers(fs);
   // 地区の階の広がりで間隔を決める (都市の全部の階の中央値では、大きな地区で板が大きく重なった)
   st.gap = computeGap(fs);
 }
@@ -382,7 +427,9 @@ function drawOverview() {
     const uv = pts.map(p => proj(p[0], p[1], 0));
     const d = uv.map((q, k) => (k ? 'L' : 'M') + q[0].toFixed(1) + ' ' + q[1].toFixed(1)).join('');
     const col = DIR_COLORS[t.dir] || '#5f6368';
-    const onRoute = st.routeTrams.includes(i);
+    // 乗った区間 (routeSpans) のある道筋は、線はふだんの見た目で描き、乗る所から降りる所までだけを下で重ねて太くする。
+    // routeSpans の無い知らせ (前の版のアプリ) では、今までどおり道筋の全体を太くする
+    const onRoute = st.routeTrams.includes(i) && !st.routeSpans.some(s => s[0] === i);
     if (onRoute) el('path', { class: 'route-case', d }, lines);
     el('path', { class: 'ov-track' + (onRoute ? ' on-route' : ''), d, style: onRoute ? '' : `stroke:${col}` }, lines);
     // 矢印: 線の長さの 1/3 と 2/3 の所に、進む向きの三角
@@ -401,10 +448,46 @@ function drawOverview() {
     }
     // 向きの名前 (A 回り・B 回り) を線の真ん中の矢印の横に
   });
+  // 乗った区間: 道筋のうち、乗る乗り場から降りる乗り場まで (道筋の点の並びの向きに進む) を道順の色で太く
+  for (const s of st.routeSpans) {
+    const t = (st.map.tracks || [])[s[0]];
+    if (!t || !t.pts || t.pts.length < 2) continue;
+    const part = trackPart(t.pts, [s[1], s[2]], [s[3], s[4]]);
+    if (part.length < 2) continue;
+    const d = part.map((p, k) => { const q = proj(p[0], p[1], 0); return (k ? 'L' : 'M') + q[0].toFixed(1) + ' ' + q[1].toFixed(1); }).join('');
+    el('path', { class: 'route-case', d }, lines);
+    el('path', { class: 'ov-track on-route', d }, lines);
+  }
   // 向きの凡例
   const dirs = [...new Set((st.map.tracks || []).map(t => t.dir).filter(x => x))];
   const leg = document.getElementById('legend');
   if (leg) leg.innerHTML = dirs.map(x => `<span style="color:${DIR_COLORS[x] || '#5f6368'}">━▶ シャトル（${x}回り）</span>`).join('　');
+}
+
+// 道筋 pts ([[x, y], …]) の上の、点 a に近い所から点 b に近い所までの折れ線 (点の並びの向きに進む)。
+// b が a より手前にあるとき: 道筋が環 (始めと終わりの点が TRACK_LOOP_GAP m 以内) なら終わりから始めへ回り込む。環でなければ a と b の間 (手前から先へ)
+const TRACK_LOOP_GAP = 1;
+function trackPart(pts, a, b) {
+  const at = p => {
+    let best = null;
+    for (let k = 1; k < pts.length; k++) {
+      const p0 = pts[k - 1], dx = pts[k][0] - p0[0], dy = pts[k][1] - p0[1], l2 = dx * dx + dy * dy;
+      const t = l2 > 0 ? Math.max(0, Math.min(1, ((p[0] - p0[0]) * dx + (p[1] - p0[1]) * dy) / l2)) : 0;
+      const q = [p0[0] + t * dx, p0[1] + t * dy], dd = Math.hypot(q[0] - p[0], q[1] - p[1]);
+      if (!best || dd < best.d) best = { d: dd, k, t, q };
+    }
+    return best;
+  };
+  const pa = at(a), pb = at(b);
+  if (!pa || !pb) return [];
+  const before = (x, y) => x.k < y.k || (x.k === y.k && x.t <= y.t);
+  const n = pts.length;
+  const loop = Math.hypot(pts[0][0] - pts[n - 1][0], pts[0][1] - pts[n - 1][1]) <= TRACK_LOOP_GAP;
+  // 点 x から点 y まで (x が手前) の頂点の並び。区間 k は pts[k-1]〜pts[k]
+  const run = (x, y) => [x.q, ...pts.slice(x.k, y.k), y.q];
+  if (before(pa, pb)) return run(pa, pb);
+  if (loop) return [...run(pa, { k: n - 1, t: 1, q: pts[n - 1] }), ...run({ k: 1, t: 0, q: pts[0] }, pb).slice(1)];
+  return run(pb, pa);
 }
 
 function fitOverview() {
@@ -471,13 +554,16 @@ function rebuild() {
     const c = st.mode === 'plan' ? null : floorHull(f.id);
     if (c) {
       el('path', { class: 'slab', d: ringPath(c, st.stack[f.id]) }, g);
-      // 階の名前 (板の左の角)
+      // 階の名前 (板の左の角)。選んだ階は、階段でつながる階の名前 (stairPartners) を後ろに添える (ほかの階の名札は長くしない。名札どうしが重なって隠れやすくなるため)
       let best = null;
       for (const p of c) { const q = proj(p[0], p[1], st.stack[f.id]); if (!best || q[0] < best[0]) best = q; }
+      const fname = f.id === st.sel ? f.name + stairPartners(f.id) : f.name;
       addAt(best[0], best[1], t => {
         const tx = el('text', { x: -6, y: 4, 'text-anchor': 'end', class: f.id === st.sel ? 'bold' : '' }, t);
-        tx.textContent = f.name;
-      }, 'mk flabel' + (f.id === st.sel || st.top ? '' : ' dim'), null, f.name, f.id === st.sel ? 1 : 5, 'end');
+        tx.textContent = fname;
+      }, 'mk flabel' + (f.id === st.sel || st.top ? '' : ' dim'), null, fname, f.id === st.sel ? 1 : 5, 'end');
+      // 選んだ階の名札は、板の左の角が画面の外でも見えるよう、板の形を持たせておく (applyView の visibleAnchor)
+      if (f.id === st.sel) st.ovl[st.ovl.length - 1].hullUV = c.map(p => proj(p[0], p[1], st.stack[f.id]));
     }
   }
   // 区画の床
@@ -495,8 +581,55 @@ function rebuild() {
       el('title', null, p).textContent = s.name || s.id;
     }
   }
+  // 階段の外形 (2026-11-02、利用者の指示「階段の形がわかるなら、階段アイコンでなく階段を枠で囲んでフロア同様に扱う」): 外形 (outline) のある階段は、
+  // 両端の階 (下の端 bottom の階と上の端 top の階) の両方に、外形の輪を枠で描く。下の階は実線、上の階は破線 (viewer.css の .stairshape・.stairshape.upper)。
+  // 外形の無い階段は今までどおり階段のアイコン (drawMarkers)。道順のグラフ・道順は変えない。
+  // 階段の板 (輪) は 1 つの形として見せる (2026-11-02、親の指示「板の境目が格子に見える。1 つの形にし、外側の縁だけを出す」):
+  // 先に全部の輪の枠を太めに描き (.stairshape-edge)、その上に全部の輪の塗りを枠なし・不透明で描く (.stairshape-fill)。内側の境目は塗りに隠れ、外側の縁だけが残る
+  // (輪の和の形だけを描く。形は作らない)。上の端の階も塗りは不透明にし、破線の縁と薄い色で分ける。
+  // 同じ階で重なる・触れる別々の階段も 1 つの形にする (2026-11-02、利用者の答え「B が好ましい」): 階ごと・端ごと (下の端・上の端は別の組) に、
+  // その階の全部の階段の枠をまとめて先に描き、塗りをまとめて上に描く。重なる・触れる階段どうしの境目は塗りに隠れ、離れている階段は別の形のまま残る。
+  // 選んだ階の階段の形は、名札がよける (st.stairBoxes。placeLabels)
+  st.stairBoxes = [];
+  const stairPaths = {};   // 階の Id → { lower: d, upper: d }
+  if (st.mode !== 'plan')
+    for (const s of st.map.stairs || []) {
+      if (!s.outline || !s.outline.length) continue;
+      for (const [p, f, upper] of [[s.bottom, s.from, false], [s.top, s.to, true]]) {
+        const fid = floorOfPoint(f, p[2]);
+        const g = fid !== null ? groups[fid] : null;
+        if (!g) continue;
+        let d = '';
+        for (const r of s.outline) d += ringPath(r, st.stack[fid]);
+        if (!d) continue;
+        const sp = stairPaths[fid] = stairPaths[fid] || { lower: '', upper: '' };
+        if (upper) sp.upper += d; else sp.lower += d;
+        if (fid === st.sel) {
+          let u0 = Infinity, v0 = Infinity, u1 = -Infinity, v1 = -Infinity;
+          for (const r of s.outline) for (const q of r) { const [u, v] = proj(q[0], q[1], st.stack[fid]); u0 = Math.min(u0, u); v0 = Math.min(v0, v); u1 = Math.max(u1, u); v1 = Math.max(v1, v); }
+          st.stairBoxes.push([u0, v0, u1, v1]);
+        }
+      }
+    }
+  for (const fid in stairPaths) {
+    for (const upper of [false, true]) {
+      const d = upper ? stairPaths[fid].upper : stairPaths[fid].lower;
+      if (!d) continue;
+      const sg = el('g', { class: 'stairshape' + (upper ? ' upper' : '') }, groups[fid]);
+      el('path', { class: 'stairshape-edge', d }, sg);
+      el('path', { class: 'stairshape-fill', d }, sg);
+    }
+  }
   // 低い階から順に重ねる。選んだ階は最後 (いちばん上)
-  for (const f of floorsToDraw) if (f.id !== st.sel) world.appendChild(groups[f.id]);
+  // 選んだ階と同じ段 (sameTiers) の階は、選んだ階の板 (白い凸包) の下に隠れないよう、選んだ階の板だけを先に描き、その上に同じ段の階 (薄く)、
+  // いちばん上に選んだ階の床・区画を描く
+  const mates = floorsToDraw.filter(f => f.id !== st.sel && st.stack[f.id] === st.stack[st.sel]);
+  for (const f of floorsToDraw) if (f.id !== st.sel && !mates.includes(f)) world.appendChild(groups[f.id]);
+  if (groups[st.sel] && mates.length) {
+    const slab = groups[st.sel].querySelector('path.slab');
+    if (slab) el('g', { class: 'floor sel' }, world).appendChild(slab);
+  }
+  for (const f of mates) world.appendChild(groups[f.id]);
   if (groups[st.sel]) world.appendChild(groups[st.sel]);
 
   const lines = el('g', { id: 'lines' }, world);
@@ -617,6 +750,7 @@ function drawMarkers() {
   // 階段: 下と上の端に段の印。選んだ階にある端だけ (ほかの階の階段の印は並べない。地区の平面図では出さない)
   for (const s of m.stairs || []) {
     if (st.mode === 'plan') break;
+    if (s.outline && s.outline.length) continue;   // 外形のある階段は枠で描く (rebuild)。アイコンは出さない
     for (const [p, f, up] of [[s.bottom, s.from, true], [s.top, s.to, false]]) {
       const fid = floorOfPoint(f, p[2]);
       if (fid === null || fid !== st.sel) continue;
@@ -786,6 +920,44 @@ function drawSectionLabel() {
   }, 'mk flabel', null, s.name || s.id, 1);
 }
 
+// 階段でつながる階の名前 (2026-11-01、利用者の決まり「階段でつながっているフロアには双方にサブの名前として相手の名前を付けるルールにする」)。
+// StationMapPanel.StairPartners と同じ決まり: 階段 (map.stairs の from・to) でこの階とつながる、階の一覧に出る階 (listed) の名前を、
+// 一覧の並び (重ねる並びの上から) の順に「（階段で: A・B・C）」(同じ文字は 1 回。4 つ以上なら 3 つと「ほか N」)。
+// 相手の名前が一覧に 2 つ以上ある名前なら高さを添える (例「Aparelli +13.0 m」。高さは z を小数 1 桁、符号付き)。相手が無ければ ''
+const STAIR_PARTNER_MAX = 3;
+function stairPartners(fid) {
+  const listed = st.floors.filter(f => f.listed);
+  const listedIds = new Set(listed.map(f => f.id));
+  // つながる階: 一覧に出ない階 (listed でない階・描かない階) は階段の道の途中とみなしてたどり、最初に着いた一覧に出る階で止める
+  // (2026-11-01、親の決定「B」。一度たどった階はたどらない)
+  const next = {};
+  for (const s of st.map.stairs || []) {
+    if (s.from === s.to) continue;
+    (next[s.from] = next[s.from] || []).push(s.to);
+    (next[s.to] = next[s.to] || []).push(s.from);
+  }
+  const ids = new Set(), seen = new Set([fid]), queue = [fid];
+  while (queue.length) {
+    const cur = queue.shift();
+    for (const g of next[cur] || []) {
+      if (seen.has(g)) continue;
+      seen.add(g);
+      if (listedIds.has(g)) ids.add(g); else queue.push(g);
+    }
+  }
+  const ps = listed.filter(f => ids.has(f.id));
+  if (!ps.length) return '';
+  // 一覧の並びは上の階が上 (StackOrder)。ここでは重ねる順番 (st.stack0) と高さの大きい順にする
+  ps.sort((a, b) => (st.stack0[b.id] - st.stack0[a.id]) || (b.z - a.z));
+  const count = {};
+  for (const f of listed) count[f.name] = (count[f.name] || 0) + 1;
+  const h = z => (z > 0 ? '+' : '') + z.toFixed(1) + ' m';
+  const names = [];
+  for (const f of ps) { const n = count[f.name] > 1 ? f.name + ' ' + h(f.z) : f.name; if (!names.includes(n)) names.push(n); }
+  const shown = names.slice(0, STAIR_PARTNER_MAX).join('・');
+  return names.length > STAIR_PARTNER_MAX ? '（階段で: ' + shown + ' ほか ' + (names.length - STAIR_PARTNER_MAX) + '）' : '（階段で: ' + shown + '）';
+}
+
 function floorName(fid) {
   const i = st.fidx[fid];
   return i !== undefined ? st.floors[i].name : (fid || '');
@@ -799,11 +971,32 @@ function textWidth(s) { let w = 0; for (const ch of s) w += ch.charCodeAt(0) < 0
 function applyView() {
   world.setAttribute('transform', `matrix(${st.vs} 0 0 ${st.vs} ${st.vx} ${st.vy})`);
   for (const o of st.ovl) {
-    const [x, y] = toScreen(o.u, o.v);
+    let [x, y] = toScreen(o.u, o.v);
+    if (o.hullUV) [x, y] = visibleAnchor(o.hullUV, x, y);
     o.sx = x; o.sy = y;
     o.el.setAttribute('transform', `translate(${x.toFixed(1)} ${y.toFixed(1)})`);
   }
   placeLabels();
+}
+
+// 選んだ階の名札の置き所 (2026-11-01、親の決定: 板の左の角が画面の外で名札が隠れるのは不具合)。
+// 板のいちばん左の角 (x, y) が画面の中 (placeLabels が札を置かない画面の外の幅 VIS_MARGIN の内側) ならそのまま。外なら、画面の中に見えている板の角のうち
+// いちばん左のもの (今までの「板の左の角」に近い所)。見えている角が無ければ (板が画面いっぱいなど)、板の角の外枠の箱と画面の重なる所の左の辺の真ん中。
+// 重なる所も無ければ (板が全部画面の外) そのまま (札は置かない)。ほかの札の置き方は変えない
+const VIS_MARGIN = 40;
+function visibleAnchor(hullUV, x, y) {
+  const w = svg.clientWidth || 800, h = svg.clientHeight || 600;
+  const inside = (px, py) => px >= VIS_MARGIN && py >= VIS_MARGIN && px <= w - VIS_MARGIN && py <= h - VIS_MARGIN;
+  if (inside(x, y)) return [x, y];
+  const pts = hullUV.map(q => toScreen(q[0], q[1]));
+  let best = null;
+  for (const p of pts) if (inside(p[0], p[1]) && (!best || p[0] < best[0])) best = p;
+  if (best) return best;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of pts) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+  const ix0 = Math.max(x0, VIS_MARGIN), iy0 = Math.max(y0, VIS_MARGIN), ix1 = Math.min(x1, w - VIS_MARGIN), iy1 = Math.min(y1, h - VIS_MARGIN);
+  if (ix0 <= ix1 && iy0 <= iy1) return [ix0, (iy0 + iy1) / 2];
+  return [x, y];
 }
 
 // ===== 名札の置き場所 =====
@@ -852,6 +1045,12 @@ function placeLabels() {
     if (o.sx < -30 || o.sy < -40 || o.sx > w + 30 || o.sy > h + 30) continue;
     if (o.pri === 0) add([o.sx - 12, o.sy - 28, o.sx + ICON, o.sy + 12]);
     else if (!o.el.classList.contains('flabel')) add([o.sx - ICON, o.sy - ICON, o.sx + ICON, o.sy + ICON]);
+  }
+  // 選んだ階の階段の形 (外形の輪の箱。rebuild の st.stairBoxes): 名札を重ねない
+  for (const bb of st.stairBoxes || []) {
+    const [ax, ay] = toScreen(bb[0], bb[1]), [bx, by] = toScreen(bb[2], bb[3]);
+    if (bx < -20 || by < -20 || ax > w + 20 || ay > h + 20) continue;
+    add([ax, ay, bx, by]);
   }
   for (const line of st.routeUV || []) {
     for (let i = 0; i + 1 < line.length; i++) {
@@ -1024,8 +1223,28 @@ svg.addEventListener('contextmenu', e => e.preventDefault());
 svg.addEventListener('wheel', e => {
   e.preventDefault();
   const r = svg.getBoundingClientRect();
-  zoomAt(e.clientX - r.left, e.clientY - r.top, Math.pow(1.0015, -e.deltaY));
+  const f = Math.pow(1.0015, -e.deltaY);
+  zoomAt(e.clientX - r.left, e.clientY - r.top, f);
+  if (f < 1) checkZoomOut();
 }, { passive: false });
+
+// 縮小して、描いている図の全体 (world の範囲) が画面の幅と高さの両方の ZOOMOUT_RATIO より小さくなったら、アプリへ zoomout を知らせる
+// (［マップ］タブはその場所を真ん中にした星系図へ戻る。別ウィンドウは知らせを使わない)。ZOOMOUT_RATIO は仮の値 (2026-11-01、利用者の決めた案 1 で親と決めた):
+// 全体が画面の 1/4 より小さければ、それ以上縮めても場所の中は読めないので、外 (星系図) を見たいときとみなす。続けて送らないよう ZOOMOUT_GAP_MS あける
+const ZOOMOUT_RATIO = 0.25, ZOOMOUT_GAP_MS = 1500;
+let lastZoomOut = 0;
+function checkZoomOut() {
+  if (!st.map) return;
+  let b;
+  try { b = world.getBBox(); } catch (e) { return; }
+  if (!(b.width > 0 || b.height > 0)) return;
+  const w = svg.clientWidth || 800, h = svg.clientHeight || 600;
+  if (b.width * st.vs >= w * ZOOMOUT_RATIO || b.height * st.vs >= h * ZOOMOUT_RATIO) return;
+  const now = Date.now();
+  if (now - lastZoomOut < ZOOMOUT_GAP_MS) return;
+  lastZoomOut = now;
+  post({ type: 'zoomout' });
+}
 
 svg.addEventListener('pointerdown', e => {
   const r = svg.getBoundingClientRect();
@@ -1149,6 +1368,7 @@ function receive(m) {
       case 'route':
         st.route = m.pts || null;
         st.routeTrams = m.trams || [];
+        st.routeSpans = m.tramSpans || [];
         rebuild();
         if (m.fit && st.mode === 'overview') { fitOverview(); break; }
         if (m.fit && st.mode === 'plan') { fitPlan(st.district); break; }
@@ -1178,9 +1398,9 @@ function receive(m) {
         break;
       }
     }
-  } catch (e) { fail(e); }
+  } catch (e) { fail(e, m && m.type ? String(m.type) : 'receive'); }
 }
-window.stationMap = { receive, state: st, placePin, click, applyView, zoomAt, enterDistrict, showOverview, showPlan, showWhole, moveFloor, neighborFloors };
+window.stationMap ={ receive, state: st, placePin, click, applyView, zoomAt, enterDistrict, showOverview, showPlan, showWhole, moveFloor, neighborFloors };
 document.getElementById('back')?.addEventListener('click', () => showWhole());
 document.getElementById('floorUp')?.addEventListener('click', () => moveFloor(1));
 document.getElementById('floorDown')?.addEventListener('click', () => moveFloor(-1));
