@@ -33,7 +33,9 @@ public partial class StationMapWindow : Window
     // ルート (FindRoots の規則 1) は見つけたままにしてあり、HiddenKinds から外せば出る
     private static readonly HashSet<string> HiddenKinds = new(StringComparer.Ordinal) { KindCave, KindWreck, KindCrash };
     // 星図に載っていない場所のうち、床のメッシュの無い場所を一覧に出さない (BuildContentKeys。次の版で床の作り方を足すときに false にする)
-    private const bool HideNoFloorPlaces = true;
+    internal const bool HideNoFloorPlaces = true;
+    // 床のメッシュの無い星図の場所 (ステーション・都市・前哨基地など) の record (2026-11-01、利用者の決定: 星図外と同じく、床のできない場所は出さない。BuildContentKeys で作る)
+    private static HashSet<string> s_noFloor = new(StringComparer.Ordinal);
     private static readonly string[] Kinds = [KindStation, KindOutpost, KindAsteroid, KindPoi, KindAnomaly, KindJump, KindNav];
     // 名前の無い場所 (ゲームのデータに名前が無く、名前が record 名のままの場所。HasGameName が false)。種類とは別の軸で、付けたときだけ一覧に出す (内部名のまま)。
     // 「全部」は種類とこれの両方を付ける・外す。覚え方は種類と同じ (s_excludedKinds に入れる)
@@ -251,6 +253,9 @@ public partial class StationMapWindow : Window
             unlisted.Add(new UnlistedPlace(r.Place.Record, name, label, kind, r.Place.System));
         }
         s_unlisted = unlisted;
+        s_noFloor = HideNoFloorPlaces
+            ? search.Roots.Values.Where(r => !r.Place.IsUnlisted && !HasFloorMesh(idx, r, hasFloorMesh)).Select(r => r.Place.Record).ToHashSet(StringComparer.Ordinal)
+            : new HashSet<string>(StringComparer.Ordinal);
         App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの地図] 同じ地図の判定: ルート {keys.Count}、中身の鍵 {keys.Values.Distinct().Count()}、{sw.Elapsed.TotalSeconds:F1} 秒");
         return (stamp, keys);
     }
@@ -315,8 +320,10 @@ public partial class StationMapWindow : Window
         var system = lstSystems.SelectedItem as string;
         var q = txtFilter.Text.Trim();
         // 選んでいる星系の、種類のチェックに当たる場所 (チェックの有無によらず全部。件数と同じ名前の判定に使う)
-        var places = _tree.Places.Where(n => KindOf(n) != null && string.Equals(n.System, system, StringComparison.OrdinalIgnoreCase)).ToList();
-        var unlisted = s_unlisted.Where(u => string.Equals(u.System, system, StringComparison.OrdinalIgnoreCase)).ToList();
+        var places = _tree.Places.Where(n => KindOf(n) != null && string.Equals(n.System, system, StringComparison.OrdinalIgnoreCase) && !s_noFloor.Contains(n.RecordName)
+            // 取り込んだら一覧に出る階の無い空の地図だった場所 (StationMapExports.IsEmptyMap。取り込む前には分からない通信アレイ・Rockcracker_Sandbox など) も出さない
+            && !(HideNoFloorPlaces && StationMapExports.IsEmptyMap(n.RecordName))).ToList();
+        var unlisted = s_unlisted.Where(u => string.Equals(u.System, system, StringComparison.OrdinalIgnoreCase) && !(HideNoFloorPlaces && StationMapExports.IsEmptyMap(u.Record))).ToList();
         foreach (var (kind, box) in _kindBoxes)
             box.Content = $"{kind} ({(kind == KindUnnamed ? places.Count(n => !HasGameName(n)) : places.Count(n => KindOf(n) == kind) + unlisted.Count(u => u.Kind == kind))})";
         // 同じ名前の場所が 2 つ以上ある名前 (チェックで隠れている種類の場所も数える。チェックを変えても添え字が変わらないように)

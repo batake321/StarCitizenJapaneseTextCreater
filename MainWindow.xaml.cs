@@ -2845,7 +2845,14 @@ public partial class MainWindow : Window
             // (印は取得を止める依頼より前に立つので、依頼が登録より先に来たときは、ここで印を見て始めない)
             lock (_priceRefreshTasks)
             {
-                if (_exiting || _indexBuildRunning || GameDataExtractor.IsIndexBuildRunning || _importsRunning > 0) return;
+                if (_exiting || _indexBuildRunning || GameDataExtractor.IsIndexBuildRunning || _importsRunning > 0)
+                {
+                    // 始めないときも理由をログに残す (2026-11-01。契約の地図の表が作られず、ログから理由が分からなかったため)
+                    Log($"[起動後の作り直し] 始めませんでした (閉じる途中 {_exiting}・インデックス構築 {_indexBuildRunning}・構築・再抽出 {GameDataExtractor.IsIndexBuildRunning}・"
+                        + $"取り込み {_importsRunning} 件。次の起動でまた調べます)");
+                    return;
+                }
+                Log("[起動後の作り直し] 足りないデータがあるか調べます");
                 cts = new CancellationTokenSource();
                 var ct = cts.Token;
                 task = Task.Run(async () =>
@@ -2869,6 +2876,7 @@ public partial class MainWindow : Window
                         }
                     }
                     catch (Exception ex) { Log($"[名前] AI 訳の名前の英語への書き戻しに失敗しました: {ex.Message}"); }
+                    Log("[起動後の作り直し] 名前の書き戻しを終えました。ゲームデータの DB を調べます");
 
                     using var extractor = new GameDataExtractor(workDir);
                     if (!extractor.IsReady) return (0, 0, 0, 0, 0, 0, "starbreaker か Data.p4k が見つからない");
@@ -2883,7 +2891,15 @@ public partial class MainWindow : Window
                     var needsOre = extractor.NeedsOreLocations() || extractor.NeedsShopTables() || extractor.NeedsMissionMapPlaces();
                     // 店と DB の価格の紐づけ (shop_price_links) だけが無い・前の形なら、それだけを作る (Data.p4k は読まない)
                     var needsShopLinks = !needsOre && extractor.NeedsShopPriceLinks();
-                    if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints && !needsStarmap && !needsExtra && !needsOre && !needsShopLinks) return (0, 0, 0, 0, 0, 0, (string?)null);
+                    // 判定をそのままログに残す (作るとき・作らないときとも)
+                    Log($"[起動後の作り直し] 判定: 積載量 {needsCargo}・資源の種類 {needsResources}・口の定義 {needsPorts}・BP {needsBlueprints}・場所名 {needsStarmap}・"
+                        + $"追加の品目 {needsExtra}・採掘できる場所 {extractor.NeedsOreLocations()}・星図の場所と店 {extractor.NeedsShopTables()}・契約の地図 {extractor.NeedsMissionMapPlaces()}・"
+                        + $"価格の紐づけ {needsShopLinks}");
+                    if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints && !needsStarmap && !needsExtra && !needsOre && !needsShopLinks)
+                    {
+                        Log("[起動後の作り直し] 作り直すものはありません");
+                        return (0, 0, 0, 0, 0, 0, (string?)null);
+                    }
                     if (GameDataExtractor.IsIndexBuildRunning) return (0, 0, 0, 0, 0, 0, "インデックス構築・装備データの再抽出が走っている");
                     ct.ThrowIfCancellationRequested();
                     int cargo = 0, resources = 0, blueprints = 0, starmap = 0, extra = 0, ore = 0;
@@ -2992,6 +3008,7 @@ public partial class MainWindow : Window
                             Log($"[お店] 店と DB の価格の紐づけを作れませんでした (次の起動でまた試します): {ex.Message}");
                         }
                     }
+                    Log("[起動後の作り直し] 終わりました");
                     return (cargo, resources, blueprints, starmap, extra, ore, (string?)null);
                 });
                 _startupBackfillCts = cts;
@@ -3006,6 +3023,7 @@ public partial class MainWindow : Window
                 Log($"[BP] ブループリントの取り出しをしませんでした ({skipped})");
                 Log($"[場所名] 星図の場所の名前の取り出しをしませんでした ({skipped})");
                 Log($"[採掘できる場所] 資源の採掘できる場所を作りませんでした ({skipped})");
+                Log($"[契約の地図] 契約の地図の表を作りませんでした ({skipped})");
             }
             if (count > 0) ShipCargo.Invalidate();   // 計算した値を使うよう、覚えた結果を捨てて一覧を描き直す
             if (resourceCount > 0)

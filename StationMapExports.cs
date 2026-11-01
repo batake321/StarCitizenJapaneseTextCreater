@@ -65,7 +65,15 @@ internal sealed class StationMapExports : INotifyPropertyChanged
     //   SecondsPerRun: 1 本ずつの 3 か所の合計 225.5 秒 ÷ 89 回 ≈ 2.53 秒。
     //   ParallelSlowdown: 同時に動かすと 1 回が遅くなる分 (1 本足すごとに 1 回の時間が × (1 + この値 × 足した本数))。上の 10 回の予想との外れの最大が
     //     いちばん小さくなる値として 0.074 にした (外れは −20% (Checkmate 11 本) 〜 +20% (Seraphim 3 本))
-    public const double SecondsPerRun = 2.53;
+    //   (2026-11-01 の決め直し) 利用者が実機でまとめて取り込んだ 88 か所 (app_log.txt 20:13〜21:01。Star Citizen を動かしながら) の実測に合わせた:
+    //     starbreaker 1 回あたり (「starbreaker の中 計」÷ 回数) は 85 か所で中央値 6.30 秒・平均 6.37 秒 (3.6〜10.2 秒)。
+    //     そのときほかに動いていた場所の数 (「動いている N 本」) ごとの 1 回あたりの中央値: 1 本 8.20 秒 (3 か所)・2 本 6.39 秒 (11)・3 本 5.73 秒 (48)・
+    //     4 本 6.40 秒 (17)・5〜9 本 8.1〜9.2 秒 (各 1〜2 か所)。本数が増えても 1 回あたりは増えておらず、本数の多いところは数が少なく決められない。
+    //     どの場所も、その場所の starbreaker は 1 本ずつ動いていた (「中 計」÷ 実時間の中央値 0.99) ので、同時に動かしたときの遅れ (ParallelSlowdown) は
+    //     この記録からは決め直せない。前の値のままにする。SecondsPerRun は中央値の 6.30 にした (前の 2.53 は Star Citizen を止めて計った値)。
+    //   床・道順の時間は予想に入れない: 取り込みの前に分かる値 (インスタンスの数) と合わない。実測は Lorville 368.5 秒 (利用者の取り込み。今のソースのハーネスで 151 秒)・
+    //     Orison 80.6 秒・New Babbage 12.2 秒、ほかの 85 か所は 5 秒以下。インスタンスは Lorville 3,699・Orison 5,175 で、多いほうが速い
+    public const double SecondsPerRun = 6.30;
     public const double ParallelSlowdown = 0.074;
     public const double BaseSeconds = 3.0;
     public const double SecondsPerInstance = 0.002;
@@ -110,7 +118,8 @@ internal sealed class StationMapExports : INotifyPropertyChanged
     }
 
     // JSON の頭 (印・record・Data.p4k の印・木の形のハッシュ)
-    internal sealed record Header(string Record, string P4kPath, long P4kSize, long P4kWriteUtcTicks, string TreeHash, int Format)
+    // ListedFloors: 一覧に出る階の数 (Finish が書く "listedFloors"。形 12 から。無ければ -1)
+    internal sealed record Header(string Record, string P4kPath, long P4kSize, long P4kWriteUtcTicks, string TreeHash, int Format, int ListedFloors = -1)
     {
         // 今の版 (Format) より古い形か
         public bool Outdated => Format < StationMapExports.Format;
@@ -134,7 +143,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
             var r = new Utf8JsonReader(buf, isFinalBlock: final, default);
             string app = "", record = "", p4kPath = "", hash = "";
             long size = 0, ticks = 0;
-            int format = 0;
+            int format = 0, listedFloors = -1;
             if (!r.Read() || r.TokenType != JsonTokenType.StartObject) return null;
             while (r.Read())
             {
@@ -148,6 +157,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
                     case "app": app = r.TokenType == JsonTokenType.String ? r.GetString() ?? "" : ""; break;
                     case "record": record = r.TokenType == JsonTokenType.String ? r.GetString() ?? "" : ""; break;
                     case "treeHash": hash = r.TokenType == JsonTokenType.String ? r.GetString() ?? "" : ""; break;
+                    case "listedFloors": if (r.TokenType == JsonTokenType.Number && r.TryGetInt32(out var lf)) listedFloors = lf; break;
                     case "p4k":
                         if (r.TokenType != JsonTokenType.StartObject) { if (!r.TrySkip()) goto done; break; }
                         while (r.Read() && r.TokenType == JsonTokenType.PropertyName)
@@ -168,7 +178,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         done:
             if (app != Mark || record.Length == 0 || p4kPath.Length == 0) return null;
             if (!string.Equals(ShortName(record), shortName, StringComparison.OrdinalIgnoreCase)) return null;
-            return new Header(record, p4kPath, size, ticks, hash, format);
+            return new Header(record, p4kPath, size, ticks, hash, format, listedFloors);
         }
         catch { return null; }
     }
@@ -902,15 +912,24 @@ internal sealed class StationMapExports : INotifyPropertyChanged
             src.Remove(k);
             if (k == "sources")
             {
+                res["listedFloors"] = ListedFloorsOf(src);
                 res["treeHash"] = treeHash;
                 res["sources"] = arr;
                 added = true;
             }
             else res[k] = v;
         }
-        if (!added) { res["treeHash"] = treeHash; res["sources"] = arr; }
+        if (!added) { res["listedFloors"] = ListedFloorsOf(src); res["treeHash"] = treeHash; res["sources"] = arr; }
         return res.ToJsonString(JsonOut);
     }
+
+    // 一覧に出る階の数 (floors のうち listed が true のもの)。頭の欄 "listedFloors" に書き、ReadHeaderOf で読む (形 12。2026-11-01、利用者の決定
+    // 「床ができない場所は出さない」: 取り込む前には分からない、書き出した後で床の板が 0 になる場所 (通信アレイ・Rockcracker_Sandbox) を一覧から外すため)
+    private static int ListedFloorsOf(JsonObject src) =>
+        src["floors"] is JsonArray fl ? fl.Count(f => f is JsonObject o && o["listed"] is JsonValue v && v.TryGetValue<bool>(out var b) && b) : 0;
+
+    // 取り込んだ地図が、一覧に出る階の無い空の地図か (頭の listedFloors が 0。古い形で欄が無ければ false)
+    internal static bool IsEmptyMap(string record) => ReadOurHeader(ShortName(record)) is { ListedFloors: 0 };
 
     // 書き出しの記録 (ログ・確かめに使う)
     internal sealed record ExportStats(int Runs, int Socpaks, int Missing, long TotalGlbBytes, long MaxGlbBytes, double ExportSeconds, double ComposeSeconds,
@@ -1358,7 +1377,9 @@ internal sealed class StationMapExports : INotifyPropertyChanged
                 var nm = places.GroupBy(p => p.Place.Record).ToDictionary(g => g.Key, g => g.First().Name, StringComparer.Ordinal);
                 // まとめての取り込みは星図の場所のうちステーション・都市 (Manmade 系・LandingZone) だけ (FindRoots は前哨基地・小惑星のルートも返すので絞る。
                 // 星図に載っていない場所 (IsUnlisted) も外す)
-                return (nm, search.Roots.Values.Where(r => r.Place.IsStation && !r.Place.IsUnlisted).OrderBy(r => r.Place.System, StringComparer.Ordinal).ThenBy(r => r.Place.Record, StringComparer.Ordinal).ToList());
+                // 床のメッシュの無い場所 (取り込んでも空の地図になる。StationMapWindow.HasFloorMesh。ハーネスで、ステーション・都市では TransitPoint_Glaciem_Alpha・Bravo・Charlie の 3 か所) も外す (2026-11-01、利用者の決定。HideNoFloorPlaces を false にすれば入る)
+                var floorCache = new Dictionary<string, bool>(StringComparer.Ordinal);
+                return (nm, search.Roots.Values.Where(r => r.Place.IsStation && !r.Place.IsUnlisted && (!StationMapWindow.HideNoFloorPlaces || StationMapWindow.HasFloorMesh(index, r, floorCache))).OrderBy(r => r.Place.System, StringComparer.Ordinal).ThenBy(r => r.Place.Record, StringComparer.Ordinal).ToList());
             }, ct);
             string NameOf(StationRoot r) => names.TryGetValue(r.Place.Record, out var n) && n.Length > 0 ? n : ShortName(r.Place.Record);
             Log($"ステーションのまとめて取り込む: ゲームデータを調べました ({swScan.Elapsed.TotalSeconds:F1} 秒): 星図の場所 (record ごと) {names.Count} 件、ルートが見つかったもの {roots.Count} か所");

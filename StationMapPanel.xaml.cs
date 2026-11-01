@@ -21,7 +21,9 @@ namespace StarCitizenJapaneseTextCreater;
 //   道順: StationRouteGraph の関数 (StationMapModel.Route) で計算し、ビューアに線を、左に手順を出す
 public partial class StationMapPanel : UserControl
 {
-    private sealed record FloorRow(string Id, string Display);
+    // 階の一覧の行: 階 1 つ (Id あり。Name は階の表示の名前)、または同じ名前の階のまとまりの行 (IsGroup。Id は ""、Group はまとまりの鍵 = 階の表示の名前)。
+    // まとまりの中の行は Group にまとまりの鍵が入る
+    private sealed record FloorRow(string Id, string Name, string Display, string? Group = null, bool IsGroup = false);
     private sealed record SectionRow(string Id, string Display);
     // 出発地・目的地の 1 行。Kind: current・pin・shop・section・transit
     private sealed record Place(string Kind, int Index, string Id, string Display);
@@ -38,6 +40,10 @@ public partial class StationMapPanel : UserControl
     private string? _floor;
     private readonly Dictionary<string, string> _floorDisplay = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _floorStepName = new(StringComparer.Ordinal);
+    // 一覧に出す階 (重ねる並び (StackOrder) の順。まとめる前の 1 階ずつの行)
+    private List<FloorRow> _floorItems = new();
+    // 開いている同じ名前の階のまとまりの鍵 (地図ごと。地図を出すたびに全部閉じる)
+    private readonly HashSet<string> _openFloorGroups = new(StringComparer.Ordinal);
     private Dictionary<int, string> _shopNames = new();
     // 店の種類 (ShopTreeShop.Kind。装備の店・コモディティの端末など。［詳細］の店の候補の [種類] と同じ。引けなければ無し)
     private Dictionary<int, string> _shopKinds = new();
@@ -275,7 +281,8 @@ public partial class StationMapPanel : UserControl
             }
             _floorDisplay[f.Id] = FixShops(name);
         }
-        // 同じ名前の階に高さを添える処理はしない (一覧に出る階どうしの同じ名前は、データ側が displayName の括弧で見分けている)
+        // 同じ名前の階に高さを添える処理はしない (一覧に出る階どうしの同じ名前は、データ側が displayName の括弧で見分けている。
+        // 括弧で見分けられない同じ名前の階は、階の一覧で ▼ のまとまりにまとめる (RefreshFloors))
         // Describe が「◯階」と付けるので、名前の終わりの「階」は外して渡す
         foreach (var f in m.Floors) _floorStepName[f.Id] = _floorDisplay[f.Id].EndsWith('階') ? _floorDisplay[f.Id][..^1] : _floorDisplay[f.Id];
 
@@ -381,18 +388,14 @@ public partial class StationMapPanel : UserControl
     {
         var m = _model!;
         var floors = m.DrawnFloors();
-        _suppress = true;
-        try
-        {
-            // 一覧に出すのはデータが listed にした階だけ。エレベーターで止まるだけの階 (elevatorOnly) は出さない。
-            // 並びは地図・［上の階］［下の階］(viewer.js の stackPeers・setDistrictFor) と同じ重ねる並びで、上の階が上 (StackOrder)
-            lstFloors.ItemsSource = StackOrder(m, floors.Where(f => f.Listed && !f.ElevatorOnly && f.Reachable)).Select(f => new FloorRow(f.Id, FloorDisplay(f.Id))).ToList();
-            // 初めの階: 店のいちばん多い階 (無ければいちばん上)
-            _floor = m.Shops.Where(s => floors.Any(f => f.Id == s.Floor)).GroupBy(s => s.Floor).OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefault()
-                     ?? floors.LastOrDefault()?.Id;
-            lstFloors.SelectedItem = (lstFloors.ItemsSource as List<FloorRow>)?.FirstOrDefault(r => r.Id == _floor);
-        }
-        finally { _suppress = false; }
+        // 一覧に出すのはデータが listed にした階だけ。エレベーターで止まるだけの階 (elevatorOnly) は出さない。
+        // 並びは地図・［上の階］［下の階］(viewer.js の stackPeers・setDistrictFor) と同じ重ねる並びで、上の階が上 (StackOrder)
+        _floorItems = StackOrder(m, floors.Where(f => f.Listed && !f.ElevatorOnly && f.Reachable)).Select(f => new FloorRow(f.Id, FloorDisplay(f.Id), FloorDisplay(f.Id))).ToList();
+        _openFloorGroups.Clear();
+        // 初めの階: 店のいちばん多い階 (無ければいちばん上)。同じ名前の階のまとまりの中なら、そのまとまりを開いて選ぶ
+        _floor = m.Shops.Where(s => floors.Any(f => f.Id == s.Floor)).GroupBy(s => s.Floor).OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefault()
+                 ?? floors.LastOrDefault()?.Id;
+        RefreshFloors(RevealFloor(_floor));
 
         var places = new List<Place>();
         foreach (var s in m.Shops)
@@ -446,6 +449,44 @@ public partial class StationMapPanel : UserControl
             .Select(r => r.F).ToList();
     }
 
+    // 階の一覧の行を作り直す。同じ表示の名前の階が 2 つ以上あれば (データに見分ける手がかりが無い階。括弧で見分けた階は名前が違うので入らない)、
+    // 「▼ 名前（N 件）」の 1 行にまとめる (数の言葉は「階」にしない。「（2 階）」が 2 階目と読めるため) (利用者の指示。ステーションの別ウィンドウの場所の一覧 (StationMapWindow.GroupRows) と同じ見た目と動き:
+    // 閉じているときは ▼ (押すと開く)、開いているときは ▲ (押すと閉じる)、中の行は一段下げる)。
+    // まとまりの行は、まとまりの中のいちばん上の階 (重ねる並びで最初の階) の所に出す。ほかの階の並びは変えない。
+    // 開いた中の行は重ねる並びの順で、名前に「（上から n 番目）」(まとまりの中の、一覧の上からの順番) を添えて見分ける
+    // (高さは見分けに使わない。同じ高さの同じ名前の階がある: RR_P6_L5 の Maintenance Shaft 02 の 2 つ)。
+    // 選んでいる階 (_floor) の行を選ぶ (閉じたまとまりの中なら、何も選ばない)。scroll: 選んだ行が見えるようにする
+    private void RefreshFloors(bool scroll = false)
+    {
+        var groups = _floorItems.GroupBy(r => r.Name, StringComparer.Ordinal).Where(g => g.Count() > 1).ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+        var rows = new List<FloorRow>();
+        var done = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var r in _floorItems)
+        {
+            if (!groups.TryGetValue(r.Name, out var members)) { rows.Add(r); continue; }
+            if (!done.Add(r.Name)) continue;
+            var open = _openFloorGroups.Contains(r.Name);
+            rows.Add(new FloorRow("", r.Name, $"{(open ? "▲" : "▼")} {r.Name}（{members.Count} 件）", r.Name, IsGroup: true));
+            if (open) rows.AddRange(members.Select((x, i) => x with { Display = $"　　{x.Name}（上から {i + 1} 番目）", Group = r.Name }));
+        }
+        _suppress = true;
+        try
+        {
+            lstFloors.ItemsSource = rows;
+            lstFloors.SelectedItem = rows.FirstOrDefault(r => !r.IsGroup && r.Id == _floor);
+            if (scroll && lstFloors.SelectedItem != null) lstFloors.ScrollIntoView(lstFloors.SelectedItem);
+        }
+        finally { _suppress = false; }
+    }
+
+    // 階が同じ名前の階のまとまりの中なら、そのまとまりを開く。新しく開いたら true
+    private bool RevealFloor(string? fid)
+    {
+        if (fid == null || _floorItems.FirstOrDefault(r => r.Id == fid) is not { } row) return false;
+        if (_floorItems.Count(r => string.Equals(r.Name, row.Name, StringComparison.Ordinal)) < 2) return false;
+        return _openFloorGroups.Add(row.Name);
+    }
+
     private string FloorSuffix(string fid) => fid.Length > 0 ? $"（階: {FloorDisplay(fid)}）" : "";
 
     private void RefreshSections()
@@ -490,6 +531,13 @@ public partial class StationMapPanel : UserControl
     private void LstFloors_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppress || lstFloors.SelectedItem is not FloorRow row) return;
+        if (row.IsGroup)
+        {
+            // まとまりの行: 押すと開く・閉じる。選んでいる階はそのまま (作り直した一覧で選び直す)
+            if (!_openFloorGroups.Remove(row.Group!)) _openFloorGroups.Add(row.Group!);
+            RefreshFloors();
+            return;
+        }
         _floor = row.Id;
         RefreshSections();
         Send(new { type = "floor", id = row.Id });
@@ -692,9 +740,8 @@ public partial class StationMapPanel : UserControl
     {
         if (_floor == fid) return;
         _floor = fid;
-        _suppress = true;
-        try { lstFloors.SelectedItem = (lstFloors.ItemsSource as List<FloorRow>)?.FirstOrDefault(r => r.Id == fid); }
-        finally { _suppress = false; }
+        // ビューアで移った階 (［上の階］［下の階］・現在位置の階・区画の階など) が同じ名前の階のまとまりの中なら、そのまとまりを開いて選ぶ
+        RefreshFloors(RevealFloor(fid));
         RefreshSections();
     }
 
