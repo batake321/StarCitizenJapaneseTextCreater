@@ -428,6 +428,8 @@ public sealed class AppUpdater
             done += DownloadSizeOf(f);
             progress?.Report((done, total));
         }
+        // 変わったファイルが 0 個のときは置き場所のフォルダがまだ無いので、作ってから書く (2026-11-02、「Could not find a part of the path …plan.json.tmp」で失敗した)
+        Directory.CreateDirectory(Path.GetDirectoryName(plan.StagingDir)!);
         WritePlanDurable(Path.Combine(Path.GetDirectoryName(plan.StagingDir)!, "plan.json"), plan);
         _log($"新しい版 v{plan.Version} の差分 {plan.Files.Count} ファイル ({total / 1024.0 / 1024.0:N1} MB) を {plan.StagingDir} に用意しました");
     }

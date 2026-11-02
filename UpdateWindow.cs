@@ -195,6 +195,8 @@ internal sealed class UpdateWindow : Window
         catch (Exception ex)
         {
             _downloading = false;
+            // 失敗の理由をアプリのログにも残す (2026-11-02、利用者の指摘「ログに失敗理由が出ないのは問題」。前は窓に出すだけだった)
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[更新] ダウンロードに失敗しました: {ex}");
             _status.Foreground = Brushes.Firebrick;
             _status.Text = string.Format(UpdateTexts.DownloadFailed, ex.Message);
             _progress.Visibility = Visibility.Collapsed;
