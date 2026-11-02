@@ -152,6 +152,8 @@ public partial class MapPanel : UserControl
             core.NavigationCompleted += (_, _) => _navDone?.TrySetResult();
             webMap.DefaultBackgroundColor = System.Drawing.Color.White;
             _webReady = true;
+            // 場所の施設のアイコン (ゲームの svg) を裏で取り出して割り当てる。割り当てられたら星系図を作り直す (それまではアイコン無し。AmenityIcons)
+            _ = MapAmenityIconsAsync(core);
         }
         catch (Exception ex)
         {
@@ -159,6 +161,15 @@ public partial class MapPanel : UserControl
             _webFailed = true;
             App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] WebView2 の初期化に失敗しました: {ex.GetType().FullName} (HResult 0x{ex.HResult:X8}): {ex}");
         }
+    }
+
+    // 施設のアイコンを割り当てられたか (星系図の場所のラベルの横に施設のアイコンを出す: GameDataQueryService.AmenityRowSvg)
+    private bool _amenityIcons;
+    private async Task MapAmenityIconsAsync(CoreWebView2 core)
+    {
+        if (!await AmenityIcons.MapAsync(core)) return;
+        _amenityIcons = true;
+        if (_pageView != null && IsVisible) await RenderAsync(); else if (_pageView != null) _stale = true;
     }
 
     // 図の点・ラベルの record を［詳細］タブで開く (名前は ShopTree の場所の名前。星系は星系名)
@@ -234,6 +245,8 @@ public partial class MapPanel : UserControl
             var tree = await GetTreeAsync();
             if (version != _renderVersion) return;
             _tree = tree;
+            RefreshAmenityFilter(tree);
+            RefreshMapHints();
             txtStatus.Text = statusAfter ?? "";
             if (tree == null || tree.IsEmpty) { ShowMessage("インデックスが未構築です (設定タブの［インデックス構築］)"); return; }
             if (_webFailed || !_webReady) { ShowMessage("（図は WebView2 が必要です）"); return; }
@@ -243,7 +256,7 @@ public partial class MapPanel : UserControl
             var view = CurrentView();
             _marks = BuildMarks(tree, eff?.Unix ?? Now());
             var (html, count) = BuildPage(tree, view, App.Config.MapViews, eff, LogPlaceNode(tree, LandingPlaceProvider?.Invoke()), LogRunning(), ComputeQt(tree),
-                QuantumStateProvider?.Invoke(), _marks);
+                QuantumStateProvider?.Invoke(), _marks, _amenityIcons ? AmenityIcons.Url : null);
             if (count == 0) { ShowMessage("座標のある星系がありません"); _pageView = null; return; }
             txtMessage.Visibility = Visibility.Collapsed;
             // 場所の階層マップを出している間は、星系図は隠したまま (書き換えだけする)
@@ -304,7 +317,36 @@ public partial class MapPanel : UserControl
             }
         }
         var ok = await CaptureAsync(auto: false, from);
+        // (2026-11-02、利用者の指摘「現在位置ボタンで位置がとれないとでる」) 座標を読めなかったときは、1 回だけ取り直す。
+        // 間は自動の取得の取り直し (目的地の選択の後、取れなければ 3 秒おきにあと 2 回) と同じ 3 秒
+        if (!ok && _lastFailUnreadable)
+        {
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 座標を読めなかったので、{ButtonRetryDelay.TotalSeconds:0} 秒後に 1 回だけ取り直します（ボタン・{from}）");
+            await Task.Delay(ButtonRetryDelay);
+            ok = await CaptureAsync(auto: false, from + "・取り直し");
+        }
+        // 取れなかったときの Game.log の手がかり (ステーションの地図がハンガーにいるかの推測に使う。StationMapPanel)
+        // 時刻は UTC (Game.log の行の時刻 (GameLogParser) と同じ)
+        LastCaptureFailLog = ok ? null : (DateTime.UtcNow, LandingPlaceProvider?.Invoke(), QuantumStateProvider?.Invoke());
         return (ok, txtStatus.Text);
+    }
+
+    // ボタンで座標を読めなかったときの取り直しまでの間 (CaptureCurrentAsync)
+    private static readonly TimeSpan ButtonRetryDelay = TimeSpan.FromSeconds(3);
+    // 直前の取得の失敗が「座標を読めなかった」(クリップボードの文字が座標の形でない) か
+    private bool _lastFailUnreadable;
+    // ボタンで取れなかったときの Game.log の手がかり (取れなかった時刻 (UTC)・今の着陸場所の名前・量子ジャンプの状態)。取れたら null。アプリを動かしている間だけ
+    public static (DateTime At, string? Landing, GameLogQuantumState? Quantum)? LastCaptureFailLog { get; private set; }
+
+    // ログに出すクリップボードの文字の頭 (ClipHeadLength 文字。改行は「⏎」にして見えるように。空・読めなければその旨)
+    private const int ClipHeadLength = 80;
+    private static string ClipHead(string? text)
+    {
+        if (text == null) return "（読めなかった）";
+        if (text.Length == 0) return "（空）";
+        if (text == ClipboardPlaceholder) return "（送る前に入れた印のまま。ゲームが座標を書かなかった）";
+        var t = text.Length > ClipHeadLength ? text[..ClipHeadLength] + "…" : text;
+        return "「" + t.Replace("\r\n", "⏎").Replace("\n", "⏎").Replace("\r", "⏎").Replace("\t", "→") + "」";
     }
 
     // 図を作り直す。この欄が画面に無いときは作り直さず、次に画面に出たとき (Loaded) に作る (知らせの文は状態の欄に出す)
@@ -446,6 +488,7 @@ public partial class MapPanel : UserControl
         var mode = auto ? "自動" : $"ボタン・{from}";
         // クリップボードを元に戻せなかったときの知らせ (状態の欄の終わりに添える。戻せたときは空)
         var clipboardNote = "";
+        _lastFailUnreadable = false;
         bool Fail(string status, string? reason = null)
         {
             txtStatus.Text = status + clipboardNote;
@@ -567,7 +610,10 @@ public partial class MapPanel : UserControl
             }
             if (CurrentLocation.Parse(text) is not { } pos)
             {
-                return Fail("座標を読めませんでした (クリップボードの文字が /showlocation の座標の形ではありません)");
+                // (2026-11-02) 読めなかったクリップボードの文字の頭をアプリのログに出す (理由を後で調べられるように)
+                _lastFailUnreadable = true;
+                return Fail("座標を読めませんでした (クリップボードの文字が /showlocation の座標の形ではありません)",
+                    $"座標を読めませんでした (クリップボードの文字が /showlocation の座標の形ではありません。文字の頭: {ClipHead(text)})");
             }
             var tree = await GetTreeAsync();
             if (tree == null || tree.IsEmpty) { ShowMessage("インデックスが未構築です (設定タブの［インデックス構築］)"); return Fail("", "インデックスが未構築です"); }
@@ -827,10 +873,11 @@ public partial class MapPanel : UserControl
     // 現在位置があれば、その星系の図に印 (取った座標の照準・推定位置の白抜きの丸・量子ジャンプ中の矢印) を描き、各場所のラベルの距離を現在位置からの距離にする
     // (量子ジャンプ中は目的地からの距離に「、到着後」を添える)。logPlace は Game.log の居場所 (現在地の決め方)、logRunning は［ゲームログ］の追い読みが動いているか。
     // 現在位置の星系は、eff.System (量子ジャンプの途中に取った座標の星系の名前) があればその星系、無ければいちばん近い場所の星系 (CurrentLocation.Locate)
-    // marks は地図のある場所の印 (［マップ］タブの BuildMarks。各星系図の overlay に入れる)
+    // marks は地図のある場所の印 (［マップ］タブの BuildMarks。各星系図の overlay に入れる)。
+    // amenityIconUrl は施設のアイコンの URL の作り方 (アイコンを割り当てたときだけ。各星系図の overlay に入れる。null なら施設のアイコンは描かない)
     internal static (List<(ShopTreeNode Star, string Name, MapOverlay Overlay)> Maps, string? NearInner) MapState(ShopTree tree, string view,
         CurrentLocation.EffectivePosition? eff, ShopTreeNode? logPlace, bool logRunning, double unix, CurrentLocation.QtState? qt = null,
-        GameLogQuantumState? q = null, MapMarks? marks = null)
+        GameLogQuantumState? q = null, MapMarks? marks = null, Func<string, string?>? amenityIconUrl = null)
     {
         CurrentLocation.Result? loc = null;
         CurrentLocation.Whereabouts? where = null;
@@ -897,6 +944,7 @@ public partial class MapPanel : UserControl
                 if (objs.Count > 0) overlay = overlay with { Objectives = objs.Select(o => o.Pos).ToList() };
             }
             if (marks != null) overlay = overlay with { Marks = marks };
+            if (amenityIconUrl != null) overlay = overlay with { AmenityIconUrl = amenityIconUrl };
             maps.Add((star, name, overlay));
         }
         string? near = null;
@@ -933,9 +981,10 @@ public partial class MapPanel : UserControl
     // 各星系図の最初の表示は、覚えた表示 (views) があればそれ、無ければ全体。星系名の見出しを図の上に付ける。中身の状態は MapState。
     // 【現在位置の近く】(aside.near) は、中身が無くても隠して置いておく (書き換えで出すため)
     internal static (string Html, int Count) BuildPage(ShopTree tree, string view, IReadOnlyList<MapViewState> views, CurrentLocation.EffectivePosition? eff,
-        ShopTreeNode? logPlace, bool logRunning = true, CurrentLocation.QtState? qt = null, GameLogQuantumState? q = null, MapMarks? marks = null)
+        ShopTreeNode? logPlace, bool logRunning = true, CurrentLocation.QtState? qt = null, GameLogQuantumState? q = null, MapMarks? marks = null,
+        Func<string, string?>? amenityIconUrl = null)
     {
-        var (maps, near) = MapState(tree, view, eff, logPlace, logRunning, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0, qt, q, marks);
+        var (maps, near) = MapState(tree, view, eff, logPlace, logRunning, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0, qt, q, marks, amenityIconUrl);
         var body = new StringBuilder();
         body.Append("<div class=\"mapwrap\">");
         body.Append(view == ViewAll ? "<div class=\"maps\">" : "<div class=\"maps single\">");
@@ -1395,30 +1444,85 @@ public partial class MapPanel : UserControl
     }
 
     // ===== 場所の検索 =====
-    // 候補: 星図の場所 (名前の一部。座標のある場所か地図のある場所) と、星図に載っていない場所 (調べが済んでいれば)。名前の頭が合うものを先に、最大 SearchMax 件
-    private const int SearchMax = 20;
+    // 候補: 星図の場所 (名前の一部。座標のある場所か地図のある場所) と、星図に載っていない場所 (調べが済んでいれば)。名前の頭が合うものを先に、最大 SearchMax 件。
+    // 施設 (cmbAmenity) を選んでいれば、星図の施設の一覧にその施設のある星図の場所だけ (星図に載っていない場所は施設の一覧が無いので入れない)。
+    // 施設を選んでいて名前が空なら、その施設のある場所を全部 (最大 SearchMaxAmenity 件)
+    private const int SearchMax = 20, SearchMaxAmenity = 100;
     private sealed record SearchItem(string Record, string Name, string Display, bool HasMap);
+    // 施設の選択肢 (Id = 施設の種類のレコードの GUID。空は「施設: すべて」)
+    private sealed record AmenityChoice(string Id, string Display);
 
-    private void TxtSearch_TextChanged(object sender, TextChangedEventArgs e)
+    // 施設の選択肢を、木のどこかの場所にある施設の種類で作り直す (選んでいた施設があれば選んだまま)
+    private void RefreshAmenityFilter(ShopTree? tree)
+    {
+        var keep = (cmbAmenity.SelectedItem as AmenityChoice)?.Id ?? "";
+        var list = new List<AmenityChoice> { new("", "施設: すべて") };
+        if (tree != null) list.AddRange(tree.AmenityTypes.Select(a => new AmenityChoice(a.Id, a.Label)));
+        _amenityRefreshing = true;
+        try
+        {
+            cmbAmenity.ItemsSource = list;
+            cmbAmenity.SelectedItem = list.FirstOrDefault(c => c.Id == keep) ?? list[0];
+            cmbAmenity.IsEnabled = list.Count > 1;
+        }
+        finally { _amenityRefreshing = false; }
+    }
+    private bool _amenityRefreshing;
+
+    // 取り込み済みの地図のデータからの施設の手がかり (record 名 → 手がかり。AmenityMapHints.All。星系図を作り直すたびに裏で読み直す。
+    // 同じファイルは覚えたものを使うので、2 回目からは速い)。読めるまでは空 (施設の検索は施設の一覧だけで当てる)
+    private Dictionary<string, AmenityMapHints.Hints> _mapHints = new(StringComparer.Ordinal);
+    private int _mapHintsVersion;
+    private async void RefreshMapHints()
+    {
+        var version = ++_mapHintsVersion;
+        try
+        {
+            var hints = await Task.Run(AmenityMapHints.All);
+            if (version != _mapHintsVersion) return;
+            _mapHints = hints;
+            if (popSearch.IsOpen && (cmbAmenity.SelectedItem as AmenityChoice)?.Id is { Length: > 0 }) UpdateSearch();
+        }
+        catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 地図の施設の手がかりを読めませんでした: {ex.Message}"); }
+    }
+
+    private void CmbAmenity_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_amenityRefreshing) return;
+        UpdateSearch();
+    }
+
+    private void TxtSearch_TextChanged(object sender, TextChangedEventArgs e) => UpdateSearch();
+
+    private void UpdateSearch()
     {
         var q = txtSearch.Text.Trim();
-        if (q.Length == 0 || _tree == null) { popSearch.IsOpen = false; return; }
+        var amenity = (cmbAmenity.SelectedItem as AmenityChoice)?.Id ?? "";
+        if (q.Length == 0 && amenity.Length == 0 || _tree == null) { popSearch.IsOpen = false; return; }
         var marks = _marks;
         var items = new List<SearchItem>();
         foreach (var n in _tree.Places)
         {
-            if (!n.Name.Contains(q, StringComparison.OrdinalIgnoreCase)) continue;
+            if (q.Length > 0 && !n.Name.Contains(q, StringComparison.OrdinalIgnoreCase)) continue;
+            // 施設: 星図の施設の一覧にあるか、無くても取り込み済みの地図のデータに手がかりがあれば (精製所・積載ドックだけ。候補に「（推測）」を付ける)
+            var guessed = false;
+            if (amenity.Length > 0 && !n.Amenities.Any(a => string.Equals(a.Id, amenity, StringComparison.OrdinalIgnoreCase)))
+            {
+                if (!GameDataQueryService.GuessedByMap(_mapHints.GetValueOrDefault(n.RecordName), amenity)) continue;
+                guessed = true;
+            }
             var hasMap = marks?.Has.ContainsKey(n.RecordName) == true;
             if (!hasMap && !n.Position.HasValue) continue;
-            items.Add(new SearchItem(n.RecordName, n.Name, $"{n.Name}（{n.TypeLabel}・{n.Root.System}）{(hasMap ? "［地図］" : "")}", hasMap));
+            items.Add(new SearchItem(n.RecordName, n.Name, $"{n.Name}（{n.TypeLabel}・{n.Root.System}）{(hasMap ? "［地図］" : "")}{(guessed ? "（推測）" : "")}", hasMap));
         }
-        if (marks != null)
+        if (marks != null && amenity.Length == 0)
             foreach (var u in marks.Unlisted.Where(u => u.Name.Contains(q, StringComparison.OrdinalIgnoreCase)))
                 items.Add(new SearchItem(u.Record, u.Name, $"{u.Name}（{u.System}）［地図］", true));
-        var list = items.OrderBy(i => i.Name.StartsWith(q, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
-            .ThenBy(i => i.Name, StringComparer.OrdinalIgnoreCase).Take(SearchMax).ToList();
+        var list = items.OrderBy(i => q.Length > 0 && i.Name.StartsWith(q, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(i => i.Name, StringComparer.OrdinalIgnoreCase).Take(amenity.Length > 0 ? SearchMaxAmenity : SearchMax).ToList();
         lstSearch.ItemsSource = list;
         popSearch.IsOpen = list.Count > 0;
+        if (list.Count == 0 && amenity.Length > 0) txtStatus.Text = "その施設のある場所は見つかりませんでした";
     }
 
     private void TxtSearch_PreviewKeyDown(object sender, KeyEventArgs e)

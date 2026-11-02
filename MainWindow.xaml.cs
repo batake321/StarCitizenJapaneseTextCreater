@@ -2902,6 +2902,8 @@ public partial class MainWindow : Window
                     var needsPorts = extractor.NeedsCharacterPorts();
                     var needsBlueprints = extractor.NeedsBlueprints();
                     var needsStarmap = extractor.NeedsStarmapNames();
+                    // 星図の場所の施設 (starmap_amenities。［詳細］の場所の施設・［マップ］の施設のアイコンと検索) が無い・空なら、それだけを取り出す
+                    var needsAmenities = extractor.NeedsStarmapAmenities();
                     var needsExtra = extractor.NeedsExtraItems();
                     // 星図の場所・ゲームの店の表 (starmap_locations / game_shops。［詳細］タブのお店) と契約の地図の表 (mission_map_vars など。契約の詳細の地図のリンク) も
                     // 同じ Step 6c で作るので、無ければ一緒に作る
@@ -2911,8 +2913,8 @@ public partial class MainWindow : Window
                     // 判定をそのままログに残す (作るとき・作らないときとも)
                     Log($"[起動後の作り直し] 判定: 積載量 {needsCargo}・資源の種類 {needsResources}・口の定義 {needsPorts}・BP {needsBlueprints}・場所名 {needsStarmap}・"
                         + $"追加の品目 {needsExtra}・採掘できる場所 {extractor.NeedsOreLocations()}・星図の場所と店 {extractor.NeedsShopTables()}・契約の地図 {extractor.NeedsMissionMapPlaces()}・"
-                        + $"価格の紐づけ {needsShopLinks}");
-                    if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints && !needsStarmap && !needsExtra && !needsOre && !needsShopLinks)
+                        + $"価格の紐づけ {needsShopLinks}・場所の施設 {needsAmenities}");
+                    if (!needsCargo && !needsResources && !needsPorts && !needsBlueprints && !needsStarmap && !needsExtra && !needsOre && !needsShopLinks && !needsAmenities)
                     {
                         Log("[起動後の作り直し] 作り直すものはありません");
                         return (0, 0, 0, 0, 0, 0, (string?)null);
@@ -2979,6 +2981,20 @@ public partial class MainWindow : Window
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
                             Log($"[場所名] 星図の場所の名前の取り出しに失敗しました (次の起動でまた試します): {ex.Message}");
+                        }
+                    }
+                    // 星図の場所の施設 (前が終わってから。終わったら GameDataExtractor が ShopTablesChanged を知らせ、［詳細］・［マップ］が作り直す)
+                    if (needsAmenities)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        try
+                        {
+                            Log("[場所の施設] 星図の場所の施設 (starmap_amenities) が無い・空なので、裏で取り出します");
+                            await extractor.RebuildStarmapAmenitiesAsync(new Progress<string>(m => Log($"[場所の施設] {m}")), ct);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            Log($"[場所の施設] 星図の場所の施設の取り出しに失敗しました (次の起動でまた試します): {ex.Message}");
                         }
                     }
                     // 追加の品目 (採掘レーザー・鉱石ポッド・BP や契約から参照される品目など。BP の表を使うので BP の後)

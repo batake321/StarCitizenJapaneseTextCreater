@@ -25,7 +25,9 @@ public partial class StationMapPanel : UserControl
     // まとまりの中の行は Group にまとまりの鍵が入る
     private sealed record FloorRow(string Id, string Name, string Display, string? Group = null, bool IsGroup = false);
     private sealed record SectionRow(string Id, string Display);
-    // 出発地・目的地の 1 行。Kind: current・pin・shop・section・transit
+    // 端末の一覧の 1 行 (端末のまとまり StationMapModel.TerminalGroups の番号)
+    private sealed record TerminalRow(int Group, string Display);
+    // 出発地・目的地の 1 行。Kind: current・pin・shop・section・transit・terminal (Index は端末のまとまりの番号)
     private sealed record Place(string Kind, int Index, string Id, string Display);
 
     private StationMapModel? _model;
@@ -77,7 +79,8 @@ public partial class StationMapPanel : UserControl
     private static readonly TimeSpan WebViewInitLimit = TimeSpan.FromSeconds(30);
 
     // 地図の WebView2 を合成で描く版 (WebView2CompositionControl) にするか。［マップ］タブ (MapPanel) は true (星系図と重ねて透明度を変える (クロスフェード) ため。
-    // HWND の WebView2 は WPF の透明度が効かない)。別ウィンドウは false (今の HWND の WebView2 のまま)。XAML で設定し、最初に地図を出す前に決める
+    // HWND の WebView2 は WPF の透明度が効かない)。別ウィンドウも true (2026-11-02。同じ利用者データの置き場で HWND と合成が混ざると初期化が 0x8007139F で失敗したため、
+    // 種類をそろえた。StationMapWeb.InitAsync の説明)。XAML で設定し、最初に地図を出す前に決める
     public bool UseComposition { get; set; }
     private Microsoft.Web.WebView2.Wpf.IWebView2? _web;
     // 地図の WebView2 (初めて使うときに作って webHost に入れる)
@@ -217,7 +220,7 @@ public partial class StationMapPanel : UserControl
         if (UseComposition) WebElement.Visibility = Visibility.Visible;
         try
         {
-            var init = _webInit ??= StationMapWeb.InitAsync(Web, OnViewerMessage, () => $"{_name} ({_record})");
+            var init = _webInit ??= StationMapWeb.InitAsync(Web, OnViewerMessage, () => $"{_name} ({_record})", OnViewerError);
             // 用意が終わらないときに「読み込み中...」のままにしない (WebViewInitLimit たっても終わらなければ、知らせとログを出してやめる。用意はそのまま続き、次に出すときに使う)
             if (await Task.WhenAny(init, Task.Delay(WebViewInitLimit)) != init)
             {
@@ -247,13 +250,14 @@ public partial class StationMapPanel : UserControl
         _model = null;
         _viewerMap = null;
         _pendingFocus = null;
+        _loadWatch.Stop();
         _record = "";
         if (_viewShort != null) { StationMapExports.Instance.ReleaseView(_viewShort); _viewShort = null; }
         _routeVersion++;
         _suppress = true;
         try
         {
-            lstFloors.ItemsSource = null; lstSections.ItemsSource = null; lstStart.ItemsSource = null; lstDest.ItemsSource = null; lstSteps.ItemsSource = null;
+            lstFloors.ItemsSource = null; lstSections.ItemsSource = null; lstTerminals.ItemsSource = null; lstStart.ItemsSource = null; lstDest.ItemsSource = null; lstSteps.ItemsSource = null;
         }
         finally { _suppress = false; }
         txtRoute.Text = ""; txtCurrent.Text = "";
@@ -460,8 +464,16 @@ public partial class StationMapPanel : UserControl
         }
         foreach (var s in m.Sections.Where(s => s.Listed))
             places.Add(new Place("section", s.Index, s.Id, $"区画: {_sectionNames[s.Id]}"));
+        // 端末 (まとまりごと。道順は端末の位置からいちばん近い節点。データ側が付けた node)
+        // 地図に出せない端末 (階の無いもの・たどれない階のもの) は、一覧・目的地に出さない (選んでも何も強調されないため。2026-11-02、検証の指摘)。数はログに出す
+        var hidden = m.TerminalGroups.Count(g => !TerminalOnMap(g));
+        if (hidden > 0)
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの地図] 「{_name}」({_record}): 地図に出せない端末 (階が無い・たどれない階) のまとまり {hidden} 件を、端末の一覧と目的地に出しません ({string.Join("・", m.TerminalGroups.Where(g => !TerminalOnMap(g)).GroupBy(g => g.Kind).Select(x => $"{StationTerminalKinds.Label(x.Key)} {x.Count()}"))})");
+        foreach (var g in m.TerminalGroups.Where(TerminalOnMap))
+            places.Add(new Place("terminal", g.Index, "", $"端末: {TerminalLabel(g)}{TerminalWhere(g)}"));
         _places = places;
         RefreshSections();
+        RefreshTerminals();
         RefreshPlaceLists();
         txtRoute.Text = "";
         lstSteps.ItemsSource = null;
@@ -686,6 +698,133 @@ public partial class StationMapPanel : UserControl
         finally { _suppress = false; }
     }
 
+    // ===== 端末 =====
+
+    // 地図に出せる端末のまとまり (階があり、たどれる階のもの。StationMapModel.ViewerMap が地図に送るものと同じ)
+    private bool TerminalOnMap(StationMapModel.TerminalGroup g) => g.Floor.Length > 0 && _model?.UnreachableFloors().Contains(g.Floor) != true;
+
+    // 端末のまとまりの名前: 種類の言葉 (StationTerminalKinds。ゲームの訳) と、まとめた数 (2 つ以上なら「×N」)
+    private static string TerminalLabel(StationMapModel.TerminalGroup g) =>
+        StationTerminalKinds.Label(g.Kind) + (g.Members.Count > 1 ? $" ×{g.Members.Count}" : "");
+
+    // 端末のまとまりの場所「（階: …・区画: …）」(階の無い端末は「（階: なし）」。区画は名前のあるときだけ)
+    private string TerminalWhere(StationMapModel.TerminalGroup g)
+    {
+        var floor = g.Floor.Length > 0 ? FloorDisplay(g.Floor) : "なし";
+        var sec = g.Section.Length > 0 && _sectionNames.TryGetValue(g.Section, out var sn) && sn.Length > 0 ? $"・区画: {sn}" : "";
+        return $"（階: {floor}{sec}）";
+    }
+
+    // 端末の一覧 (種類の順 (StationTerminalKinds)・階・位置の順。絞り込みは行の文字)
+    private void RefreshTerminals()
+    {
+        if (_model == null) return;
+        var q = txtTerminalFilter.Text.Trim();
+        var list = _model.TerminalGroups.Where(TerminalOnMap).Select(g => new TerminalRow(g.Index, TerminalLabel(g) + TerminalWhere(g)))
+            .Where(r => q.Length == 0 || r.Display.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
+        var sel = (lstTerminals.SelectedItem as TerminalRow)?.Group;
+        _suppress = true;
+        try { lstTerminals.ItemsSource = list; lstTerminals.SelectedItem = list.FirstOrDefault(r => r.Group == sel); }
+        finally { _suppress = false; }
+    }
+
+    private void TxtTerminalFilter_TextChanged(object sender, TextChangedEventArgs e) => RefreshTerminals();
+
+    // 端末を選んだ: その階に移り (階の一覧も合わせる)、端末の位置に寄せて強調する。販売品の枠は消す
+    private void LstTerminals_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppress || lstTerminals.SelectedItem is not TerminalRow row || _model is not { } m || row.Group < 0 || row.Group >= m.TerminalGroups.Count) return;
+        var g = m.TerminalGroups[row.Group];
+        SendSales(null);
+        if (g.Floor.Length > 0)
+        {
+            SelectFloorInList(g.Floor);
+            Send(new { type = "floor", id = g.Floor });
+            Send(new { type = "hlterm", index = g.Index });
+            Send(new { type = "focus", pos = new[] { g.Pos.X, g.Pos.Y, g.Pos.Z }, floor = g.Floor, size = 40 });
+        }
+        else Send(new { type = "hlterm", index = g.Index });
+    }
+
+    // 端末のアイコン (ゲームのアイコン。初めて使うときに利用者の Data.p4k から取り出す。GameIcons)。取れたらビューアへ送る
+    private async Task SendIconsAsync()
+    {
+        try
+        {
+            var icons = await StationTerminalKinds.IconsAsync();
+            if (icons.Count > 0) Send(new { type = "icons", icons });
+        }
+        catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの地図] 端末のアイコンを送れませんでした: {ex.Message}"); }
+    }
+
+    // ===== 店の販売品の枠 =====
+    // (2026-11-02、利用者の指示「区画でお店を選んでそのエリアがハイライトされたとき、右側に四角で囲んだ販売品リスト(価格も)を出せれば素晴らしい。他をクリックしたら消してほしい」)
+    // 区画 (sectionId) の店 (地図の店のうち section が同じもの) ごとに、［詳細］のお店の【売っている物】と同じデータ (ShopTree の店 ShopTreeShop の Items・Commodities) を
+    // 同じ形でビューアの枠に出す: 品目は「品名・種類・価格 (購入とレンタルが両方あれば 購入・レンタル)」、コモディティは「品名・買値・売値」。値段の無い所は「-」(［詳細］と同じ)。
+    // 同じ品名・種類・値段の行は 1 行にまとめる (［詳細］と同じ)。並びは品名の順。販売データの無い店は「販売データが紐づいていません。」(［詳細］と同じ文)。
+    // 店の名前は地図の名札と同じ「店名（種類）」。区画に店が無ければ枠を消す (sectionId が null でも消す)
+    private void SendSales(string? sectionId)
+    {
+        var m = _model;
+        if (m == null || sectionId == null || BuildSales(m, _tree, _shopLabels, _sectionNames, sectionId) is not { } msg) { Send(new { type = "sales" }); return; }
+        Send(msg);
+    }
+
+    // 販売品の枠の知らせ ({type:'sales', title, shops})。区画に店が無ければ null (確かめの道具からも呼ぶので static)
+    internal static object? BuildSales(StationMapModel m, ShopTree? tree, IReadOnlyDictionary<int, string> shopLabels, IReadOnlyDictionary<string, string> sectionNames, string sectionId)
+    {
+        var _tree = tree; var _shopLabels = shopLabels; var _sectionNames = sectionNames;
+        var shops = m.Shops.Where(s => s.Section == sectionId).ToList();
+        if (shops.Count == 0) return null;
+        var list = new List<object>();
+        // 同じ店 (ShopTree の店が同じ) は 1 つだけ
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var s in shops)
+        {
+            var shop = ShopOf(_tree, m.Record, s);
+            if (shop != null && !seen.Add(shop.Record)) continue;
+            var name = _shopLabels.TryGetValue(s.Index, out var l) && l.Length > 0 ? l : ShopNoName;
+            if (shop == null || shop.Items.Count == 0 && shop.Commodities.Count == 0)
+            {
+                list.Add(new { name, note = "販売データが紐づいていません。" });
+                continue;
+            }
+            var tables = new List<object>();
+            if (shop.Items.Count > 0)
+            {
+                var items = shop.Items.Values.ToList();
+                var hasBuy = items.Any(i => i.Buy.HasValue);
+                var hasRent = items.Any(i => i.Rents.Count > 0);
+                var cols = new List<string> { "品名", "種類" };
+                if (hasBuy) cols.Add(hasRent ? "購入" : "価格");
+                if (hasRent) cols.Add("レンタル");
+                var rows = items.Select(i => (i.Name, i.Type,
+                        Buy: i.Buy is { } b ? $"{b:N0} aUEC" : "-",
+                        Rent: i.Rents.Count > 0
+                            ? string.Join(" / ", i.Rents.Distinct().OrderBy(r => r.Days ?? int.MaxValue).ThenBy(r => r.Price).Select(r => $"{(r.Days is { } d ? $"{d}日 " : "")}{r.Price:N0} aUEC"))
+                            : "-"))
+                    .Distinct().OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).ThenBy(r => r.Type, StringComparer.OrdinalIgnoreCase)
+                    .Select(r =>
+                    {
+                        var row = new List<string> { r.Name, r.Type };
+                        if (hasBuy) row.Add(r.Buy);
+                        if (hasRent) row.Add(r.Rent);
+                        return row;
+                    }).ToList();
+                tables.Add(new { cols, rows, left = 2 });
+            }
+            if (shop.Commodities.Count > 0)
+            {
+                static string P(double v) => v > 0 ? $"{v:N0} aUEC" : "-";
+                var rows = shop.Commodities.Distinct().OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase).Select(c => new List<string> { c.Name, P(c.Buy), P(c.Sell) }).ToList();
+                tables.Add(new { cols = new List<string> { "品名", "買値", "売値" }, rows, left = 1 });
+            }
+            list.Add(new { name, tables });
+        }
+        var title = _sectionNames.TryGetValue(sectionId, out var sn) && sn.Length > 0 ? $"販売品: {sn}" : "販売品";
+        return new { type = "sales", title, shops = list };
+    }
+
     private void RefreshPlaceLists()
     {
         var head = new List<Place> { new("current", -1, StartCurrentId, "現在位置（/showlocation）") };
@@ -722,6 +861,7 @@ public partial class StationMapPanel : UserControl
         }
         _floor = row.Id;
         RefreshSections();
+        SendSales(null);
         Send(new { type = "floor", id = row.Id });
     }
 
@@ -731,6 +871,8 @@ public partial class StationMapPanel : UserControl
         var fid = SectionFloor(sec);
         if (fid.Length > 0) SelectFloorInList(fid);
         Send(new { type = "section", id = row.Id, floor = fid });
+        // 店のある区画は、地図の右に販売品を出す (店の無い区画は消す)
+        SendSales(row.Id);
         // 床の形の無い区画は、箱の中心に寄せる (大きさは箱に合わせる)
         if (sec.Floors.Count == 0)
             Send(new { type = "focus", pos = new[] { sec.Center.X, sec.Center.Y, sec.Center.Z }, floor = fid, size = Math.Max(40, 2 * Math.Max(sec.Half.X, sec.Half.Y)) });
@@ -739,6 +881,7 @@ public partial class StationMapPanel : UserControl
     private void LstStart_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppress || lstStart.SelectedItem is not Place p) return;
+        SendSales(null);
         _start = p;
         SendEnds();
         _ = RouteAsync();
@@ -747,6 +890,7 @@ public partial class StationMapPanel : UserControl
     private void LstDest_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppress || lstDest.SelectedItem is not Place p) return;
+        SendSales(null);
         _dest = p;
         SendEnds();
         _ = RouteAsync();
@@ -772,8 +916,9 @@ public partial class StationMapPanel : UserControl
         _start = new Place("current", -1, StartCurrentId, "");
         RefreshPlaceLists();
         SendEnds();
-        var inside = _cur is { State: not "Outside" };
+        var inside = _cur is { State: not ("Outside" or "Hangar" or "HangarGuess") };
         if (inside) Send(new { type = "gotoCurrent" });
+        else HangarFocus();
         _ = RouteAsync(withCurrent: inside);
         return true;
     }
@@ -806,6 +951,17 @@ public partial class StationMapPanel : UserControl
         }
         if (!res.Ok)
         {
+            if (TryHangarFromGameLog() is { } note)
+            {
+                txtCurrent.Text = note;
+                _start = new Place("current", -1, StartCurrentId, "");
+                RefreshPlaceLists();
+                SendCurrent();
+                SendEnds();
+                HangarFocus();
+                _ = RouteAsync();
+                return;
+            }
             txtCurrent.Text = res.Status.Length > 0 ? res.Status : "現在位置を取れませんでした";
             return;
         }
@@ -814,6 +970,49 @@ public partial class StationMapPanel : UserControl
     }
 
     // ===== ビューア =====
+
+    // 地図を送ったのに、ビューアから読み終わった知らせ (loaded) が LoadWatchSeconds 秒たっても来ないとき・ビューアが失敗を知らせたとき (2026-11-02、
+    // 利用者の指摘「HUR-L5 マップがでない」「ログにエラーの情報も出てない」): 地図の欄に知らせを出し、アプリのログに書く (空白のままにしない)。
+    // 値: 送る地図は大きいもので数 MB (Area18 2.4 MB) で、ビューアは数秒以内に描き終える (Chrome headless で確かめた描画は数秒) ので、余裕を見て 20 秒
+    private const int LoadWatchSeconds = 20;
+    private readonly DispatcherTimer _loadWatch = new() { Interval = TimeSpan.FromSeconds(LoadWatchSeconds) };
+    private bool _loadWatchHooked;
+    private const string ViewerFailText = "地図を表示できませんでした（アプリのログを見てください）";
+
+    private void StartLoadWatch()
+    {
+        if (!_loadWatchHooked)
+        {
+            _loadWatchHooked = true;
+            _loadWatch.Tick += (_, _) =>
+            {
+                _loadWatch.Stop();
+                if (_model == null || _disposed) return;
+                // 地図の欄が見えていない間 (［マップ］タブで星系図を出している・別のタブ) は数えない (見えるまで待つ。2026-11-02、検証の指摘)
+                if (!IsVisible) { _loadWatch.Start(); return; }
+                App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの地図] ビューアの失敗: 「{_name}」({_record}) の地図を送ってから {LoadWatchSeconds} 秒たっても、ビューアから読み終わった知らせが来ません");
+                ShowViewerFail();
+            };
+        }
+        _loadWatch.Stop();
+        _loadWatch.Start();
+    }
+
+    private void OnViewerError(JsonElement msg)
+    {
+        // 地図を読むところ (load) の失敗だけ、地図の欄に知らせを出す (ほかの操作の失敗はログだけ。ビューアの下にも短く出る)
+        var where = msg.TryGetProperty("where", out var w) && w.ValueKind == JsonValueKind.String ? w.GetString() : "";
+        if (where != "load") return;
+        _loadWatch.Stop();
+        ShowViewerFail();
+    }
+
+    // 地図の欄の上に知らせを出す (地図は消さない。合成で描く WebView2 では知らせが地図の上に出る。HWND の WebView2 ではビューアの中の知らせ (viewer.js の fail) が出る)
+    private void ShowViewerFail()
+    {
+        txtOverlay.Text = ViewerFailText;
+        txtOverlay.Visibility = Visibility.Visible;
+    }
 
     private void Send(object msg)
     {
@@ -831,14 +1030,23 @@ public partial class StationMapPanel : UserControl
           .Append(",\"floor\":").Append(JsonSerializer.Serialize(_floor))
           .Append(",\"top\":").Append(chkTop.IsChecked == true ? "true" : "false").Append('}');
         StationMapWeb.Post(Web, sb.ToString());
+        StartLoadWatch();
         SendCurrent();
         if (_pin is { } pin) Send(new { type = "pin", pos = new[] { pin.Pos.X, pin.Pos.Y, pin.Pos.Z }, floor = pin.Floor });
         SendEnds();
+        _ = SendIconsAsync();
         if (_pendingFocus is { } focus) { _pendingFocus = null; Send(focus); }
     }
 
     private void SendCurrent()
     {
+        // ハンガーの中 (地図に床が無い) は点を出さず、ハンガーロビー (艦隊マネージャーの端末) を強調する (HangarFocus)
+        if (_cur is { State: "Hangar" or "HangarGuess" })
+        {
+            Send(new { type = "current", pos = (double[]?)null });
+            if (HangarLobby() is { } lob) Send(new { type = "hlterm", index = lob.Index });
+            return;
+        }
         if (_cur is { } c && c.State != "Outside")
             Send(new { type = "current", pos = new[] { c.Pos.X, c.Pos.Y, c.Pos.Z }, floor = c.Floor, label = "現在位置" });
         else Send(new { type = "current", pos = (double[]?)null });
@@ -848,7 +1056,7 @@ public partial class StationMapPanel : UserControl
     {
         object? Ref(Place? p) => p == null ? null : p.Kind switch
         {
-            "shop" or "transit" => new { kind = p.Kind, index = p.Index },
+            "shop" or "transit" or "terminal" => new { kind = p.Kind, index = p.Index },
             "section" => new { kind = "section", id = p.Id },
             _ => null,
         };
@@ -863,6 +1071,15 @@ public partial class StationMapPanel : UserControl
             case "ready":
                 _viewerReady = true;
                 SendLoad();
+                break;
+            case "loaded":
+                _loadWatch.Stop();
+                break;
+            case "hlterm-cleared":
+                // 地図を押して端末の強調が消えた: 左の「端末」の一覧の選択も外す (同じ行を選び直せるように)
+                _suppress = true;
+                try { lstTerminals.SelectedItem = null; }
+                finally { _suppress = false; }
                 break;
             case "floor":
                 if (msg.TryGetProperty("id", out var fid) && fid.GetString() is { } f) SelectFloorInList(f);
@@ -891,6 +1108,8 @@ public partial class StationMapPanel : UserControl
                         if (lstSections.SelectedItem != null) lstSections.ScrollIntoView(lstSections.SelectedItem);
                     }
                     finally { _suppress = false; }
+                    // 地図で区画を押した: 店のある区画なら販売品を出す
+                    SendSales(id);
                 }
                 break;
             case "pick":
@@ -901,6 +1120,8 @@ public partial class StationMapPanel : UserControl
                     if (kind == "transit" && _hangarBankOf.TryGetValue(index, out var bankRep)) index = bankRep;
                     var p = _places.FirstOrDefault(x => x.Kind == kind && x.Index == index);
                     if (p == null) break;
+                    // 店の印を押した: その店の区画の販売品を出す
+                    if (kind == "shop" && _model is { } pm && index >= 0 && index < pm.Shops.Count) SendSales(pm.Shops[index].Section);
                     _dest = p;
                     txtDestFilter.Text = "";
                     RefreshPlaceLists();
@@ -967,6 +1188,52 @@ public partial class StationMapPanel : UserControl
 
     // ===== 現在位置 =====
 
+    // 今いるハンガー (ハンガーの中と判定したときの入口。推測のときは null)
+    private StationMapModel.HangarInfo? _curHangar;
+
+    // 出発地にするハンガーロビー: いるハンガーの入口にいちばん近い艦隊マネージャーの端末のまとまり (入口が分からなければ端末のいちばん多いまとまり)
+    private StationMapModel.TerminalGroup? HangarLobby() => _model?.FleetLobby(_curHangar?.Pos);
+
+    // ハンガーロビーの階に移って寄せる (ボタンで現在位置を取った・推測したとき)
+    private void HangarFocus()
+    {
+        if (_cur is not { State: "Hangar" or "HangarGuess" } || HangarLobby() is not { } lob || lob.Floor.Length == 0) return;
+        SelectFloorInList(lob.Floor);
+        Send(new { type = "floor", id = lob.Floor });
+        Send(new { type = "hlterm", index = lob.Index });
+        Send(new { type = "focus", pos = new[] { lob.Pos.X, lob.Pos.Y, lob.Pos.Z }, floor = lob.Floor, size = 60 });
+    }
+
+    // (2026-11-02、指示 C) ボタンで座標が取れなかったとき、Game.log の手がかり (MapPanel.LastCaptureFailLog) から、この地図のステーションのハンガーにいる見込みが高ければ
+    // 出発地をハンガーロビーにする。見込み: 今の着陸場所の名前がこの地図の場所の短い名前と同じで、
+    //   ハンガー進入の通知の後に退出が無い (InHangar。無統治区域の通知の出る Pyro など)、または
+    //   着陸場所に着いた後に、自分の船の一覧の取得 (ハンガーの端末) か船の呼び出しがある (Stanton。ハンガー進入の通知が出ないため。推測)。
+    // できたら画面に出す文を返す。できなければ null
+    // (2026-11-02、検証の指摘「中 4」) 手がかり (ハンガー進入・自分の船の一覧の取得・船の呼び出し) は、取得に失敗した時刻から HangarClueWindow 以内のものだけ
+    // (ASOP を使った後に店へ歩いた人をハンガーにしないため)。推測の結果は、次に座標を取るまで残す (s_hangarGuess。地図を開き直しても出る)
+    private static readonly TimeSpan HangarClueWindow = TimeSpan.FromMinutes(15);
+    // 推測した地図 (record) と、そのときの現在位置の時刻 (App.Config.MapCurrent.Utc。これが変わったら (座標を取ったら) 推測をやめる)
+    private static (string Record, double CurrentUtc)? s_hangarGuess;
+
+    private string? TryHangarFromGameLog()
+    {
+        var m = _model;
+        if (m == null || MapPanel.LastCaptureFailLog is not { } hint) return null;
+        if (hint.Landing is not { Length: > 0 } landing || !string.Equals(landing, StationMapExports.ShortName(m.Record), StringComparison.OrdinalIgnoreCase)) return null;
+        var q = hint.Quantum;
+        bool Recent(DateTime? t) => t is { } v && v <= hint.At.AddMinutes(1) && hint.At - v <= HangarClueWindow;
+        var likely = q is { InHangar: true } && Recent(q.LastHangarEnter)
+            || q is { LandingSince: { } since } && (Recent(q.LastOwnFetch) && q.LastOwnFetch >= since || Recent(q.LastSpawn) && q.LastSpawn >= since);
+        if (!likely) return null;
+        _curHangar = null;
+        if (HangarLobby() is not { } lob) return null;
+        _cur = (lob.Pos, lob.Floor, "HangarGuess");
+        s_hangarGuess = (m.Record, App.Config.MapCurrent.Utc);
+        App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの地図] 現在位置を取れなかったので、Game.log からハンガー（推測）として出発地にしました: 着陸場所 {landing}、" +
+            $"ハンガー進入の後 {(q?.InHangar == true ? "退出なし" : "-")}、着陸 {q?.LandingSince:HH:mm:ss}、船の一覧の取得 {q?.LastOwnFetch:HH:mm:ss}、呼び出し {q?.LastSpawn:HH:mm:ss}");
+        return "現在位置は取れませんでした。ゲームのログからハンガー（推測）として出発地にしました";
+    }
+
     private void UpdateCurrent(bool send = true)
     {
         var m = _model;
@@ -974,7 +1241,17 @@ public partial class StationMapPanel : UserControl
         var cur = App.Config.MapCurrent;
         _curUtc = cur.Utc;
         _cur = null;
+        _curHangar = null;
         txtCurrent.Text = "";
+        // Game.log からハンガーと推測した後、まだ座標を取っていなければ、その推測を出す (TryHangarFromGameLog)
+        if (s_hangarGuess is { } guess && guess.Record == m.Record && guess.CurrentUtc == cur.Utc && HangarLobby() is { } glob)
+        {
+            _cur = (glob.Pos, glob.Floor, "HangarGuess");
+            txtCurrent.Text = "現在位置は取れませんでした。ゲームのログからハンガー（推測）として出発地にしました";
+            if (send) SendCurrent();
+            return;
+        }
+        if (s_hangarGuess is { } old && old.CurrentUtc != cur.Utc) s_hangarGuess = null;
         if (cur.Utc <= 0) { if (send) SendCurrent(); return; }
         var global = (cur.X, cur.Y, cur.Z);
         var node = _tree?.NodeByStarmapRecord(m.Record);
@@ -1009,19 +1286,31 @@ public partial class StationMapPanel : UserControl
         if (root.Spins && sameSystem && _spinBody is { Length: > 0 } fitBody)
         {
             fit = m.FitStanding(global, dt => root.CorrectedTheta(cur.Utc + dt, fitBody, corrections));
-            if (fit == null) fitNote = "（時刻を合わせられませんでした: 床の上になる時刻が取った時刻の前後 1.5 秒に無いので、取った時刻の位置のまま出しています）";
+            // (2026-11-02、利用者の指摘) 失敗の文は利用者に分かる言葉にする (ハンガーの中は FitStanding が床の次に探す)
+            if (fit == null) fitNote = "（位置を床の上に合わせられませんでした。地図に床の無い所 (ハンガーの中・船の中など) かもしれません）";
         }
         fitNote = corrNote + fitNote;
         LogFit(m, cur.Utc, fit, root.Spins && sameSystem, corrections, _spinBody);
         var local = fit?.Local ?? m.ToLocal(global, theta)!.Value;
-        if (sameSystem && m.SectionAt(local) != null)
+        _curHangar = null;
+        // (2026-11-02、利用者の指摘「ハンガー内にいると現在位置がとれない」) ハンガーの中 (時刻合わせがハンガーの中で合った、または区画の中でなくハンガーの範囲に入る。
+        // StationMapModel.HangarAt): 「ハンガーの中にいます」とし、道順の出発地はそのハンガーにいちばん近いハンガーロビー (艦隊マネージャーの端末) にする
+        // 自転しない場所 (時刻合わせをしない) は、取った点でハンガーの中か (HangarPointAt: 床の上でなく、小さい区画の箱の外で、ハンガーの範囲) を見る
+        var hangar = sameSystem ? fit?.Hangar ?? (fit == null ? m.HangarPointAt(local) : null) : null;
+        if (hangar != null)
         {
-            _cur = (local, fit?.Floor.Id ?? m.FloorOf(local)?.Id ?? "", "Inside");
+            _curHangar = hangar;
+            _cur = (local, "", "Hangar");
+            txtCurrent.Text = $"ハンガーの中にいます（ハンガー ({(hangar.Size.Length > 0 ? hangar.Size : "?")}) の下）。道順はハンガーロビーから出します" + corrNote;
+        }
+        else if (sameSystem && m.SectionAt(local) != null)
+        {
+            _cur = (local, fit?.Floor?.Id ?? m.FloorOf(local)?.Id ?? "", "Inside");
             txtCurrent.Text = fitNote;
         }
         else if (sameSystem && (fit != null || m.InsideBounds(local)))
         {
-            _cur = (local, fit?.Floor.Id ?? m.FloorOf(local)?.Id ?? "", "Bounds");
+            _cur = (local, fit?.Floor?.Id ?? m.FloorOf(local)?.Id ?? "", "Bounds");
             txtCurrent.Text = "現在位置は区画の外です（ハンガーなど）。道順は到着口のエレベーターから出します" + fitNote;
         }
         else
@@ -1066,10 +1355,10 @@ public partial class StationMapPanel : UserControl
         else if (fit is not { } f) text = $"時刻合わせ: 床の上になる時刻が前後 {StationMapModel.FitWindowSeconds} 秒に無いので、取った時刻のまま";
         else
         {
-            var floorName = _floorDisplay.TryGetValue(f.Floor.Id, out var fn) ? fn : f.Floor.Id;
+            var floorName = f.Floor == null ? $"ハンガーの中 (入口 {f.Hangar?.Index} {f.Hangar?.Size})" : _floorDisplay.TryGetValue(f.Floor.Id, out var fn) ? fn : f.Floor.Id;
             var secName = f.Section is { } s ? (_sectionNames.TryGetValue(s.Id, out var sn) ? sn : s.Name) + $" ({s.Id})" : "なし";
             text = string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                $"δ {f.Delta:+0.000;-0.000} 秒、局所 ({f.Local.X:0.0}, {f.Local.Y:0.0}, {f.Local.Z:0.0})、階 {floorName} ({f.Floor.Id})、区画 {secName}、候補 {f.Candidates}");
+                $"δ {f.Delta:+0.000;-0.000} 秒、局所 ({f.Local.X:0.0}, {f.Local.Y:0.0}, {f.Local.Z:0.0})、階 {floorName} ({f.Floor?.Id ?? "-"})、区画 {secName}、候補 {f.Candidates}");
         }
         var corr = body is { Length: > 0 } && corrections.LastOrDefault(c => c.Body == body) is { } cc
             ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $"、補正値 {cc.OffsetDeg:0.######}° (測った時刻 {DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(cc.Utc * 1000)).ToLocalTime():HH:mm:ss.fff}{(cc.Utc == utc ? "。今回の点で測ったもの" : "")})")
@@ -1138,6 +1427,12 @@ public partial class StationMapPanel : UserControl
                     name = _hangarLifts.Contains(p.Index) ? HangarLift : _transitNames.TryGetValue(p.Index, out var n) ? n : (t.Kind == "tram" ? "シャトル乗り場" : "エレベーター");
                     return t.Node >= 0 ? t.Node : m.NearestNode(t.Pos);
                 }
+            case "terminal":
+                {
+                    var g = m.TerminalGroups[p.Index];
+                    name = TerminalLabel(g);
+                    return g.Node >= 0 ? g.Node : m.NearestNode(g.Pos);
+                }
             case "section":
                 {
                     var s = m.Sections[p.Index];
@@ -1152,6 +1447,9 @@ public partial class StationMapPanel : UserControl
                 if (_cur is not { } c) return -1;
                 if (c.State == "Inside") return m.NearestNode(c.Pos);
                 // 区画の外・ステーションの外: いちばん近い到着口 (ハンガー・ドッキングのエレベーター。ハンガーのエレベーター (HangarLifts) も入れる)
+                // ハンガーの中 (推測を含む): ハンガーロビー (艦隊マネージャーの端末のまとまり) の節点。無ければ下の到着口
+                if (c.State is "Hangar" or "HangarGuess" && HangarLobby() is { } lobby)
+                    return lobby.Node >= 0 ? lobby.Node : m.NearestNode(lobby.Pos);
                 var arrivals = m.Transit.Where(t => t.Node >= 0 && (_hangarLifts.Contains(t.Index) || t.Kind == "elevator" && _transitNames.TryGetValue(t.Index, out _)
                     && (t.Dest.Contains("docking", StringComparison.OrdinalIgnoreCase) || t.Dest.Contains("hangar", StringComparison.OrdinalIgnoreCase)))).ToList();
                 if (arrivals.Count == 0) return -1;

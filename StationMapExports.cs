@@ -47,7 +47,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
     // 横の記録の印 (段階 4 の StationMapJson.App と同じ)
     public const string Mark = StationMapJson.App;
     // 保存する JSON の形の版 (JSON の "format")。版の数字は StationMapJson.Format (StationRouteGraph.cs) の 1 か所だけで、Write がその値を書く。上げるのはそこだけ。
-    //   これより古い版の JSON は「取り込みが要る」(StateOf が None) として扱い、取り込み直しで置き換える (このアプリのものなので、使用量・最大容量では数え、古い順に消す)
+    //   これと違う版 (古い版と、新しい版のアプリで取り込んだもの) の JSON は「取り込みが要る」(StateOf が None) として扱い、取り込み直しで置き換える (このアプリのものなので、使用量・最大容量では数え、古い順に消す)
     public const int Format = StationMapJson.Format;
     // 進み具合の欄 (Ship3DExports.Jobs) の Short と、容量の数え方 (Ship3DExports.EnforceLimit) のキーの頭
     public const string KeyPrefix = "station:";
@@ -124,10 +124,11 @@ internal sealed class StationMapExports : INotifyPropertyChanged
 
     // JSON の頭 (印・record・Data.p4k の印・木の形のハッシュ)
     // ListedFloors: 一覧に出る階の数 (Finish が書く "listedFloors"。形 12 から。無ければ -1)
-    internal sealed record Header(string Record, string P4kPath, long P4kSize, long P4kWriteUtcTicks, string TreeHash, int Format, int ListedFloors = -1)
+    internal sealed record Header(string Record, string P4kPath, long P4kSize, long P4kWriteUtcTicks, string TreeHash, int Format, int ListedFloors = -1, string Name = "")
     {
-        // 今の版 (Format) より古い形か
-        public bool Outdated => Format < StationMapExports.Format;
+        // 今の版 (Format) と違う形か (取り込みが要る)。古い形に加えて、今のアプリより新しい形 (新しい版のアプリで取り込んだもの) も入れる
+        // (2026-11-02、利用者の決定「OK」: 新しい形式の地図も［まとめて取り込む］の「取り込みが要る」に数え、古い版のアプリでも取り込み直して見られるようにする)
+        public bool Outdated => Format != StationMapExports.Format;
     }
 
     // JSON の頭を読む (先頭の 64KB だけ。頭の欄は sources より前にある)。読めて、印があり、record の短い名前がファイル名と同じときだけ返す
@@ -146,7 +147,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
             }
             var final = buf.Length < 64 * 1024;
             var r = new Utf8JsonReader(buf, isFinalBlock: final, default);
-            string app = "", record = "", p4kPath = "", hash = "";
+            string app = "", record = "", p4kPath = "", hash = "", placeName = "";
             long size = 0, ticks = 0;
             int format = 0, listedFloors = -1;
             if (!r.Read() || r.TokenType != JsonTokenType.StartObject) return null;
@@ -161,6 +162,8 @@ internal sealed class StationMapExports : INotifyPropertyChanged
                     case "format": if (r.TokenType == JsonTokenType.Number && r.TryGetInt32(out var fv)) format = fv; break;
                     case "app": app = r.TokenType == JsonTokenType.String ? r.GetString() ?? "" : ""; break;
                     case "record": record = r.TokenType == JsonTokenType.String ? r.GetString() ?? "" : ""; break;
+                    // 場所の名前 (画面の知らせに出す。内部の名前 station:… を出さないため)
+                    case "name": placeName = r.TokenType == JsonTokenType.String ? r.GetString() ?? "" : ""; break;
                     case "treeHash": hash = r.TokenType == JsonTokenType.String ? r.GetString() ?? "" : ""; break;
                     case "listedFloors": if (r.TokenType == JsonTokenType.Number && r.TryGetInt32(out var lf)) listedFloors = lf; break;
                     case "p4k":
@@ -183,9 +186,17 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         done:
             if (app != Mark || record.Length == 0 || p4kPath.Length == 0) return null;
             if (!string.Equals(ShortName(record), shortName, StringComparison.OrdinalIgnoreCase)) return null;
-            return new Header(record, p4kPath, size, ticks, hash, format, listedFloors);
+            return new Header(record, p4kPath, size, ticks, hash, format, listedFloors, placeName);
         }
         catch { return null; }
+    }
+
+    // 画面に出す地図の名前: 頭の場所の名前 (無ければ短い名前。内部の名前 station:… は出さない)
+    public static string DisplayNameOf(FileInfo f)
+    {
+        var shortName = Path.GetFileNameWithoutExtension(f.Name);
+        // (名前の欄が record 名 (StarMapObject.…) のときは、名前が引けなかった取り込みなので短い名前にする)
+        return ReadHeaderOf(f.FullName, shortName) is { Name.Length: > 0 } h && !h.Name.StartsWith("StarMapObject.", StringComparison.Ordinal) ? h.Name : shortName;
     }
 
     // キャッシュの地図 (置き場所の stations\ の直下の *.json のうち、頭に印があるもの)
@@ -206,14 +217,19 @@ internal sealed class StationMapExports : INotifyPropertyChanged
     // 地図の JSON の横に置いた GLB の読み取りの結果 (StationMeshCache) の大きさ (無ければ 0)。容量の上限の数えに地図と合わせて入れる
     public static long MeshCacheBytes(FileInfo json)
     {
-        try { var f = new FileInfo(StationMeshCache.PathOf(json.FullName)); return f.Exists ? f.Length : 0; }
+        try
+        {
+            var f = new FileInfo(StationMeshCache.PathOf(json.FullName));
+            var k = new FileInfo(StationMeshCache.KeysPathOf(f.FullName));
+            return (f.Exists ? f.Length : 0) + (k.Exists ? k.Length : 0);
+        }
         catch { return 0; }
     }
 
     // GLB の読み取りの結果を消す (地図を消すとき)
     private static void DeleteMeshCache(string shortName)
     {
-        try { var p = StationMeshCache.PathOf(JsonPath(shortName)); if (File.Exists(p)) File.Delete(p); }
+        try { StationMeshCache.Delete(StationMeshCache.PathOf(JsonPath(shortName))); }
         catch (Exception ex) { Log($"{shortName}.meshes.gz を消せませんでした: {ex.Message}"); }
     }
 
@@ -633,6 +649,12 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         Log($"「{ShortName(root.Place.Record)}」の書き出しの計画: {prep.Seconds:F1} 秒 (木 {tTree:F1} 秒、要る socpak {tNeed - tTree:F1} 秒、起動のまとめ {prep.Seconds - tNeed:F1} 秒)。" +
             $"インスタンス {tree.Instances.Count}、要る socpak {need.Count} → starbreaker {jobs.Count} 回 (一致 合計 {jobs.Sum(j => j.Matched)}、1 回の一致 最大 {(jobs.Count > 0 ? jobs.Max(j => j.Matched) : 0)})、" +
             $"名前の表 {(names == null ? "なし" : names.Localize == null ? "global.ini なし" : "あり")}");
+        // (2026-11-02) 外す決まり (StationChildFilter) に当たった Child: 外したものと、部分木に床・階段の部品があるので外さなかったもの
+        if (tree.CutChildren.Count + tree.KeptChildren.Count > 0)
+            Log($"「{ShortName(root.Place.Record)}」の木で外す決まり (HarvestableObjectContainer など) に当たった Child: 外した {tree.CutChildren.Count} 件" +
+                (tree.CutChildren.Count > 0 ? $" ({string.Join("、", tree.CutChildren.Select(c => $"{c.Entity} [{c.Class}] {c.Socpak}"))})" : "") +
+                $"、床・階段の部品があるので外さなかった {tree.KeptChildren.Count} 件 (うち FW22_ の Child {tree.KeptChildren.Count(c => c.Class.StartsWith("FW22_", StringComparison.OrdinalIgnoreCase))} 件)" +
+                (tree.KeptChildren.Count > 0 ? $" ({string.Join("、", tree.KeptChildren.Select(c => $"{c.Entity} [{c.Class}] {c.Socpak}"))})" : ""));
         return prep;
     }
 
@@ -809,7 +831,10 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         var sw = Stopwatch.StartNew();
         var t = new List<string>();
         void Mark(string step) { t.Add($"{step} {sw.Elapsed.TotalSeconds:F1}"); sw.Restart(); }
-        var plates = StationFloorBuilder.DropOverheadPlates(StationFloorBuilder.Plates(tree, set), out var droppedPlates);
+        var plates0 = StationFloorBuilder.Plates(tree, set);
+        if (StationFloorBuilder.LastBadPlates > 0)
+            Log($"「{ShortName(tree.Root.Place.Record)}」 座標が壊れた板 {StationFloorBuilder.LastBadPlates} 枚を使いませんでした (部品: {string.Join("、", StationFloorBuilder.LastBadPlateNames.Distinct().Take(10))})");
+        var plates = StationFloorBuilder.DropOverheadPlates(plates0, out var droppedPlates);
         // (2026-11-02) 形で判定して表に足した部品の名前を決め直し (歩ける面につながらなかったものは「どれでもない」)、手元の表 (置き場所の stations\station_mesh_kinds_user.json) に書く。
         // 書けなくても取り込みは続ける
         // (2026-11-02) 前から表にある形の名前も、この取り込みで階段・床になれば上書きするので、足した名前が無くても決め直す
@@ -1041,13 +1066,15 @@ internal sealed class StationMapExports : INotifyPropertyChanged
     // tryExtra・releaseExtra は starbreaker を並行に足すときの問い合わせと返し (StationFloorBuilder.ExportAsync の説明)。null なら 1 本ずつ
     internal static async Task<(string Json, ExportStats Stats)> BuildJsonAsync(Prep prep, string exe, Ship3DExports.P4kStamp stamp, string workDir,
         Action<int, int>? progress, Action? afterExport, CancellationToken ct, Action<string>? onStage = null,
-        Func<Task<bool>>? tryExtra = null, Action? releaseExtra = null)
+        Func<Task<bool>>? tryExtra = null, Action? releaseExtra = null, int? maxExport = null)
     {
         var who = $"「{ShortName(prep.Root.Place.Record)}」";
         // ログ用: starbreaker の回ごとの記録。1 回ずつは出さず (Checkmate で 60 回ある)、終わった回の数で RunLogBlock 回ごとに 1 行にまとめる。失敗した回は 1 回ずつ出す。
         //   回は並行に動くので、終わる順は番号の順とは限らない。回の番号は GLB の名前 (ExportAsync が付ける station_<番号 4 桁>.glb。番号は prep.Jobs の添え字) から取る。
         //   GLB の大きさは、run が返った直後 (ExportAsync が読んで消す前) に見る。記録は並行の回から触るので logLock で守る
-        var totalRuns = prep.Jobs.Count;
+        // 動かす回 (保存に足りない socpak だけを書き出すときは、その回だけ。下の保存の使い回し)
+        var runJobs = prep.Jobs;
+        var totalRuns = runJobs.Count;
         var logLock = new object();
         int completed = 0, blockFrom = 1, blockFails = 0, maxActive = 0, blockMaxActive = 0;
         double blockRun = 0, sumRun = 0, slowSec = -1;
@@ -1058,7 +1085,7 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         {
             var m = GlbNoRegex.Match(args);
             var no = m.Success ? int.Parse(m.Groups[1].Value) + 1 : 0;
-            var j = no >= 1 && no <= prep.Jobs.Count ? prep.Jobs[no - 1] : null;
+            var j = no >= 1 && no <= runJobs.Count ? runJobs[no - 1] : null;
             var what = j != null ? $"{j.Pattern} (要る socpak {j.Socpaks.Count}、一致 {j.Matched})" : "";
             lock (logLock)
             {
@@ -1108,39 +1135,80 @@ internal sealed class StationMapExports : INotifyPropertyChanged
             }
             return r;
         }
-        // (2026-11-02、利用者の指示) 保存した GLB の読み取りの結果 (StationMeshCache) が使えれば、starbreaker を動かさずに判定だけやり直す
+        // (2026-11-02、利用者の指示) 保存した GLB の読み取りの結果 (StationMeshCache) が使えれば、starbreaker を動かさずに判定だけやり直す。
+        // (2026-11-02、利用者の指示「ない場合は取り込み済みなら足りないものだけ取る形にしてほしい」) 保存は socpak ごとの読み取りの結果なので、
+        // Data.p4k の印・保存の版・同梱の部品の表が同じなら木が変わっても使い、保存に無い socpak だけを書き出して足す (StationMeshCache の説明)
         var meshCache = StationMeshCache.PathOf(JsonPath(ShortName(prep.Root.Place.Record)));
         var needKeys = prep.Jobs.SelectMany(j => j.Socpaks).Distinct(StringComparer.Ordinal).ToList();
         StationMeshSet set;
         Action? saveMeshCache = null;
         var fromCache = false;
-        if (StationMeshCache.TryLoad(meshCache, stamp.Key, prep.TreeHash, needKeys, out var cacheWhy) is { } saved)
+        var saved = StationMeshCache.TryLoad(meshCache, stamp.Key, out var cacheWhy);
+        var lack = saved == null ? needKeys : needKeys.Where(k => !saved.Value.Raw.ContainsKey(k)).ToList();
+        if (saved is { } sv && lack.Count == 0)
         {
-            set = StationFloorBuilder.FromRaw(saved.Raw, saved.Missing, needKeys, MeshKinds());
+            set = StationFloorBuilder.FromRaw(sv.Raw, sv.Missing, needKeys, MeshKinds());
             fromCache = true;
-            Log($"{who} 保存した GLB の読み取りの結果を使い、starbreaker を動かしません (socpak {needKeys.Count}、{meshCache})");
+            Log($"{who} 保存した GLB の読み取りの結果を使い、starbreaker を動かしません (保存から {needKeys.Count} 個・書き出し 0 個、{meshCache})");
             progress?.Invoke(totalRuns, totalRuns);
+            // 保存に今の地図で要らない socpak が残っていれば、要るものだけにして書き直す (保存が大きくなり続けないように)
+            if (sv.Raw.Count > needKeys.Count || StationMeshCache.KeysOutdated(meshCache, prep.Tree))
+            {
+                var kh = StationMeshCache.BundledKindsHash();
+                var keep = set;
+                saveMeshCache = () =>
+                {
+                    try { StationMeshCache.Save(meshCache, stamp.Key, prep.TreeHash, kh, keep, prep.Tree); Log($"{who} 保存した GLB の読み取りの結果を今の地図で要るものだけにしました ({sv.Raw.Count} → {keep.Raw.Count} 個)"); }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log($"{who} GLB の読み取りの結果を保存できませんでした: {ex.Message}"); }
+                };
+            }
         }
         else
         {
-        Log($"{who} 保存した GLB の読み取りの結果は使いません ({cacheWhy})");
+        // (2026-11-02、検証の指摘「中 5」) 自動の変換 (maxExport あり) で、書き出しの要る socpak が上限を超えるときは書き出さない (TopUpPlan の見積もりが外れたとき)
+        if (maxExport is int mx && lack.Count > mx)
+            throw new InvalidOperationException($"自動の変換: 書き出しの要る socpak が {lack.Count} 個で、上限 {mx} 個を超えるので、この場所は作り直しませんでした" +
+                "（［まとめて取り込む］か［読み込み］で取り込めます）");
+        if (saved != null)
+        {
+            // 足りない socpak だけの回にする (書き出しの計画のまとめ方 PlanGrouped で、足りない socpak だけをまとめ直す)
+            runJobs = PlanGrouped(prep.Index, lack, await Ship3DP4kIndex.GetAsync(stamp), MaxSocpaksPerRun, MaxGeometryBytesPerRun, ct);
+            totalRuns = runJobs.Count;
+            Log($"{who} 保存した GLB の読み取りの結果に足りない socpak だけを書き出します: 保存から {needKeys.Count - lack.Count} 個・書き出し {lack.Count} 個 (starbreaker {runJobs.Count} 回。例: {lack[0]})");
+        }
+        else Log($"{who} 保存した GLB の読み取りの結果は使いません ({cacheWhy})。保存から 0 個・書き出し {needKeys.Count} 個");
         Log($"{who} starbreaker の書き出しを始めます: 全 {totalRuns} 回 (終わった数で {RunLogBlock} 回ごとに 1 行で出します。{(tryExtra != null ? "同時数の上限まで並行に動かします" : "1 本ずつ")})");
         onStage?.Invoke("starbreaker の書き出し");
-        set = await StationFloorBuilder.ExportAsync(Run, stamp.Path, prep.Jobs, workDir, progress, ct, tryExtra, releaseExtra, MeshKinds());
-        Log($"{who} starbreaker の書き出しが終わりました: {set.Runs} / {totalRuns} 回、{set.Seconds:F1} 秒 (starbreaker の時間の足し合わせ {sumRun:F1} 秒、同時に動いた最大 {maxActive} 本)、" +
-            $"GLB 合計 {Ship3DExports.FormatBytes(set.TotalGlbBytes)}・最大 {Ship3DExports.FormatBytes(set.MaxGlbBytes)}、床・階段のメッシュのある socpak {set.Meshes.Count(m => m.Value.Count > 0)} / {set.Meshes.Count}、" +
-            $"GLB に出てこなかった socpak {set.Missing.Count}、失敗 {set.Errors.Count} 回");
-        if (set.Errors.Count > 0)
+        var exported = await StationFloorBuilder.ExportAsync(Run, stamp.Path, runJobs, workDir, progress, ct, tryExtra, releaseExtra, MeshKinds());
+        Log($"{who} starbreaker の書き出しが終わりました: {exported.Runs} / {totalRuns} 回、{exported.Seconds:F1} 秒 (starbreaker の時間の足し合わせ {sumRun:F1} 秒、同時に動いた最大 {maxActive} 本)、" +
+            $"GLB 合計 {Ship3DExports.FormatBytes(exported.TotalGlbBytes)}・最大 {Ship3DExports.FormatBytes(exported.MaxGlbBytes)}、床・階段のメッシュのある socpak {exported.Meshes.Count(m => m.Value.Count > 0)} / {exported.Meshes.Count}、" +
+            $"GLB に出てこなかった socpak {exported.Missing.Count}、失敗 {exported.Errors.Count} 回");
+        if (exported.Errors.Count > 0)
         {
-            Log($"「{prep.Root.Place.Record}」の床の書き出しで starbreaker が {set.Errors.Count} 回失敗しました:\n{string.Join("\n", set.Errors)}");
-            throw new InvalidOperationException($"starbreaker が {set.Errors.Count} 回失敗しました: {set.Errors[0]}");
+            Log($"「{prep.Root.Place.Record}」の床の書き出しで starbreaker が {exported.Errors.Count} 回失敗しました:\n{string.Join("\n", exported.Errors)}");
+            throw new InvalidOperationException($"starbreaker が {exported.Errors.Count} 回失敗しました: {exported.Errors[0]}");
         }
-        // GLB の読み取りの結果の保存は、地図の JSON を書けた後 (呼ぶ側が ExportStats.SaveMeshCache を呼ぶ。JSON の無い保存を残さないため)
+        if (saved is { } sv2)
+        {
+            // 保存の結果と書き出した結果を合わせる。並びは要る socpak の並び (書き出しの計画 prep.Jobs の順)
+            var raw = new Dictionary<string, List<List<StationGlbMesh>>>(StringComparer.Ordinal);
+            var missing = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var k in needKeys)
+            {
+                if (sv2.Raw.TryGetValue(k, out var c)) { raw[k] = c; if (sv2.Missing.Contains(k)) missing.Add(k); }
+                else if (exported.Raw.TryGetValue(k, out var c2)) { raw[k] = c2; if (exported.Missing.Contains(k)) missing.Add(k); }
+            }
+            set = StationFloorBuilder.FromRaw(raw, missing, needKeys, MeshKinds());
+            set.Runs = exported.Runs; set.TotalGlbBytes = exported.TotalGlbBytes; set.MaxGlbBytes = exported.MaxGlbBytes; set.Seconds = exported.Seconds;
+        }
+        else set = exported;
+        // GLB の読み取りの結果の保存は、地図の JSON を書けた後 (呼ぶ側が ExportStats.SaveMeshCache を呼ぶ。JSON の無い保存を残さないため)。
+        // 保存するのは今の地図で要る socpak だけ (要らなくなった socpak の結果は消す。保存が大きくなり続けないように)
         var kindsHash = StationMeshCache.BundledKindsHash();
         var saveSet = set;
         saveMeshCache = () =>
         {
-            try { StationMeshCache.Save(meshCache, stamp.Key, prep.TreeHash, kindsHash, saveSet); Log($"{who} GLB の読み取りの結果を保存しました ({meshCache}、{Ship3DExports.FormatBytes(new FileInfo(meshCache).Length)})"); }
+            try { StationMeshCache.Save(meshCache, stamp.Key, prep.TreeHash, kindsHash, saveSet, prep.Tree); Log($"{who} GLB の読み取りの結果を保存しました ({meshCache}、{Ship3DExports.FormatBytes(new FileInfo(meshCache).Length)}、socpak {saveSet.Raw.Count} 個)"); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log($"{who} GLB の読み取りの結果を保存できませんでした: {ex.Message}"); }
         };
         }
@@ -1383,15 +1451,17 @@ internal sealed class StationMapExports : INotifyPropertyChanged
             // starbreaker の並行: この取り込みの枠 1 本のほかに、同時数の上限 (Ship3DExports.MaxParallelExports。ほかの取り込みの分を引いたもの) まで足す。
             //   足すかは Ship3DExports.TryAcquireExtraRun (UI スレッド。CPU 使用率 90% 以上・待っている取り込みがあるときは足さない) で決め、
             //   その前に置き場所のドライブの空きが MinFreeBytes 以上あるかを見る (並行の分だけ途中の GLB が同時に置かれるため)
-            Func<Task<bool>>? tryExtra = dispatcher == null ? null : async () =>
+            // 自動の変換 (AutoConvertAsync) の取り込みは starbreaker を足さない (1 本ずつ。ゲームの邪魔にならないように)
+            Func<Task<bool>>? tryExtra = dispatcher == null || _autoJobs.Contains(job) ? null : async () =>
             {
                 if (FreeSpaceProblem() != null) return false;
                 return await dispatcher.InvokeAsync(() => ex.TryAcquireExtraRun());
             };
             Action? releaseExtra = dispatcher == null ? null : () => dispatcher.BeginInvoke(() => ex.ReleaseExtraRun());
+            var maxExport = _autoJobs.Contains(job) ? AutoMaxExportSocpaks : (int?)null;
             var (json, stats) = await Task.Run(() => BuildJsonAsync(prep, exe, stamp, work, Progress,
                 () => { if (dispatcher != null) dispatcher.BeginInvoke(() => ex.EndRun(job)); else ex.EndRun(job); }, ct, s => job.LogStage = s,
-                tryExtra, releaseExtra), ct);
+                tryExtra, releaseExtra, maxExport), ct);
 
             job.LogStage = "保存";
             var swSave = Stopwatch.StartNew();
@@ -1426,6 +1496,133 @@ internal sealed class StationMapExports : INotifyPropertyChanged
             ex.EndRun(job);
             if (tmp != null) try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
             try { if (Directory.Exists(work)) Directory.Delete(work, recursive: true); } catch { }
+        }
+    }
+
+    // ===== 自動の変換 =====
+    // (2026-11-02、利用者の決定「b も」) 取り込み済みの地図のうち、形式が今と違うもの (Header.Outdated。古い形式も新しい形式も) を、裏で自動で作り直す。
+    //   いつ: アプリの起動の後 (MainWindow.InitShip3DSettings が AutoConvertDelay 後に呼ぶ。形式を上げた版に更新した後の起動もこれ) と、Data.p4k の印が変わったとき。
+    //   対象: 地図の JSON の頭の Data.p4k の印が今の印と同じで (StateOf では照合の要らないもの)、保存した読み取りの結果 (StationMeshCache) が使え、
+    //     書き出しが要らないか、足りない socpak が AutoMaxExportSocpaks 個以下のもの (TopUpPlan)。保存が無い・使えない・全部の書き出しが要るもの・
+    //     Data.p4k の印が変わった地図 (保存の印も違うので全部の書き出しになる) は自動ではしない (今までどおり［まとめて取り込む］か個別の［読み込み］)。
+    //   飛ばすもの: 表示中 (AcquireView)・取り込み中・照合中・後で消すもの・まとめて取り込むが動いている間 (まとめて取り込むを始めたら自動の変換は止める)。
+    //   照合との順序: 照合 (VerifyAsync) は形式が今と同じで Data.p4k の印が違う地図だけ、自動の変換は形式が違って印が同じ地図だけなので、同じ地図に両方は掛からない。
+    //   控えめにする: 1 か所ずつ (前のものが終わってから次を並べる)、starbreaker も 1 本ずつ (ExportAsync の tryExtra を使わない)。待ち行列 (Ship3DExports.WaitTurnAsync) に乗るので、
+    //     CPU 使用率が高いとき・同時数の上限 (メモリ) のときは待つ。進み具合は今の取り込みと同じく設定タブの欄と［詳細］に出る (AddJob)
+    // AutoMaxExportSocpaks: 自動で書き出してよい足りない socpak の数。2026-11-02 に 86 か所を取り込み直したとき、町・内部を入れた Nyx_Levski で 93 個 (30 回・21 秒)、
+    //   Rockcracker で 27〜30 個、ほかの場所は部品の表が増えた分の数個だった。数個の書き出しは starbreaker 数回 (1 回 2〜6 秒) で済むので 20 個までにした (値は親・利用者の確認待ち)
+    public const int AutoMaxExportSocpaks = 20;
+    // 起動してから自動の変換を始めるまで (起動直後の DB・画面の読み込みと重ならないように)
+    public static readonly TimeSpan AutoConvertDelay = TimeSpan.FromSeconds(60);
+    private bool _autoRunning, _autoAgain;
+    private CancellationTokenSource? _autoCts;
+    private readonly HashSet<Ship3DJob> _autoJobs = new();
+
+    // 自動の変換を始める (UI スレッドで呼ぶ)。動いている間に頼まれたら、終わってからもう 1 回調べる
+    public void StartAutoConvert(string why)
+    {
+        if (_autoRunning) { _autoAgain = true; return; }
+        _ = AutoConvertAsync(why);
+    }
+
+    public void CancelAutoConvert() { try { _autoCts?.Cancel(); } catch (ObjectDisposedException) { } }
+
+    // 自動の変換で作り直すか: 形式が今と違い、Data.p4k の印が今と同じ地図の短い名前と record (UI スレッドの外から呼べる)
+    internal static List<(string Short, string Record)> AutoConvertCandidatesOnDisk(Ship3DExports.P4kStamp stamp)
+    {
+        var res = new List<(string, string)>();
+        foreach (var f in CachedFiles())
+        {
+            var sn = Path.GetFileNameWithoutExtension(f.Name);
+            if (ReadHeaderOf(f.FullName, sn) is { } h && h.Outdated && SameStamp(h, stamp)) res.Add((sn, h.Record));
+        }
+        return res;
+    }
+
+    private bool AutoSkip(string shortName) =>
+        _byShort.ContainsKey(shortName) || _views.ContainsKey(shortName) || _verifying.ContainsKey(shortName) || _pendingDelete.Contains(shortName);
+
+    private async Task AutoConvertAsync(string why)
+    {
+        _autoRunning = true;
+        StationIndex? index = null;
+        try
+        {
+            do
+            {
+                _autoAgain = false;
+                if (_batchActive) { Log($"自動の変換 ({why}): まとめて取り込むが動いているので、しません"); break; }
+                var stamp = Ship3DExports.CurrentStamp();
+                if (stamp == null) break;
+                var onDisk = await Task.Run(() => AutoConvertCandidatesOnDisk(stamp));
+                var cands = onDisk.Where(c => !AutoSkip(c.Short)).ToList();
+                if (cands.Count == 0)
+                {
+                    if (onDisk.Count > 0) Log($"自動の変換 ({why}): 形式の違う地図 {onDisk.Count} か所は、表示中・取り込み中・照合中なので今はしません");
+                    continue;
+                }
+                _autoCts?.Dispose();
+                _autoCts = new CancellationTokenSource();
+                var ct = _autoCts.Token;
+                var sw = Stopwatch.StartNew();
+                var extractor = new GameDataExtractor(DetailPanel.WorkDir());
+                await extractor.EnsureStarBreakerAsync();
+                var dbPath = DetailPanel.DbPath();
+                var workDir = DetailPanel.WorkDir();
+                MapNames? mapNames = null;
+                Dictionary<string, string> names = new(StringComparer.Ordinal);
+                // 計画: 場所の表・索引・ルート探し (まとめて取り込むと同じ)、場所ごとの木と保存の使い方 (TopUpPlan)
+                var plans = await Task.Run(() =>
+                {
+                    var places = LoadPlaces(dbPath);
+                    mapNames = LoadNames(places, workDir, dbPath);
+                    names = places.GroupBy(p => p.Place.Record).ToDictionary(g => g.Key, g => g.First().Name, StringComparer.Ordinal);
+                    index = StationIndex.Build(stamp.Path, ct);
+                    var roots = index.FindRoots(places.Select(p => p.Place).ToList(), ct: ct).Roots;
+                    var list = new List<(string Short, StationRoot? Root, int Kind, int Export)>();
+                    foreach (var (sn, rec) in cands)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        if (!roots.TryGetValue(rec, out var root)) { list.Add((sn, null, 2, 0)); continue; }
+                        var (kind, export) = TopUpPlan(index, StationTree.Load(index, root, contents: false, ct: ct), stamp);
+                        list.Add((sn, root, kind, export));
+                    }
+                    return list;
+                }, ct);
+                var go = plans.Where(p => p.Root != null && (p.Kind == 0 || p.Kind == 1 && p.Export <= AutoMaxExportSocpaks)).ToList();
+                var notAuto = plans.Except(go).ToList();
+                Log($"自動の変換 ({why}): {go.Count} か所 (保存から {go.Count(p => p.Kind == 0)}・足りない分の書き出し {go.Count(p => p.Kind == 1)} (合計 {go.Where(p => p.Kind == 1).Sum(p => p.Export)} 個の socpak))。" +
+                    $"自動ではしない {notAuto.Count} か所 (保存が無い・使えない・場所が見つからない {notAuto.Count(p => p.Kind == 2)}、足りない socpak が {AutoMaxExportSocpaks} 個より多い {notAuto.Count(p => p.Kind == 1)})" +
+                    (notAuto.Count > 0 ? $": {string.Join("、", notAuto.Select(p => p.Short))}" : "") + $"。計画 {sw.Elapsed.TotalSeconds:F1} 秒");
+                int done = 0, failed = 0, no = 0;
+                var failures = new List<string>();
+                foreach (var p in go)
+                {
+                    no++;
+                    if (ct.IsCancellationRequested || _batchActive) break;
+                    if (AutoSkip(p.Short)) continue;   // 計画の間に表示・取り込み・照合が始まったもの
+                    var rec = p.Root!.Place.Record;
+                    var job = new Ship3DJob(rec, KeyOf(p.Short), names.TryGetValue(rec, out var n) && n.Length > 0 ? n : p.Short, _autoCts)
+                        { Kind = Ship3DJobKind.Station, LogTag = $"自動の変換の {no} / {go.Count} か所目" };
+                    _autoJobs.Add(job);
+                    AddJob(job, p.Short);
+                    try { if (await RunBatchJobAsync(job, p.Short, p.Root, index!, mapNames, extractor.StarBreakerExe, stamp, failures)) done++; else failed++; }
+                    finally { _autoJobs.Remove(job); }
+                }
+                // 自動の変換の取り込みはまとめての扱い (InBatch) で、1 か所ずつは容量の上限を見ないので、終わりに 1 回見る (2026-11-02、検証の指摘)
+                if (done > 0) Ship3DExports.Instance.EnforceLimit(justExported: "");
+                Log($"自動の変換 ({why}) が終わりました: 作り直した {done} か所、失敗・取り消し・飛ばした {failed} か所、全体 {sw.Elapsed.TotalSeconds:F1} 秒" +
+                    (failures.Count > 0 ? "\n" + string.Join("\n", failures) : ""));
+                index?.Dispose();
+                index = null;
+            } while (_autoAgain);
+        }
+        catch (OperationCanceledException) { Log($"自動の変換 ({why}) を止めました"); }
+        catch (Exception e) { Log($"自動の変換 ({why}) が失敗しました: {Ship3DExports.Describe(e)}"); }
+        finally
+        {
+            index?.Dispose();
+            _autoRunning = false;
         }
     }
 
@@ -1469,7 +1666,11 @@ internal sealed class StationMapExports : INotifyPropertyChanged
 
         _batchCts = new CancellationTokenSource();
         var ct = _batchCts.Token;
+        // 自動の変換が動いていれば止め、取り消しが済む (自動の変換の取り込みが全部終わる) のを待つ (まとめて取り込むが同じ場所も取り込むので、二重に並べないように。
+        // 待たずに候補を作ると、取り消し中の場所が「取り込み中」として飛ばされる。2026-11-02、検証の指摘「中 6」)
+        CancelAutoConvert();
         SetBatchActive(true);
+        while (_autoRunning || _autoJobs.Count > 0) await Task.Delay(100);
         var failures = new List<string>();
         StationIndex? index = null;
         // ログ用: 全体の経過・今の段階・飛ばしたものの名前 (理由ごと)
@@ -1543,6 +1744,8 @@ internal sealed class StationMapExports : INotifyPropertyChanged
             batchStage = "見積もり";
             var swEst = Stopwatch.StartNew();
             var selected = new List<(StationRoot Root, double Seconds, double Bytes)>();
+            // 保存した読み取りの結果 (StationMeshCache) の使い方の見積もり (TopUpPlan): 保存から作り直す・足りない socpak だけ書き出す (その数)・全部書き出す
+            int planFromCache = 0, planTopUp = 0, planTopUpSocpaks = 0, planFull = 0;
             double sumBytes = 0, sumSeconds = 0;
             for (int k = 0; k < candidates.Count; k++)
             {
@@ -1550,7 +1753,8 @@ internal sealed class StationMapExports : INotifyPropertyChanged
                 var r = candidates[k];
                 BatchText = $"マップをまとめて取り込む: 見積もり中 {k + 1} / {candidates.Count} か所目 ({NameOf(r)})";
                 int count;
-                try { count = await Task.Run(() => StationTree.Load(index!, r, contents: false, ct: ct).Instances.Count, ct); }
+                (int Kind, int Export) plan;
+                try { (count, plan) = await Task.Run(() => { var t = StationTree.Load(index!, r, contents: false, ct: ct); return (t.Instances.Count, TopUpPlan(index!, t, stamp)); }, ct); }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception e)
                 {
@@ -1569,7 +1773,9 @@ internal sealed class StationMapExports : INotifyPropertyChanged
                 sumBytes += bytes;
                 sumSeconds += sec;
                 selected.Add((r, sec, bytes));
+                if (plan.Kind == 0) planFromCache++; else if (plan.Kind == 1) { planTopUp++; planTopUpSocpaks += plan.Export; } else planFull++;
             }
+            Log($"ステーションのまとめて取り込む: 保存した読み取りの結果の使い方 (見積もり): 保存から作り直す {planFromCache} か所、足りない socpak だけ書き出す {planTopUp} か所 (合計 {planTopUpSocpaks} 個)、全部書き出す {planFull} か所");
             Log($"ステーションのまとめて取り込む: 見積もりが終わりました ({swEst.Elapsed.TotalSeconds:F1} 秒): 取り込むもの {selected.Count} か所、" +
                 $"予想 合計 {sumSeconds:F0} 秒・約 {Ship3DExports.FormatBytes(sumBytes)}、最大容量を超えるので取り込まない {notTaken} か所、見積もれなかった {failures.Count} か所");
             batchStage = "始めるかの確認";
@@ -1593,6 +1799,9 @@ internal sealed class StationMapExports : INotifyPropertyChanged
             var minutes = sumSeconds / Math.Max(1, parallel) / 60;
             var ask = head +
                       $"取り込むステーション・都市: {selected.Count} か所\n" +
+                      $"　保存した読み取りの結果から作り直す (書き出し無し): {planFromCache} か所\n" +
+                      $"　足りない部品だけを書き出す: {planTopUp} か所 (合計 {planTopUpSocpaks} 個の socpak)\n" +
+                      $"　全部を書き出す: {planFull} か所\n" +
                       $"予想時間: 約 {Math.Max(1, Math.Ceiling(minutes)):F0} 分 (1 か所ずつなら合計 約 {Math.Ceiling(sumSeconds / 60):F0} 分。同時 {parallel} 本までで見込んだもの)\n" +
                       $"予想サイズ: 約 {Math.Max(1, Math.Ceiling(sumBytes / (1024.0 * 1024))):F0} MB\n\n" + info +
                       "\n始めますか？ (進み具合は［詳細］タブと設定タブの 3D モデルの欄に出ます)";
@@ -1655,6 +1864,20 @@ internal sealed class StationMapExports : INotifyPropertyChanged
             _batchCts = null;
             SetBatchActive(false);
         }
+    }
+
+    // 保存した読み取りの結果 (StationMeshCache) の使い方の見積もり (2026-11-02、利用者の指示「足りないものだけ全部拾うようにしてほしい」。まとめて取り込むの確認の窓に出す)。
+    // Kind: 0 = 保存から作り直す (書き出し無し)、1 = 足りない socpak だけ書き出す (Export がその数)、2 = 全部書き出す (保存が無い・使えない)。
+    // 足りない socpak: 木の socpak のうち、保存したときに調べていない (StationMeshCache.KeysOf の Checked に無い) もので、書き出す部品のあるもの
+    // (StationFloorBuilder.ScanSocMeshes と IsExportMesh(部品の表)。書き出しの計画 PlanExports と同じ決まり)。
+    // 保存したときに調べて要らなかった socpak が、部品の表が増えて要るようになった分は数えない (見積もり)。取り込みのときは書き出しの計画で決め直す
+    internal static (int Kind, int Export) TopUpPlan(StationIndex index, StationTree tree, Ship3DExports.P4kStamp stamp)
+    {
+        if (StationMeshCache.KeysOf(StationMeshCache.PathOf(JsonPath(ShortName(tree.Root.Place.Record))), stamp.Key) is not { } keys) return (2, 0);
+        var kinds = MeshKinds();
+        var lack = tree.Instances.Where(i => i.Found && i.Socpak.Length > 0 && !keys.Checked.Contains(i.Socpak)).Select(i => i.Socpak).Distinct(StringComparer.Ordinal)
+            .Count(sp => StationFloorBuilder.ScanSocMeshes(index, sp).Any(n => StationFloorBuilder.IsExportMesh(kinds, n)));
+        return lack == 0 ? (0, 0) : (1, lack);
     }
 
     // まとめての中の 1 か所 (順番を待ってから計画を作って取り込む)。作れたら true。失敗は failures に足す (知らせは最後にまとめて)

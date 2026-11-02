@@ -149,7 +149,9 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         catch { return new List<FileInfo>(); }
     }
 
-    public static long CacheBytes() => CachedFiles().Sum(f => f.Length);
+    // (2026-11-02) ステーションの 3D 表示 (Station3DExports) も最大容量に合わせて数えるので、その分 (Station3DExports.CacheBytes) も足す。
+    // 呼ぶ所 (まとめて取り込むの残りの容量・使用量のログ) は「船 + ステーションの地図」をこれと StationMapExports.CacheBytes の和で出している
+    public static long CacheBytes() => CachedFiles().Sum(f => f.Length) + Station3DExports.CacheBytes();
 
     public static string ShortName(string record) =>
         record.StartsWith("EntityClassDefinition.", StringComparison.OrdinalIgnoreCase) ? record["EntityClassDefinition.".Length..] : record;
@@ -363,7 +365,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             _verifying.Remove(shortName);
             RaiseStateChanged();
         }
-        DeleteChangedCache(shortName, reason!);
+        // (2026-11-02、利用者の決定「a」) 変わっていた船は消さずに、裏で自動で取り直す (QueueRefresh。書き出し中の船は今までどおり後で消す)
+        QueueRefresh(shortName, reason!);
         return false;
     }
 
@@ -426,9 +429,9 @@ public sealed class Ship3DExports : INotifyPropertyChanged
 
     private static void Log(string msg) => App.AppendStartupLog(App.Config.WorkingDirectory, $"[3D モデル] {msg}");
 
-    // 取り込み 1 件のログ (船は [3D モデル]、ステーションの地図は [ステーションの地図] の頭。続けて「名前」(短い名前))
+    // 取り込み 1 件のログ (船は [3D モデル]、ステーションの地図は [ステーションの地図]、ステーションの 3D 表示は [ステーションの 3D] の頭。続けて「名前」(短い名前))
     internal static void LogJob(Ship3DJob job, string msg) =>
-        App.AppendStartupLog(App.Config.WorkingDirectory, $"{(job.Kind == Ship3DJobKind.Station ? "[ステーションの地図]" : "[3D モデル]")} 「{job.Name}」({job.Short}) {msg}");
+        App.AppendStartupLog(App.Config.WorkingDirectory, $"{(job.Kind switch { Ship3DJobKind.Station => "[ステーションの地図]", Ship3DJobKind.Station3D => "[ステーションの 3D]", _ => "[3D モデル]" })} 「{job.Name}」({job.Short}) {msg}");
 
     // ログに出す例外の中身: アプリが理由を書いて投げる種類 (InvalidOperationException・IOException) は型と文、それ以外は型・文・呼び出し履歴
     internal static string Describe(Exception ex) =>
@@ -447,6 +450,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
     public double CpuPercent => _cpuPercent;
     // CPU 使用率が 90% 以上 (書き出しを始めない。［読み込み］・［まとめて取り込む］を使えなくする)
     public bool CpuHigh => _cpuHigh;
+    // 今 CPU 使用率が 90% 以上か (Instance をまだ作っていなければ false。どのスレッドからも読める。ゲームのアイコンの取り出し GameIcons が見る)
+    internal static bool CpuHighNow => _instance?._cpuHigh ?? false;
 
     // 空き物理メモリ (バイト。GlobalMemoryStatusEx の ullAvailPhys)。調べられなければ null
     public static long? AvailablePhysicalMemory()
@@ -490,11 +495,21 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         RefreshProgress();
         // Data.p4k の印が変わった (パッチ・チャンネルの切り替え) かを見る (Data.p4k を探して大きさ・更新日時を見るだけ。開かない)
         var stampKey = CurrentStamp()?.Key;
-        if (!_stampSeen) { _stampSeen = true; _lastStampKey = stampKey; }
+        if (!_stampSeen)
+        {
+            _stampSeen = true;
+            _lastStampKey = stampKey;
+            // 自動の取り直し (StartAutoRefresh の説明): 起動の後 AutoRefreshDelay たってから 1 回 (アプリを閉じている間にパッチが入ったとき)。ステーションの 3D も同じ
+            var t = new DispatcherTimer { Interval = AutoRefreshDelay };
+            t.Tick += (_, _) => { t.Stop(); StartAutoRefresh("起動の後"); Station3DExports.Instance.StartAutoRefresh("起動の後"); };
+            t.Start();
+        }
         else if (stampKey != _lastStampKey)
         {
             _lastStampKey = stampKey;
             P4kStampChanged?.Invoke();
+            StartAutoRefresh("Data.p4k の印が変わった");
+            Station3DExports.Instance.StartAutoRefresh("Data.p4k の印が変わった");
         }
     }
 
@@ -726,6 +741,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         }
         if (_byShort.TryGetValue(shortName, out var running) && running.Task != null)
         {
+            // 自動の取り直しの順番待ちなら、いちばん先にする (［読み込み］を押した船を待たせない)
+            PromoteRefresh(running);
             Log($"「{name}」({shortName}) の［読み込み］: 同じ船の書き出しが動いているので、それに合流します ({running.LogTag})");
             try { return await running.Task; }
             catch { return null; }
@@ -748,6 +765,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         // 照合の間に別の［読み込み］が始めていれば合流する
         if (_byShort.TryGetValue(shortName, out running) && running.Task != null)
         {
+            // 照合で変わっていて自動の取り直しに並んだ船なら、いちばん先にする
+            PromoteRefresh(running);
             Log($"「{name}」({shortName}) の［読み込み］: 照合の間に同じ船の書き出しが始まったので、それに合流します ({running.LogTag})");
             try { return await running.Task; }
             catch { return null; }
@@ -817,6 +836,205 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         }
         finally { RemoveJob(job); }
     }
+
+    // ===== 自動の取り直し =====
+    // (2026-11-02、利用者の決定「a だが b も」: 取り込み済みの船の 3D が古く (パッチなどで) なったら、消すのではなく、裏で自動で取り直す)
+    //   いつ: 照合 (VerifyAsync) で「変わっていた」(照合できなかったを含む) になったとき。照合は今までどおり表示しようとしたとき・まとめて取り込むのほかに、
+    //     起動の後 AutoRefreshDelay たってから 1 回と、Data.p4k の印が変わったときに、印の違う船を全部照合する (StartAutoRefresh。1 隻ずつ。CPU 使用率が 90% 以上の間は待つ)。
+    //   取り直すまで: 古い GLB はファイルとしては残すが、表示には使わない (後で消すもの _pendingDelete に入れる。StateOf は「なし」、書き出し中の仕事があるので［読み込み］は押せず、
+    //     ［詳細］の状態は仕事の文「自動の取り直しの順番待ち」・書き出し中の進み具合になる)。今開いている表示はそのまま (表示中のものは消さない今までの決まり)。
+    //     取り直せたら新しい GLB で置き換える (ExportAsync が _pendingDelete から外す)。失敗したら今までどおり古いものを消す (仕事を外したとき DeletePendingIfIdle)。
+    //     取り消し (アプリの終了など)・空きが足りずやめたときは古いものを消さずに残す (次の照合でまた取り直しに並ぶ)。
+    //   控えめにする: 1 隻ずつ (前の船が終わってから次を始める)。書き出しは船と共通の待ち行列 (WaitTurnAsync・Pump) に乗るので、CPU 使用率 90% 以上・同時数の上限の間は待つ。
+    //     順番待ちの船は進み具合の欄の「待ち N 隻」の 1 行にまとまる (仕事は並べたときに作る。［読み込み］を押した船はいちばん先にする PromoteRefresh)。
+    //   変わった船が多いとき (全船 279 隻・25.9 GB の実績): 数の上限は設けず全部並べる。並べる順は GLB の更新日時の新しい順 (最近取り込んだ・見た船ほど先)。
+    //     予想時間は前に書き出した時間 (横の記録の ExportSeconds)。容量は置き換えなので増えるのは新旧の差の分だけ。古いものから消す (EnforceLimit) は 1 隻ごとにはせず
+    //     (まとめて取り込むと同じ。取り直し中の船を消さないため)、並べたものが全部終わったときに 1 回だけ。1 隻ごとに置き場所のドライブの空き (AutoRefreshMinFreeBytes) を見て、
+    //     足りなければ残りをやめる (古いものは残す)。
+    public static readonly TimeSpan AutoRefreshDelay = TimeSpan.FromSeconds(60);
+    public const long AutoRefreshMinFreeBytes = 2L * 1024 * 1024 * 1024;
+    private readonly List<Ship3DJob> _refreshWaiting = new();
+    private readonly Dictionary<Ship3DJob, TaskCompletionSource<string?>> _refreshTcs = new();
+    private readonly Dictionary<string, string> _refreshReason = new(StringComparer.OrdinalIgnoreCase);
+    private CancellationTokenSource _refreshCts = new();
+    private bool _refreshRunning, _scanRunning, _scanAgain;
+    // ログ用: 今回の取り直しの数 (並べたもの・取り直せたもの・失敗・取り消し)
+    private int _refreshQueued, _refreshDone, _refreshFailed, _refreshCancelled;
+    private readonly List<string> _refreshNames = new();
+    // 今書き出している取り直し (無ければ null)。船とステーションの 3D の取り直しは合わせて 1 本ずつにする (相手のこれが null になるまで待つ)
+    internal Ship3DJob? RefreshCurrent { get; private set; }
+
+    // 照合で変わっていた船を取り直しに並べる (UI スレッド)。書き出し中 (個別・まとめて・取り直し) の船は、その書き出しが新しいものを書くので、今までどおり後で消すだけ
+    private void QueueRefresh(string shortName, string reason)
+    {
+        var side = ReadOurSidecar(shortName);
+        if (side == null || _byShort.ContainsKey(shortName)) { DeleteChangedCache(shortName, reason); return; }
+        _pendingDelete.Add(shortName);
+        var job = new Ship3DJob(side.Record, shortName, shortName, _refreshCts) { EstimatedSeconds = Math.Max(side.ExportSeconds, BaseSeconds), LogTag = "自動の取り直し" };
+        var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        job.Task = tcs.Task;   // 個別の［読み込み］が同じ船なら合流する
+        _refreshTcs[job] = tcs;
+        _refreshReason[shortName] = reason;
+        AddJob(job);
+        job.SetPhase(Ship3DJobPhase.Queued, "自動の取り直しの順番待ち");
+        _refreshWaiting.Add(job);
+        _refreshQueued++;
+        _refreshNames.Add(shortName);
+        LogJob(job, $"自動の取り直しに並べました ({reason})。待ち {_refreshWaiting.Count} 隻");
+        RaiseStateChanged();
+        if (!_refreshRunning) _ = ProcessRefreshAsync();
+    }
+
+    // 自動の取り直しの順番待ち (まだ見積もり・書き出しを始めていない) の船か。順番待ちの間は［読み込み］を押せる (押すと PromoteRefresh でいちばん先にする)
+    public bool IsRefreshWaiting(string record) => _byShort.TryGetValue(ShortName(record), out var j) && _refreshWaiting.Contains(j);
+
+    // 自動の取り直しの順番待ちの船を、いちばん先にする (［読み込み］で合流したとき)
+    private void PromoteRefresh(Ship3DJob job)
+    {
+        var i = _refreshWaiting.IndexOf(job);
+        if (i <= 0) return;
+        _refreshWaiting.RemoveAt(i);
+        _refreshWaiting.Insert(0, job);
+        LogJob(job, "［読み込み］が押されたので、自動の取り直しの順番をいちばん先にしました");
+    }
+
+    // 並べた船を 1 隻ずつ取り直す (UI スレッド)
+    private async Task ProcessRefreshAsync()
+    {
+        _refreshRunning = true;
+        var sw = Stopwatch.StartNew();
+        string? lastDone = null;
+        try
+        {
+            while (_refreshWaiting.Count > 0)
+            {
+                var job = _refreshWaiting[0];
+                _refreshWaiting.RemoveAt(0);
+                if (await RunRefreshJobAsync(job)) lastDone = job.Short;
+            }
+        }
+        finally
+        {
+            _refreshRunning = false;
+            Log($"自動の取り直し: {_refreshQueued} 隻 (取り直した {_refreshDone}、失敗して消した {_refreshFailed}、やめた (古いものを残した) {_refreshCancelled}。" +
+                $"{sw.Elapsed.TotalSeconds:F1} 秒): {string.Join(", ", _refreshNames)}");
+            _refreshQueued = _refreshDone = _refreshFailed = _refreshCancelled = 0;
+            _refreshNames.Clear();
+            // 古いものから消すのは、並べたものが全部終わったときに 1 回だけ (説明は上)
+            if (lastDone != null) EnforceLimit(justExported: lastDone);
+        }
+    }
+
+    // 取り直し 1 隻: 見積もり (確認の窓は出さない) → 順番を待つ → 書き出す。取り直せたら true
+    private async Task<bool> RunRefreshJobAsync(Ship3DJob job)
+    {
+        var tcs = _refreshTcs[job];
+        _refreshTcs.Remove(job);
+        var keepOld = false;
+        try
+        {
+            job.Cts.Token.ThrowIfCancellationRequested();
+            if (DriveOf(Folder) is { } d && d.Free < AutoRefreshMinFreeBytes)
+            {
+                LogJob(job, $"置き場所のドライブ {d.Root} の空きが {FormatBytes(d.Free)} しかないので、自動の取り直しをやめます (古いものは残します。{FormatBytes(AutoRefreshMinFreeBytes)} 以上要ります)");
+                // 残りも同じなのでやめる
+                foreach (var j in _refreshWaiting.ToList()) j.Cancel();
+                keepOld = true;
+                job.SetPhase(Ship3DJobPhase.Cancelled, "");
+                _refreshCancelled++;
+                tcs.TrySetResult(null);
+                return false;
+            }
+            var stamp = CurrentStamp() ?? throw new OperationCanceledException("ゲームの Data.p4k が見つかりません");
+            job.LogStage = "StarBreaker の用意";
+            var extractor = new GameDataExtractor(DetailPanel.WorkDir());
+            await extractor.EnsureStarBreakerAsync();
+            job.SetPhase(Ship3DJobPhase.Estimating, "自動の取り直し: 見積もり中");
+            job.LogStage = "見積もり (--dump-hierarchy)";
+            var est = await Ship3DEstimator.EstimateAsync(extractor.StarBreakerExe, stamp, job.Record, job.Cts.Token);
+            var c = Ship3DStats.Coefficients();
+            job.Estimate = est;
+            job.EstimatedSeconds = est.Seconds(c);
+            LogJob(job, $"自動の取り直しを始めます ({(_refreshReason.TryGetValue(job.Short, out var why) ? why : "")})。予想 {job.EstimatedSeconds:F0} 秒・約 {FormatBytes(est.GlbBytes(c))}");
+            // ステーションの 3D の取り直しが書き出している間は待つ (合わせて 1 本ずつ)
+            if (Station3DExports.Instance.RefreshCurrent != null) job.SetPhase(Ship3DJobPhase.Estimating, "自動の取り直し: ステーションの 3D の取り直しが終わるのを待っています");
+            while (Station3DExports.Instance.RefreshCurrent != null) await Task.Delay(1000, job.Cts.Token);
+            RefreshCurrent = job;
+            await WaitTurnAsync(job, job.Cts.Token);
+            var path = await ExportAsync(job, extractor.StarBreakerExe, stamp);
+            _refreshDone++;
+            tcs.TrySetResult(path);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            keepOld = true;
+            job.SetPhase(Ship3DJobPhase.Cancelled, "");
+            _refreshCancelled++;
+            LogJob(job, $"自動の取り直しをやめました (段階: {(job.LogStage.Length > 0 ? job.LogStage : "順番待ち")})。古いものは残します (次の照合でまた並びます)");
+            tcs.TrySetResult(null);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            job.SetPhase(Ship3DJobPhase.Failed, "");
+            _refreshFailed++;
+            LogJob(job, $"自動の取り直しが失敗しました (段階: {job.LogStage})。古いものは消します: {Describe(ex)}");
+            tcs.TrySetResult(null);
+            return false;
+        }
+        finally
+        {
+            // 取り消し・やめたときは古いものを残す (後で消すものから外す)。失敗のときは残したまま仕事を外す → DeletePendingIfIdle で消える (今までの照合の扱いと同じ)
+            if (RefreshCurrent == job) RefreshCurrent = null;
+            if (keepOld) _pendingDelete.Remove(job.Short);
+            _refreshReason.Remove(job.Short);
+            RemoveJob(job);
+        }
+    }
+
+    // 印の違う船を全部照合する (UI スレッド)。変わっていた船は照合が取り直しに並べる (QueueRefresh)。動いている間に頼まれたら、終わってからもう 1 回
+    public void StartAutoRefresh(string why)
+    {
+        if (_scanRunning) { _scanAgain = true; return; }
+        _ = ScanAsync(why);
+    }
+
+    private async Task ScanAsync(string why)
+    {
+        _scanRunning = true;
+        try
+        {
+            do
+            {
+                _scanAgain = false;
+                var stamp = CurrentStamp();
+                if (stamp == null) break;
+                // 横の記録の Data.p4k の印が今と違う船 (書き出し中・照合中・後で消すものは除く)。GLB の更新日時の新しい順
+                var cands = await Task.Run(() => CachedFiles()
+                    .Select(f => (File: f, Short: Path.GetFileNameWithoutExtension(f.Name), Side: ReadOurSidecar(Path.GetFileNameWithoutExtension(f.Name))))
+                    .Where(x => x.Side != null && !(string.Equals(x.Side.P4kPath, stamp.Path, StringComparison.OrdinalIgnoreCase)
+                        && x.Side.P4kSize == stamp.Size && x.Side.P4kWriteUtcTicks == stamp.WriteUtcTicks))
+                    .OrderByDescending(x => x.File.LastWriteTimeUtc).Select(x => (x.Short, Record: x.Side!.Record)).ToList());
+                cands = cands.Where(x => !_byShort.ContainsKey(x.Short) && !_verifying.ContainsKey(x.Short) && !_pendingDelete.Contains(x.Short)).ToList();
+                if (cands.Count == 0) continue;
+                Log($"自動の取り直し ({why}): Data.p4k の印が違う船 {cands.Count} 隻を 1 隻ずつ照合します (変わっていた船は取り直しに並べます)");
+                var sw = Stopwatch.StartNew();
+                int same = 0, changed = 0;
+                foreach (var (sn, rec) in cands)
+                {
+                    // CPU 使用率が 90% 以上の間は待つ (照合は starbreaker の --dump-hierarchy を動かすため)
+                    while (_cpuHigh) await Task.Delay(1000);
+                    if (StateOf(rec) != Ship3DCacheState.NeedsVerify) continue;   // 待つ間に照合・取り込みが始まったもの
+                    if (await VerifyAsync(rec)) same++; else changed++;
+                }
+                Log($"自動の取り直し ({why}): 照合が終わりました: 変わっていなかった {same} 隻、変わっていた {changed} 隻 (取り直しに並べました)、{sw.Elapsed.TotalSeconds:F1} 秒");
+            } while (_scanAgain);
+        }
+        catch (Exception e) { Log($"自動の取り直し ({why}) の照合が失敗しました: {Describe(e)}"); }
+        finally { _scanRunning = false; }
+    }
+
 
     // ===== 書き出し本体 =====
 
@@ -934,19 +1152,34 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         var max = MaxMb * MB;
         var files = CachedFiles();
         var stations = StationMapExports.CachedFiles();
-        long total = files.Sum(f => f.Length) + stations.Sum(f => f.Length + StationMapExports.MeshCacheBytes(f));
+        // ステーションの 3D 表示 (Station3DExports。キーは "station3d:<短い名前>"。大きさは置き場所のフォルダの中の全部) も合わせて数え、古い順に消す対象にする
+        var station3d = Station3DExports.CachedEntries();
+        long total = files.Sum(f => f.Length) + stations.Sum(f => f.Length + StationMapExports.MeshCacheBytes(f)) + station3d.Sum(e => e.Bytes);
         if (total <= max) return;
         var protect = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { justExported };
         foreach (var v in _views.Keys) protect.Add(v);
         foreach (var j in Jobs) protect.Add(j.Short);
         foreach (var v in StationMapExports.Instance.ProtectedKeys()) protect.Add(v);
+        foreach (var v in Station3DExports.Instance.ProtectedKeys()) protect.Add(v);
         var deleted = new List<string>();
         var deletedStation = false;
         var entries = files.Select(f => (File: f, Key: Path.GetFileNameWithoutExtension(f.Name)))
             .Concat(stations.Select(f => (File: f, Key: StationMapExports.KeyOf(f))));
-        foreach (var (f, key) in entries.Where(e => !protect.Contains(e.Key)).OrderBy(e => e.File.LastWriteTimeUtc))
+        foreach (var (f, key) in entries.Concat(station3d.Select(e => (File: e.Scene, Key: e.Key))).Where(e => !protect.Contains(e.Key)).OrderBy(e => e.File.LastWriteTimeUtc))
         {
             if (total <= max) break;
+            if (Station3DExports.IsKey(key))
+            {
+                // 大きさは消す前に取る (場所のフォルダの中の全部)
+                var len3 = station3d.First(e => e.Key == key).Bytes;
+                // ログに出すのは場所の名前 (内部のキー "station3d:…" は出さない)。消す前に取る
+                var name3 = Station3DExports.DisplayNameOfKey(key);
+                if (!Station3DExports.Instance.DeleteForLimit(key)) continue;
+                total -= len3;
+                deleted.Add($"{name3} (ステーションの 3D)");
+                deletedStation = true;
+                continue;
+            }
             if (StationMapExports.IsKey(key))
             {
                 // 大きさは消す前に取る (GLB の読み取りの結果 (.meshes.gz) も合わせて消える)
@@ -977,13 +1210,19 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         {
             var left = CachedFiles();
             var leftStations = StationMapExports.CachedFiles();
+            var left3d = Station3DExports.CachedEntries();
             string text;
-            if (leftStations.Count == 0)
+            // 残っているのがステーションの 3D 1 件だけのとき。ほか (船・地図) の分かれ道は 3D が無いときと同じ (3D が残っていても船・地図の文の決まりを通す)
+            if (left3d.Count == 1 && left.Count == 0 && leftStations.Count == 0)
+                text = $"「{Station3DExports.DisplayNameOfKey(left3d[0].Key)}」のステーションの 3D 1 件だけで最大容量 ({MaxMb:N0} MB) を超えています ({FormatBytes(left3d[0].Bytes)})。消さずに残します";
+            else if (left3d.Count > 0 && left.Count + leftStations.Count + left3d.Count > 1)
+                text = $"最大容量 ({MaxMb:N0} MB) を超えていますが、表示中・書き出し中のものを除くと消せるものがありません (今 {FormatBytes(total)})";
+            else if (leftStations.Count == 0)
                 text = left.Count == 1
                     ? $"「{Path.GetFileNameWithoutExtension(left[0].Name)}」1 隻だけで最大容量 ({MaxMb:N0} MB) を超えています ({FormatBytes(left[0].Length)})。消さずに残します"
                     : $"最大容量 ({MaxMb:N0} MB) を超えていますが、表示中・書き出し中のものを除くと消せるものがありません (今 {FormatBytes(total)})";
             else if (left.Count == 0 && leftStations.Count == 1)
-                text = $"「{StationMapExports.KeyOf(leftStations[0])}」1 件だけで最大容量 ({MaxMb:N0} MB) を超えています ({FormatBytes(leftStations[0].Length + StationMapExports.MeshCacheBytes(leftStations[0]))})。消さずに残します";
+                text = $"「{StationMapExports.DisplayNameOf(leftStations[0])}」1 件だけで最大容量 ({MaxMb:N0} MB) を超えています ({FormatBytes(leftStations[0].Length + StationMapExports.MeshCacheBytes(leftStations[0]))})。消さずに残します";
             else
                 text = $"最大容量 ({MaxMb:N0} MB) を超えていますが、表示中・書き出し中のものを除くと消せるものがありません (今 {FormatBytes(total)})";
             Notice = text;
@@ -1096,6 +1335,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 {
                     BatchText = $"船舶・車両をまとめて取り込む: 照合中 {i + 1} / {list.Count} 隻目 ({s.Name})";
                     if (await VerifyAsync(s.Record)) { skipFresh++; skippedFresh.Add(s.Short); continue; }
+                    // 照合で変わっていた船は自動の取り直しに並んだ (QueueRefresh)。その取り直しが書き出すので、見積もりの前に外す (書き出し中と同じ扱い)
+                    if (_byShort.ContainsKey(s.Short)) { skipRunning++; skippedRunning.Add(s.Short); continue; }
                 }
                 else if (state == Ship3DCacheState.Fresh) { skipFresh++; skippedFresh.Add(s.Short); continue; }
                 if (HasForeignFile(s.Short)) { skipForeign++; skippedForeign.Add(s.Short); continue; }
@@ -1456,8 +1697,8 @@ internal static class Ship3DP4kIndex
 
 public enum Ship3DJobPhase { Estimating, Queued, Exporting, Done, Failed, Cancelled }
 
-// 書き出しの種類: 船の 3D モデル / ステーションの地図 (StationMapExports)
-public enum Ship3DJobKind { Ship, Station }
+// 書き出しの種類: 船の 3D モデル / ステーションの地図 (StationMapExports) / ステーションの 3D 表示 (Station3DExports)
+public enum Ship3DJobKind { Ship, Station, Station3D }
 
 // 書き出し 1 隻 (進み具合の欄の 1 行)
 public sealed class Ship3DJob : INotifyPropertyChanged

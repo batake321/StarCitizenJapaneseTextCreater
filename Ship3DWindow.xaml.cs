@@ -285,7 +285,8 @@ public partial class Ship3DWindow : Window
         var state = ex.StateOf(_record);
         var shortName = Ship3DExports.ShortName(_record);
         var job = ex.Jobs.FirstOrDefault(j => j.Short.Equals(shortName, StringComparison.OrdinalIgnoreCase));
-        btnImport.IsEnabled = state == Ship3DCacheState.None && job == null && !ex.CpuHigh;
+        // 自動の取り直しの順番待ちの間も押せる (押すとその船をいちばん先にする。Ship3DExports.IsRefreshWaiting・PromoteRefresh)
+        btnImport.IsEnabled = state == Ship3DCacheState.None && job == null && !ex.CpuHigh || ex.IsRefreshWaiting(_record);
         txtShipState.Text = job != null ? $"書き出し中: {job.Text}"
             : state switch
             {

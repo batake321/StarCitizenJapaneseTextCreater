@@ -54,6 +54,12 @@ public partial class MainWindow
         };
         // Data.p4k の印が変わったとき (設定タブを開いたままパッチが入ったとき等)
         Ship3DExports.Instance.P4kStampChanged += RequestBatchRecount;
+        // (2026-11-02、利用者の決定「b も」) 取り込み済みの地図の形式が今と違えば、裏で自動で作り直す (StationMapExports.AutoConvertAsync の説明)。
+        // 起動の後 AutoConvertDelay たってから 1 回と、Data.p4k の印が変わったとき
+        var autoTimer = new System.Windows.Threading.DispatcherTimer { Interval = StationMapExports.AutoConvertDelay };
+        autoTimer.Tick += (_, _) => { autoTimer.Stop(); StationMapExports.Instance.StartAutoConvert("起動の後"); };
+        autoTimer.Start();
+        Ship3DExports.Instance.P4kStampChanged += () => StationMapExports.Instance.StartAutoConvert("Data.p4k の印が変わった");
         // 設定タブを開いたとき: 全部取り込み済みかを出し直す (パッチで Data.p4k が変わっていれば押せるようになる)
         tabMain.SelectionChanged += (_, e) =>
         {
@@ -151,10 +157,11 @@ public partial class MainWindow
     private void UpdateShip3DUsageText()
     {
         if (txtShip3DUsage == null) return;
-        // 船とステーションの地図を合わせた使用量 (最大容量は両方を合わせて数える)
+        // 船・ステーションの地図・ステーションの 3D を合わせた使用量 (最大容量はどれも合わせて数える)
         var files = Ship3DExports.CachedFiles();
         var stations = StationMapExports.CachedFiles();
-        txtShip3DUsage.Text = $"今の使用量: {Ship3DExports.FormatBytes(files.Sum(f => f.Length) + stations.Sum(f => f.Length + StationMapExports.MeshCacheBytes(f)))} ({files.Count} 隻・{stations.Count} か所)";
+        var st3d = Station3DExports.CachedEntries();
+        txtShip3DUsage.Text = $"今の使用量: {Ship3DExports.FormatBytes(files.Sum(f => f.Length) + stations.Sum(f => f.Length + StationMapExports.MeshCacheBytes(f)) + st3d.Sum(e => e.Bytes))} ({files.Count} 隻・{stations.Count} か所・3D {st3d.Count} か所)";
     }
 
     // ［マップをまとめて取り込む］は、船の［船舶・車両をまとめて取り込む］と同じく、CPU 使用率が 90% 以上のときと、ステーションのまとめて取り込むが動いている間と、

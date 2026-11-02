@@ -48,6 +48,8 @@ const st = {
   start: null,        // 同上
   vs: 1, vx: 0, vy: 0,    // 画面 = (U·vs + vx, V·vs + vy)
   ovl: [],            // 画面の大きさで描く印 [{el, u, v, label, pri}]
+  icons: {},          // 端末の種類 → ゲームのアイコンの data: URI (アプリが {type:'icons'} で送る。無ければ色の丸と頭の 1 字)
+  hlTerm: null,       // 強調している端末のまとまりの番号 (左の「端末」の一覧で選んだもの)
 };
 
 function post(m) {
@@ -56,14 +58,15 @@ function post(m) {
 }
 // 失敗をアプリへ知らせる (アプリがログに書く。StationMapWeb.LogScriptError)。where: どの処理か (アプリからの知らせの種類 load・floor・route など、
 // または event (クリック・ホイールなどの操作)・promise)。画面の下にも短く出す (何も出ないまま止まって見えないように)
-function fail(e, where) {
+// at: 起きた所 (ファイル:行:列。window の error の知らせから。無ければ '')。アプリはログに「ビューアの失敗」として書く (StationMapWeb.InitAsync)
+function fail(e, where, at) {
   const message = (e && e.message !== undefined) ? String(e.message) : String(e);
   const stack = (e && e.stack) ? String(e.stack) : '';
   console.error('[stationmap] ' + (where || '') + ' ' + (stack || message));
-  post({ type: 'error', where: where || '', message, stack });
-  try { msgEl.textContent = '地図の表示でエラーが起きました (' + (where || '') + '): ' + message; } catch (x) { }
+  post({ type: 'error', where: where || '', message, stack, at: at || '' });
+  try { msgEl.textContent = '地図を表示できませんでした (' + (where || '') + '): ' + message + '（アプリのログを見てください）'; } catch (x) { }
 }
-window.addEventListener('error', e => fail(e.error || e.message, 'event'));
+window.addEventListener('error', e => fail(e.error || e.message, 'event', e && e.filename ? (String(e.filename).split('/').pop() + ':' + e.lineno + ':' + e.colno) : ''));
 window.addEventListener('unhandledrejection', e => fail(e.reason, 'promise'));
 
 function el(name, attrs, parent) {
@@ -152,6 +155,22 @@ function currentFloor(fid, x, y, z) {
   };
   return pick(cand) || (cand !== st.floors ? pick(st.floors) : null) || floorOfPoint(fid, z);
 }
+// 階 fid の床 (区画の床の輪) の、点 (x, y) にいちばん近い所 {x, y, d}。床が無ければ null (currentFloor と同じ輪の表を使う)
+const CUR_FLOOR_GAP = 30;
+function nearestFloorPoint(fid, x, y) {
+  currentFloor(fid, x, y, 0);   // 輪の表 (st.rings) を作る
+  let best = null;
+  for (const o of (st.rings || {})[fid] || []) {
+    const r = o.r;
+    for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+      const [ax, ay] = r[j], [bx, by] = r[i], ex = ax - bx, ey = ay - by, l2 = ex * ex + ey * ey;
+      const t = l2 > 0 ? Math.max(0, Math.min(1, ((x - bx) * ex + (y - by) * ey) / l2)) : 0;
+      const px = bx + ex * t, py = by + ey * t, d = Math.hypot(x - px, y - py);
+      if (!best || d < best.d) best = { x: px, y: py, d };
+    }
+  }
+  return best;
+}
 // 描くか (斜めの図は選んだ階の上下 WINDOW 階まで、真上の図は選んだ階だけ)
 function visible(fid) {
   if (fid === null || fid === undefined || st.fidx[fid] === undefined) return false;
@@ -209,6 +228,8 @@ function load(m) {
   st.sel = (m.floor && st.fidx[m.floor] !== undefined) ? m.floor : (st.floors.length ? st.floors[st.floors.length - 1].id : null);
   st.top = !!m.top;
   st.selSec = null; st.route = null; st.cur = null; st.pin = null; st.dest = null; st.start = null; st.routeTrams = []; st.routeSpans = [];
+  st.hlTerm = null;
+  showSales(null);
   st.dists = map.districts || [];
   st.groupDist = {};
   for (const d of st.dists) for (const g of d.groups || []) st.groupDist[g] = d.id;
@@ -217,6 +238,8 @@ function load(m) {
   // 初めは、主要な地区のある都市でも階の地図 (選んだ階を濃く、斜めに重ねた図。地区のある都市ではその階の地区の階)。
   // 都市の全体図は［← 全体図へ戻る］で出す (利用者の指示 2026-11-01: Orbituary を開いて全体図が出たのを見て「全体が意味不明　2枚目スクショならわかる」)
   st.mode = 'floors'; setDistrictFor(st.sel); rebuild(); fitFloor(st.sel);
+  // 読み終わったことをアプリへ知らせる (アプリは、知らせが来なければ「地図を表示できませんでした」と出してログに書く。StationMapPanel.LoadWatch)
+  post({ type: 'loaded', floors: st.floors.length });
 }
 
 // 階の間隔: 各階の床の斜めの図での縦の広がりの中央値 × 0.9 + 15 (20 m 以上)。広がりは床の点の 5〜95 % の範囲 (遠くの小さな床で広がらないように)
@@ -558,10 +581,14 @@ function rebuild() {
       let best = null;
       for (const p of c) { const q = proj(p[0], p[1], st.stack[f.id]); if (!best || q[0] < best[0]) best = q; }
       const fname = f.id === st.sel ? f.name + stairPartners(f.id) : f.name;
+      // 階の名札 (2026-11-02、利用者の指示「階も区域も今の文字が見やすいとは思わない」): 角の丸い札の中に書く。選んだ階は濃い札に白い太字 (14px)、
+      // ほかの階は白い札に灰色の枠と字 (12px)。札の位置・大きさは placeLabels・setLabel が合わせる (o.pill)
+      const selF = f.id === st.sel;
       addAt(best[0], best[1], t => {
-        const tx = el('text', { x: -6, y: 4, 'text-anchor': 'end', class: f.id === st.sel ? 'bold' : '' }, t);
+        el('rect', { class: 'pill-bg' + (selF ? ' sel' : ''), rx: 4, ry: 4, visibility: 'hidden' }, t);
+        const tx = el('text', { x: -6, y: 4, 'text-anchor': 'end', class: 'pill' + (selF ? ' sel bold' : ''), 'data-fs': selF ? 14 : 12 }, t);
         tx.textContent = fname;
-      }, 'mk flabel' + (f.id === st.sel || st.top ? '' : ' dim'), null, fname, f.id === st.sel ? 1 : 5, 'end');
+      }, 'mk flabel' + (selF || st.top ? '' : ' dim'), null, fname, selF ? 1 : 5, 'end');
       // 選んだ階の名札は、板の左の角が画面の外でも見えるよう、板の形を持たせておく (applyView の visibleAnchor)
       if (f.id === st.sel) st.ovl[st.ovl.length - 1].hullUV = c.map(p => proj(p[0], p[1], st.stack[f.id]));
     }
@@ -644,8 +671,42 @@ function rebuild() {
   drawTracks(lines);
   drawRoute(el('g', { id: 'routeLayer' }, world));
   drawMarkers();
+  drawSectionNames();
   drawSectionLabel();
   applyView();
+}
+
+// 区画の名札 (2026-11-02、利用者の指示「階も区域も今の文字が見やすいとは思わない」): 選ばなくても、選んだ階の区画 (データが一覧に出す区画 listed で名前のあるもの) の名前を
+// 区画の中に出す。同じ名前の区画がその階に 2 つ以上あれば、床の輪のいちばん大きいもの 1 つにだけ出す。位置はいちばん大きい輪の頂点の平均 (drawSectionLabel と同じ)。
+// 字は 12px の太め・濃い灰色に白い縁取り (枠は付けない。床の上で区画の形を隠さないように)。重なりは placeLabels でよけ、置けなければ出さない (まとめた名札にしない)。
+// 選んでいる区画は drawSectionLabel が出すので、ここでは出さない。全体図・地区の平面図では出さない
+function drawSectionNames() {
+  if (st.mode !== 'floors' || !st.sel || !visible(st.sel)) return;
+  const best = {};
+  for (const s of st.map.sections || []) {
+    if (!s.listed || !s.name || s.id === st.selSec) continue;
+    const rings = (s.floors || {})[st.sel];
+    if (!rings) continue;
+    for (const r of rings) {
+      if (r.length < 3) continue;
+      let a = 0;
+      for (let i = 0; i < r.length; i++) { const p = r[i], q = r[(i + 1) % r.length]; a += p[0] * q[1] - q[0] * p[1]; }
+      a = Math.abs(a) / 2;
+      const b = best[s.name];
+      if (!b || a > b.a) best[s.name] = { a, r, s };
+    }
+  }
+  const sel = (st.map.sections || []).find(x => x.id === st.selSec);
+  for (const name in best) {
+    if (sel && sel.name === name) continue;
+    const { r } = best[name];
+    const cx = r.reduce((a, p) => a + p[0], 0) / r.length, cy = r.reduce((a, p) => a + p[1], 0) / r.length;
+    const mk = addMarker(cx, cy, st.sel, g => {
+      el('text', { x: 0, y: 0, 'text-anchor': 'middle', class: 'secname' }, g).textContent = name;
+    }, 'mk flabel secname-mk', null, name, 7);
+    const o = mk ? st.ovl[st.ovl.length - 1] : null;
+    if (o) { o.kind = 'section'; o.noCluster = true; o.fs = 12; o.bold = true; }
+  }
 }
 
 function drawStairLinks(g) {
@@ -737,7 +798,9 @@ function addAt(u, v, build, cls, attrs, label, pri, anchor) {
       o.bold = o.tx.classList.contains('bold');
     }
     const k = attrs && attrs['data-k'];
-    o.kind = k === 'shop' ? 'shop' : k === 'transit' ? 'transit' : k === 'district' ? 'district' : (cls || '').includes('flabel') ? 'floor' : 'other';
+    o.kind = k === 'shop' ? 'shop' : k === 'transit' ? 'transit' : k === 'terminal' ? 'terminal' : k === 'district' ? 'district' : (cls || '').includes('flabel') ? 'floor' : 'other';
+    // 札の付いた名札 (階の名前。viewer.css の .pill-bg): 字の大きさ (data-fs) と背景の四角
+    if (o.tx && o.tx.classList.contains('pill')) { o.pill = true; o.fs = +(o.tx.getAttribute('data-fs') || 13); o.bg = g.querySelector('rect.pill-bg'); }
   }
   st.ovl.push(o);
   return g;
@@ -809,6 +872,30 @@ function drawMarkers() {
       el('text', { x: 7, y: 4, class: 'lbl' + (hot ? ' bold' : '') }, g).textContent = name;
       el('title', null, g).textContent = name ? '店: ' + name : '店';   // 名前の無い店 (ゲームの名前がデータに無い) は名札を出さない
     }, 'mk' + (hot ? '' : dimClass(fid)), { 'data-k': 'shop', 'data-i': i }, (hot || !dimClass(fid)) ? name : '', hot ? 0 : 2);
+  }
+  // 端末 (2026-11-02、利用者の指示「マークは端末のところがいい」): 端末の位置 (隣り合う同じ種類の端末はまとめて 1 つ。StationMapModel.TerminalGroups) に、
+  // 種類の色の丸と、その上にゲームのアイコン (白一色の svg。アプリが {type:'icons'} で送る。無ければ種類の言葉の頭の 1 字)。
+  // 名札は種類の言葉 (ゲームの訳。termKinds) と、まとめた数 (×N)。押すと目的地にする (店・乗り場と同じ)。左の一覧で選んだまとまりは橙の輪で強調する
+  const kinds = m.termKinds || {};
+  for (const t of m.terminals || []) {
+    if (!t.floor) continue;
+    const fid = floorOfPoint(t.floor, t.pos[2]);
+    if (!visible(fid)) continue;
+    const info = kinds[t.kind] || { label: t.kind, color: '#5f6368' };
+    const i = t.i, label = info.label + (t.n > 1 ? ' ×' + t.n : '');
+    const hl = st.hlTerm === i;
+    const hot = isDest('terminal', i) || isStart('terminal', i) || hl;
+    addMarker(t.pos[0], t.pos[1], fid, g => {
+      if (hl) el('circle', { r: 17, class: 'hl-ring' }, g);
+      el('circle', { r: 9, class: 'term-dot', style: `fill:${info.color}` }, g);
+      const ic = st.icons && st.icons[t.kind];
+      if (ic) el('image', { href: ic, x: -6.5, y: -6.5, width: 13, height: 13, class: 'term-icon' }, g);
+      else el('text', { x: 0, y: 4, 'text-anchor': 'middle', class: 'term-letter' }, g).textContent = (info.label || '?')[0];
+      if (isDest('terminal', i)) el('circle', { r: 13, class: 'dest-ring' }, g);
+      if (isStart('terminal', i)) el('circle', { r: 13, class: 'start-ring' }, g);
+      el('text', { x: 12, y: 4, class: 'lbl' + (hot ? ' bold' : '') }, g).textContent = label;
+      el('title', null, g).textContent = '端末: ' + label;
+    }, 'mk' + (hot ? '' : dimClass(fid)), { 'data-k': 'terminal', 'data-i': i }, (hot || !dimClass(fid)) ? label : '', hot ? 0 : 3);
   }
   // 現在位置 (/showlocation。赤い点)
   if (st.cur) {
@@ -1020,6 +1107,10 @@ st.layout = { ms: 0, placed: 0, moved: 0, clustered: 0, clusters: 0 };
 
 function labelSize(o) {
   if (o.huge) return [textWidth(o.label) * 1.7 + 6, 28];
+  // 札の付いた名札 (階の名前): 字の大きさ (o.fs) の幅に左右 7 px ずつの余白、高さは字 + 10 px
+  if (o.pill) return [textWidth(o.label) * (o.fs / 13) * (o.bold ? 1.08 : 1) + 14, o.fs + 10];
+  // 区画の名札 (12px の太め)
+  if (o.kind === 'section') return [textWidth(o.label) * (12 / 13) * 1.08 + 4, 16];
   const per = o.big ? 1.2 : 1;
   return [(textWidth(o.label) * per) * (o.bold ? 1.08 : 1) + 4, o.big ? 19 : 17];
 }
@@ -1070,6 +1161,9 @@ function placeLabels() {
       }
     }
   }
+  // 店の販売品の枠 (#sales) が出ていれば、その下には名札を置かない
+  const sb = salesBox();
+  if (sb) add(sb);
   const clusterLayer = document.getElementById('clusters') || el('g', { id: 'clusters' }, svg);
   clusterLayer.textContent = '';
   const order = st.ovl.filter(o => o.label && o.tx).sort((a, b) => a.pri - b.pri);
@@ -1081,7 +1175,8 @@ function placeLabels() {
     const [lw, lh] = labelSize(o);
     let got = null;
     outer:
-    for (const r of LEADER_STEPS) {
+    // 区画の名札は、すぐ近く (0・16 px) にだけ置く (遠くへずらすと、どの区画の名前か分からなくなるため)
+    for (const r of (o.kind === 'section' ? [0, 16] : LEADER_STEPS)) {
       const dirs = r === 0 ? (o.anchor === 'end' ? [[-1, 0], [1, 0]] : [[1, 0], [-1, 0]]) : DIRS;
       for (const [dx, dy] of dirs) {
         // 札の印に近い辺を、印から (8 + r) px の所に置く
@@ -1094,7 +1189,7 @@ function placeLabels() {
         break outer;
       }
     }
-    if (!got) { setLabel(o, null); left.push(o); continue; }
+    if (!got) { setLabel(o, null); if (!o.noCluster) left.push(o); continue; }
     add(got.b);
     setLabel(o, got);
     placed++;
@@ -1108,7 +1203,7 @@ function placeLabels() {
     if (!g) groups.set(k, g = []);
     g.push(o);
   }
-  const words = { shop: '店', transit: '乗り場', floor: '階', other: '名前' };
+  const words = { shop: '店', transit: '乗り場', terminal: '端末', floor: '階', other: '名前' };
   for (const g of groups.values()) {
     const cx = g.reduce((a, o) => a + o.sx, 0) / g.length, cy = g.reduce((a, o) => a + o.sy, 0) / g.length;
     const text = `${words[g[0].kind] || '名前'} ${g.length} 件`;
@@ -1136,12 +1231,19 @@ function placeLabels() {
 
 // 札を置く (got が null なら隠す)。位置は印の g の中の座標
 function setLabel(o, got) {
-  if (!got) { o.tx.setAttribute('visibility', 'hidden'); o.leader.setAttribute('visibility', 'hidden'); return; }
+  if (!got) { o.tx.setAttribute('visibility', 'hidden'); o.leader.setAttribute('visibility', 'hidden'); if (o.bg) o.bg.setAttribute('visibility', 'hidden'); return; }
   o.tx.setAttribute('visibility', 'visible');
   o.tx.setAttribute('text-anchor', 'middle');
   o.tx.setAttribute('x', got.cx.toFixed(1));
-  o.tx.setAttribute('y', (got.cy + (o.huge ? 7 : 5)).toFixed(1));
-  if (got.r > 0) {
+  o.tx.setAttribute('y', (got.cy + (o.huge ? 7 : o.fs ? o.fs * 0.36 : 5)).toFixed(1));
+  if (o.bg) {
+    const [bw, bh] = labelSize(o);
+    o.bg.setAttribute('x', (got.cx - bw / 2).toFixed(1)); o.bg.setAttribute('y', (got.cy - bh / 2).toFixed(1));
+    o.bg.setAttribute('width', bw.toFixed(1)); o.bg.setAttribute('height', bh.toFixed(1));
+    o.bg.setAttribute('visibility', 'visible');
+  }
+  // 区画の名札は引き出し線を出さない (すぐ近くにだけ置くので。線が区画の床の上に増えて見にくくなるため)
+  if (got.r > 0 && o.kind !== 'section') {
     // 引き出し線: 印から札の近い辺まで
     const [lw, lh] = labelSize(o);
     const ex = got.cx - Math.sign(got.cx) * lw / 2 * (Math.abs(got.cx) > lw / 2 ? 1 : 0);
@@ -1300,6 +1402,9 @@ function endPress(e, cancel) {
   const p = press;
   press = null;
   if (cancel || p.drag || p.long) return;
+  // 地図を押したら、店の販売品の枠と端末の強調を消す (区画・店を押したときは、アプリが知らせを受けて出し直す。2026-11-02、利用者の指示「他をクリックしたら消してほしい」)
+  showSales(null);
+  if (st.hlTerm !== null && !(p.target && p.target.closest && p.target.closest('[data-k="terminal"]'))) { st.hlTerm = null; rebuild(); post({ type: 'hlterm-cleared' }); }
   click(p.target);
 }
 svg.addEventListener('pointerup', e => endPress(e, false));
@@ -1321,7 +1426,7 @@ function click(target) {
     applyView();
     return;
   }
-  if (k === 'shop' || k === 'transit') {
+  if (k === 'shop' || k === 'transit' || k === 'terminal') {
     post({ type: 'pick', kind: k, index: +hit.getAttribute('data-i') });
     return;
   }
@@ -1395,10 +1500,20 @@ function receive(m) {
         if (!fid) break;
         st.sel = fid; st.mode = 'floors'; setDistrictFor(fid); rebuild();
         const [u, v] = proj(st.cur.pos[0], st.cur.pos[1], st.stack[fid]);
-        fitPoints([[u, v]], m.size || 120);
+        // (2026-11-02、利用者の指摘「赤い点だけで床が何も見えない」) 点がその階の床から CUR_FLOOR_GAP m より離れていれば、いちばん近い床の点も入る範囲で寄せる
+        const near = nearestFloorPoint(fid, st.cur.pos[0], st.cur.pos[1]);
+        const pts = [[u, v]];
+        if (near && near.d > CUR_FLOOR_GAP) pts.push(proj(near.x, near.y, st.stack[fid]));
+        fitPoints(pts, m.size || 120);
         post({ type: 'floor', id: fid });
         break;
       }
+      // 端末のアイコン (種類 → data: URI)。届いたら描き直す
+      case 'icons': st.icons = m.icons || {}; if (st.map) rebuild(); break;
+      // 左の「端末」の一覧で選んだまとまりを強調する (null で消す)。階に移って寄せるのは、アプリが floor・focus を送る
+      case 'hlterm': st.hlTerm = (m.index === undefined || m.index === null) ? null : m.index; rebuild(); break;
+      // 店の販売品の枠 ({title, shops: [{name, cols, rows, note}]}。shops が無ければ消す)
+      case 'sales': showSales(m); break;
       case 'focus': {
         const fid = floorOfPoint(m.floor, m.pos[2]);
         if (visible(fid)) { const [u, v] = proj(m.pos[0], m.pos[1], st.stack[fid]); fitPoints([[u, v]], m.size || 40); }
@@ -1407,6 +1522,38 @@ function receive(m) {
     }
   } catch (e) { fail(e, m && m.type ? String(m.type) : 'receive'); }
 }
+// ===== 店の販売品の枠 (2026-11-02、利用者の指示「区画でお店を選んでそのエリアがハイライトされたとき、右側に四角で囲んだ販売品リスト(価格も)を出せれば素晴らしい。他をクリックしたら消してほしい」) =====
+// 地図の右上 (#legend の下) に、幅 380 px・高さは地図の高さ − 70 px までの枠。長いときは枠の中で巻き取る。店ごとに見出し「店名（種類）」と表 (列は cols、行は rows)。
+// 表の無い店は note の文。右上の × で閉じる。地図を押すと閉じる (endPress)。中身はアプリが作る (StationMapPanel.SendSales。［詳細］のお店の【売っている物】と同じデータ)
+function esc(t) { return String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function showSales(m) {
+  let box = document.getElementById('sales');
+  if (!m || !m.shops || !m.shops.length) { if (box) { box.style.display = 'none'; box.innerHTML = ''; } return; }
+  if (!box) { box = document.createElement('div'); box.id = 'sales'; document.body.appendChild(box); }
+  let h = '<div class="sales-head"><span>' + esc(m.title || '販売品') + '</span><button type="button" class="sales-close" title="閉じる">×</button></div>';
+  for (const sh of m.shops) {
+    h += '<div class="sales-shop">' + esc(sh.name) + '</div>';
+    if (sh.note) { h += '<div class="sales-note">' + esc(sh.note) + '</div>'; continue; }
+    for (const tb of sh.tables || []) {
+      h += '<table><thead><tr>' + tb.cols.map((c, ci) => '<th' + (ci >= tb.left ? ' class="num"' : '') + '>' + esc(c) + '</th>').join('') + '</tr></thead><tbody>';
+      for (const r of tb.rows) h += '<tr>' + r.map((c, ci) => '<td' + (ci >= tb.left ? ' class="num"' : '') + '>' + esc(c) + '</td>').join('') + '</tr>';
+      h += '</tbody></table>';
+    }
+  }
+  box.innerHTML = h;
+  box.style.display = 'block';
+  box.scrollTop = 0;
+  box.querySelector('.sales-close').addEventListener('click', () => { showSales(null); applyView(); });
+  applyView();
+}
+// 販売品の枠の画面の箱 [x0, y0, x1, y1] (svg の中の座標)。出ていなければ null
+function salesBox() {
+  const box = document.getElementById('sales');
+  if (!box || box.style.display !== 'block') return null;
+  const a = box.getBoundingClientRect(), b = svg.getBoundingClientRect();
+  return [a.left - b.left - 6, a.top - b.top - 6, a.right - b.left + 6, a.bottom - b.top + 6];
+}
+
 window.stationMap ={ receive, state: st, placePin, click, applyView, zoomAt, enterDistrict, showOverview, showPlan, showWhole, moveFloor, neighborFloors };
 document.getElementById('back')?.addEventListener('click', () => showWhole());
 document.getElementById('floorUp')?.addEventListener('click', () => moveFloor(1));

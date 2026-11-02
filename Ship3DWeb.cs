@@ -49,7 +49,11 @@ internal static class Ship3DWeb
                 using var doc = JsonDocument.Parse(e.WebMessageAsJson);
                 var type = doc.RootElement.TryGetProperty("type", out var t) ? t.GetString() : null;
                 if (type == "error" && doc.RootElement.TryGetProperty("message", out var m))
-                    App.AppendStartupLog(App.Config.WorkingDirectory, $"[3D モデル] 表示: {m.GetString()}");
+                {
+                    // ステーションの 3D のビューア (wwwroot\station3d) は source に "station3d" を付けて送る。ログの頭をそれに合わせる
+                    var station3d = doc.RootElement.TryGetProperty("source", out var src) && src.ValueKind == JsonValueKind.String && src.GetString() == "station3d";
+                    App.AppendStartupLog(App.Config.WorkingDirectory, $"{(station3d ? "[ステーションの 3D]" : "[3D モデル]")} 表示: {m.GetString()}");
+                }
                 else if (type == "roomNames" && doc.RootElement.TryGetProperty("names", out var arr) && arr.ValueKind == JsonValueKind.Array)
                 {
                     // 語の表で日本語にできなかった部屋の名前を AI で訳して返す (Ship3DRoomNames)。50 個・80 字までに限る

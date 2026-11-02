@@ -1921,7 +1921,7 @@ internal static class StationMapJson
     // 一覧に出す階の、描く床の形の面積の下限 (m²)。値: Checkmate の Cargo Deck の 3 階 (9 m²)・Contested Zone の 8 階 (24 m²) などの小さな切れ端は出さず、
     // 貨物のエレベーターの階 (Ext. Freight の 1 階、47〜50 m²。乗り場と行き先がある) は出す値として決めた
     public const double MinListedFloorArea = 30;
-    public const int Format = 17;   // 2: 道順のグラフの経由点を waypoints にまとめた形 (Write の graph の説明)。3: 階・区画の名前を訳と星図の場所の名前で付けるようにした (取り込みが NameFloors・NameSections に localize・placeNames を渡す。2026-11-01)。4: 区画の name を表示の名前にし、Child の entityName を entity に移した。階の名前を代表の 1 つ・訳のある名前だけにした (2026-11-01)。5: 地区 (districts) を足した (2026-11-01)。6: transit に lineInternal を足し、タグの無いエレベーターの行き先の名前を引くようにした (2026-11-01)。7: floors に reachable (乗り場からたどれない階は false。その階の区画の多角形は書かない)、transit のエレベーターに place (乗り場を含む区画の名前) を足した。床も店も無い箱だけの区画の多角形を書かないようにした (2026-11-01)。8: 階を真上から見た重なりで分けるようにした (Levels)。floors に implemented を足し、transit の kind (elevator・elevator-noride) を実装されているかの判定で決めるようにした (2026-11-01) 9: transit のトラムの乗り場に nextGateway・nextStop・nextDistrict (次の駅)、floors に stackGroup・stackLevel (行き先の鍵で決めた重ねる順番) を足した (2026-11-01) 10: 階を、数段の階段 (1.3 m 未満) でつながる床を高さの範囲 3 m 未満のあいだ足す作り方にした (利用者の規則、2026-11-01)。 11: 何も無い層を一覧から外し、階の名前をデータの名前だけにした。店の名前に area_label・販売データの名前を足した (2026-11-01)。 12: 頭に一覧に出る階の数 (listedFloors。StationMapExports.Finish が書く) を足した。 13: 乗り場の判定・地区の条件を直した (2026-11-01)。 14: 通路の部品 (corridor_*) を床にし、店の名前を階の名前・括弧の候補に使わないようにし、重ねる順を階の単位にし、新しい乗り物の仕組み (sctransport*) の乗り場を拾うようにした (2026-11-01)。 15: stairs に outline (階段の板の真上から見た形) を足し、明らかに階が違う階段の両端の床を別の層にし、エレベーターとつながった階の名前を階段でつながる階に付けるようにした (2026-11-02)。 16: 床・階段を部品の形 (GLB の三角形の上向きの面) で判定し、板を実際の面の高さで作り、部品の名前と種類を表に登録するようにした (2026-11-02)。 17: 区画の floors の環を、板を格子に塗った輪郭から板ごとの凸包そのものにした (四角い部品は四角のまま。環どうしは重なることがある。2026-11-02、利用者の決定「A」)。
+    public const int Format = 18;   // 2: 道順のグラフの経由点を waypoints にまとめた形 (Write の graph の説明)。3: 階・区画の名前を訳と星図の場所の名前で付けるようにした (取り込みが NameFloors・NameSections に localize・placeNames を渡す。2026-11-01)。4: 区画の name を表示の名前にし、Child の entityName を entity に移した。階の名前を代表の 1 つ・訳のある名前だけにした (2026-11-01)。5: 地区 (districts) を足した (2026-11-01)。6: transit に lineInternal を足し、タグの無いエレベーターの行き先の名前を引くようにした (2026-11-01)。7: floors に reachable (乗り場からたどれない階は false。その階の区画の多角形は書かない)、transit のエレベーターに place (乗り場を含む区画の名前) を足した。床も店も無い箱だけの区画の多角形を書かないようにした (2026-11-01)。8: 階を真上から見た重なりで分けるようにした (Levels)。floors に implemented を足し、transit の kind (elevator・elevator-noride) を実装されているかの判定で決めるようにした (2026-11-01) 9: transit のトラムの乗り場に nextGateway・nextStop・nextDistrict (次の駅)、floors に stackGroup・stackLevel (行き先の鍵で決めた重ねる順番) を足した (2026-11-01) 10: 階を、数段の階段 (1.3 m 未満) でつながる床を高さの範囲 3 m 未満のあいだ足す作り方にした (利用者の規則、2026-11-01)。 11: 何も無い層を一覧から外し、階の名前をデータの名前だけにした。店の名前に area_label・販売データの名前を足した (2026-11-01)。 12: 頭に一覧に出る階の数 (listedFloors。StationMapExports.Finish が書く) を足した。 13: 乗り場の判定・地区の条件を直した (2026-11-01)。 14: 通路の部品 (corridor_*) を床にし、店の名前を階の名前・括弧の候補に使わないようにし、重ねる順を階の単位にし、新しい乗り物の仕組み (sctransport*) の乗り場を拾うようにした (2026-11-01)。 15: stairs に outline (階段の板の真上から見た形) を足し、明らかに階が違う階段の両端の床を別の層にし、エレベーターとつながった階の名前を階段でつながる階に付けるようにした (2026-11-02)。 16: 床・階段を部品の形 (GLB の三角形の上向きの面) で判定し、板を実際の面の高さで作り、部品の名前と種類を表に登録するようにした (2026-11-02)。 17: 区画の floors の環を、板を格子に塗った輪郭から板ごとの凸包そのものにした (四角い部品は四角のまま。環どうしは重なることがある。2026-11-02、利用者の決定「A」)。 18: 端末 (terminals)・外の設備 (exterior: pads・hangars・freight・decks) を足し、木から外す Child (HarvestableObjectContainer など) のうち部分木に床・階段の部品のあるものを外さないようにした (excludedChildren に外した Child を書く。2026-11-02)。
 
     public static string Write(StationIndex index, StationTree tree, IReadOnlyList<StationFloor> floors, IReadOnlyList<StationSection> sections,
         IReadOnlyList<StationStair> stairs, IReadOnlyList<StationTransit> transit, StationGraph graph, StarRotRule rule = StationIndex.DefaultRule)
@@ -1975,6 +1975,15 @@ internal static class StationMapJson
                 w.WriteString("path", sp);
                 if (index.Entries.TryGetValue(sp, out var e)) w.WriteNumber("size", e.Size); else w.WriteNull("size");
                 w.WriteNull("crc");
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+            // 外す決まり (StationChildFilter) に当たった Child (形 18。2026-11-02): socpak・entity (Child の entityName)・class・kept (部分木に床・階段の部品があるので外さなかったら true)
+            w.WriteStartArray("excludedChildren");
+            foreach (var (sp, en, cls, kept) in tree.CutChildren.Select(c => (c.Socpak, c.Entity, c.Class, false)).Concat(tree.KeptChildren.Select(c => (c.Socpak, c.Entity, c.Class, true))))
+            {
+                w.WriteStartObject();
+                w.WriteString("socpak", sp); w.WriteString("entity", en); w.WriteString("class", cls); w.WriteBoolean("kept", kept);
                 w.WriteEndObject();
             }
             w.WriteEndArray();
@@ -2122,6 +2131,62 @@ internal static class StationMapJson
                 w.WriteEndObject();
             }
             w.WriteEndArray();
+            // 端末 (形 18。2026-11-02): kind (StationTerminalKinds の鍵)・guid・class・entity (内部の名前。画面には出さない)・pos (局所)・yaw (度。z 回り)・
+            // floor (StationFloorBuilder.FloorAtXY。無ければ "")・section (区画の Id。自分か祖先のインスタンスの区画、無ければ箱に入るいちばん小さい区画)・
+            // node (道順のグラフの節点の番号 (graph の nodes と waypoints を合わせた並び)。StationRouteGraph.NearestNode。無ければ -1)・basis (判定の根拠)・
+            // 店の端末は shop (SCShop の CryGUID)・shopEntity (SCShop の Name)
+            var termSec = TerminalSections(tree, sections);
+            w.WriteStartArray("terminals");
+            foreach (var t in tree.Terminals)
+            {
+                w.WriteStartObject();
+                w.WriteString("kind", t.Kind); w.WriteString("guid", t.Guid); w.WriteString("class", t.EntityClass); w.WriteString("entity", t.EntityName);
+                Vec(w, "pos", t.Pos); Num(w, "yaw", Yaw(t.Rot));
+                w.WriteString("floor", StationFloorBuilder.FloorAtXY(floors, t.Pos.X, t.Pos.Y, t.Pos.Z)?.Id ?? "");
+                var sec = termSec(t.Instance, t.Pos);
+                w.WriteString("section", sec >= 0 ? "s" + sec : "");
+                w.WriteNumber("node", StationRouteGraph.NearestNode(graph, floors, t.Pos));
+                w.WriteString("basis", t.Basis);
+                if (t.ShopGuid.Length > 0) { w.WriteString("shop", t.ShopGuid); w.WriteString("shopEntity", t.ShopEntity); }
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+            // 外の設備 (形 18。2026-11-02。3D の表示に使う): pads (着陸パッド: key は HUDDisplayName (@ui_interactor_pad_01 など。訳はパッド01)、size は dimensions [x, y, z])、
+            // hangars (ハンガーの入口: gatewaySize は metadata の GatewaySize、size はその区分 (2 Small・4 Medium・5 Large・6 XL。取り込んだ所の class 名の区分と全部一致)、door は EntityLinks の先)、
+            // freight (外の貨物エレベーターの台: kiosk は端末の CryGUID、deck は外部貨物の区画の鍵 (@cargodeck_NN)、deckGuess は対応が推測 (近さ) であること、deckDistance は台と区画の中心の間 (m))、
+            // decks (外部貨物の区画: key は HUDDisplayName、size は dimensions)。どれも pos は局所、rot は [w, x, y, z]
+            w.WriteStartObject("exterior");
+            void ExArr(string name, string kind, Action<StationExterior> extra)
+            {
+                w.WriteStartArray(name);
+                foreach (var x in tree.Exteriors.Where(x => x.Kind == kind))
+                {
+                    w.WriteStartObject();
+                    w.WriteString("guid", x.Guid); w.WriteString("class", x.EntityClass); w.WriteString("entity", x.EntityName);
+                    Vec(w, "pos", x.Pos);
+                    var q = x.Rot ?? (1, 0, 0, 0);
+                    w.WriteStartArray("rot"); w.WriteNumberValue(Math.Round(q.W, 6)); w.WriteNumberValue(Math.Round(q.X, 6)); w.WriteNumberValue(Math.Round(q.Y, 6)); w.WriteNumberValue(Math.Round(q.Z, 6)); w.WriteEndArray();
+                    if (x.Size is { } sz) Vec(w, "size", sz);
+                    extra(x);
+                    w.WriteEndObject();
+                }
+                w.WriteEndArray();
+            }
+            ExArr("pads", "pad", x => w.WriteString("key", x.NameKey));
+            ExArr("hangars", "hangar", x =>
+            {
+                w.WriteNumber("gatewaySize", x.GatewaySize);
+                w.WriteString("size", x.GatewaySize switch { 2 => "S", 4 => "M", 5 => "L", 6 => "XL", _ => "" });
+                if (x.Link.Length > 0) w.WriteString("door", x.Link);
+            });
+            ExArr("freight", "freight", x =>
+            {
+                w.WriteString("kiosk", x.Link);
+                w.WriteString("deck", x.Deck);
+                if (x.DeckGuess) { w.WriteBoolean("deckGuess", true); Num(w, "deckDistance", x.DeckDistance); }
+            });
+            ExArr("decks", "deck", x => w.WriteString("key", x.NameKey));
+            w.WriteEndObject();
             w.WriteStartArray("transit");
             // エレベーターの印の名前 (2026-11-01 に足したもの): place は、行き先 (dest) が階の名前 (floor_NN・ground_floor・lobby・foyer・roof) か空の乗り場だけに書く、
             // 乗り場のインスタンスか祖先のうち、表示の名前の付いたいちばん近い区画の名前
@@ -2291,6 +2356,38 @@ internal static class StationMapJson
     }
 
     private static void Num(Utf8JsonWriter w, string name, double v) => w.WriteNumber(name, Math.Round(v, 2));
+
+    // z 回りの向き (度。回転で +x を回した向き。回転が無ければ 0)
+    private static double Yaw((double W, double X, double Y, double Z)? q)
+    {
+        if (q is not { } r) return 0;
+        var (x, y, _) = new StationXf(0, 0, 0, r.W, r.X, r.Y, r.Z).Rotate(1, 0, 0);
+        return Math.Atan2(y, x) * 180 / Math.PI;
+    }
+
+    // 端末の区画 (StationRouteGraph.Build の節点の区画と同じ決め方): 自分か祖先のインスタンスが区画ならそれ、無ければ箱に入るいちばん小さい区画。
+    // 区画にするのは Build と同じく、ルート (0 番) と箱が 2 km を超えるものを除いた区画。無ければ -1
+    private static Func<int, (double X, double Y, double Z), int> TerminalSections(StationTree tree, IReadOnlyList<StationSection> sections)
+    {
+        var secs = sections.Where(s => s.Instance != 0 && s.Half.X <= 1000 && s.Half.Y <= 1000 && s.Half.Z <= 1000).ToList();
+        var byInst = secs.ToDictionary(s => s.Instance);
+        var inv = secs.ToDictionary(s => s.Instance, s => tree.Instances[s.Instance].ToStation.Inverse());
+        return (inst, p) =>
+        {
+            for (int i = inst; i >= 0; i = tree.Instances[i].Parent) if (byInst.ContainsKey(i)) return i;
+            int best = -1; double bv = double.MaxValue;
+            foreach (var s in secs)
+            {
+                var ins = tree.Instances[s.Instance];
+                if (ins.MinBounds is not { } a || ins.MaxBounds is not { } b) continue;
+                var q = inv[s.Instance].Apply(p);
+                if (q.X < a.X || q.X > b.X || q.Y < a.Y || q.Y > b.Y || q.Z < a.Z || q.Z > b.Z) continue;
+                var v = (b.X - a.X) * (b.Y - a.Y) * (b.Z - a.Z);
+                if (v < bv) { bv = v; best = s.Instance; }
+            }
+            return best;
+        };
+    }
 
     private static void Vec(Utf8JsonWriter w, string name, (double X, double Y, double Z) v)
     {

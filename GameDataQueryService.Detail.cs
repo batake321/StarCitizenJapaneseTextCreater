@@ -350,8 +350,9 @@ public partial class GameDataQueryService
     // shopTree を渡すと、【販売場所】の店の部分を、shop_price_links で店に結べた行だけお店の詳細へのリンク ([[record|表示名]]。DetailLink) にする
     // includePersonal が false なら【ブループリント】の節に個人のデータ (在庫・所持・手持ち) を出さない (データ API の LAN からの要求。BlueprintDetail.ItemSectionText)
     // 品目が無ければ null
+    // mapShops: 【販売場所】の店名の右に「MAP」のリンクを付ける店の record (ShopTreeDetailText と同じ。null なら付けない)
     public string? GetItemDetailText(string recordName, IReadOnlyDictionary<string, List<(string Location, double Price)>>? uexItemPrices = null, ShopTree? shopTree = null,
-        bool includePersonal = true)
+        bool includePersonal = true, IReadOnlySet<string>? mapShops = null)
     {
         var rec = (recordName ?? "").Trim();
         if (rec.Length == 0) return null;
@@ -476,7 +477,7 @@ public partial class GameDataQueryService
         }
 
         sb.AppendLine();
-        sb.Append(ShopText(uuids, nameEn, uexItemPrices, shopTree));
+        sb.Append(ShopText(uuids, nameEn, uexItemPrices, shopTree, mapShops));
 
         // その品をできる品とする BP があれば、末尾に【ブループリント】の節 (［BP］タブと同じ読み方。BP の表が無い・BP が無ければ出さない)。
         // 読み込みが例外になったときは、この節だけを読み込めなかった旨の 1 行にする (【装着できるアタッチメント】と同じ)
@@ -873,7 +874,9 @@ public partial class GameDataQueryService
     // 販売場所。保存データ (item_shop_prices) の購入・レンタルがあればそれ、購入が無ければ UEX の items_prices (英語名で引く)。
     // 購入は「星系 / 場所 / 店名 / 値段」を安い順に (ShopLine)、レンタルは「売り場 / 日数 / 値段」。
     // 店名・売り場は、shop_price_links で店に結べたものだけお店の詳細へのリンクにする (ShopTree.FindShopRecord)
-    private string ShopText(List<string> uuids, string nameEn, IReadOnlyDictionary<string, List<(string Location, double Price)>>? uexItemPrices, ShopTree? tree)
+    // 店名・売り場の右に、mapShops にある店だけ「MAP」のリンク (ShopMapLink) を付ける
+    private string ShopText(List<string> uuids, string nameEn, IReadOnlyDictionary<string, List<(string Location, double Price)>>? uexItemPrices, ShopTree? tree,
+        IReadOnlySet<string>? mapShops = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine("【販売場所】");
@@ -895,13 +898,17 @@ public partial class GameDataQueryService
         {
             sb.AppendLine($"  購入 ({source}): 星系 / 場所 / 店名 / 値段");
             foreach (var s in buys.GroupBy(s => s.Location).Select(g => g.MinBy(s => s.Price)!).OrderBy(s => s.Price).ThenBy(s => s.Location, StringComparer.OrdinalIgnoreCase))
-                sb.AppendLine("  " + ShopLine(s, tree));
+                sb.AppendLine("  " + ShopLine(s, tree, mapShops));
         }
         var rents = rows.Where(r => r.Kind == ShopPriceStore.KindRent && r.Price.HasValue).OrderBy(r => r.Price).ToList();
         if (rents.Count > 0)
         {
             sb.AppendLine("  レンタル: 売り場 / 日数 / 値段");
-            foreach (var r in rents) sb.AppendLine($"  {ShopCell(r.Location, tree?.FindShopRecord(r.Source, r.Location))} / {r.RentDays}日 / {r.Price!.Value:N0} aUEC");
+            foreach (var r in rents)
+            {
+                var rentRecord = tree?.FindShopRecord(r.Source, r.Location);
+                sb.AppendLine($"  {ShopCell(r.Location, rentRecord)}{ShopMapLink(rentRecord, mapShops)} / {r.RentDays}日 / {r.Price!.Value:N0} aUEC");
+            }
         }
         if (buys.Count == 0 && rents.Count == 0)
         {
@@ -914,13 +921,14 @@ public partial class GameDataQueryService
 
     // 【販売場所】の購入の 1 行「星系 / 場所 / 店名 / 値段 aUEC」(ShopListing.Line と同じ形。店名はリンクにできればリンク)。
     // 分けられない形 (UEX の船の店。「Vantage HUR-L1」のように店名と場所が 1 つの名前) は、見出しの 4 列に合わせて星系・場所を「-」にし、店名の列に売り場の文字を入れる
-    private static string ShopLine(ShopListing s, ShopTree? tree)
+    private static string ShopLine(ShopListing s, ShopTree? tree, IReadOnlySet<string>? mapShops = null)
     {
         var price = $"{s.Price:N0} aUEC";
         var record = tree?.FindShopRecord(s.Source, s.Location);
+        var map = ShopMapLink(record, mapShops);
         return s.Parts() is { } x
-            ? $"{x.System} / {(x.Place.Length > 0 ? x.Place : "-")} / {ShopCell(x.Shop, record)} / {price}"
-            : $"- / - / {ShopCell(s.Location, record)} / {price}";
+            ? $"{x.System} / {(x.Place.Length > 0 ? x.Place : "-")} / {ShopCell(x.Shop, record)}{map} / {price}"
+            : $"- / - / {ShopCell(s.Location, record)}{map} / {price}";
     }
 
     // 「A / B / C」の行の店の列。record があればリンク (表示名の " / " は列の区切りと重ならないよう "/" にする)
@@ -1192,6 +1200,8 @@ public partial class GameDataQueryService
                 }
             }
             tree.LinkLocations();
+            // 星図の場所の施設 (starmap_amenities。表が無い前の版の DB では施設は無いものとして読む。起動後に裏で取り出す: GameDataExtractor.RebuildStarmapAmenitiesAsync)
+            LoadAmenities(tree);
             // 名前 → 星図の場所 (starmap_entities。量子ジャンプの目的地を引く。表が無い前の版の DB では空)
             using (var cmd = _conn.CreateCommand())
             {
@@ -1341,13 +1351,89 @@ public partial class GameDataQueryService
         return tree;
     }
 
-    // 木の中のお店・場所・星系の詳細の文字 (［詳細］タブ。GetItemDetailText と同じ形で、リンクは DetailLink)。record が木に無ければ null
-    public static string? ShopTreeDetailText(ShopTree tree, string record)
+    // 星図の場所の施設 (starmap_amenities) を木の場所に付ける。施設の名前 (画面の言葉) は訳のキー (display_key) のゲームの訳
+    // (translations.db の日本語。無ければ英語、それも無ければ施設の name)。表が無ければ何もしない
+    private void LoadAmenities(ShopTree tree)
+    {
+        using (var cmd = _conn.CreateCommand())
+        {
+            // 表が無い・前の形 (施設の種類の GUID の列 type_id が無い) なら施設は無いものとして読む (起動後に裏で作り直す: GameDataExtractor.NeedsStarmapAmenities)
+            cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('starmap_amenities') WHERE name = 'type_id'";
+            if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0) return;
+        }
+        using var loc = new LocReader(_translationsDbPath);
+        var labels = new Dictionary<string, string>(StringComparer.Ordinal);
+        string Label(string name, string key)
+        {
+            if (labels.TryGetValue(name, out var l)) return l;
+            var t = key.StartsWith('@') ? loc.Text(key) : "";
+            l = t.Length > 0 && !t.StartsWith('@') ? t : name;
+            labels[name] = l;
+            return l;
+        }
+        using var c = _conn.CreateCommand();
+        c.CommandText = "SELECT record_name, amenity, display_key, icon, type_ord, type_id FROM starmap_amenities ORDER BY record_name, ord";
+        using var r = c.ExecuteReader();
+        while (r.Read())
+        {
+            var a = new ShopTreeAmenity(r.GetString(5), r.GetString(1), Label(r.GetString(1), r.GetString(2)), r.GetString(3), r.GetInt32(4));
+            tree.AddAmenity(r.GetString(0), a);
+        }
+    }
+
+    // 木の中のお店・場所・星系の詳細の文字 (［詳細］タブ。GetItemDetailText と同じ形で、リンクは DetailLink)。record が木に無ければ null。
+    // mapShops: 店名の右に「MAP」のリンク (ShopMapLink。押すと［マップ］タブでその店の位置を出す) を付ける店の record (［詳細］タブが決める。null なら付けない)
+    public static string? ShopTreeDetailText(ShopTree tree, string record, IReadOnlySet<string>? mapShops = null)
     {
         if (tree.ShopsByRecord.TryGetValue(record, out var shop)) return ShopDetailText(shop);
-        if (tree.NodesByRecord.TryGetValue(record, out var node)) return node.IsStar ? SystemDetailText(node) : PlaceDetailText(node);
+        if (tree.NodesByRecord.TryGetValue(record, out var node)) return node.IsStar ? SystemDetailText(node, mapShops) : PlaceDetailText(node, mapShops);
         return null;
     }
+
+    // ===== 店の「MAP」のリンク (2026-11-02、利用者の指示「この表のショップの右に、MAP ボタンを付けて、マップで位置を表示する機能が欲しい」) =====
+    // 詳細の record の頭。［詳細］タブ (DetailPanel.OpenLink) が受けて、［マップ］タブでその店の位置を出す (MapPanel.ShowShopInMapTab)
+    public const string ShopMapPrefix = "ShopMap:";
+
+    // 店名の後ろに足す「 MAP」のリンク (店の record が mapShops にあるときだけ。無ければ "")
+    private static string ShopMapLink(string? shopRecord, IReadOnlySet<string>? mapShops) =>
+        shopRecord != null && mapShops != null && mapShops.Contains(shopRecord) ? " " + DetailLink(ShopMapPrefix + shopRecord, "MAP") : "";
+
+    // ===== 場所の施設 =====
+    // ［詳細］の【基本】に「あり／なし」を出す施設。施設の種類のレコード (StarMapAmenityTypes の StarMapAmenityTypeEntry) の GUID (_RecordId_。小文字) で持つ
+    // (施設の name の文字では決め打ちしない。GUID は 2026-11-02 の Data.p4k の値):
+    //   利用者の言う「精錬所」= 7618a59c-… (name Refinery)、
+    //   「補給」= 1178cca7-… (name Vehicle Services。英語の文 ATC_CryAstro「Cry-Astro Vehicle Services」・Hints_CryAstro_Title「Repair, Refuel, Restock」)、
+    //   「外部貨物エレベーター」= 02905cad-… (name Commodity Trading - Loading Dock。形 18 の地図の写しで外の貨物エレベーター (exterior.freight) のある 24 か所のうち 16 か所にある施設。
+    //   残りの 8 か所 (Levski・AsteroidClusterBase_Nyx_Social_Keeger_001〜004・ContestedZone の 3 か所) は施設の一覧に無く、地図の手がかりで「あり（推測）」になる)。
+    // 行の名前は施設の訳 (ゲームの訳。精製所・乗り物サービス・積載ドック)
+    public const string AmenityRefinery = "7618a59c-75f4-4f63-9c51-d39c3cc58a75", AmenityVehicleServices = "1178cca7-dd66-4b9d-a22f-5515710a5f9e",
+        AmenityLoadingDock = "02905cad-b6ef-4e1d-a996-291647200f42";
+    public static readonly string[] KeyAmenities = [AmenityRefinery, AmenityVehicleServices, AmenityLoadingDock];
+
+    // 施設のアイコンの行「<<amen:BASE64>>」(DetailHtml が【基本】の上のアイコンの並びにする。中身は JSON の [{ "l": 施設の名前, "i": アイコンのパス }])
+    public static string AmenityLine(IEnumerable<ShopTreeAmenity> amenities) =>
+        "<<amen:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(amenities.Select(a => new { l = a.Label, i = a.Icon })))) + ">>";
+
+    // 施設の有無の文字: 星図の施設の一覧にあれば「あり」、無くても取り込み済みの地図のデータに手がかりがあれば「あり（推測）」、どちらも無ければ「なし」。
+    // 地図の手がかりは精製所 (精錬の端末) と積載ドック (外の貨物エレベーター) だけ (AmenityMapHints)。地図は場所そのものの record の地図 (［詳細］の地図のバーと同じ)
+    public const string AmenityYes = "あり", AmenityGuessed = "あり（推測）", AmenityNo = "なし";
+    public static string AmenityState(ShopTreeNode node, string amenity)
+    {
+        if (node.Amenities.Any(a => a.Id == amenity)) return AmenityYes;
+        if (amenity is not (AmenityRefinery or AmenityLoadingDock)) return AmenityNo;
+        return GuessedByMap(AmenityMapHints.Of(node.RecordName), amenity) ? AmenityGuessed : AmenityNo;
+    }
+
+    // 地図の手がかりでその施設がありそうか (精製所: 精錬の端末がある、積載ドック: 外の貨物エレベーターがある。ほかの施設は false)
+    internal static bool GuessedByMap(AmenityMapHints.Hints? hints, string amenity) => hints != null && amenity switch
+    {
+        AmenityRefinery => hints.Refinery,
+        AmenityLoadingDock => hints.ExteriorFreight,
+        _ => false,
+    };
+
+    // 【基本】に施設の有無を出す場所: 分類「ステーション」の種類 (ShopTree.StationTypes) か、施設のある場所
+    private static bool ShowsAmenities(ShopTreeNode n) => ShopTree.StationTypes.Contains(n.Type) || n.Amenities.Count > 0;
 
     // 根の Star から node までの道筋「Stanton > ArcCorp > Area18」(各段はリンク)
     private static string PathLinks(ShopTreeNode node)
@@ -1417,15 +1503,34 @@ public partial class GameDataQueryService
     private static string NameCell(string record, string name) =>
         record.Length > 0 ? DetailLink(record, name) : Cell(MdEscape(name));
 
-    // 場所の詳細: 【基本】名前・種類・星系、【場所】親の道筋、【この中の場所】子 (種類ごと)、【お店】この場所の店
-    private static string PlaceDetailText(ShopTreeNode node)
+    // 場所の詳細: (施設のアイコン)、【基本】名前・種類・星系・(施設の有無)、【場所】親の道筋、【この中の場所】子 (種類ごと)、【お店】この場所の店
+    private static string PlaceDetailText(ShopTreeNode node, IReadOnlySet<string>? mapShops = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine(DetailTitle(node.Name, node.TypeLabel));
+        // 施設のアイコン (星図の施設の順。【基本】の上)
+        if (node.Amenities.Count > 0)
+        {
+            sb.AppendLine(AmenityLine(node.Amenities));
+            sb.AppendLine();
+        }
         sb.AppendLine("【基本】");
         sb.AppendLine($"  名前: {node.Name}");
         sb.AppendLine($"  種類: {node.TypeLabel}");
         sb.AppendLine($"  星系: {node.System}");
+        // 精製所・乗り物サービス・積載ドックのあり／なし (星図の施設の一覧で決める。行の名前は施設の訳。訳が引けなければ施設の name)。
+        // 一覧に無くても、取り込み済みの地図のデータ (AmenityMapHints) に手がかりがあれば「あり（推測）」(精製所・積載ドックだけ)
+        if (ShowsAmenities(node) && node.Tree is { } tree)
+        {
+            var guessed = false;
+            foreach (var key in KeyAmenities)
+            {
+                var state = AmenityState(node, key);
+                guessed |= state == AmenityGuessed;
+                sb.AppendLine($"  {tree.AmenityLabel(key, key switch { AmenityRefinery => "Refinery", AmenityVehicleServices => "Vehicle Services", _ => "Loading Dock" })}: {state}");
+            }
+            if (guessed) sb.AppendLine("  ※（推測）: ゲームの星図の施設の一覧には無いが、取り込んだ地図のデータ (精錬の端末・外の貨物エレベーター) から推し量ったもの");
+        }
         sb.AppendLine();
         sb.AppendLine("【場所】");
         sb.AppendLine(node.Parent != null ? PathLinks(node.Parent) : "(なし)");
@@ -1434,7 +1539,7 @@ public partial class GameDataQueryService
         AppendChildPlaces(sb, node);
         sb.AppendLine();
         sb.AppendLine("【お店】");
-        AppendShops(sb, node);
+        AppendShops(sb, node, mapShops);
         sb.AppendLine();
         sb.AppendLine("【距離】");
         // 惑星・衛星の自転の角度は今の時刻 (開いた時刻) のもの (CurrentLocation.ThetasAt)
@@ -1459,7 +1564,7 @@ public partial class GameDataQueryService
     }
 
     // 星系の詳細: 【基本】名前、【場所】根の Star の直下の場所 (種類ごと)、【お店】根の Star の店
-    private static string SystemDetailText(ShopTreeNode node)
+    private static string SystemDetailText(ShopTreeNode node, IReadOnlySet<string>? mapShops = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine(DetailTitle(node.System, "星系"));
@@ -1470,7 +1575,7 @@ public partial class GameDataQueryService
         AppendChildPlaces(sb, node);
         sb.AppendLine();
         sb.AppendLine("【お店】");
-        AppendShops(sb, node);
+        AppendShops(sb, node, mapShops);
         // 惑星・衛星の自転の角度は今の時刻 (開いた時刻) のもの
         var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
         if (SystemMapSvg(node, null, overlay: new MapOverlay(CurrentLocation.ThetasAt(Descendants(node), nowUnix), null, "")) is { } systemMap)
@@ -1779,7 +1884,7 @@ public partial class GameDataQueryService
                 mapAttr = $" data-map=\"{(imported ? 1 : 0)}\"";
                 mapMark = MapMarkSvg(at, x, y, imported);
             }
-            sb.Append($"<a data-rec=\"{Xml(n.RecordName)}\"{mapAttr} href=\"{Href(n)}\"><title>{Xml(label)}</title>{shape}{mapMark}{text}</a>");
+            sb.Append($"<a data-rec=\"{Xml(n.RecordName)}\"{mapAttr} href=\"{Href(n)}\"><title>{Xml(label)}</title>{shape}{mapMark}{text}{AmenityRowSvg(n, overlay?.AmenityIconUrl)}</a>");
         }
         // 星図に載っていない場所 (overlay.Marks.Unlisted のうちこの星系のもの。［マップ］タブだけ): 小さな三角の印・地図の枠・名前。
         // リンクは record (Unlisted.…) を詳細のリンクの形で持つ (MapPanel が押されたときに地図へ移る。詳細は無い)
@@ -1852,6 +1957,29 @@ public partial class GameDataQueryService
         }
         sb.Append("</svg>");
         return sb.ToString();
+    }
+
+    // 星系図の場所のラベルの横に並べる施設のアイコン (［マップ］タブだけ。iconUrl があるとき)。【基本】に有無を出す 3 つ (KeyAmenities) のうち、その場所にあるもの。
+    // 1 つ 14px の濃い丸に白い svg (ゲームのアイコンは白一色)。位置はスクリプト (MapScript の declutter) がラベルの右 (ラベルが点の左なら左) に置き、
+    // ラベルを隠すときは一緒に隠す。最初は隠して置く。マウスを乗せると施設の名前
+    internal const double AmenityIconPx = 14, AmenityIconGap = 1;
+    private static string AmenityRowSvg(ShopTreeNode n, Func<string, string?>? iconUrl)
+    {
+        if (iconUrl == null || n.Amenities.Count == 0) return "";
+        var list = KeyAmenities.Select(k => n.Amenities.FirstOrDefault(a => a.Id == k)).Where(a => a != null).ToList();
+        var sb = new StringBuilder();
+        var i = 0;
+        foreach (var a in list)
+        {
+            if (iconUrl(a!.Icon) is not { } url) continue;
+            var x = i * (AmenityIconPx + AmenityIconGap);
+            sb.Append($"<g class=\"amenicon\" transform=\"translate({F2(x)},0)\"><title>{Xml(a.Label)}</title>" +
+                      $"<circle cx=\"{F2(AmenityIconPx / 2)}\" cy=\"{F2(AmenityIconPx / 2)}\" r=\"{F2(AmenityIconPx / 2)}\"/>" +
+                      $"<image href=\"{Xml(url)}\" x=\"1.5\" y=\"1.5\" width=\"{F2(AmenityIconPx - 3)}\" height=\"{F2(AmenityIconPx - 3)}\"/></g>");
+            i++;
+        }
+        if (i == 0) return "";
+        return $"<g class=\"amenrow\" data-aw=\"{F2(i * (AmenityIconPx + AmenityIconGap) - AmenityIconGap)}\" visibility=\"hidden\">{sb}</g>";
     }
 
     // マップタブの図に置いておく最近の契約の目標の入れ物の数
@@ -1990,14 +2118,14 @@ public partial class GameDataQueryService
             sb.AppendLine($"| {Cell(MdEscape(c.TypeLabel))} | {DetailLink(c.Record, c.Name)} |");
     }
 
-    // この場所の店の表 (店名 (リンク) | 種類。名前の順)。無ければ「(なし)」
-    private static void AppendShops(StringBuilder sb, ShopTreeNode node)
+    // この場所の店の表 (店名 (リンク) | 種類。名前の順)。無ければ「(なし)」。店名の右に「MAP」のリンク (mapShops にある店だけ。ShopMapLink)
+    private static void AppendShops(StringBuilder sb, ShopTreeNode node, IReadOnlySet<string>? mapShops = null)
     {
         if (node.Shops.Count == 0) { sb.AppendLine("(なし)"); return; }
         sb.AppendLine("| 店名 | 種類 |");
         sb.AppendLine("|---|---|");
         foreach (var s in node.Shops.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase).ThenBy(s => s.Id, StringComparer.Ordinal))
-            sb.AppendLine($"| {DetailLink(s.Record, s.Name)} | {Cell(MdEscape(s.Kind))} |");
+            sb.AppendLine($"| {DetailLink(s.Record, s.Name)}{ShopMapLink(s.Record, mapShops)} | {Cell(MdEscape(s.Kind))} |");
     }
 }
 
@@ -2073,10 +2201,26 @@ public sealed class ShopTree
     public ShopTreeNode AddLocation(string record, string name, string type, string parent, string system)
     {
         var isStar = parent.Length == 0 && type == "Star";
-        var node = new ShopTreeNode(isStar ? SystemPrefix + system : PlacePrefix + record, record, name, type, TypeLabel(type), parent, system, isStar);
+        var node = new ShopTreeNode(isStar ? SystemPrefix + system : PlacePrefix + record, record, name, type, TypeLabel(type), parent, system, isStar) { Tree = this };
         _byStarmapRecord[record] = node;
         NodesByRecord[node.Record] = node;
         return node;
+    }
+
+    // 施設の種類 (施設の種類のレコードの GUID → 施設。どこかの場所にあるものだけ。施設の訳 (Label) と種類の並び (TypeOrd) に使う)
+    private readonly Dictionary<string, ShopTreeAmenity> _amenityTypes = new(StringComparer.OrdinalIgnoreCase);
+    // どこかの場所にある施設の種類 (星図の施設の種類の並び)
+    public IReadOnlyList<ShopTreeAmenity> AmenityTypes => _amenityTypes.Values.OrderBy(a => a.TypeOrd).ThenBy(a => a.Name, StringComparer.Ordinal).ToList();
+    // 施設の種類の GUID の画面の言葉 (施設の訳。その施設がどこにも無い・施設の表が無ければ fallback)
+    public string AmenityLabel(string id, string fallback) => _amenityTypes.TryGetValue(id, out var a) ? a.Label : fallback;
+
+    // 星図の場所 (record 名 StarMapObject.…) に施設を足す (木に無い場所 (テンプレートなど) は捨てる。同じ施設は 1 つ)
+    public void AddAmenity(string starmapRecord, ShopTreeAmenity amenity)
+    {
+        if (!_byStarmapRecord.TryGetValue(starmapRecord, out var node)) return;
+        if (node.Amenities.Any(a => string.Equals(a.Id, amenity.Id, StringComparison.OrdinalIgnoreCase))) return;
+        node.Amenities.Add(amenity);
+        _amenityTypes.TryAdd(amenity.Id, amenity);
     }
 
     // 親子と自転の親をつなぐ (AddLocation を全部終えてから呼ぶ)
@@ -2275,10 +2419,12 @@ public sealed class ShopTree
 // QtFrom / QtTo = 量子ジャンプの線の出発地と目的地 (無ければ線は無し)、QtDest = 量子ジャンプの目的地 (目立たせる)、
 // QtGoal = 線の先が契約の目標 (推定。旗と「契約の目標（推定）」を出す)、Objectives = 地図に出す最近の契約の目標の位置 (橙の旗と「契約の目標」)、
 // Marks = 地図 (ステーションなどの階層マップ) のある場所の印 (［マップ］タブの星系図だけ。MapPanel が入れる。無ければ印も足す点も無し)
+// AmenityIconUrl = 施設のアイコンのパス (ShopTreeAmenity.Icon) → 画像の URL (［マップ］タブの星系図だけ。アイコンを取り出せたとき。無ければ施設のアイコンは描かない)
 internal sealed record MapOverlay(IReadOnlyDictionary<ShopTreeNode, double> Thetas, (double X, double Y, double Z)? Current, string CurrentLabel,
     string Kind = MapOverlay.KindTaken, (double X, double Y, double Z)? ArrowFrom = null, (double X, double Y, double Z)? DistanceFrom = null,
     string DistanceSuffix = "", ShopTreeNode? InsidePlace = null, (double X, double Y, double Z)? QtFrom = null, (double X, double Y, double Z)? QtTo = null,
-    ShopTreeNode? QtDest = null, bool QtGoal = false, IReadOnlyList<(double X, double Y, double Z)>? Objectives = null, MapMarks? Marks = null)
+    ShopTreeNode? QtDest = null, bool QtGoal = false, IReadOnlyList<(double X, double Y, double Z)>? Objectives = null, MapMarks? Marks = null,
+    Func<string, string?>? AmenityIconUrl = null)
 {
     public const string KindTaken = "taken", KindEstimated = "est", KindMoving = "moving";
 }
@@ -2303,6 +2449,10 @@ public sealed class ShopTreeNode(string record, string recordName, string name, 
     public ShopTreeNode? Parent { get; set; }
     public List<ShopTreeNode> Children { get; } = new();
     public List<ShopTreeShop> Shops { get; } = new();
+    // 星図の施設 (starmap_amenities。星図の順。無ければ空)
+    public List<ShopTreeAmenity> Amenities { get; } = new();
+    // この場所の木 (施設の訳を引くため)
+    public ShopTree? Tree { get; init; }
     // 星系の恒星からの絶対座標 (メートル。starmap_locations の x / y / z。無ければ null) と半径 (StarMapObject の size。無ければ null)
     public (double X, double Y, double Z)? Position { get; set; }
     public double? Radius { get; set; }
@@ -2322,6 +2472,10 @@ public sealed class ShopTreeNode(string record, string recordName, string name, 
     // この場所の星系の恒星 (根の Star)
     public ShopTreeNode Root { get { var n = this; while (n.Parent != null) n = n.Parent; return n; } }
 }
+
+// 星図の場所の施設 1 つ (starmap_amenities の 1 行)。Id = 施設の種類のレコードの GUID (小文字。施設を見分けるのはこれ)、Name = 施設の name (英語)、
+// Label = 画面の言葉 (施設の訳)、Icon = アイコンの Data.p4k の中のパス (Data/ の下)、TypeOrd = 施設の種類の並び
+public sealed record ShopTreeAmenity(string Id, string Name, string Label, string Icon, int TypeOrd);
 
 // ゲームの店 1 つ (game_shops の 1 行)、または場所だけ結べた価格の行だけで作った店 (recordPrefix が PriceShop:)。Items / Commodities は紐づけた DB の価格
 public sealed class ShopTreeShop(string id, string name, string kind, ShopTreeNode location, string entityName, string recordPrefix)

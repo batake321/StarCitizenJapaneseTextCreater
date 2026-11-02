@@ -3163,6 +3163,10 @@ public partial class GameDataExtractor : IDisposable
         try { starmapCount = await ExtractStarmapNamesAsync(dataP4kPath, ct); }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { StatusChanged?.Invoke($"星図の場所の名前 (StarMapObject) の取り出しに失敗しました: {ex.Message}"); }
+        // 星図の場所の施設 (［詳細］の場所の施設・［マップ］の施設のアイコンと検索)。失敗しても構築は続ける (starmap_amenities は前のまま。無い・空なら起動後に裏で取り出す)
+        try { await ExtractStarmapAmenitiesAsync(dataP4kPath, ct); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { StatusChanged?.Invoke($"星図の場所の施設の取り出しに失敗しました: {ex.Message}"); }
 
         // Step 6: BP (ブループリント。［BP］タブ)。失敗しても構築は続ける (3 表は前のまま。無い・空なら起動後に裏で取り出す: RebuildBlueprintsAsync)
         step++;

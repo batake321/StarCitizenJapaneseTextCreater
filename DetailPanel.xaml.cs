@@ -57,7 +57,8 @@ public partial class DetailPanel : UserControl
     private const string LoadingText = "読み込み中...";
 
     // リストの 1 行 (Record が空なら名前で引き直す)
-    private sealed record ListItem(string Record, string Name, string Kind, int Size, string Display);
+    // Depth / ChildCount / IsOpen: 一覧で星図の場所の親子をまとめたときの段 (0 = いちばん上)・まとめた子の数 (0 なら親の行でない)・開いているか (GroupedRows)
+    private sealed record ListItem(string Record, string Name, string Kind, int Size, string Display, int Depth = 0, int ChildCount = 0, bool IsOpen = false);
 
     private readonly DispatcherTimer _searchTimer = new() { Interval = TimeSpan.FromMilliseconds(300) };
     private bool _suppressSearch, _suppressSelection;
@@ -217,6 +218,8 @@ public partial class DetailPanel : UserControl
             webDetail.DefaultBackgroundColor = System.Drawing.Color.White;
             _webReady = true;
             if (_pendingHtml != null) { core.NavigateToString(_pendingHtml); _pendingHtml = null; }
+            // 場所の施設のアイコン (ゲームの svg) を裏で取り出して割り当てる。割り当てられるまでは施設を文字だけで出す (AmenityIcons)
+            _ = MapAmenityIconsAsync(core);
         }
         catch (Exception ex)
         {
@@ -227,6 +230,21 @@ public partial class DetailPanel : UserControl
             txtStatus.Text = $"表の表示 (WebView2) を使えません。文字で表示します: {ex.Message}";
             // 失敗の中身 (型・HResult・メッセージ・スタックを含む例外の全文) をアプリのログ (作業ディレクトリの app_log.txt) に残す
             AppendAppLog($"[詳細] WebView2 の初期化に失敗しました: {ex.GetType().FullName} (HResult 0x{ex.HResult:X8}): {ex}");
+        }
+    }
+
+    // 施設のアイコンを WebView2 に割り当てる。割り当てられたら、今出している詳細の施設の文字 (span.amentext[data-icon]) を、
+    // ページを作り直さずにアイコンに差し替える (詳細の位置・図の拡大はそのまま。DetailHtml.SwapAmenityIconsScript)。これから出す詳細は初めからアイコンで出す
+    private bool _amenityIcons;
+    private string? _shownText;
+    private async Task MapAmenityIconsAsync(CoreWebView2 core)
+    {
+        if (!await AmenityIcons.MapAsync(core)) return;
+        _amenityIcons = true;
+        if (_shownText is { } t && t.Contains("<<amen:", StringComparison.Ordinal))
+        {
+            try { await core.ExecuteScriptAsync(DetailHtml.SwapAmenityIconsScript); }
+            catch (Exception ex) { AppendAppLog($"[詳細] 施設のアイコンを差し込めませんでした: {ex.Message}"); }
         }
     }
 
@@ -245,8 +263,9 @@ public partial class DetailPanel : UserControl
         if (!string.Equals(_detailRecord, _stationDetailRecord, StringComparison.Ordinal)) SetStationTarget(null, null);
         txtDetail.Text = DetailHtml.ForTextBox(text);   // 文字の欄ではリンクは表示名だけ、図は 1 行の断り書き
         txtDetail.ScrollToHome();
+        _shownText = text;
         if (_webFailed) return;
-        var html = DetailHtml.FromDetailText(text);
+        var html = DetailHtml.FromDetailText(text, _amenityIcons);
         if (_webReady) webDetail.CoreWebView2.NavigateToString(html);
         else _pendingHtml = html;
     }
@@ -346,6 +365,12 @@ public partial class DetailPanel : UserControl
     private async void OpenLink(string record)
     {
         if (string.IsNullOrWhiteSpace(record)) return;
+        // 店名の右の「MAP」(GameDataQueryService.ShopMapLink): ［マップ］タブでその店の位置を出す (店の詳細の［マップに表示］と同じ)。詳細は開かない
+        if (record.StartsWith(GameDataQueryService.ShopMapPrefix, StringComparison.Ordinal))
+        {
+            await ShowShopOnMapAsync(record[GameDataQueryService.ShopMapPrefix.Length..]);
+            return;
+        }
         if (!string.Equals(record, _detailRecord, StringComparison.OrdinalIgnoreCase)) PushHistory(CaptureState());
         _searchTimer.Stop();
         var version = ++_searchVersion;   // 進行中の検索の結果でリストを差し替えない
@@ -380,7 +405,8 @@ public partial class DetailPanel : UserControl
 
     // 戻るの履歴の 1 件: 分類・種類 (選択肢・選んでいるもの・使えるか)・サイズ (同じ)・名前の欄・リストの中身・選んでいる行・表示している詳細の record
     private sealed record HistoryState(string Category, List<string> KindChoices, string? Kind, bool KindEnabled,
-        List<string> SizeChoices, string? Size, bool SizeEnabled, string Query, List<ListItem> Items, ListItem? Selected, string? DetailRecord);
+        List<string> SizeChoices, string? Size, bool SizeEnabled, string Query, List<ListItem> Items, ListItem? Selected, string? DetailRecord,
+        List<string>? OpenParents = null);
 
     private const int HistoryMax = 10;
     private readonly List<HistoryState> _history = new();
@@ -394,9 +420,10 @@ public partial class DetailPanel : UserControl
         (cmbKind.ItemsSource as IEnumerable<string>)?.ToList() ?? new List<string>(), cmbKind.SelectedItem as string, cmbKind.IsEnabled,
         (cmbSize.ItemsSource as IEnumerable<string>)?.ToList() ?? new List<string>(), cmbSize.SelectedItem as string, cmbSize.IsEnabled,
         txtQuery.Text,
-        (lstCandidates.ItemsSource as List<ListItem>)?.ToList() ?? new List<ListItem>(),
+        _listSource.ToList(),
         useSelectedOverride ? selected : lstCandidates.SelectedItem as ListItem,
-        _detailRecord);
+        _detailRecord,
+        _openParents.ToList());
 
     // 履歴に積む (最大 10 件。超えたら古いものから捨てる)
     private void PushHistory(HistoryState state)
@@ -430,10 +457,7 @@ public partial class DetailPanel : UserControl
             txtQuery.Text = s.Query;
         }
         finally { _suppressSearch = false; }
-        SetList(s.Items);
-        _suppressSelection = true;
-        try { lstCandidates.SelectedItem = s.Selected; }
-        finally { _suppressSelection = false; }
+        SetList(s.Items, selectRecord: s.Selected?.Record, openParents: s.OpenParents);
         ShowStatus(s.Category == CategoryAll ? (s.Query.Trim().Length == 0 ? "" : s.Items.Count > 0 ? $"候補 {s.Items.Count} 件" : "候補なし") : $"{s.Items.Count} 件");
 
         Task detail;
@@ -643,17 +667,124 @@ public partial class DetailPanel : UserControl
     }
 
     // リストを差し替える (選択を変えても詳細は開き直さない)。selectRecord があればその行を選んだ状態にする
-    private void SetList(List<ListItem> items, string? selectRecord = null)
+    // (その行が閉じた親の行の中なら、親を開いて見えるようにする)。
+    // 星図の場所の親子は、親と子が両方とも候補にあれば子を親の下にまとめる (GroupedRows)。履歴にはまとめる前の候補 (_listSource) を積む
+    // openParents: 開いておく親の行の record (戻るの履歴で、戻る前の開け閉めの状態を戻すため)
+    private void SetList(List<ListItem> items, string? selectRecord = null, IEnumerable<string>? openParents = null)
     {
+        _listSource = items;
+        _openParents.Clear();
+        if (openParents != null) _openParents.UnionWith(openParents);
+        ShowRows(selectRecord);
+        ShowListArea(items.Count > 0);
+        RegroupWhenTreeReady();
+    }
+
+    // 一覧を出した時点で木 (_shopTreeTask) ができていなくてまとめられなかったときは、木ができたら今の一覧をまとめ直す
+    // (その間に一覧が差し替わっていれば何もしない。選んでいる行とスクロールの位置は保つ)。お店・場所・星系の行が無ければ待たない
+    private async void RegroupWhenTreeReady()
+    {
+        if (_shopTreeTask is { IsCompletedSuccessfully: true }) return;
+        var source = _listSource;
+        if (!source.Any(i => ShopTree.IsTreeRecord(i.Record))) return;
+        var tree = await GetShopTreeOrNullAsync();
+        if (tree == null || !ReferenceEquals(source, _listSource)) return;
+        ShowRows((lstCandidates.SelectedItem as ListItem)?.Record, keepScroll: true);
+    }
+
+    // 一覧のスクロールの部品 (ListBox の中の ScrollViewer。まだ無ければ null)
+    private ScrollViewer? ListScrollViewer()
+    {
+        if (System.Windows.Media.VisualTreeHelper.GetChildrenCount(lstCandidates) == 0) return null;
+        var border = System.Windows.Media.VisualTreeHelper.GetChild(lstCandidates, 0);
+        return border != null && System.Windows.Media.VisualTreeHelper.GetChildrenCount(border) > 0
+            ? System.Windows.Media.VisualTreeHelper.GetChild(border, 0) as ScrollViewer : null;
+    }
+
+    // ===== 星図の場所の親子のまとめ (2026-11-02、利用者の決定「それで」: 子の場所を親の下にまとめて ▼ で開く) =====
+    // 例: HUR L2 (Stanton1_L2) の下の HUR L2-A (Stanton1_L2_01)、HUR-L1 Green Glade Station (RR_HUR_L1) の下の HUR-L1 Green Glade Clinic (RR_HUR_L1_CLINIC)。
+    // 親子は星図の parent_record (ShopTreeNode.Parent) で決める (名前では決めない)。子の親は、候補の中でいちばん近い祖先。
+    // 親の行は「▼ 表示（N 件）」(閉じている。押すと開く)・「▲ …」(開いている。押すと閉じる)、子の行は一段下げる (［マップ］の階の一覧・StationMapWindow.GroupRows と同じ見た目と動き)。
+    // 親の行も子の行も、選べば今までどおりその場所の詳細を出す。親の行は押すたびに開け閉めする。子だけが候補にあるときは今までどおり 1 行
+    private List<ListItem> _listSource = new();
+    private readonly HashSet<string> _openParents = new(StringComparer.Ordinal);
+
+    // 今の候補 (_listSource) を、開け閉めの状態でまとめて一覧に出す。selectRecord があればその行を選ぶ (一覧に出ていなければ何も選ばない)。
+    // reveal: selectRecord の行が閉じた親の中なら、親を開いて見えるようにする。keepScroll: 作り直す前のスクロールの位置に戻す。
+    // focusSelected: 作り直した後、選んだ行 (無ければ一覧) に焦点を戻す (行の部品ができてから。←/→ の開け閉め)
+    private void ShowRows(string? selectRecord = null, bool reveal = true, bool keepScroll = false, bool focusSelected = false)
+    {
+        var tree = _shopTreeTask is { IsCompletedSuccessfully: true } t ? t.Result : null;
+        if (reveal && selectRecord != null && tree != null && tree.NodesByRecord.TryGetValue(selectRecord, out var target))
+            for (var n = target.Parent; n != null; n = n.Parent) _openParents.Add(n.Record);
+        var rows = GroupedRows(_listSource, tree);
+        var offset = keepScroll ? ListScrollViewer()?.VerticalOffset : null;
         _suppressSelection = true;
         try
         {
-            lstCandidates.ItemsSource = items;
+            lstCandidates.ItemsSource = rows;
             lstCandidates.SelectedItem = selectRecord == null ? null
-                : items.FirstOrDefault(i => i.Record.Equals(selectRecord, StringComparison.OrdinalIgnoreCase));
+                : rows.FirstOrDefault(i => i.Record.Equals(selectRecord, StringComparison.OrdinalIgnoreCase));
         }
         finally { _suppressSelection = false; }
-        ShowListArea(items.Count > 0);
+        if (offset == null && !focusSelected) return;
+        // 行の部品を作らせてから位置・焦点を戻す (ItemsSource を差し替えた直後は部品がまだ無い)
+        lstCandidates.UpdateLayout();
+        if (offset is { } off) ListScrollViewer()?.ScrollToVerticalOffset(off);
+        if (!focusSelected) return;
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+        {
+            if (lstCandidates.SelectedItem is { } sel && lstCandidates.ItemContainerGenerator.ContainerFromItem(sel) is ListBoxItem item) item.Focus();
+            else lstCandidates.Focus();
+        });
+    }
+
+    // 候補のまとめ: 星図の場所の行のうち、候補の中に祖先がある行を、いちばん近い祖先の行の下に移す (並びは元の順。親の行は元の位置)。
+    // 閉じている親の下の行は出さない。木が無ければ (作れていない) まとめない
+    private List<ListItem> GroupedRows(List<ListItem> items, ShopTree? tree)
+    {
+        if (tree == null) return items;
+        var inList = items.Select(i => i.Record).Where(r => tree.NodesByRecord.ContainsKey(r)).ToHashSet(StringComparer.Ordinal);
+        if (inList.Count < 2) return items;
+        var parentOf = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var r in inList)
+            for (var n = tree.NodesByRecord[r].Parent; n != null; n = n.Parent)
+                if (inList.Contains(n.Record)) { parentOf[r] = n.Record; break; }
+        if (parentOf.Count == 0) return items;
+        var children = items.Where(i => parentOf.ContainsKey(i.Record)).GroupBy(i => parentOf[i.Record], StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+        var result = new List<ListItem>();
+        var placed = new HashSet<string>(StringComparer.Ordinal);
+        void Add(ListItem it, int depth)
+        {
+            var indent = new string('　', depth * 2);
+            if (children.TryGetValue(it.Record, out var kids) && placed.Add(it.Record))
+            {
+                var open = _openParents.Contains(it.Record);
+                result.Add(it with { Display = $"{indent}{(open ? "▲" : "▼")} {it.Display}（{kids.Count} 件）", Depth = depth, ChildCount = kids.Count, IsOpen = open });
+                if (open) foreach (var k in kids) Add(k, depth + 1);
+            }
+            else result.Add(depth == 0 ? it : it with { Display = indent + it.Display, Depth = depth });
+        }
+        foreach (var it in items) if (!parentOf.ContainsKey(it.Record)) Add(it, 0);
+        return result;
+    }
+
+    // 親の行を開け閉めする (詳細は開き直さない。一覧のスクロールの位置は保つ)。選んでいる行はそのまま選ぶ。
+    // 選んでいた行が閉じた親の中に隠れるときは、どの行も選ばない (親の行を選んだ形にすると、詳細が子のままなのに親を選んでいるように見えるため。詳細は子のまま)。
+    // focus: 開け閉めの後、選んでいる行 (無ければ一覧) に焦点を戻す (←/→ で開け閉めしたとき)
+    private void ToggleParent(string record, bool focus = false)
+    {
+        if (!_openParents.Remove(record)) _openParents.Add(record);
+        var selected = (lstCandidates.SelectedItem as ListItem)?.Record;
+        ShowRows(selected, reveal: false, keepScroll: true, focusSelected: focus);
+    }
+
+    // 親の行を押した (選んで詳細を出すのは SelectionChanged。押すたびに開け閉めする)
+    private void LstCandidates_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (e.OriginalSource is not DependencyObject src) return;
+        if (ItemsControl.ContainerFromElement(lstCandidates, src) is ListBoxItem { DataContext: ListItem { ChildCount: > 0 } row }) ToggleParent(row.Record);
     }
 
     // リストの行 (と下の仕切り) を、出す品目があるときだけ見せる (v1.22.3 の候補の一覧と同じく、空なら隠す)。
@@ -682,10 +813,10 @@ public partial class DetailPanel : UserControl
 
     private void SelectInList(string record)
     {
-        if (lstCandidates.ItemsSource is not List<ListItem> items) return;
-        _suppressSelection = true;
-        try { lstCandidates.SelectedItem = items.FirstOrDefault(i => i.Record.Equals(record, StringComparison.OrdinalIgnoreCase)); }
-        finally { _suppressSelection = false; }
+        if (lstCandidates.ItemsSource is not List<ListItem>) return;
+        // 閉じた親の行の中の行なら、親を開いて選ぶ (ShowRows)。スクロールの位置は保ち、選んだ行が見えるようにする
+        ShowRows(record, keepScroll: true);
+        if (lstCandidates.SelectedItem is { } sel) lstCandidates.ScrollIntoView(sel);
     }
 
     private void TxtQuery_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -714,6 +845,12 @@ public partial class DetailPanel : UserControl
     private void LstCandidates_PreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Enter && lstCandidates.SelectedItem is ListItem item) { Open(item, CaptureState()); e.Handled = true; }
+        // 親の行: → で開く、← で閉じる
+        else if (e.Key is Key.Right or Key.Left && lstCandidates.SelectedItem is ListItem { ChildCount: > 0 } parent && parent.IsOpen == (e.Key == Key.Left))
+        {
+            ToggleParent(parent.Record, focus: true);
+            e.Handled = true;
+        }
     }
 
     // リストの品目の詳細を出す (名前の欄は変えない。変えるとリストの絞り込みが変わるため)。record が無ければ名前で引き直す。
@@ -754,18 +891,20 @@ public partial class DetailPanel : UserControl
         string? error = null;
         var isTreeRecord = ShopTree.IsTreeRecord(record);
         ShopTree? tree = null;
+        HashSet<string>? mapShops = null;
         _loadingCount++;
         try
         {
             // お店・場所・星系 (その詳細と、販売場所のリンクに使う)。品目の詳細では、木を作れなくても詳細はリンク無しで出す
             try { tree = await GetShopTreeAsync(); }
             catch when (!isTreeRecord) { tree = null; }
+            mapShops = tree != null ? MapShopRecords(tree) : null;
             (text, itemType) = await Task.Run(() =>
             {
-                if (isTreeRecord) return (tree != null ? GameDataQueryService.ShopTreeDetailText(tree, record) : null, "");
+                if (isTreeRecord) return (tree != null ? GameDataQueryService.ShopTreeDetailText(tree, record, mapShops) : null, "");
                 if (!File.Exists(db)) return ((string?)null, "");
                 using var q = GameDataQueryService.OpenReadOnly(db);
-                return (q.GetItemDetailText(record, shopTree: tree), q.ItemTypeOf(record));
+                return (q.GetItemDetailText(record, shopTree: tree, mapShops: mapShops), q.ItemTypeOf(record));
             });
         }
         catch (Exception ex) { text = null; error = $"読み込めませんでした: {ex.Message}"; }
@@ -800,7 +939,7 @@ public partial class DetailPanel : UserControl
             var again = await Task.Run(() =>
             {
                 using var q = GameDataQueryService.OpenReadOnly(db);
-                return q.GetItemDetailText(record, uex, tree);
+                return q.GetItemDetailText(record, uex, tree, mapShops: mapShops);
             });
             if (version != _detailVersion || again == null) return;
             ShowDetail(again);
@@ -853,7 +992,8 @@ public partial class DetailPanel : UserControl
         var state = ex.StateOf(_ship3DRecord);
         var shortName = Ship3DExports.ShortName(_ship3DRecord);
         var job = ex.Jobs.FirstOrDefault(j => j.Short.Equals(shortName, StringComparison.OrdinalIgnoreCase));
-        btnShip3DImport.IsEnabled = state == Ship3DCacheState.None && job == null && !ex.CpuHigh;
+        // 自動の取り直しの順番待ちの間も押せる (押すとその船をいちばん先にする。Ship3DExports.IsRefreshWaiting・PromoteRefresh)
+        btnShip3DImport.IsEnabled = state == Ship3DCacheState.None && job == null && !ex.CpuHigh || ex.IsRefreshWaiting(_ship3DRecord);
         txtShip3D.Text = job != null ? $"3D モデル: 書き出し中 {job.Text}"
             : state switch
             {
@@ -1018,6 +1158,8 @@ public partial class DetailPanel : UserControl
         _stationShop = place == null ? null : shop;
         var placeButtons = _stationShop != null ? Visibility.Collapsed : Visibility.Visible;
         btnStationImport.Visibility = btnStationMap.Visibility = btnStationWindow.Visibility = placeButtons;
+        // ステーションの 3D 表示のバー (店の詳細では出さない。場所が変われば 3D 表示をやめる。Station3DDetailPanel.cs)
+        SetStation3DTarget(_stationShop == null ? place : null);
         btnShopMap.Visibility = _stationShop != null ? Visibility.Visible : Visibility.Collapsed;
         if (place == null)
         {
@@ -1113,6 +1255,24 @@ public partial class DetailPanel : UserControl
         MapPanel.ShowPlaceInMapTab(place.RecordName, place.Name);
     }
 
+    // 表の店名の右の「MAP」: その店のある場所 (StationMapPlaceOf) の地図を［マップ］タブに出し、その店を選ぶ (［マップに表示］と同じ。MapPanel.ShowShopInMapTab)。
+    // 店・場所が見つからなければ状態の欄に知らせる
+    private async Task ShowShopOnMapAsync(string shopRecord)
+    {
+        var tree = await GetShopTreeOrNullAsync();
+        if (tree != null && tree.ShopsByRecord.TryGetValue(shopRecord, out var shop) && StationMapPlaceOf(shop) is { } place)
+        {
+            MapPanel.ShowShopInMapTab(place.RecordName, place.Name, shop);
+            return;
+        }
+        ShowStatus("この店の場所の地図が見つかりませんでした");
+    }
+
+    // 店名の右に「MAP」を付ける店: 店のある場所 (かその上) が地図の一覧に出る場所 (StationMapPlaceOf。店の詳細の［マップに表示］と同じ条件) の店の record。
+    // StationMapWindow の覚え (床の無い場所) を読むので、UI のスレッドで作る
+    private static HashSet<string> MapShopRecords(ShopTree tree) =>
+        tree.Shops.Where(s => StationMapPlaceOf(s) != null).Select(s => s.Record).ToHashSet(StringComparer.Ordinal);
+
     // ［マップに表示］(店の詳細): ［マップ］タブに切り替えて、店のある場所の地図を出し、その店を選ぶ (MapPanel.ShowShopInMapTab)。
     // 取り込み済みかどうかは見ない (未取り込みなら［マップ］タブが地図の欄に知らせと上の帯に［読み込み］を出す)
     private void BtnShopMap_Click(object sender, RoutedEventArgs e)
@@ -1166,8 +1326,68 @@ internal static class DetailHtml
     // 図の行「<<svg:BASE64>>」(GameDataQueryService.SvgLine)
     private static readonly Regex SvgLineRegex = new(@"^\s*<<svg:([A-Za-z0-9+/=]+)>>\s*$", RegexOptions.Multiline);
 
-    // 文字の欄 (WebView2 が使えないとき) に出す文字: リンクは表示名だけ、図の行は「（図は WebView2 が必要です）」
-    public static string ForTextBox(string text) => SvgLineRegex.Replace(StripLinks(text), "（図は WebView2 が必要です）");
+    // 場所の施設のアイコンの行「<<amen:BASE64>>」(GameDataQueryService.AmenityLine。中身は JSON の [{ "l": 施設の名前, "i": アイコンのパス }])
+    private static readonly Regex AmenLineRegex = new(@"^\s*<<amen:([A-Za-z0-9+/=]+)>>\s*$", RegexOptions.Multiline);
+    // 店名の右の「MAP」のリンク (GameDataQueryService.ShopMapLink。前の空白ごと)。文字の欄では押せないので消す
+    private static readonly Regex ShopMapLinkRegex = new(@" ?\[\[" + Regex.Escape(Uri.EscapeDataString(GameDataQueryService.ShopMapPrefix)) + @"[A-Za-z0-9%._~\-]*\|MAP\]\](?!\])");
+
+    // 施設の行の中身 (施設の名前とアイコンのパス)。読めなければ空
+    private static List<(string Label, string Icon)> ParseAmenities(string base64)
+    {
+        var list = new List<(string, string)>();
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(Encoding.UTF8.GetString(Convert.FromBase64String(base64)));
+            if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array) return list;
+            foreach (var e in doc.RootElement.EnumerateArray())
+            {
+                if (e.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
+                var l = e.TryGetProperty("l", out var lv) && lv.ValueKind == System.Text.Json.JsonValueKind.String ? lv.GetString() ?? "" : "";
+                var i = e.TryGetProperty("i", out var iv) && iv.ValueKind == System.Text.Json.JsonValueKind.String ? iv.GetString() ?? "" : "";
+                if (l.Length > 0) list.Add((l, i));
+            }
+        }
+        catch (Exception ex) when (ex is FormatException or System.Text.Json.JsonException or ArgumentException) { }
+        return list;
+    }
+
+    // 施設のアイコンの並び (HTML のブロック 1 行)。icons が true ならゲームのアイコン (濃い丸の背景に白の svg。マウスを乗せると施設の名前)、
+    // false (アイコンを取り出せていない・データ API) なら施設の名前の文字だけ
+    private static string AmenityBlock(List<(string Label, string Icon)> list, bool icons)
+    {
+        var sb = new StringBuilder("<div class=\"amenbar\">");
+        foreach (var (label, icon) in list)
+        {
+            var name = System.Net.WebUtility.HtmlEncode(label);
+            var url = AmenityIcons.Url(icon);
+            if (icons && url != null)
+                sb.Append($"<span class=\"amen\" title=\"{name}\"><img src=\"{System.Net.WebUtility.HtmlEncode(url)}\" alt=\"{name}\"></span>");
+            else
+                // 後からアイコンを割り当てたときに差し替えられるよう、アイコンの URL を data-icon に持たせる (SwapAmenityIconsScript)
+                sb.Append($"<span class=\"amentext\"{(url != null ? $" data-icon=\"{System.Net.WebUtility.HtmlEncode(url)}\"" : "")}>{name}</span>");
+        }
+        return sb.Append("</div>").ToString();
+    }
+
+    // 施設の文字 (span.amentext[data-icon]) をアイコン (span.amen > img) に差し替えるスクリプト (［詳細］タブがアイコンを割り当てた後に、ページを作り直さずに走らせる)。
+    // 名前は textContent・title で入れる (HTML として読まない)
+    public const string SwapAmenityIconsScript = """
+        (function () {
+          Array.prototype.forEach.call(document.querySelectorAll('.amenbar span.amentext[data-icon]'), function (s) {
+            var name = s.textContent, a = document.createElement('span'), img = document.createElement('img');
+            a.className = 'amen'; a.title = name; img.src = s.getAttribute('data-icon'); img.alt = name;
+            a.appendChild(img); s.parentNode.replaceChild(a, s);
+          });
+        })();
+        """;
+
+    // 文字の欄 (WebView2 が使えないとき) に出す文字: リンクは表示名だけ (店名の右の「MAP」は消す)、図の行は「（図は WebView2 が必要です）」、
+    // 施設のアイコンの行は「施設: A、B、…」
+    public static string ForTextBox(string text)
+    {
+        var t = AmenLineRegex.Replace(ShopMapLinkRegex.Replace(text ?? "", ""), m => "施設: " + string.Join("、", ParseAmenities(m.Groups[1].Value).Select(a => a.Label)));
+        return SvgLineRegex.Replace(StripLinks(t), "（図は WebView2 が必要です）");
+    }
 
     // WebView2 の移動先がリンク (scjt://detail/<URL エンコードした record>) なら record を返す
     public static bool TryParseLink(string? uri, out string record)
@@ -1228,7 +1448,8 @@ internal static class DetailHtml
         return sb.ToString();
     }
 
-    public static string FromDetailText(string text) => Page(Markdig.Markdown.ToHtml(ToMarkdown(text ?? ""), Pipeline));
+    // amenityIcons: 施設の行をゲームのアイコンで出す (［詳細］タブで、アイコンを WebView2 に割り当てたときだけ。AmenityIcons)。false なら施設の名前の文字
+    public static string FromDetailText(string text, bool amenityIcons = false) => Page(Markdig.Markdown.ToHtml(ToMarkdown(text ?? "", amenityIcons), Pipeline));
 
     // 図 1 つの HTML のブロック (1 行): <div class="map"> の中に svg (GameDataQueryService.SystemMapSvg / NearMapSvg) と、右上に重ねる［全体］［＋］［－］の HTML のボタン。
     // ボタンは CSS (.mapctl) で枠の右上に置く (svg の中の座標には頼らない)。押したときの動きは MapScript。
@@ -1239,7 +1460,7 @@ internal static class DetailHtml
         "<div class=\"mapctl\"><button type=\"button\" data-act=\"fit\">全体</button><button type=\"button\" data-act=\"in\">＋</button><button type=\"button\" data-act=\"out\">－</button></div>" +
         GameDataQueryService.MapLegendHtml(withMapLegend) + "</div>";
 
-    public static string ToMarkdown(string text)
+    public static string ToMarkdown(string text, bool amenityIcons = false)
     {
         var lines = text.Replace("\r\n", "\n").Split('\n').Select(l => l.TrimEnd()).ToList();
         var md = new StringBuilder();
@@ -1281,6 +1502,14 @@ internal static class DetailHtml
                 try { svg = Encoding.UTF8.GetString(Convert.FromBase64String(svgMatch.Groups[1].Value)); }
                 catch (FormatException) { continue; }
                 md.AppendLine(MapBlock(svg)).AppendLine();
+                continue;
+            }
+            // 施設のアイコンの行「<<amen:BASE64>>」(GameDataQueryService.AmenityLine) → アイコン (か名前) の並び (HTML のブロック。名前は打ち消して入れる)
+            if (AmenLineRegex.Match(t) is { Success: true } amenMatch)
+            {
+                FlushAll();
+                var amen = ParseAmenities(amenMatch.Groups[1].Value);
+                if (amen.Count > 0) md.AppendLine(AmenityBlock(amen, amenityIcons)).AppendLine();
                 continue;
             }
             // 「【【名前（種類）】】」(GameDataQueryService.DetailTitle) → 大きめの見出し (## )
@@ -1392,7 +1621,7 @@ internal static class DetailHtml
     // body は自分で作った HTML (名前などは打ち消し済み)。extraCss はページに足す CSS (マップタブの並べ方など)。スクリプトは MapScript だけ
     public static string Page(string body, string extraCss = "") => $$"""
         <!DOCTYPE html><html><head><meta charset="utf-8">
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src https://{{AmenityIcons.Host}}">
         <style>
         body { font-family: 'Yu Gothic UI','Meiryo','Segoe UI',sans-serif; font-size: 13px; color: #212121; background: #FFFFFF;
                margin: 8px 10px; line-height: 1.5; word-wrap: break-word; }
@@ -1451,6 +1680,15 @@ internal static class DetailHtml
         th { background: #E8E8E8; font-weight: 600; }
         tr:nth-child(even) td { background: #F8F8F8; }
         .em { color: #1565C0; }
+        .amenbar { display: flex; flex-wrap: wrap; gap: 4px; margin: 0.2em 0 0.4em; }
+        .amenbar .amen { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 50%; background: #37474F; }
+        .amenbar .amen img { width: 22px; height: 22px; display: block; }
+        .amenbar .amentext { display: inline-block; padding: 1px 8px; border-radius: 3px; background: #37474F; color: #FFFFFF; }
+        a[href^="scjt://detail/ShopMap%3A"] { display: inline-block; margin-left: 4px; padding: 0 5px; font-size: 0.85em; line-height: 1.4; text-decoration: none;
+                                               border: 1px solid #90A4AE; border-radius: 3px; background: #FFFFFF; }
+        a[href^="scjt://detail/ShopMap%3A"]:hover { background: #E3F2FD; }
+        .map g.amenrow circle { fill: #37474F; stroke: none; }
+        .map g.amenrow { pointer-events: visible; }
         {{extraCss}}
         </style></head><body>{{body}}<script>{{MapScript}}</script></body></html>
         """;
@@ -1602,6 +1840,9 @@ internal static class DetailHtml
               labels.sort(function (a, b) { return a.pri - b.pri || b.sub - a.sub || a.no - b.no || a.i - b.i; });
               labels.forEach(function (lb) {
                 var el = lb.el, it = lb.it, own = lb.pt;
+                // ラベルの横の施設のアイコン (g.amenrow。マップタブだけ): ラベルと一緒に置き、一緒に隠す。重なりの判定はラベルとアイコンを合わせた箱で見る
+                var am = el.parentNode ? el.parentNode.querySelector('g.amenrow') : null, aw = am ? num(am, 'data-aw', 0) : 0;
+                if (am) am.setAttribute('visibility', 'hidden');
                 // 使っていないラベル (data-off。現在位置の印の無いときのラベル) は隠し、重なりの判定に入れない
                 if (el.getAttribute('data-off') === '1') { el.setAttribute('visibility', 'hidden'); return; }
                 var pr = own ? own.r : 4, sx = own ? own.sx : it.sx, sy = own ? own.sy : it.sy;
@@ -1610,10 +1851,20 @@ internal static class DetailHtml
                 var ok = false;
                 for (var t = 0; t < tries.length && !ok; t++) {
                   el.setAttribute('x', tries[t][0]); el.setAttribute('y', tries[t][1]); el.setAttribute('text-anchor', tries[t][2]);
-                  var b = el.getBBox(), hit = false;
+                  var b = el.getBBox(), hit = false, ax = 0, ay = 0;
+                  if (am) {
+                    // アイコンはラベルの右 (ラベルが点の左 (end) のときはラベルの左)。高さはラベルの真ん中 (アイコンは 14px)
+                    ax = tries[t][2] === 'end' ? b.x - 3 - aw : b.x + b.width + 3;
+                    ay = b.y + b.height / 2 - 7;
+                    var bx = Math.min(b.x, ax), by = Math.min(b.y, ay);
+                    b = { x: bx, y: by, width: Math.max(b.x + b.width, ax + aw) - bx, height: Math.max(b.y + b.height, ay + 14) - by };
+                  }
                   for (var k = 0; k < placed.length && !hit; k++) if (boxHit(b, placed[k])) hit = true;
                   for (var m = 0; m < points.length && !hit; m++) if (points[m] !== own && pointHit(b, points[m], own)) hit = true;
-                  if (!hit) { ok = true; placed.push(b); }
+                  if (!hit) {
+                    ok = true; placed.push(b);
+                    if (am) { am.setAttribute('transform', 'translate(' + ax + ',' + ay + ')'); am.removeAttribute('visibility'); }
+                  }
                 }
                 if (!ok) {
                   el.setAttribute('x', it.tx); el.setAttribute('y', it.ty); el.setAttribute('text-anchor', 'start');

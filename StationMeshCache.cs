@@ -11,12 +11,21 @@ namespace StarCitizenJapaneseTextCreater;
 // starbreaker を動かさずに、表での選び分け (StationFloorBuilder.FromRaw) から先 (床・階・道順・JSON) だけをやり直す。
 // Version は、GLB の読み方 (ReadMeshes) や形の数 (StationShape・ShapeOf) の作り方を変えたときに上げる (上げると次の取り込みは全部取り直す)。
 // 読めないファイル (壊れた・前の形) は消す
+// (2026-11-02、利用者の指示「ない場合は取り込み済みなら足りないものだけ取る形にしてほしい」) 保存の中身は socpak ごとの読み取りの結果 (GLB の子ごとのメッシュ・8 隅・形の数。
+// socpak の枠の値で、木の中の置き方に依らない) なので、使える条件を「Data.p4k の印・この版・同梱の部品の表のハッシュが同じ」にし、木のハッシュでは捨てない。
+// 要る socpak のうち保存に無いものだけを書き出して足す (StationMapExports.BuildJsonAsync)。木のハッシュは頭に書くが、確かめには使わない。
+// 横に <短い名前>.meshes.keys (UTF-8 の文字。1 行目「SCJTC-STATION-MESH-KEYS」、2 行目 版、3 行目 Data.p4k の印、4 行目 同梱の表のハッシュ、
+// 続けて「C<TAB>socpak」= 保存にある socpak、「T<TAB>socpak」= 保存したときの木にあった socpak (書き出しが要るかを調べたもの)) を置く。
+// まとめて取り込むの確認の窓で、gz を開かずに「保存から作り直せるか・何個書き出すか」を数えるのに使う (StationMapExports.TopUpPlan)
 internal static class StationMeshCache
 {
     public const int Version = 1;
     private const string Magic = "SCJTC-STATION-MESHES";
 
     public static string PathOf(string jsonPath) => Path.ChangeExtension(jsonPath, null) + ".meshes.gz";
+    // 横の鍵の一覧 (<短い名前>.meshes.keys)。meshCachePath は PathOf の値
+    public static string KeysPathOf(string meshCachePath) => meshCachePath.EndsWith(".meshes.gz", StringComparison.OrdinalIgnoreCase) ? meshCachePath[..^3] + ".keys" : meshCachePath + ".keys";
+    private const string KeysMagic = "SCJTC-STATION-MESH-KEYS";
 
     // 同梱の部品の表のハッシュ (無ければ "")
     public static string BundledKindsHash()
@@ -29,9 +38,88 @@ internal static class StationMeshCache
         catch (IOException) { return ""; }
     }
 
-    // 書く (一時ファイルに書いてから置き換える)
-    public static void Save(string path, string stampKey, string treeHash, string kindsHash, StationMeshSet set) =>
+    // 書く (一時ファイルに書いてから置き換える)。横の鍵の一覧も書く (調べたもの (T) は tree の socpak。無ければ保存にある socpak)
+    public static void Save(string path, string stampKey, string treeHash, string kindsHash, StationMeshSet set, StationTree? tree = null)
+    {
         Write(path, stampKey, treeHash, kindsHash, set.Raw, set.Missing.ToHashSet(StringComparer.Ordinal));
+        WriteKeys(path, stampKey, kindsHash, set.Raw.Keys, tree?.Instances.Where(i => i.Found && i.Socpak.Length > 0).Select(i => i.Socpak) ?? set.Raw.Keys);
+    }
+
+    private static void WriteKeys(string path, string stampKey, string kindsHash, IEnumerable<string> cached, IEnumerable<string> checkedSocpaks)
+    {
+        var kp = KeysPathOf(path);
+        var sb = new StringBuilder();
+        sb.Append(KeysMagic).Append('\n').Append(Version).Append('\n').Append(stampKey.Replace('\n', ' ')).Append('\n').Append(kindsHash).Append('\n');
+        // (2026-11-02、検証の指摘「中 5」) 保存 (.gz) の大きさと更新日時。読むときに合わなければ (公開版のアプリが .gz だけ書き直したなど) この一覧は使わない
+        sb.Append(GzLine(path)).Append('\n');
+        foreach (var k in cached.Distinct(StringComparer.Ordinal).OrderBy(k => k, StringComparer.Ordinal)) sb.Append("C\t").Append(k).Append('\n');
+        foreach (var k in checkedSocpaks.Distinct(StringComparer.Ordinal).OrderBy(k => k, StringComparer.Ordinal)) sb.Append("T\t").Append(k).Append('\n');
+        var tmp = kp + ".tmp";
+        File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(false));
+        File.Move(tmp, kp, true);
+    }
+
+    // 横の鍵の一覧を読む。無い・版・Data.p4k の印・同梱の表が違えば null (gz は開かない)
+    public static (HashSet<string> Cached, HashSet<string> Checked)? ReadKeys(string path, string stampKey)
+    {
+        try
+        {
+            var kp = KeysPathOf(path);
+            if (!File.Exists(kp) || !File.Exists(path)) return null;
+            var lines = File.ReadAllLines(kp, Encoding.UTF8);
+            if (lines.Length < 5 || lines[0] != KeysMagic || lines[1] != Version.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                || lines[2] != stampKey.Replace('\n', ' ') || lines[3] != BundledKindsHash() || lines[4] != GzLine(path)) return null;
+            var c = new HashSet<string>(StringComparer.Ordinal); var t = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var l in lines.Skip(4))
+            {
+                if (l.StartsWith("C\t", StringComparison.Ordinal)) c.Add(l[2..]);
+                else if (l.StartsWith("T\t", StringComparison.Ordinal)) t.Add(l[2..]);
+            }
+            return (c, t);
+        }
+        catch (IOException) { return null; }
+    }
+
+    // 保存にある socpak (Cached) と、保存したときに書き出しが要るかを調べた socpak (Checked) (まとめて取り込むの確認の窓の見積もり。StationMapExports.TopUpPlan)。
+    // 横の鍵の一覧があればそれ。無ければ (2026-11-02 より前の保存)、保存を全部読んで、保存にある socpak を両方にする。使えない保存 (Data.p4k・版・同梱の表が違う) は null
+    public static (HashSet<string> Cached, HashSet<string> Checked)? KeysOf(string path, string stampKey)
+    {
+        if (ReadKeys(path, stampKey) is { } k) return k;
+        if (!File.Exists(path) || TryLoad(path, stampKey, out _) is not { } l) return null;
+        var c = l.Raw.Keys.ToHashSet(StringComparer.Ordinal);
+        // (2026-11-02、検証の指摘) 読んだら横の鍵の一覧を書いておき、次からは .gz を読まない (調べたもの (T) は保存にある socpak だけ)
+        try { WriteKeys(path, stampKey, BundledKindsHash(), c, c); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        return (c, new HashSet<string>(c, StringComparer.Ordinal));
+    }
+
+    // 横の鍵の一覧に書く保存 (.gz) の印: 「G<TAB>大きさ<TAB>更新日時 (UTC の ticks)」。.gz が無ければ「G<TAB>-」
+    private static string GzLine(string path)
+    {
+        var f = new FileInfo(path);
+        return f.Exists ? $"G\t{f.Length}\t{f.LastWriteTimeUtc.Ticks}" : "G\t-";
+    }
+
+    // 横の鍵の一覧が無いか、木の socpak に一覧の「調べたもの」に入っていないものがあるか (書き直したほうがよいか)
+    public static bool KeysOutdated(string path, StationTree tree)
+    {
+        try
+        {
+            var kp = KeysPathOf(path);
+            if (!File.Exists(kp)) return true;
+            var t = File.ReadAllLines(kp, Encoding.UTF8).Where(l => l.StartsWith("T\t", StringComparison.Ordinal)).Select(l => l[2..]).ToHashSet(StringComparer.Ordinal);
+            return tree.Instances.Any(i => i.Found && i.Socpak.Length > 0 && !t.Contains(i.Socpak));
+        }
+        catch (IOException) { return true; }
+    }
+
+    // 保存と横の鍵の一覧を消す
+    public static void Delete(string path)
+    {
+        if (File.Exists(path)) File.Delete(path);
+        var kp = KeysPathOf(path);
+        if (File.Exists(kp)) File.Delete(kp);
+    }
 
     private static void Write(string path, string stampKey, string treeHash, string kindsHash, IReadOnlyDictionary<string, List<List<StationGlbMesh>>> raw, HashSet<string> missing)
     {
@@ -62,16 +150,13 @@ internal static class StationMeshCache
 
     private sealed record Loaded(string StampKey, string TreeHash, string KindsHash, Dictionary<string, List<List<StationGlbMesh>>> Raw, HashSet<string> Missing);
 
-    // 読む。無い・壊れている・版・Data.p4k・木のハッシュ・同梱の表が違う・要る socpak (keys) が入っていないときは null と理由。
+    // 読む。無い・壊れている・版・Data.p4k・同梱の表が違うときは null と理由 (木のハッシュは見ない。要る socpak が足りるかは呼ぶ側で見る)。
     // Raw は socpak → GLB に出た子ごとのメッシュの並び (1 つの GLB に同じ socpak の子が 2 回出たときは 2 つ。StationMeshSet.Raw と同じ)
-    public static (Dictionary<string, List<List<StationGlbMesh>>> Raw, HashSet<string> Missing)? TryLoad(string path, string stampKey, string treeHash, IEnumerable<string> keys, out string reason)
+    public static (Dictionary<string, List<List<StationGlbMesh>>> Raw, HashSet<string> Missing)? TryLoad(string path, string stampKey, out string reason)
     {
         if (Read(path, out reason) is not { } l) return null;
         if (l.StampKey != stampKey) { reason = "Data.p4k が保存したときと違う"; return null; }
-        if (l.TreeHash != treeHash) { reason = "ステーションの木が保存したときと違う"; return null; }
         if (l.KindsHash != BundledKindsHash()) { reason = "同梱の部品の表が保存したときと違う"; return null; }
-        var lack = keys.Where(k => !l.Raw.ContainsKey(k)).ToList();
-        if (lack.Count > 0) { reason = $"要る socpak が保存した読み取りの結果に無い ({lack.Count} 個。例: {lack[0]})"; return null; }
         return (l.Raw, l.Missing);
     }
 
@@ -80,6 +165,10 @@ internal static class StationMeshCache
     {
         if (Read(path, out _) is not { } l || l.StampKey != oldKey) return false;
         Write(path, newKey, l.TreeHash, l.KindsHash, l.Raw, l.Missing);
+        // 横の鍵の一覧も印を書き直す (調べたもの (T) は前の一覧のまま。無ければ保存にある socpak だけ)
+        var kp = KeysPathOf(path);
+        var checkedOld = File.Exists(kp) ? File.ReadAllLines(kp, Encoding.UTF8).Where(x => x.StartsWith("T\t", StringComparison.Ordinal)).Select(x => x[2..]).ToList() : l.Raw.Keys.ToList();
+        WriteKeys(path, newKey, l.KindsHash, l.Raw.Keys, checkedOld);
         return true;
     }
 
@@ -121,7 +210,7 @@ internal static class StationMeshCache
         }
         catch (Exception ex) { reason = $"保存した読み取りの結果を読めない ({ex.GetType().Name}: {ex.Message})"; }
         // 読めない・形や版が違う: 使えないので消す (次の取り込みで作り直す)
-        try { File.Delete(path); } catch { }
+        try { Delete(path); } catch { }
         return null;
     }
 

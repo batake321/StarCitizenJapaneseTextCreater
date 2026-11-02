@@ -35,7 +35,19 @@
                 <TextBlock Text="区画" FontWeight="Bold" Margin="0,6,0,2"/>
                 <TextBox x:Name="txtSectionFilter" TextChanged="TxtSectionFilter_TextChanged" ToolTip="区画の名前の一部で絞り込みます"/>
                 <ListBox x:Name="lstSections" Height="120" DisplayMemberPath="Display" SelectionChanged="LstSections_SelectionChanged"
-                         ToolTip="選んだ階の区画。選ぶと、その区画の店を囲む範囲を出します"/>
+                         ToolTip="選んだ階の区画。選ぶと、その区画の店を囲む範囲を出します (店のある区画は地図の右に販売品を出します)"/>
+
+                <!-- 端末の一覧 (2026-11-02、利用者の指示「マップの区画の下に端末のリストが欲しい。選ぶと地図でその位置をハイライト。道案内も目的地に」) -->
+                <TextBlock Text="端末" FontWeight="Bold" Margin="0,6,0,2"/>
+                <TextBox x:Name="txtTerminalFilter" TextChanged="TxtTerminalFilter_TextChanged" ToolTip="端末の種類・階・区画の名前の一部で絞り込みます"/>
+                <ListBox x:Name="lstTerminals" Height="120" DisplayMemberPath="Display" SelectionChanged="LstTerminals_SelectionChanged"
+                         ToolTip="艦隊マネージャー・クリニック・薬局・再生登録・ショップ・コモディティ・貨物センター・精製所・貨物エレベーターの端末。選ぶと、その階に移って端末の位置を強調します">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
+                            <Setter Property="ToolTip" Value="{Binding Display}"/>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                </ListBox>
 
                 <TextBlock Text="道案内" FontWeight="Bold" Margin="0,8,0,2"/>
                 <DockPanel Margin="0,0,0,2">
@@ -48,7 +60,7 @@
                 <TextBlock Text="目的地" Margin="0,4,0,2"/>
                 <TextBox x:Name="txtDestFilter" TextChanged="TxtDestFilter_TextChanged" ToolTip="目的地の名前の一部で絞り込みます"/>
                 <ListBox x:Name="lstDest" Height="120" DisplayMemberPath="Display" SelectionChanged="LstDest_SelectionChanged"
-                         ToolTip="店・区画・乗り場。地図の店・乗り場の印のクリックでも選べます"/>
+                         ToolTip="店・区画・乗り場・端末。地図の店・乗り場・端末の印のクリックでも選べます"/>
 
                 <TextBlock Text="道順" FontWeight="Bold" Margin="0,8,0,2"/>
                 <TextBlock x:Name="txtRoute" TextWrapping="Wrap" Margin="0,0,0,2"/>

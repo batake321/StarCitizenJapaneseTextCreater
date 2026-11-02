@@ -418,6 +418,34 @@ internal sealed class StationIndex : IDisposable
         return len > 0 ? (r.W / len, r.X / len, r.Y / len, r.Z / len) : null;
     }
 
+    // socpak の .soc に、書き出しで読む部品 (床・階段・灯り。名前の語の決まり StationFloorBuilder.IsExportMesh(mesh)) があるか (読んだものは覚える)。
+    // 部品の表 (StationMeshKinds) は取り込みのたびに増えるので使わない (木の形が表の中身で変わらないように。調べの担当が数えたのも同じ決まり)
+    private readonly ConcurrentDictionary<string, bool> _floorParts = new(StringComparer.Ordinal);
+    public bool HasFloorParts(string socpak) => _floorParts.GetOrAdd(Resolve(socpak), r => StationFloorBuilder.ScanSocMeshes(this, r).Any(StationFloorBuilder.IsExportMesh));
+
+    // Child の部分木 (Child の socpak、入れ子の Child、socpak の直下の Child を、深さ StationTree.DefaultMaxDepth まで。同じ socpak は 1 度だけ) に、
+    // 床・階段の部品のある socpak (HasFloorParts) があるか (2026-11-02、外す決まりの Child を外さない判定。StationTree.Load)
+    public bool SubtreeHasFloorParts(SocChild child)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        bool Walk(SocChild c, int depth)
+        {
+            if (depth > StationTree.DefaultMaxDepth) return false;
+            if (c.Socpak.Length > 0)
+            {
+                var r = Resolve(c.Socpak);
+                if (seen.Add(r))
+                {
+                    if (HasFloorParts(r)) return true;
+                    if (Head(r) is { } h) foreach (var k in h.Children) if (Walk(k, depth + 1)) return true;
+                }
+            }
+            foreach (var k in c.Kids) if (Walk(k, depth + 1)) return true;
+            return false;
+        }
+        return Walk(child, 0);
+    }
+
     // ステーションのルートを探す。places は星図の場所 (Star と、地図を作る種類 (StationPlace.IsMapPlace) を含める)。
     // 星系の socpak (pu/system/<星系>/<名前>.socpak) の xml の中から starMapRecord が Star の Child を見つけ、そこから入れ子の Child と子の socpak の xml の Child を辿る。
     // 同じ socpak の xml の Child は 1 度だけ辿る (GameDataExtractor の BuildStarmap と同じ)。同じ場所が 2 つ以上の Child にあれば最初に辿ったもの
@@ -662,6 +690,32 @@ internal sealed record StationShop(int Instance, string EntityName, string Guid,
 // .rmxml の RoomMapping の 1 行 (3 段目の要素)。A・B・C は 1〜3 段目の SuperGUID、Next は NextRoomSuperGUID (無ければ "")。意味は未確認 (StationTree の説明)
 internal sealed record StationRoomRoute(int Instance, string A, string B, string C, double Distance, string Features, string Next);
 
+// 端末 1 つ (2026-11-02、利用者の指示「端末の場所がわかる？ … マークは端末のところがいい」)。.soc の Entity の Pos・Rotate を局所に直したもの。
+// Kind は StationTerminalKinds の鍵 (fleet・clinic・pharmacy・clone・shop・commodity・cargo・refinery・freight)。Basis は判定の根拠 (例 "metadata:entitycomponentshipinsuranceprovider"、"class:CloneLocationAdmin")。
+// ShopGuid・ShopEntity は店の端末のとき、同じ socpak のいちばん近い SCShop (EntityCryGUID・Name)。無ければ ""
+internal sealed record StationTerminal(int Instance, string Kind, string Guid, string EntityClass, string EntityName,
+    (double X, double Y, double Z) Pos, (double W, double X, double Y, double Z)? Rot, string Basis)
+{
+    public string ShopGuid { get; init; } = "";
+    public string ShopEntity { get; init; } = "";
+}
+
+// 外の設備 1 つ (2026-11-02、利用者の指示「外部の着陸パッドの場所と番号、外部の貨物エレベーター、割り当てられるハンガーの場所が立体で見たい」。3D の表示は別に作る)。
+// Kind: pad (EntityClass LandingArea。NameKey は HUDDisplayName、Size は dimensions)、deck (EntityClass LoadingArea。NameKey は HUDDisplayName (@cargodeck_NN)、Size は dimensions)、
+// hangar (metadata entitycomponentinstancedinteriorgateway の Entity。GatewaySize は metadata の値、Link は EntityLinks の先 (HangarDoor))、
+// freight (LoadingPlatformManager の台 loadingPlatform の位置。Link は kiosk の CryGUID。Deck は台を箱の中に含む deck の NameKey (直接の参照は無いので推測。DeckGuess))
+internal sealed record StationExterior(int Instance, string Kind, string Guid, string EntityClass, string EntityName,
+    (double X, double Y, double Z) Pos, (double W, double X, double Y, double Z)? Rot)
+{
+    public string NameKey { get; init; } = "";
+    public (double X, double Y, double Z)? Size { get; init; }
+    public int GatewaySize { get; init; }
+    public string Link { get; init; } = "";
+    public string Deck { get; init; } = "";
+    public bool DeckGuess { get; init; }
+    public double DeckDistance { get; init; }
+}
+
 // ステーションの木 (ルートから Child を辿ったインスタンス) と、その中身
 internal sealed class StationTree
 {
@@ -686,12 +740,18 @@ internal sealed class StationTree
     public List<StationPoint> Points { get; } = new();
     public List<StationShop> Shops { get; } = new();
     public List<StationRoomRoute> RoomRoutes { get; } = new();
+    // 端末と外の設備 (2026-11-02。SocpakContents.ReadTerminals)
+    public List<StationTerminal> Terminals { get; } = new();
+    public List<StationExterior> Exteriors { get; } = new();
     // 深さの上限で辿るのをやめた Child の数・親と同じ socpak が祖先にあって辿らなかった Child の数
     public int DepthCut { get; private set; }
     public int CycleCut { get; private set; }
     // StationChildFilter で木に入れなかった Child の数と socpak
     public int ClassCut { get; private set; }
     public List<string> ClassCutNames { get; } = new();
+    // (2026-11-02) 外す決まり (StationChildFilter) に当たった Child の (socpak, entityName, class): 外したもの (CutChildren) と、部分木に床・階段の部品があるので外さなかったもの (KeptChildren)
+    public List<(string Socpak, string Entity, string Class)> CutChildren { get; } = new();
+    public List<(string Socpak, string Entity, string Class)> KeptChildren { get; } = new();
 
     // インスタンス i の枠 → 全体の座標 の変換と、その逆 (全体 → インスタンスの枠)
     public StationXf InstanceToGlobal(int i, StarRotRule rule = StationIndex.DefaultRule, double theta = 0) => Root.GlobalXf(rule, theta).Then(Instances[i].ToStation);
@@ -724,7 +784,14 @@ internal sealed class StationTree
                 var k = kids[n];
                 var el = n < kidEls.Count && kidEls.Count == kids.Count ? kidEls[n] : null;
                 if (k.Socpak.Length > 0 && chain.Contains(index.Resolve(k.Socpak), StringComparer.Ordinal)) { tree.CycleCut++; continue; }
-                if (el != null && StationChildFilter.Skip((string?)el.Attribute("class") ?? "", root.Place.IsStation)) { tree.ClassCut++; tree.ClassCutNames.Add(index.Resolve(k.Socpak)); continue; }
+                if (el != null && StationChildFilter.Skip((string?)el.Attribute("class") ?? "", root.Place.IsStation))
+                {
+                    // (2026-11-02、利用者の決定「1 OK」) 外す決まりの Child でも、部分木に床・階段の部品のある socpak があれば外さない (StationIndex.SubtreeHasFloorParts)
+                    var cls = (string?)el.Attribute("class") ?? "";
+                    if (index.SubtreeHasFloorParts(k))
+                        tree.KeptChildren.Add((index.Resolve(k.Socpak), k.EntityName, cls));
+                    else { tree.ClassCut++; tree.ClassCutNames.Add(index.Resolve(k.Socpak)); tree.CutChildren.Add((index.Resolve(k.Socpak), k.EntityName, cls)); continue; }
+                }
                 Add(idx, k.Socpak, k.EntityName, depth + 1, toStation.Then(StationXf.Of(k.X, k.Y, k.Z, k.Rot)), k.Kids,
                     el != null ? ChildElements(el) : new List<XElement>(), ((string?)el?.Attribute("guid") ?? "").Trim().ToLowerInvariant(), k.StarMapRecord,
                     (string?)el?.Attribute("tags") ?? "");
@@ -842,6 +909,33 @@ internal sealed class StationTree
             }
             foreach (var s in c.Shops) Shops.Add(new StationShop(inst.Index, s.Name, s.Guid, xf.Apply(s.Pos), s.Pos, s.FromBytes));
             foreach (var r in c.Routes) RoomRoutes.Add(r with { Instance = inst.Index });
+            (double, double, double, double)? Rq((double W, double X, double Y, double Z)? q) => q is { } r2 ? StationXf.Mul((xf.Qw, xf.Qx, xf.Qy, xf.Qz), r2) : (xf.Qw, xf.Qx, xf.Qy, xf.Qz);
+            foreach (var t in c.Terminals) Terminals.Add(t with { Instance = inst.Index, Pos = xf.Apply(t.Pos), Rot = Rq(t.Rot) });
+            foreach (var x in c.Exteriors) Exteriors.Add(x with { Instance = inst.Index, Pos = xf.Apply(x.Pos), Rot = Rq(x.Rot) });
+        }
+        LinkFreightDecks();
+    }
+
+    // 外の貨物エレベーターの台 (freight) と外部貨物の区画 (deck。LoadingArea、HUDDisplayName @cargodeck_NN) の対応 (2026-11-02)。
+    // データに直接の参照は見つかっていない (調べの報告) ので、近さで当てた推測 (DeckGuess を付ける)。台の位置から中心がいちばん近い deck で、
+    // 間が deck の大きさ (dimensions の大きい辺) の 2 倍以内のもの。無ければ Deck は ""。
+    // 確かめた値 (2026-11-02): RR_HUR_LEO は台 12 と deck 12 が 1 つずつ、どれも約 425 m (水平 404〜407 m、2 番目に近い deck は 590 m 以上)。
+    // Nyx_Levski は台 16 と deck 8 で、deck 1 つに台 2 つ、325〜340 m (2 番目は 340〜532 m で差の小さい台がある)。deck の大きさは 300 m
+    private void LinkFreightDecks()
+    {
+        var decks = Exteriors.Where(e => e.Kind == "deck" && e.NameKey.Length > 0).ToList();
+        for (int i = 0; i < Exteriors.Count; i++)
+        {
+            var f = Exteriors[i];
+            if (f.Kind != "freight") continue;
+            StationExterior? best = null; double bd = double.MaxValue;
+            foreach (var d in decks)
+            {
+                var dist = Math.Sqrt((d.Pos.X - f.Pos.X) * (d.Pos.X - f.Pos.X) + (d.Pos.Y - f.Pos.Y) * (d.Pos.Y - f.Pos.Y) + (d.Pos.Z - f.Pos.Z) * (d.Pos.Z - f.Pos.Z));
+                var lim = d.Size is { } s ? 2 * Math.Max(s.X, Math.Max(s.Y, s.Z)) : 0;
+                if (dist <= lim && dist < bd) { bd = dist; best = d; }
+            }
+            if (best != null) Exteriors[i] = f with { Deck = best.NameKey, DeckGuess = true, DeckDistance = bd };
         }
     }
 
@@ -885,6 +979,15 @@ internal sealed class SocpakContents
         IReadOnlyList<(double X, double Y, double Z)> Path)> Meta { get; } = new();
     public List<(string Name, string Guid, (double X, double Y, double Z) Pos, bool FromBytes)> Shops { get; } = new();
     public List<StationRoomRoute> Routes { get; } = new();
+    // 端末と外の設備 (socpak の枠の値のまま。Instance は -1)
+    public List<StationTerminal> Terminals { get; } = new();
+    public List<StationExterior> Exteriors { get; } = new();
+    // 端末・外の設備の判定に使う metadata (2026-11-02): ファイル名 (.xml を除く) → Entity の CryGUID (小文字)。
+    // entitycomponentinstancedinteriorgateway は CryGUID → (GatewaySize, OcRelativeTransform の位置・回転)
+    public static readonly string[] TerminalMetaKinds = ["entitycomponentshipinsuranceprovider", "entitycomponentcommodityuiprovider", "entitycomponentshoppingprovider"];
+    public const string GatewayMetaKind = "entitycomponentinstancedinteriorgateway";
+    private readonly Dictionary<string, HashSet<string>> _termMeta = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (int Size, (double X, double Y, double Z)? Pos, (double W, double X, double Y, double Z)? Rot)> _gateways = new(StringComparer.OrdinalIgnoreCase);
 
     // .soc のバイト列の店 (CryXmlB の Entity に Pos が無かったときだけ使う。assemble.py と同じ並び「SCShop_… | x,y,z | SCShop | GUID | GUID」)
     private static readonly Regex ShopBytesRegex = new(
@@ -900,6 +1003,7 @@ internal sealed class SocpakContents
             using var zip = index.OpenSocpak(rel);
             if (zip == null) return null;
             var c = new SocpakContents();
+            var socs = new List<byte[]>();
             foreach (var e in zip.Entries)
             {
                 var name = e.FullName.Replace('\\', '/').ToLowerInvariant();
@@ -908,15 +1012,21 @@ internal sealed class SocpakContents
                 if (name.Contains("/metadata/", StringComparison.Ordinal) && file.EndsWith(".xml", StringComparison.Ordinal)
                     && StationTree.MetaKinds.Contains(file[..^4]))
                     c.ReadMeta(file[..^4], StationIndex.ReadAll(e));
+                else if (name.Contains("/metadata/", StringComparison.Ordinal) && file.EndsWith(".xml", StringComparison.Ordinal)
+                    && (TerminalMetaKinds.Contains(file[..^4]) || file[..^4] == GatewayMetaKind))
+                    c.ReadTerminalMeta(file[..^4], StationIndex.ReadAll(e));
                 else if (file.EndsWith(".soc", StringComparison.Ordinal))
                 {
                     var bytes = StationIndex.ReadAll(e);
                     c.ReadShops(bytes);
                     c.ReadLandingAreas(bytes);
+                    socs.Add(bytes);
                 }
                 else if (file.EndsWith(".rmxml", StringComparison.Ordinal))
                     c.ReadRoomMapping(StationIndex.ReadAll(e));
             }
+            // 端末・外の設備は、metadata (CryGUID の一覧) を全部読んでから .soc の Entity に当てる (zip の中の並びは metadata が後のことがある)
+            c.ReadTerminals(socs);
             return c;
         }
         catch (Exception ex) when (ex is InvalidDataException or IOException) { return null; }
@@ -1082,6 +1192,172 @@ internal sealed class SocpakContents
             }
         }
     }
+
+    // 端末の判定に使う metadata (TerminalMetaKinds) の Entity の CryGUID と、ハンガーの入口 (GatewayMetaKind) の GatewaySize・OcRelativeTransform
+    private void ReadTerminalMeta(string kind, byte[] bytes)
+    {
+        var doc = ParseAny(bytes);
+        if (doc?.Root == null) return;
+        foreach (var ent in doc.Root.Elements("Entity"))
+        {
+            var guid = ((string?)ent.Attribute("CryGUID") ?? "").Trim().ToLowerInvariant();
+            if (guid.Length == 0) continue;
+            if (kind == GatewayMetaKind)
+            {
+                int.TryParse((string?)ent.Attribute("GatewaySize"), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var size);
+                (double, double, double)? pos = null; (double, double, double, double)? rot = null;
+                if ((string?)ent.Attribute("OcRelativeTransform") is { } tm && TransformLsRegex.Match(tm) is { Success: true } m)
+                {
+                    pos = StationIndex.ParseVec(m.Groups[2].Value.Trim());
+                    rot = StationIndex.Normalize(StationIndex.ParseQuat(m.Groups[1].Value.Trim()));
+                }
+                _gateways[guid] = (size, pos, rot);
+                continue;
+            }
+            if (!_termMeta.TryGetValue(kind, out var set)) _termMeta[kind] = set = new HashSet<string>(StringComparer.Ordinal);
+            set.Add(guid);
+        }
+    }
+
+    // 端末の種類の判定 (2026-11-02。上から順に当てる。場所の名前では決めない):
+    //   ① metadata entitycomponentshipinsuranceprovider の CryGUID → fleet (艦隊マネージャー。ShipSelectorKiosk_*)
+    //   ② metadata entitycomponentcommodityuiprovider の CryGUID → commodity (コモディティ。*CommodityKiosk*)
+    //   ③ LoadingPlatformManager の kiosk の参照先 → freight (貨物エレベーターの端末)
+    //   ④ EntityLinks の先が EntityClass「Refinery」の Entity → refinery (精製所の端末。SoftLock_Terminal_Standard_Refinery*)
+    //   ⑤ EntityClass に「CloneLocationAdmin」→ clone (再生登録)、「HospitalCheckIn」→ clinic (クリニックの受付の端末)
+    //   ⑥ 店の端末: EntityClass に「ShoppingKiosk」「Shop_Terminal」があるもの、または metadata entitycomponentshoppingprovider の CryGUID
+    //      (EntityClass に「screen」のあるもの (精製所の画面 MASTER_screen_16x9_MiningKiosk) は除く。理由: 精製所の受付の壁の高い所 (床から約 5 m) にある画面で、
+    //      人が前に立って使う端末ではない (RR_HUR_L1 の util_a_refinery_admin_lge_001 で、Pos の高さ 5.27 m、端末 SoftLock_Terminal_Standard_Refinery は 4.27 m の床の上。推測を含む))。
+    //      同じ socpak のいちばん近い SCShop を店にし、その SCShop の Name に「Pharmacy」があれば pharmacy (薬局)、「Cargo_Office」があり「Rental」が無ければ cargo (貨物センター)、ほかは shop
+    //      (「Rental」を除く理由: Cargo Center の socpak (cargo_office_001) には、貨物の店 SCShop_Cargo_Office と、乗り物の貸し出しの店 SCShop_Cargo_Office_Rentals
+    //      (ShopKiosk_Rentals の端末) の 2 つがあり、貸し出しの端末は Cargo Center の端末ではないため。RR_HUR_LEO で確かめた)
+    // Pos の無い Entity は使わない
+    private static readonly string[] TerminalNeedles = ["Kiosk", "CloneLocationAdmin", "HospitalCheckIn", "Refinery", "Shop_Terminal", "LoadingPlatform", "LandingArea", "LoadingArea", "SCShop", "InstancedHangarGateway"];
+
+    private sealed record SocEnt(string Cls, string Name, string Guid, (double X, double Y, double Z)? Pos, (double W, double X, double Y, double Z)? Rot, List<string> Links, XElement E);
+
+    private void ReadTerminals(List<byte[]> socs)
+    {
+        var needles = TerminalNeedles.Concat(_termMeta.Values.SelectMany(s => s)).Concat(_gateways.Keys).ToList();
+        var ents = new List<SocEnt>();
+        foreach (var bytes in socs)
+        {
+            var latin1 = Encoding.Latin1.GetString(bytes);
+            if (!needles.Any(k => latin1.Contains(k, StringComparison.OrdinalIgnoreCase))) continue;
+            var starts = new List<int>();
+            for (int at = latin1.IndexOf("CryXmlB", StringComparison.Ordinal); at >= 0; at = latin1.IndexOf("CryXmlB", at + 7, StringComparison.Ordinal)) starts.Add(at);
+            for (int i = 0; i < starts.Count; i++)
+            {
+                var a = starts[i];
+                var z = i + 1 < starts.Count ? starts[i + 1] : bytes.Length;
+                if (!needles.Any(k => latin1.IndexOf(k, a, z - a, StringComparison.OrdinalIgnoreCase) >= 0)) continue;
+                XDocument doc;
+                try { doc = CryXmlParser.ParseBinaryBytes(bytes[a..z]); }
+                catch { continue; }
+                foreach (var en in doc.Descendants("Entity"))
+                    ents.Add(new SocEnt((string?)en.Attribute("EntityClass") ?? "", (string?)en.Attribute("Name") ?? "",
+                        ((string?)en.Attribute("EntityCryGUID") ?? "").Trim().ToLowerInvariant(),
+                        StationIndex.ParseVec((string?)en.Attribute("Pos")), StationIndex.Normalize(StationIndex.ParseQuat((string?)en.Attribute("Rotate"))),
+                        en.Elements("EntityLinks").Elements("Link").Select(l => ((string?)l.Attribute("TargetCryGUID") ?? "").Trim().ToLowerInvariant()).Where(g => g.Length > 0).ToList(), en));
+            }
+        }
+        if (ents.Count == 0) return;
+        var byGuid = new Dictionary<string, SocEnt>(StringComparer.Ordinal);
+        foreach (var e in ents) if (e.Guid.Length > 0) byGuid.TryAdd(e.Guid, e);
+        HashSet<string> Meta(string k) => _termMeta.TryGetValue(k, out var s) ? s : new HashSet<string>();
+        var fleet = Meta("entitycomponentshipinsuranceprovider");
+        var commodity = Meta("entitycomponentcommodityuiprovider");
+        var shopping = Meta("entitycomponentshoppingprovider");
+        var refineries = ents.Where(e => e.Cls == "Refinery" && e.Guid.Length > 0).Select(e => e.Guid).ToHashSet(StringComparer.Ordinal);
+        // LoadingPlatformManager の参照 (属性 loadingPlatformEntityReferences の loadingPlatform・kiosk。無ければ SCLoadingPlatformManager の子の entitySuperGUID の最後の GUID)
+        var managers = new List<(SocEnt M, string Platform, string Kiosk)>();
+        static string Last(string? s) => (s ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).LastOrDefault()?.ToLowerInvariant() ?? "";
+        foreach (var e in ents.Where(e => e.Cls == "LoadingPlatformManager"))
+        {
+            var refs = e.E.Descendants("loadingPlatformEntityReferences").FirstOrDefault();
+            var mgr = e.E.Elements("SCLoadingPlatformManager").FirstOrDefault();
+            var platform = ((string?)refs?.Attribute("loadingPlatform") ?? "").Trim().ToLowerInvariant();
+            var kiosk = ((string?)refs?.Attribute("kiosk") ?? "").Trim().ToLowerInvariant();
+            if (platform.Length == 0) platform = Last((string?)mgr?.Element("LoadingPlatform")?.Attribute("entitySuperGUID"));
+            if (kiosk.Length == 0) kiosk = Last((string?)mgr?.Element("Kiosk")?.Attribute("entitySuperGUID"));
+            managers.Add((e, platform, kiosk));
+        }
+        var freightKiosks = managers.Select(m => m.Kiosk).Where(k => k.Length > 0).ToHashSet(StringComparer.Ordinal);
+        var shops = ents.Where(e => e.Cls == "SCShop" && e.Pos != null).ToList();
+        var done = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var e in ents)
+        {
+            if (e.Pos is not { } pos || e.Guid.Length == 0 || done.Contains(e.Guid)) continue;
+            string? kind = null, basis = null;
+            if (fleet.Contains(e.Guid)) (kind, basis) = ("fleet", "metadata:entitycomponentshipinsuranceprovider");
+            else if (commodity.Contains(e.Guid)) (kind, basis) = ("commodity", "metadata:entitycomponentcommodityuiprovider");
+            else if (freightKiosks.Contains(e.Guid)) (kind, basis) = ("freight", "LoadingPlatformManager:kiosk");
+            else if (e.Links.Any(refineries.Contains)) (kind, basis) = ("refinery", "EntityLinks:Refinery");
+            else if (e.Cls.Contains("CloneLocationAdmin", StringComparison.OrdinalIgnoreCase)) (kind, basis) = ("clone", "class:CloneLocationAdmin");
+            else if (e.Cls.Contains("HospitalCheckIn", StringComparison.OrdinalIgnoreCase)) (kind, basis) = ("clinic", "class:HospitalCheckIn");
+            else if (!e.Cls.Contains("screen", StringComparison.OrdinalIgnoreCase)
+                     && (e.Cls.Contains("ShoppingKiosk", StringComparison.OrdinalIgnoreCase) || e.Cls.Contains("Shop_Terminal", StringComparison.OrdinalIgnoreCase) || shopping.Contains(e.Guid)))
+                (kind, basis) = ("shop", shopping.Contains(e.Guid) ? "metadata:entitycomponentshoppingprovider" : "class:ShoppingKiosk");
+            if (kind == null) continue;
+            done.Add(e.Guid);
+            var t = new StationTerminal(-1, kind, e.Guid, e.Cls, e.Name, pos, e.Rot, basis!);
+            if (kind == "shop" && shops.Count > 0)
+            {
+                var sh = shops.MinBy(s => Dist(s.Pos!.Value, pos))!;
+                var nm = sh.Name;
+                var sub = nm.Contains("Pharmacy", StringComparison.OrdinalIgnoreCase) ? "pharmacy"
+                    : nm.Contains("Cargo_Office", StringComparison.OrdinalIgnoreCase) && !nm.Contains("Rental", StringComparison.OrdinalIgnoreCase) ? "cargo" : "shop";
+                t = t with { Kind = sub, Basis = sub == "shop" ? basis! : basis + "+SCShop:" + nm, ShopGuid = sh.Guid, ShopEntity = nm };
+            }
+            Terminals.Add(t);
+        }
+        // 外の設備
+        static (double X, double Y, double Z)? Dims(XElement en)
+        {
+            var d = en.Descendants("dimensions").FirstOrDefault();
+            if (d == null) return null;
+            var inv = System.Globalization.CultureInfo.InvariantCulture; var st = System.Globalization.NumberStyles.Float;
+            return double.TryParse((string?)d.Attribute("x"), st, inv, out var x) && double.TryParse((string?)d.Attribute("y"), st, inv, out var y) && double.TryParse((string?)d.Attribute("z"), st, inv, out var z) ? (x, y, z) : null;
+        }
+        static string Hud(XElement en, string comp) => (string?)en.Descendants(comp).FirstOrDefault()?.Attribute("HUDDisplayName") ?? "";
+        var exDone = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var e in ents)
+        {
+            if (e.Guid.Length == 0 || exDone.Contains(e.Guid)) continue;
+            if (e.Cls == "LandingArea" && e.Pos is { } pp)
+            {
+                exDone.Add(e.Guid);
+                Exteriors.Add(new StationExterior(-1, "pad", e.Guid, e.Cls, e.Name, pp, e.Rot) { NameKey = Hud(e.E, "LandingArea"), Size = Dims(e.E) });
+            }
+            else if (e.Cls == "LoadingArea" && e.Pos is { } lp)
+            {
+                exDone.Add(e.Guid);
+                Exteriors.Add(new StationExterior(-1, "deck", e.Guid, e.Cls, e.Name, lp, e.Rot) { NameKey = Hud(e.E, "LoadingArea"), Size = Dims(e.E) });
+            }
+            else if (_gateways.TryGetValue(e.Guid, out var gw) && (e.Pos ?? gw.Pos) is { } gp)
+            {
+                exDone.Add(e.Guid);
+                Exteriors.Add(new StationExterior(-1, "hangar", e.Guid, e.Cls, e.Name, gp, e.Pos != null ? e.Rot : gw.Rot) { GatewaySize = gw.Size, Link = e.Links.FirstOrDefault() ?? "" });
+            }
+        }
+        // metadata にだけあって .soc に Entity の無いハンガーの入口 (OcRelativeTransform の位置)
+        foreach (var (guid, gw) in _gateways)
+            if (!exDone.Contains(guid) && gw.Pos is { } gp2)
+            {
+                exDone.Add(guid);
+                Exteriors.Add(new StationExterior(-1, "hangar", guid, "", "", gp2, gw.Rot) { GatewaySize = gw.Size });
+            }
+        foreach (var (m, platform, kiosk) in managers)
+        {
+            var pl = platform.Length > 0 && byGuid.TryGetValue(platform, out var p) && p.Pos != null ? p : null;
+            var pos = pl?.Pos ?? m.Pos;
+            if (pos is not { } fp) continue;
+            Exteriors.Add(new StationExterior(-1, "freight", pl?.Guid ?? m.Guid, pl?.Cls ?? m.Cls, pl?.Name ?? m.Name, fp, pl != null ? pl.Rot : m.Rot) { Link = kiosk });
+        }
+    }
+
+    private static double Dist((double X, double Y, double Z) a, (double X, double Y, double Z) b) =>
+        Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y) + (a.Z - b.Z) * (a.Z - b.Z));
 
     // RoomMapping: 1 段目・2 段目・3 段目の要素の SuperGUID と、3 段目の Distance・Features・NextRoomSuperGUID (要素の名前は空なので位置で読む)
     private void ReadRoomMapping(byte[] bytes)

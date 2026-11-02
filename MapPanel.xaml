@@ -39,6 +39,10 @@
                              PreviewMouseLeftButtonUp="LstSearch_PreviewMouseLeftButtonUp" PreviewKeyDown="LstSearch_PreviewKeyDown"/>
                 </Popup>
             </Grid>
+            <!-- 施設で絞る (MapPanel.CmbAmenity_SelectionChanged)。星図の施設の一覧にその施設のある場所だけを候補にする。名前が空なら、その施設のある場所を全部出す -->
+            <ComboBox x:Name="cmbAmenity" MinWidth="150" Margin="6,0,0,0" VerticalContentAlignment="Center" DisplayMemberPath="Display" IsEnabled="False"
+                      SelectionChanged="CmbAmenity_SelectionChanged"
+                      ToolTip="施設 (精製所など。ゲームの星図の施設の一覧) を選ぶと、その施設のある場所だけを候補に出します。場所の名前が空なら、その施設のある場所を全部出します"/>
             <TextBlock x:Name="txtStatus" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
         </StackPanel>
 

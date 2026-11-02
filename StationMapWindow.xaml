@@ -38,6 +38,8 @@
             </StackPanel>
         </Grid>
         <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" Background="#E0E0E0"/>
-        <local:StationMapPanel Grid.Column="2" x:Name="panel"/>
+        <!-- 地図は［マップ］タブと同じ合成の WebView2 (UseComposition)。同じ利用者データの置き場 (webview2_station) のブラウザーのプロセスを共有するため、種類をそろえる
+             (2026-11-02、HWND の WebView2 の初期化が 0x8007139F で失敗した。StationMapWeb.InitAsync の説明) -->
+        <local:StationMapPanel Grid.Column="2" x:Name="panel" UseComposition="True"/>
     </Grid>
 </Window>

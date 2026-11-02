@@ -69,6 +69,10 @@
     <None Update="wwwroot\stationmap\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- ステーションの 3D 表示のビューア (wwwroot\station3d。three.js は wwwroot\three を使う) -->
+    <None Update="wwwroot\station3d\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>

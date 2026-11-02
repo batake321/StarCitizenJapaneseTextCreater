@@ -1277,6 +1277,7 @@ internal static class StationFloorBuilder
         var floorLightAt = new List<(int At, int Inst, List<(double X, double Y, double Z)> Lights)>();
         var shapeOnly = new HashSet<StationPlate>(ReferenceEqualityComparer.Instance);
         LastShapePlates = 0; LastShapeOnlyKept = 0; LastShapeOnlyDropped = 0;
+        LastBadPlates = 0; LastBadPlateNames.Clear();
         foreach (var inst in tree.Instances)
         {
             if (!set.Meshes.TryGetValue(inst.Socpak, out var meshes)) continue;
@@ -1303,6 +1304,8 @@ internal static class StationFloorBuilder
                     }
                     foreach (var sp in sps)
                     {
+                        // (2026-11-02) 座標が壊れた板 (有限でない・PlateCoordLimit を超える) は使わない (BadPlate の説明)
+                        if (BadPlate(sp)) { LastBadPlates++; LastBadPlateNames.Add(m.Mesh); continue; }
                         if (!sp.Stair && HullArea(sp.Hull) <= GatewayRoofMaxArea && gws.Any(g => sp.Top - g.Z >= 2.5 && sp.Top - g.Z <= 5 && DistToConvex(sp.Hull, g.X, g.Y) <= GatewayRoofMargin))
                         {
                             removed++;
@@ -1343,7 +1346,9 @@ internal static class StationFloorBuilder
                     if (blocks.Count > 0 && blocks[^1] == res.Count) blocks.RemoveAt(blocks.Count - 1);
                     continue;
                 }
-                res.Add(new StationPlate(inst.Index, m.Mesh, stair, hull, top, bottom, ramp));
+                var plate = new StationPlate(inst.Index, m.Mesh, stair, hull, top, bottom, ramp);
+                if (BadPlate(plate)) { LastBadPlates++; LastBadPlateNames.Add(m.Mesh); if (blocks.Count > 0 && blocks[^1] == res.Count) blocks.RemoveAt(blocks.Count - 1); continue; }
+                res.Add(plate);
             }
             // 段の灯り・床の灯りから作る板 (2026-11-01、親の決定「案 b」)
             var stepLights = meshes.Where(m => IsStepLightMesh(m.Mesh)).Select(m => LightPoint(inst, m)).ToList();
@@ -1450,6 +1455,20 @@ internal static class StationFloorBuilder
     public static bool SurfacesTouch(StationPlate a, StationPlate b) =>
         Math.Max(a.Bottom, b.Bottom) - Math.Min(a.Top, b.Top) < SurfaceRise && HullGap(a.Hull, b.Hull) <= SurfaceGap;
 
+    // (2026-11-02) 座標が壊れた板: 凸包の点・上面・底が有限でないか、絶対値が PlateCoordLimit を超えるもの。
+    // Nyx_Levski の町 (levski_v2_ext。外す決まりの Child を外さなくした後) の teachsshipshop.socpak の部品 teachsshipshop_a の形の数から作った板は、
+    // 凸包の幅が 9.0e15 m × 3.5e31 m などになっていて、板の升目 (BoxCells。8 m ごと) を作るところで取り込みのメモリが 30 GB を超えた (2026-11-02 の取り込みで確かめた)。
+    // 形の数が壊れる理由は未確認 (GLB の読み取り・形の数の作り方のどちらかは調べていない)。値: ステーションの局所の座標は大きいものでも数十 km
+    // (Orison の Vision Center が (11819, -48544)) なので、その 20 倍の 1,000 km
+    public const double PlateCoordLimit = 1_000_000;
+    // 直前の Plates で使わなかった板の数と部品の名前 (同じスレッドの直前の呼び出しのもの。並行の取り込みで混ざらないようにスレッドごと)
+    [ThreadStatic] public static int LastBadPlates;
+    [ThreadStatic] private static List<string>? _lastBadPlateNames;
+    public static List<string> LastBadPlateNames => _lastBadPlateNames ??= new();
+    private static bool BadPlate(StationPlate p) =>
+        !double.IsFinite(p.Top) || !double.IsFinite(p.Bottom) || Math.Abs(p.Top) > PlateCoordLimit || Math.Abs(p.Bottom) > PlateCoordLimit
+        || p.Hull.Any(q => !double.IsFinite(q.X) || !double.IsFinite(q.Y) || Math.Abs(q.X) > PlateCoordLimit || Math.Abs(q.Y) > PlateCoordLimit);
+
     // 直前の Plates で、形の数から作った板の数・形でだけ床・階段になった板のうち、歩ける面につながって残した数・つながらず除いた数 (確かめ用)
     public static int LastShapePlates, LastShapeOnlyKept, LastShapeOnlyDropped;
 
@@ -1534,17 +1553,8 @@ internal static class StationFloorBuilder
         var excluded = new HashSet<StationPlate>(ReferenceEqualityComparer.Instance);
         // 段か: 階段の板か、床の板で短いほうの幅か長いほうの長さが FloorSideMin 未満のもの (面積でなく縦横の長さで見る。利用者の指示)
         bool IsStep(StationPlate p) => p.Stair || MinWidth2(p.Hull) < FloorSideMin || MaxLength2(p.Hull) < FloorSideMin;
-        Dictionary<(int, int), List<StationPlate>> Grid(IEnumerable<StationPlate> ps)
-        {
-            var g = new Dictionary<(int, int), List<StationPlate>>();
-            foreach (var p in ps) foreach (var c in BoxCells(p, cell)) { if (!g.TryGetValue(c, out var l)) g[c] = l = new(); l.Add(p); }
-            return g;
-        }
-        IEnumerable<StationPlate> Near(Dictionary<(int, int), List<StationPlate>> g, StationPlate a)
-        {
-            var seen = new HashSet<StationPlate>(ReferenceEqualityComparer.Instance);
-            foreach (var c in BoxCells(a, cell)) if (g.TryGetValue(c, out var l)) foreach (var b in l) if (!ReferenceEquals(a, b) && seen.Add(b)) yield return b;
-        }
+        PlateGrid Grid(IEnumerable<StationPlate> ps) => new PlateGrid(ps, cell);
+        IEnumerable<StationPlate> Near(PlateGrid g, StationPlate a) => g.Near(a);
         var ok = new HashSet<StationPlate>(ReferenceEqualityComparer.Instance);
         var seedGrid = Grid(seeds);
         for (int pass = 0; pass < 4; pass++)
@@ -1611,6 +1621,47 @@ internal static class StationFloorBuilder
         return plates.Where(p => !cand.Contains(p) || ok.Contains(p)).Select(p => conv.TryGetValue(p, out var q) ? q : p).ToList();
     }
 
+    // 板の升目 (近くの板を探すための下調べ。2026-11-02 に KeepTouching・FloatingItems から切り出した)。
+    // 升目の数が LargeCells を超える大きな板 (Rockcracker_002 の木にある Keeger の小惑星 angular_smooth_01_03400_01_lp は 1 枚 5 km 四方で、8 m の升目では 1 枚 40 万升。
+    // 小惑星が並ぶと取り込みのメモリが 8 GB を超えた) は升目に入れず、別の並び (_large) に置き、どの板の近くの候補にも入れる。
+    // 大きな板の近くの候補は、全部の板。近くの候補は SurfacesTouch で確かめる前の下調べなので、候補が増えても結果 (つながる板) は前と同じ
+    private sealed class PlateGrid
+    {
+        public const long LargeCells = 4096;
+        private readonly double _cell;
+        private readonly Dictionary<(int, int), List<StationPlate>> _g = new();
+        private readonly List<StationPlate> _large = new();
+        private readonly List<StationPlate> _all = new();
+        public PlateGrid(IEnumerable<StationPlate> ps, double cell)
+        {
+            _cell = cell;
+            foreach (var p in ps)
+            {
+                _all.Add(p);
+                if (CellCount(p, cell) > LargeCells) { _large.Add(p); continue; }
+                foreach (var c in BoxCells(p, cell)) { if (!_g.TryGetValue(c, out var l)) _g[c] = l = new(); l.Add(p); }
+            }
+        }
+        public IEnumerable<StationPlate> Near(StationPlate a)
+        {
+            if (CellCount(a, _cell) > LargeCells)
+            {
+                foreach (var b in _all) if (!ReferenceEquals(a, b)) yield return b;
+                yield break;
+            }
+            var seen = new HashSet<StationPlate>(ReferenceEqualityComparer.Instance);
+            foreach (var c in BoxCells(a, _cell)) if (_g.TryGetValue(c, out var l)) foreach (var b in l) if (!ReferenceEquals(a, b) && seen.Add(b)) yield return b;
+            foreach (var b in _large) if (!ReferenceEquals(a, b) && seen.Add(b)) yield return b;
+        }
+    }
+
+    private static long CellCount(StationPlate p, double cell)
+    {
+        long i0 = (long)Math.Floor((p.Hull.Min(q => q.X) - SurfaceGap) / cell), i1 = (long)Math.Floor((p.Hull.Max(q => q.X) + SurfaceGap) / cell);
+        long j0 = (long)Math.Floor((p.Hull.Min(q => q.Y) - SurfaceGap) / cell), j1 = (long)Math.Floor((p.Hull.Max(q => q.Y) + SurfaceGap) / cell);
+        return (i1 - i0 + 1) * (j1 - j0 + 1);
+    }
+
     private static IEnumerable<(int, int)> BoxCells(StationPlate p, double cell)
     {
         int i0 = (int)Math.Floor((p.Hull.Min(q => q.X) - SurfaceGap) / cell), i1 = (int)Math.Floor((p.Hull.Max(q => q.X) + SurfaceGap) / cell);
@@ -1650,16 +1701,10 @@ internal static class StationFloorBuilder
         var res = new List<StationFloating>(set.NoUpFace);
         // ② 接する面なし
         const double cell = 8;
-        var grid = new Dictionary<(int, int), List<StationPlate>>();
-        foreach (var p in plates) foreach (var c in BoxCells(p, cell)) { if (!grid.TryGetValue(c, out var l)) grid[c] = l = new(); l.Add(p); }
+        var grid = new PlateGrid(plates, cell);
         foreach (var p in plates)
         {
-            var touched = false;
-            foreach (var c in BoxCells(p, cell))
-            {
-                if (grid.TryGetValue(c, out var l) && l.Any(q => !ReferenceEquals(p, q) && SurfacesTouch(p, q))) { touched = true; break; }
-            }
-            if (touched) continue;
+            if (grid.Near(p).Any(q => SurfacesTouch(p, q))) continue;
             var k = set.Kinds != null ? KindOf(set.Kinds, p.Mesh) : new StationMeshKinds.Entry(NameKind(p.Mesh), "name");
             res.Add(new StationFloating(p.Mesh, KindLabel(k), p.Hull.Average(q => q.X), p.Hull.Average(q => q.Y), p.Top, NoTouchReason));
         }

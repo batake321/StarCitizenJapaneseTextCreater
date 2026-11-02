@@ -7,7 +7,7 @@ using Microsoft.Web.WebView2.Wpf;
 namespace StarCitizenJapaneseTextCreater;
 
 // ステーションの階層マップの WebView2 (［詳細］の欄の中と、別ウィンドウ StationMapWindow で使う。船の 3D の Ship3DWeb にならう)。
-//   利用者データの置き場: 作業ディレクトリの webview2_station (船の webview2_ship3d・詳細の webview2_detail とは分ける)
+//   利用者データの置き場: 作業ディレクトリの webview2_station (［マップ］タブと別ウィンドウで共有。どちらも合成の WebView2。船の webview2_ship3d・詳細の webview2_detail とは分ける。InitAsync の説明)
 //   仮想ホスト: scjt-viewer.example → exe の横の wwwroot (ビューア stationmap\viewer.html)。データはファイルから読まず、アプリから PostWebMessageAsJson で渡す
 //   ほかへ移る・新しい窓・右クリックのメニューは止める (Ship3DWeb と同じ)。ビューアの失敗 ({type:'error'}) はアプリのログに残す
 internal static class StationMapWeb
@@ -18,9 +18,15 @@ internal static class StationMapWeb
     // WebView2 を用意してビューアを開く (一度だけ)。onMessage はビューアからの知らせ (error 以外)。使えなければ例外。
     // web は HWND の WebView2 (別ウィンドウ) か、合成で描く WebView2CompositionControl (［マップ］タブ。重ねて透明度を変えられる) のどちらか (IWebView2)
     // context: ログに書く、今出している場所 (名前と record)。無ければ空
-    public static async Task InitAsync(IWebView2 web, Action<JsonElement> onMessage, Func<string>? context = null)
+    // onError: ビューアの失敗 ({type:'error'}) を受けたとき (ログに書いた後に呼ぶ。地図の欄に知らせを出すのに使う)
+    public static async Task InitAsync(IWebView2 web, Action<JsonElement> onMessage, Func<string>? context = null, Action<JsonElement>? onError = null)
     {
         if (web.CoreWebView2 != null) return;
+        // 利用者データの置き場は webview2_station (［マップ］タブと別ウィンドウで共有し、ブラウザーのプロセスを 1 つにする)。
+        // (2026-11-02) 公開版 v2.5.1 で、［マップ］タブ (合成の WebView2) が動いている間に、別ウィンドウ (HWND の WebView2) の初期化が 0x8007139F
+        // = HRESULT_FROM_WIN32(ERROR_INVALID_STATE) で失敗した。Microsoft の資料 (WebView2 Win32 の CreateCoreWebView2EnvironmentWithOptions) では、同じ置き場の WebView は
+        // ブラウザーのプロセスを共有し、今動いている WebView と設定が合わない WebView の作成はこの値で失敗する。別ウィンドウも合成の WebView2 にして種類をそろえた
+        // (StationMapWindow.xaml の UseComposition。合成と HWND の違いが「設定が合わない」に当たるかは未確認)
         var folder = Path.Combine(DetailPanel.WorkDir(), "webview2_station");
         Directory.CreateDirectory(folder);
         var env = await CoreWebView2Environment.CreateAsync(userDataFolder: folder);
@@ -50,7 +56,10 @@ internal static class StationMapWeb
                 if (type == "error")
                 {
                     string Str(string name) => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
-                    LogScriptError("[ステーションの地図] 表示のエラー", context?.Invoke() ?? "", Str("where"), Str("message"), Str("stack"));
+                    // (2026-11-02、利用者の指摘「ログにエラーの情報も出てない」) 「[ステーションの地図] ビューアの失敗: …」として、起きた所 (ファイル:行:列) も書く
+                    var at = Str("at");
+                    LogScriptError("[ステーションの地図] ビューアの失敗", context?.Invoke() ?? "", Str("where"), (at.Length > 0 ? $"({at}) " : "") + Str("message"), Str("stack"));
+                    onError?.Invoke(root.Clone());
                     return;
                 }
                 onMessage(root.Clone());
@@ -133,6 +142,132 @@ internal sealed class StationMapModel
     public sealed record District(string Id, string Name, string NameKey, List<string> Groups, List<string> Stations,
         (double MinX, double MinY, double MaxX, double MaxY)? Bounds, (double X, double Y, double Z)? Center, bool Main);
 
+    // ハンガーの入口 1 つ (JSON の exterior.hangars): 位置 (局所)・GatewaySize・大きさの区分 (S・M・L・XL)
+    public sealed record HangarInfo(int Index, (double X, double Y, double Z) Pos, int GatewaySize, string Size);
+
+    // (2026-11-02、利用者の指摘「ハンガー内にいると現在位置がとれない」) ハンガーの中の判定の範囲: 入口 (InstancedHangarGateway) から水平に HangarRadius m 以内で、
+    // 高さが入口の HangarDepth m 下から HangarAbove m 上まで (ハンガーの中は地図に無い別の区域で、入口の下にある)。
+    // 根拠 (調べの担当 E の 3 点。Checkmate RR_P2_L4、局所の座標): (-454.8, 473.8, 25.9)・(-455.4, 484.6, 28.5)・(-508.3, 572.3, 25.5) は、
+    // いちばん近い入口 InstancedHangarGateway_Pyro_LargeTop_RestStop (-511.1, 584.5, 97。L) から水平に 124・114・13 m、71〜72 m 下。
+    // 水平は 124 m を含むように 150 m、深さは 72 m の約 2 倍の 150 m、上は入口の高さまで (入口より上はステーションの中の床のことがあるので入れない) にした。
+    // Orbituary (RR_P3_LEO) の利用者の点 (2026-11-02 14:44:08・14:44:29) は、入口 (240.4, -717.4, 97。L) から水平に 129 m、26〜28 m 下だった。
+    // L 以外の大きさの点はまだ無いので、どの大きさも同じ値 (未確認)
+    public const double HangarRadius = 150, HangarDepth = 150, HangarAbove = 0;
+
+    // 局所の点が入るハンガーの範囲 (いくつも当たれば水平にいちばん近い入口)。無ければ null
+    public HangarInfo? HangarAt((double X, double Y, double Z) p)
+    {
+        HangarInfo? best = null; double bd = double.MaxValue;
+        foreach (var h in Hangars)
+        {
+            if (p.Z > h.Pos.Z + HangarAbove || p.Z < h.Pos.Z - HangarDepth) continue;
+            var d = Math.Sqrt((p.X - h.Pos.X) * (p.X - h.Pos.X) + (p.Y - h.Pos.Y) * (p.Y - h.Pos.Y));
+            if (d <= HangarRadius && d < bd) { bd = d; best = h; }
+        }
+        return best;
+    }
+
+    // ハンガーロビー: 艦隊マネージャーの端末のまとまり (TerminalGroups の kind fleet) のうち、near (ハンガーの入口など) にいちばん近いもの。
+    // near が無ければ端末のいちばん多いまとまり。無ければ null
+    public TerminalGroup? FleetLobby((double X, double Y, double Z)? near)
+    {
+        var fleets = TerminalGroups.Where(g => g.Kind == "fleet").ToList();
+        if (fleets.Count == 0) return null;
+        if (near is { } n) return fleets.MinBy(g => (g.Pos.X - n.X) * (g.Pos.X - n.X) + (g.Pos.Y - n.Y) * (g.Pos.Y - n.Y) + (g.Pos.Z - n.Z) * (g.Pos.Z - n.Z));
+        return fleets.OrderByDescending(g => g.Members.Count).First();
+    }
+
+    // 点がどれかの階の床の上か (FitStanding と同じ決まり: 点の高さ − 床の高さが StandMin〜StandMax で、xy がその階の床の形の中)
+    public bool OnAnyFloor((double X, double Y, double Z) p)
+    {
+        OnFloorShape("", 0, 0);   // 床の輪を作る
+        foreach (var f in Floors)
+        {
+            var h = p.Z - f.Z;
+            if (h < StandMin || h > StandMax || !_floorRings!.ContainsKey(f.Id)) continue;
+            if (OnFloorShape(f.Id, p.X, p.Y)) return true;
+        }
+        return false;
+    }
+
+    // (2026-11-02、検証の指摘「中 2・3」) ハンガーの中とみなす点: 床の上でなく (OnAnyFloor)、道順のグラフの節点 (経由点を含む) から MappedNear m 以内に無く
+    // (ハンガーの中はステーションの木の外の別の区域 (instanced) で、地図の道から離れている)、ハンガーの範囲 (HangarAt) に入るもの。
+    // エレベーター・階段・通路の点 (道の節点の近く) をハンガーにしないため。
+    // 親の指示は「巨大でない区画の箱のどれにも入っていない」だったが、Orbituary (RR_P3_LEO) の利用者のハンガーの点 (局所 (358.0, -664.5, 69.0)・(362.8, -661.8, 71.0)) は
+    // 区画 s1300 (clinic_lobby_rundown_004_occu_001。箱の半分 377 × 296 × 19.6 m) の箱の中に入っていて、その決まりではハンガーにならなかったので、道の節点からの距離にした
+    // (親が 2026-11-02 にこの形でよいと決めた)。値: ハンガーの実例の点から、いちばん近い節点まで Checkmate 72.6〜133.3 m・Orbituary 62.8〜67.9 m (経由点は 159 m 以上) だったので、その半分ほどの 30 m
+    public const double MappedNear = 30;
+    public HangarInfo? HangarPointAt((double X, double Y, double Z) p) =>
+        Hangars.Count == 0 || OnAnyFloor(p) || NearGraph(p, MappedNear) ? null : HangarAt(p);
+
+    // 点から r m 以内に道順のグラフの節点 (経由点を含む) があるか。節点の位置の升目 (NearCell m) を最初に使うときに作る
+    private const double NearCell = 10;
+    private Dictionary<(long, long, long), List<(double X, double Y, double Z)>>? _nodeGrid;
+    public bool NearGraph((double X, double Y, double Z) p, double r)
+    {
+        if (_nodeGrid == null)
+        {
+            var g = new Dictionary<(long, long, long), List<(double, double, double)>>();
+            foreach (var n in Graph.Nodes)
+            {
+                var k = ((long)Math.Floor(n.Pos.X / NearCell), (long)Math.Floor(n.Pos.Y / NearCell), (long)Math.Floor(n.Pos.Z / NearCell));
+                if (!g.TryGetValue(k, out var l)) g[k] = l = new();
+                l.Add(n.Pos);
+            }
+            _nodeGrid = g;
+        }
+        long c = (long)Math.Ceiling(r / NearCell);
+        long ix = (long)Math.Floor(p.X / NearCell), iy = (long)Math.Floor(p.Y / NearCell), iz = (long)Math.Floor(p.Z / NearCell);
+        for (long a = ix - c; a <= ix + c; a++)
+            for (long b = iy - c; b <= iy + c; b++)
+                for (long d = iz - c; d <= iz + c; d++)
+                    if (_nodeGrid.TryGetValue((a, b, d), out var l))
+                        foreach (var q in l)
+                            if ((q.X - p.X) * (q.X - p.X) + (q.Y - p.Y) * (q.Y - p.Y) + (q.Z - p.Z) * (q.Z - p.Z) <= r * r) return true;
+        // 節点のあいだの長い辺 (エレベーター・階段・徒歩など。シャトル (tram) と経由点どうしの辺は除く) の上も、地図の中とみなす
+        // (エレベーターの縦穴・長い階段の途中は、両端の節点から離れていることがあるため。2026-11-02、検証の指摘「中 3」の確かめで Levski・RR_ARC_L4 に当たった)
+        if (_edgeSegs == null)
+        {
+            var segs = new List<((double X, double Y, double Z) A, (double X, double Y, double Z) B)>();
+            foreach (var e in Graph.Edges)
+            {
+                // .rmxml の部屋のつながり (rmxml) は道の形ではない (Checkmate で 3.6 km の辺がハンガーの点のそばを通っていた) ので除く。
+                // 長い辺 (FlatSegment m より長い) は、縦に近いもの (高さの差が水平の長さの半分以上。エレベーターの縦穴・斜めの昇降) だけを使う。
+                // Levski のエレベーターの辺は水平 331 m・高さ 609 m (長さ 693 m) などで、縦穴の途中の点を地図の中とみなすのに要る。
+                // Checkmate には水平に 1.7〜2.4 km・高さの差 4 m の「エレベーター」の辺 (遠くの腕への乗り物) があり、まっすぐの線はハンガーのそば (26 m) を通るが、実際の道筋ではない
+                if (e.Kind is "tram" or "floor" or "rmxml" || e.A < 0 || e.B < 0 || e.A >= Graph.Nodes.Count || e.B >= Graph.Nodes.Count) continue;
+                var pa = Graph.Nodes[e.A].Pos; var pb = Graph.Nodes[e.B].Pos;
+                var len2 = (pa.X - pb.X) * (pa.X - pb.X) + (pa.Y - pb.Y) * (pa.Y - pb.Y) + (pa.Z - pb.Z) * (pa.Z - pb.Z);
+                if (len2 <= NearCell * NearCell) continue;   // 短い辺は両端の節点で足りる
+                var h2 = (pa.X - pb.X) * (pa.X - pb.X) + (pa.Y - pb.Y) * (pa.Y - pb.Y);
+                if (len2 > FlatSegment * FlatSegment && Math.Abs(pa.Z - pb.Z) < Math.Sqrt(h2) / 2) continue;
+                segs.Add((pa, pb));
+            }
+            _edgeSegs = segs;
+        }
+        foreach (var (sa, sb) in _edgeSegs)
+        {
+            double ex = sb.X - sa.X, ey = sb.Y - sa.Y, ez = sb.Z - sa.Z, l2 = ex * ex + ey * ey + ez * ez;
+            if (Math.Min(sa.X, sb.X) - r > p.X || Math.Max(sa.X, sb.X) + r < p.X || Math.Min(sa.Y, sb.Y) - r > p.Y || Math.Max(sa.Y, sb.Y) + r < p.Y
+                || Math.Min(sa.Z, sb.Z) - r > p.Z || Math.Max(sa.Z, sb.Z) + r < p.Z) continue;
+            var t = l2 > 0 ? Math.Clamp(((p.X - sa.X) * ex + (p.Y - sa.Y) * ey + (p.Z - sa.Z) * ez) / l2, 0, 1) : 0;
+            double qx = sa.X + ex * t - p.X, qy = sa.Y + ey * t - p.Y, qz = sa.Z + ez * t - p.Z;
+            if (qx * qx + qy * qy + qz * qz <= r * r) return true;
+        }
+        return false;
+    }
+    private List<((double X, double Y, double Z) A, (double X, double Y, double Z) B)>? _edgeSegs;
+    // 縦に近くなくても使う辺の長さの上限 (m)。値は仮 (MappedNear 30 m の約 7 倍。部屋の中の徒歩の辺の長さの分布は測っていない)
+    private const double FlatSegment = 200;
+
+    // 端末 1 つ (JSON の terminals): Kind は StationTerminalKinds の鍵。Node は道順のグラフの節点の番号 (データ側の NearestNode。無ければ -1)。ShopEntity は店の端末の SCShop の Name
+    public sealed record TerminalInfo(int Index, string Kind, string Guid, (double X, double Y, double Z) Pos, string Floor, string Section, int Node, string ShopGuid, string ShopEntity);
+    // 端末のまとまり: 同じ種類・同じ階で、xy が TerminalJoin m 以内でつながる端末 (高さの差 TerminalJoinZ m 以内)。Pos・Node・Section はまとまりの真ん中にいちばん近い端末のもの
+    public sealed record TerminalGroup(int Index, string Kind, List<int> Members, (double X, double Y, double Z) Pos, string Floor, string Section, int Node);
+    // 値: 艦隊マネージャーの端末は 1.25〜3 m おきに並ぶ (RR_HUR_L1 の rs_entry で 1.25・3.0 m。調べの ent_*.tsv)、コモディティの端末も 1.5 m おき。
+    // 別々の受付 (精錬所の端末と店の端末は約 10 m 離れる) は分けたいので 6 m にした
+    public const double TerminalJoin = 6, TerminalJoinZ = 3;
+
     // Outline は階段の板を真上から見た外形の輪 (JSON の stairs の outline。板ごとに 1 つの凸包の輪。局所の xy)。板から作れない階段 (乗り場の縁の platform など) と前の版の JSON では null
     public sealed record StairInfo((double X, double Y, double Z) Bottom, (double X, double Y, double Z) Top, string From, string To,
         List<List<(double X, double Y)>>? Outline = null);
@@ -145,6 +280,11 @@ internal sealed class StationMapModel
     public List<ShopInfo> Shops { get; } = new();
     public List<TransitInfo> Transit { get; } = new();
     public List<StairInfo> Stairs { get; } = new();
+    // 端末 (JSON の terminals。形 18) と、そのまとまり (TerminalGroups。同じ種類で隣り合う端末を 1 つの印・一覧の 1 行にしたもの)
+    public List<TerminalInfo> Terminals { get; } = new();
+    public List<TerminalGroup> TerminalGroups { get; } = new();
+    // ハンガーの入口 (JSON の exterior.hangars。形 18)
+    public List<HangarInfo> Hangars { get; } = new();
     // シャトル (トラム) の道筋 (JSON の transitPaths。区間ごとの点 (局所)。無い JSON では空)
     public List<TransitPath> TransitPaths { get; } = new();
     // 地区 (JSON の districts。無い JSON では空。空なら全体図は出さず、今までどおり階の地図)
@@ -156,7 +296,10 @@ internal sealed class StationMapModel
     public Dictionary<(int, string), string> StopNames { get; } = new();
 
     // 前の版の形 (StationMapJson.Format が今より古い、または自転の値の無い JSON)。読まずに「取り込み直しが要る」と出す
-    public sealed class OldFormatException(string message) : Exception(message);
+    public class OldFormatException(string message) : Exception(message);
+    // 今のアプリより新しい形式の地図 (新しい版のアプリで取り込んだもの。2026-11-02、利用者の指摘「HUR-L5 マップがでない」: 公開版で新しい形式の地図が空白になった)
+    public sealed class NewerFormatException(string message) : OldFormatException(message);
+    private static string NewerText(int fmt) => $"この地図は新しい版のアプリで取り込んだもの (形 {fmt}) です。今のアプリの形は {StationMapJson.Format} です。アプリを更新するか、取り込み直してください";
 
     private static string OldText(int fmt) => $"この地図は前の版の形 (形 {fmt}) で取り込んだものです。今の版の形 (形 {StationMapJson.Format}) で取り込み直しが要ります";
 
@@ -165,6 +308,7 @@ internal sealed class StationMapModel
     {
         var fmt = PeekFormat(path);
         if (fmt < StationMapJson.Format) throw new OldFormatException(OldText(fmt));
+        if (fmt > StationMapJson.Format) throw new NewerFormatException(NewerText(fmt));
         return Parse(File.ReadAllBytes(path));
     }
 
@@ -194,6 +338,7 @@ internal sealed class StationMapModel
             throw new InvalidDataException("ステーションの地図のファイルではありません");
         var fmt = r.TryGetProperty("format", out var fv) && fv.ValueKind == JsonValueKind.Number ? fv.GetInt32() : 0;
         if (fmt < StationMapJson.Format) throw new OldFormatException(OldText(fmt));
+        if (fmt > StationMapJson.Format) throw new NewerFormatException(NewerText(fmt));
         m.Record = Str(r, "record");
         m.SystemName = Str(r, "system");
         if (r.TryGetProperty("root", out var root))
@@ -335,6 +480,20 @@ internal sealed class StationMapModel
             if (node >= 0) m.Graph.Nodes[node] = m.Graph.Nodes[node] with { Name = entity };
             m.Shops.Add(new ShopInfo(shi++, guid, entity, Str(s, "socpak"), pos, Str(s, "floor"), Str(s, "section"), node));
         }
+        int tmi = 0;
+        foreach (var t in Arr(r, "terminals"))
+        {
+            var node = t.TryGetProperty("node", out var nv) && nv.ValueKind == JsonValueKind.Number ? nv.GetInt32() : -1;
+            if (node >= m.Graph.Nodes.Count) node = -1;
+            m.Terminals.Add(new TerminalInfo(tmi++, Str(t, "kind"), Str(t, "guid"), Vec(t, "pos"), Str(t, "floor"), Str(t, "section"), node, Str(t, "shop"), Str(t, "shopEntity")));
+        }
+        m.GroupTerminals();
+        if (r.TryGetProperty("exterior", out var exo) && exo.ValueKind == JsonValueKind.Object)
+        {
+            int hi = 0;
+            foreach (var h in Arr(exo, "hangars"))
+                m.Hangars.Add(new HangarInfo(hi++, Vec(h, "pos"), h.TryGetProperty("gatewaySize", out var gs) && gs.ValueKind == JsonValueKind.Number ? gs.GetInt32() : 0, Str(h, "size")));
+        }
         int ti = 0;
         foreach (var t in Arr(r, "transit"))
         {
@@ -353,6 +512,35 @@ internal sealed class StationMapModel
                 Str(t, "nextGateway"), Str(t, "nextStop"), Str(t, "nextDistrict")));
         }
         return m;
+    }
+
+    // 端末をまとまり (TerminalGroups) にする。並びは種類 (StationTerminalKinds の順)・階・x・y の順
+    private void GroupTerminals()
+    {
+        TerminalGroups.Clear();
+        var left = Terminals.ToList();
+        var groups = new List<List<TerminalInfo>>();
+        while (left.Count > 0)
+        {
+            var g = new List<TerminalInfo> { left[0] };
+            left.RemoveAt(0);
+            for (int i = 0; i < g.Count; i++)
+            {
+                var a = g[i];
+                var near = left.Where(b => b.Kind == a.Kind && b.Floor == a.Floor && Math.Abs(a.Pos.Z - b.Pos.Z) <= TerminalJoinZ
+                    && Math.Sqrt((a.Pos.X - b.Pos.X) * (a.Pos.X - b.Pos.X) + (a.Pos.Y - b.Pos.Y) * (a.Pos.Y - b.Pos.Y)) <= TerminalJoin).ToList();
+                foreach (var b in near) { g.Add(b); left.Remove(b); }
+            }
+            groups.Add(g);
+        }
+        foreach (var g in groups.OrderBy(g => StationTerminalKinds.Order(g[0].Kind)).ThenBy(g => g[0].Floor, StringComparer.Ordinal)
+                     .ThenBy(g => g.Average(t => t.Pos.X)).ThenBy(g => g.Average(t => t.Pos.Y)))
+        {
+            double cx = g.Average(t => t.Pos.X), cy = g.Average(t => t.Pos.Y), cz = g.Average(t => t.Pos.Z);
+            var rp = g.MinBy(t => (t.Pos.X - cx) * (t.Pos.X - cx) + (t.Pos.Y - cy) * (t.Pos.Y - cy) + (t.Pos.Z - cz) * (t.Pos.Z - cz))!;
+            var node = rp.Node >= 0 ? rp.Node : g.Select(t => t.Node).FirstOrDefault(n => n >= 0, -1);
+            TerminalGroups.Add(new TerminalGroup(TerminalGroups.Count, rp.Kind, g.Select(t => t.Index).ToList(), rp.Pos, rp.Floor, rp.Section, node));
+        }
     }
 
     // ビューアへ送る地図 (描くのに要るものだけ。座標は 0.1 m に丸める。道順のグラフは送らない)。
@@ -385,6 +573,8 @@ internal sealed class StationMapModel
                 w.WriteStartObject();
                 w.WriteString("id", s.Id);
                 w.WriteString("name", sectionNames.TryGetValue(s.Id, out var sn) ? sn : s.Name);
+                // 区画の名札を地図に出すか (データが一覧に出す区画。2026-11-02、利用者の指示「階も区域も今の文字が見やすいとは思わない」で、選ばなくても名札を出す)
+                if (s.Listed) w.WriteBoolean("listed", true);
                 if (s.Fallback) w.WriteBoolean("fallback", true);
                 w.WriteStartObject("floors");
                 foreach (var (fid, rings) in s.Floors)
@@ -425,6 +615,25 @@ internal sealed class StationMapModel
                 w.WriteEndObject();
             }
             w.WriteEndArray();
+            // 端末 (まとまりごと): {i: まとまりの番号, kind, n: 端末の数, pos, floor}。階の無い端末・たどれない階の端末は出さない (店と同じ)。
+            // 種類の言葉と色は termKinds {kind: {label, color}} (StationTerminalKinds)。アイコンはアプリが後から {type:'icons'} で送る
+            w.WriteStartArray("terminals");
+            foreach (var g in TerminalGroups.Where(g => g.Floor.Length > 0 && !gone.Contains(g.Floor)))
+            {
+                w.WriteStartObject();
+                w.WriteNumber("i", g.Index); w.WriteString("kind", g.Kind); w.WriteNumber("n", g.Members.Count);
+                Pt("pos", g.Pos); w.WriteString("floor", g.Floor);
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+            w.WriteStartObject("termKinds");
+            foreach (var k in StationTerminalKinds.All)
+            {
+                w.WriteStartObject(k.Key);
+                w.WriteString("label", k.Label); w.WriteString("color", k.Color);
+                w.WriteEndObject();
+            }
+            w.WriteEndObject();
             w.WriteStartArray("stairs");
             foreach (var s in Stairs.Where(s => !gone.Contains(s.From) && !gone.Contains(s.To)))
             {
@@ -602,7 +811,8 @@ internal sealed class StationMapModel
     public const double FitWindowSeconds = 1.5, FitStepSeconds = 0.001;
 
     // 時刻合わせの結果: ずらした秒 (δ)、そのときの局所の点、立っている階、区画 (無ければ null)、候補の数 (選んだものを含む)
-    public sealed record StandFit(double Delta, (double X, double Y, double Z) Local, StationFloor Floor, SectionInfo? Section, int Candidates);
+    // Floor は床の上で合ったときの階 (ハンガーの中で合ったときは null)、Hangar はハンガーの中で合ったときの入口 (床の上なら null)
+    public sealed record StandFit(double Delta, (double X, double Y, double Z) Local, StationFloor? Floor, SectionInfo? Section, int Candidates, HangarInfo? Hangar = null);
 
     // 階ごとの床の輪 (区画の床の輪をまとめたもの) と、その xy の箱 (最初に使うときに作る)
     private Dictionary<string, List<(List<(double X, double Y)> Ring, double X0, double Y0, double X1, double Y1)>>? _floorRings;
@@ -666,6 +876,18 @@ internal sealed class StationMapModel
                 if (best != null) return new StandFit(dt, l, best, SectionAt(l), hits);
             }
         }
+        // (2026-11-02、利用者の指摘) 床の上になる時刻が無ければ、ハンガーの中 (HangarAt。地図に床の無い別の区域) になる時刻を同じ順で探す。
+        // 床を先に全部探すのは、ハンガーの範囲が広い (水平 150 m) ので、少しずらせば床の上になる点をハンガーにしないため
+        // (2026-11-02、検証の指摘「中 2」) ずらす途中で、先に道順のグラフの近く (NearGraph。地図の中の通路・階段・エレベーター) に来たら、ハンガーにはしない
+        // (地図の中の床で合わなかった点 (階段の途中・エレベーターの中など) を、遠くまでずらしてハンガーにしないため)
+        if (Hangars.Count == 0) return null;
+        for (int k = 0; k <= n; k++)
+            foreach (var dt in k == 0 ? new[] { 0.0 } : new[] { k * FitStepSeconds, -k * FitStepSeconds })
+            {
+                if (thetaAt(dt) is not { } th || ToLocal(global, th) is not { } l) continue;
+                if (NearGraph(l, MappedNear)) return null;
+                if (HangarPointAt(l) is { } h) return new StandFit(dt, l, null, null, 1, h);
+            }
         return null;
     }
 
@@ -763,5 +985,61 @@ internal sealed class StationMapModel
     {
         var s = StationRouteGraph.Describe(Graph, new[] { step }, "", stopNames ?? StopNames);
         return s.EndsWith(" → ", StringComparison.Ordinal) ? s[..^3] : s;
+    }
+}
+
+// 端末の種類 (2026-11-02、利用者の指示「ハンガーロビー、クリニック、薬局、再生登録、ショップ、コモディディ、配送センター、鋳造所はマーク付けてほしいし、マークは端末のところがいい」)。
+// Key は取り込みの判定 (SocpakContents.ReadTerminals) の鍵。Label は名札・一覧の種類の言葉 (ゲームの訳。アプリの作業フォルダの英語・日本語の global.ini で確かめたもの):
+//   fleet「艦隊マネージャー」ShipSelector_Header_Main (この端末の所がハンガーロビー) / clinic「クリニック」(利用者の言葉。仕様書の area_name_clinic。
+//   日本語の global.ini には area_name_clinic が無く、Maps_Amenities_Clinic・ui_dest_clinic は「診察所」) / pharmacy「薬局」shop_name_pharmacy /
+//   clone「再生登録」(利用者の決定) / shop「ショップ」(仕様書の area_name_Shops。日本語の global.ini には無い) / commodity「コモディティ」shop_ui_commodities /
+//   cargo「貨物センター」ui_dest_cargo (Cargo Center) / refinery「精製所」ui_dest_refinery / freight「貨物エレベーター」(英語は InteriorMapLabel_Cargolift「Freight Elevator」。日本語の訳は無かった)。
+// Icon はゲームのアイコン (GameIcons。Markers の svg。白一色なので Color の丸の上に載せる)。星図の施設の表 (starmapamenitytypes) にある種類 (Clinic・Refinery・
+//   Commodity Trading - Freight Elevator・Commodity Trading - Loading Dock) はそのアイコン、表に無い種類は Markers の中から形の近いものを選んだ
+internal static class StationTerminalKinds
+{
+    public sealed record Info(string Key, string Label, string Icon, string Color);
+    public static readonly Info[] All =
+    [
+        new("fleet", "艦隊マネージャー", "marker_icon_garage.svg", "#1a73e8"),
+        new("clinic", "クリニック", "marker_icon_clinic.svg", "#d93025"),
+        new("pharmacy", "薬局", "marker_icon_medical.svg", "#e52592"),
+        new("clone", "再生登録", "marker_icon_human.svg", "#9334e6"),
+        new("shop", "ショップ", "marker_icon_storage.svg", "#188038"),
+        new("commodity", "コモディティ", "marker_icon_admin.svg", "#e37400"),
+        new("cargo", "貨物センター", "marker_icon_package.svg", "#795548"),
+        new("refinery", "精製所", "marker_icon_refinery.svg", "#00897b"),
+        new("freight", "貨物エレベーター", "marker_icon_freight_elevator.svg", "#5f6368"),
+    ];
+    public static int Order(string key) { var i = Array.FindIndex(All, k => k.Key == key); return i < 0 ? All.Length : i; }
+    public static Info? Of(string key) => All.FirstOrDefault(k => k.Key == key);
+    public static string Label(string key) => Of(key)?.Label ?? key;
+
+    // ゲームのアイコンを data: の URI にしたもの (種類 → URI)。取り出せなければ空 (印は色の丸と頭の 1 字)。取り出せたら覚える
+    private static Dictionary<string, string>? _icons;
+    // 取り出せなかった Data.p4k の印 (同じ印の間は試し直さない。地図を送るたびに starbreaker の p4k extract を動かさないように。2026-11-02、検証の指摘)
+    private static string? _iconsFailedStamp;
+    public static async Task<Dictionary<string, string>> IconsAsync()
+    {
+        if (_icons != null) return _icons;
+        var stampKey = Ship3DExports.CurrentStamp()?.Key;
+        if (stampKey != null && stampKey == _iconsFailedStamp) return new Dictionary<string, string>(StringComparer.Ordinal);
+        var res = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            if (await GameIcons.EnsureAsync() is { } folder)
+                foreach (var k in All)
+                {
+                    var p = GameIcons.MarkerPath(folder, k.Icon);
+                    if (File.Exists(p)) res[k.Key] = "data:image/svg+xml;base64," + Convert.ToBase64String(await File.ReadAllBytesAsync(p));
+                }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの地図] 端末のアイコンを読めませんでした: {ex.Message}");
+        }
+        if (res.Count > 0) _icons = res;
+        else _iconsFailedStamp = stampKey;
+        return res;
     }
 }

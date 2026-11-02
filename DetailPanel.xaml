@@ -39,8 +39,10 @@
         </StackPanel>
 
         <!-- 条件に合う品目。選ぶと下に詳細を出す。品目が無いときはリストと仕切りを隠す (DetailPanel.SetList) -->
+        <!-- 星図の場所の親子は、親と子が両方とも候補にあれば子を親の下にまとめる (▼ で開く・▲ で閉じる。DetailPanel.GroupedRows)。親の行は押すたびに開け閉めする -->
         <ListBox x:Name="lstCandidates" Grid.Row="2" DisplayMemberPath="Display"
-                 SelectionChanged="LstCandidates_SelectionChanged" PreviewKeyDown="LstCandidates_PreviewKeyDown"/>
+                 SelectionChanged="LstCandidates_SelectionChanged" PreviewKeyDown="LstCandidates_PreviewKeyDown"
+                 PreviewMouseLeftButtonUp="LstCandidates_PreviewMouseLeftButtonUp"/>
 
         <GridSplitter x:Name="splitList" Grid.Row="3" Height="5" HorizontalAlignment="Stretch" Background="#E0E0E0" Margin="0,4"/>
 
@@ -77,6 +79,26 @@
             <Button x:Name="btnShopMap" Content="マップに表示" Padding="10,2" Click="BtnShopMap_Click" Visibility="Collapsed"
                     ToolTip="［マップ］タブに切り替えて、この店のある場所の地図を出し、この店を目的地にして店の階を開きます"/>
             <TextBlock x:Name="txtStation" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
+            </StackPanel>
+            <!-- ステーションの 3D 表示 (2026-11-02、利用者の指示「詳細に、3D で船のようにStation を立体で見たい…内部のマップボタンを付けて、マップに自動切換え表示の機能も欲しい」)。
+                 船の 3D のバーと同じ並び: ［読み込み］でゲームデータから書き出し (Station3DExports)、［3D 表示］は下の欄 (web3D)、［別ウィンドウ］は Station3DWindow、
+                 ［内部のマップ］は［マップ］タブに切り替えてこの場所の階層マップを出す (［地図表示］と同じ MapPanel.ShowPlaceInMapTab)。
+                 店の詳細のときは出さない。処理は Station3DDetailPanel.cs -->
+            <StackPanel x:Name="pnlStation3D">
+            <TextBlock Text="ステーションの 3D 表示" FontWeight="Bold" Margin="0,6,0,3"/>
+            <StackPanel Orientation="Horizontal">
+            <Button x:Name="btnStation3DImport" Content="読み込み" Padding="10,2" Margin="0,0,6,0" Click="BtnStation3DImport_Click"
+                    ToolTip="この場所の 3D (外から見た形と、着陸パッド・外部貨物エレベーター・ハンガーの場所) をゲームデータ (選択中のチャンネルの Data.p4k) から書き出します。最新のものがあるとき・書き出し中は使えません"/>
+            <Button x:Name="btnStation3D" Content="3D 表示" Padding="10,2" Click="BtnStation3D_Click"
+                    ToolTip="この場所の 3D を下の欄に出します (書き出し済みの場所だけ)"/>
+            <Button x:Name="btnStation3DWindow" Content="別ウィンドウ" Padding="10,2" Margin="6,0,0,0" Click="BtnStation3DWindow_Click"
+                    ToolTip="この場所の 3D を別のウィンドウに出します (書き出し済みの場所だけ)"/>
+            <Button x:Name="btnStation3DMap" Content="内部のマップ" Padding="10,2" Margin="6,0,0,0" Click="BtnStation3DMap_Click"
+                    ToolTip="［マップ］タブに切り替えて、この場所の階層マップを出します (未取り込みなら［マップ］タブに［読み込み］を出します)"/>
+            <Button x:Name="btnStation3DBack" Content="表に戻る" Padding="10,2" Margin="6,0,0,0" Click="BtnStation3DBack_Click" Visibility="Collapsed"
+                    ToolTip="3D 表示をやめて、詳細の表に戻ります"/>
+            <TextBlock x:Name="txtStation3D" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
+            </StackPanel>
             </StackPanel>
         </StackPanel>
 
