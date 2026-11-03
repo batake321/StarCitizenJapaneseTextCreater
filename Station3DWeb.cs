@@ -10,15 +10,15 @@ namespace StarCitizenJapaneseTextCreater;
 //   GLB と scene.json は船のキャッシュと同じ仮想ホスト (Ship3DExports.CacheHost → Ship3DExports.Folder) の stations3d\<短い名前>\ から読む。
 //   見出しの言葉 (ゲームの訳) はここで引いて、URL の # の後ろに JSON で渡す (ビューアはファイルを読むだけで訳を持たない):
 //     着陸パッド: HUDDisplayName の鍵 (@ui_interactor_pad_01 など) の日本語、無ければ英語 (例「パッド01」。@landing_pad_NN は日本語の訳が無く「Pad 03」)
-//     ハンガー: Maps_Amenities_Hangar<S|M|L|XL> の日本語、無ければ英語 (例「ハンガー（大）」)
+//     ハンガー: ビューアが「ハンガー L」の形で作る (2026-11-02、利用者の指示「XL L M S などの大きさが必要」「番号は必要ない」。ここでは引かない)
 //     外の貨物エレベーター: 「外部貨物エレベーター」(利用者の言葉「Freight Elevator 貨物エレベーター」に、ハンガーの中の貨物エレベーターと取り違えないよう
-//       ゲームの訳の「外部」(ui_CIToggleExteriorLights「外部ライト」など) を付けたもの) と、区画の鍵 (@cargodeck_NN) の日本語、無ければ英語 (「Ext. Freight 01」)。
-//       台と区画の対応が推測 (deckGuess) なら「（推測）」を付ける
+//       ゲームの訳の「外部」(ui_CIToggleExteriorLights「外部ライト」など) を付けたもの) だけ。区画の名前と「（推測）」は出さない
+//       (2026-11-02、利用者の指示「長すぎる。外部貨物エレベーターx6 でいい。」。近くの台をまとめて「×N」にするのはビューア)
 internal static class Station3DWeb
 {
     public const string ViewerPath = "station3d/viewer.html";
-    public const string FreightWord = "外部貨物エレベーター";
-    public const string GuessWord = "（推測）";
+    // (2026-11-02、利用者の決定「外部貨物エレベーター ×6」は「外部貨物EV ×6」にする。×2 なども同じ形。上の帯の切り替えの文字はそのまま)
+    public const string FreightWord = "外部貨物EV";
 
     // その場所の 3D をビューアで開く (キャッシュのフォルダは開くたびに割り当て直す。設定で置き場所を変えたときのため)。
     // stillWanted: 見出しの言葉を引いた後に、まだ開くか (その間に別の場所に移ったら false。開かずに false を返す)
@@ -41,10 +41,10 @@ internal static class Station3DWeb
         return true;
     }
 
-    // 見出しの言葉: 鍵 → 文 (鍵は scene.json の pads の key、freight の deck、"hangar:<区分>"、"freight"、"guess")
+    // 見出しの言葉: 鍵 → 文 (鍵は scene.json の pads・docks の key と "freight")
     internal static Dictionary<string, string> Labels(string scenePath)
     {
-        var res = new Dictionary<string, string>(StringComparer.Ordinal) { ["freight"] = FreightWord, ["guess"] = GuessWord };
+        var res = new Dictionary<string, string>(StringComparer.Ordinal) { ["freight"] = FreightWord };
         (Dictionary<string, string> En, Dictionary<string, string> Ja) ini;
         try { ini = LoadIni(); }
         catch (Exception ex)
@@ -53,8 +53,6 @@ internal static class Station3DWeb
             ini = (new(StringComparer.OrdinalIgnoreCase), new(StringComparer.OrdinalIgnoreCase));
         }
         string? Text(string k) => ResolveLoc(k, ini.Ja) ?? ResolveLoc(k, ini.En);
-        foreach (var size in new[] { "S", "M", "L", "XL" })
-            if (Text("Maps_Amenities_Hangar" + size) is { } h) res["hangar:" + size] = h;
         try
         {
             using var doc = JsonDocument.Parse(File.ReadAllBytes(scenePath));
@@ -68,7 +66,7 @@ internal static class Station3DWeb
                             res[key] = Text(key) ?? key.TrimStart('@');
                 }
                 Keys("pads", "key");
-                Keys("freight", "deck");
+                Keys("docks", "key");
             }
         }
         catch (Exception ex) when (ex is IOException or JsonException)

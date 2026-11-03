@@ -1299,6 +1299,10 @@ public partial class MapPanel : UserControl
     // 場所の階層マップを出す (未取り込みなら、地図の欄に知らせと、上の帯に［読み込み］)。読み込んでから星系図とクロスフェードで入れ替える
     // shop: ［詳細］の店の［マップに表示］(ShowShopInMapTab) で頼まれた店。地図を出せたら、その店を選ぶ (StationMapPanel.SelectShop。目的地にして店の階を開く)。
     //   地図の店に結べないとき・階に載っていないときは、場所の地図を出したまま状態の欄に知らせる。地図を出せないとき (未取り込みなど) は地図の欄の知らせのまま
+    // 地図を出している途中の場所 (ShowPlaceAsync が店の表の作成・ShowAsync を待っている間。無ければ null) と、その間に最後に頼まれた店
+    private string? _placeLoading;
+    private ShopTreeShop? _placeLoadingShop;
+
     private async Task ShowPlaceAsync(string recordName, string name, ShopTreeShop? shop = null)
     {
         // 頼まれた場所を出すので、タブを初めて開いたときの現在位置の場所の判断はもうしない (後から上書きしない)
@@ -1308,6 +1312,9 @@ public partial class MapPanel : UserControl
         txtPlaceName.Text = name;
         btnSwitch.IsEnabled = true;
         UpdatePlaceBar();
+        // 同じ場所の地図を出している途中 (店の表の作成・ShowAsync を待っている間) に、また頼まれた: 地図は出し直さず (ShowAsync を 2 回走らせない)、
+        // 頼まれた店だけ覚える。出している側が、出し終えてから最後に頼まれた店を選ぶ
+        if (_placeLoading == recordName) { _placeLoadingShop = shop; return; }
         if (placeMap.Record != recordName)
         {
             // 地図のビューアは、出したときの枠の大きさで寄せる (viewer.js の fitFloor)。隠したまま (Collapsed) だと大きさを測れないので、
@@ -1318,8 +1325,26 @@ public partial class MapPanel : UserControl
                 pnlPlace.Visibility = Visibility.Visible;
             }
             txtStatus.Text = $"「{name}」の地図を読み込み中...";
-            await placeMap.ShowAsync(recordName, name, _tree);
+            // 地図の店の名前・販売品・店を選ぶこと (StationMapPanel.ShopOf) は ShopTree で引く。星系図をまだ出していない (［詳細］の［MAP］で
+            // ［マップ］タブを初めて開いた) ときは _tree がまだ無いので、ここで作って (RenderAsync と同じ GetTreeAsync) 渡す。作れなければ今までどおり無しで出す
+            _placeLoading = recordName;
+            _placeLoadingShop = shop;
+            try
+            {
+                var tree = _tree;
+                if (tree == null)
+                {
+                    try { tree = await GetTreeAsync(); }
+                    catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 「{name}」の地図に渡す店の表を作れませんでした: {ex.Message}"); }
+                    if (_placeRecord != recordName) return;
+                }
+                await placeMap.ShowAsync(recordName, name, tree);
+            }
+            finally { if (_placeLoading == recordName) _placeLoading = null; }
             if (_placeRecord != recordName) return;
+            // 出している途中に同じ場所がまた頼まれていれば、最後に頼まれた店 (店の無い頼みなら選ばない)
+            shop = _placeLoadingShop;
+            _placeLoadingShop = null;
             txtStatus.Text = "";
         }
         if (shop != null && placeMap.Record == recordName) txtStatus.Text = placeMap.SelectShop(shop) ?? "";

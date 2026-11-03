@@ -1154,7 +1154,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         var stations = StationMapExports.CachedFiles();
         // ステーションの 3D 表示 (Station3DExports。キーは "station3d:<短い名前>"。大きさは置き場所のフォルダの中の全部) も合わせて数え、古い順に消す対象にする
         var station3d = Station3DExports.CachedEntries();
-        long total = files.Sum(f => f.Length) + stations.Sum(f => f.Length + StationMapExports.MeshCacheBytes(f)) + station3d.Sum(e => e.Bytes);
+        // ステーションの 3D の画像の共通のフォルダ (Station3DTextures) も数える。消すのは場所の 3D を消した後に、どこからも使われなくなった画像だけ
+        long total = files.Sum(f => f.Length) + stations.Sum(f => f.Length + StationMapExports.MeshCacheBytes(f)) + station3d.Sum(e => e.Bytes) + Station3DTextures.Bytes();
         if (total <= max) return;
         var protect = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { justExported };
         foreach (var v in _views.Keys) protect.Add(v);
@@ -1174,8 +1175,9 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 var len3 = station3d.First(e => e.Key == key).Bytes;
                 // ログに出すのは場所の名前 (内部のキー "station3d:…" は出さない)。消す前に取る
                 var name3 = Station3DExports.DisplayNameOfKey(key);
+                var texBefore = Station3DTextures.Bytes();
                 if (!Station3DExports.Instance.DeleteForLimit(key)) continue;
-                total -= len3;
+                total -= len3 + Math.Max(0, texBefore - Station3DTextures.Bytes());
                 deleted.Add($"{name3} (ステーションの 3D)");
                 deletedStation = true;
                 continue;

@@ -260,7 +260,8 @@ internal sealed class StationMapExports : INotifyPropertyChanged
     internal static bool IsFreshOnDisk(string record, Ship3DExports.P4kStamp stamp)
     {
         var h = ReadOurHeader(ShortName(record));
-        return h != null && !h.Outdated && SameStamp(h, stamp);
+        // (2026-11-02) 保存した読み取りの結果が前の版 (StationMeshCache.Version より前) の地図も、取り込み済みに数えない (［マップをまとめて取り込む］で全部書き出す)
+        return h != null && !h.Outdated && SameStamp(h, stamp) && !StationMeshCache.OldVersionOnDisk(StationMeshCache.PathOf(JsonPath(ShortName(record))));
     }
 
     // StateOf が照合中・後で消すもの (最新でない) とするステーションか。UI スレッドで呼ぶ
@@ -846,6 +847,10 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         }
         // (2026-11-02、利用者の決定) 踊り場の板を階段の一部にする (階を作る前)
         plates = StationFloorBuilder.Landings(tree, plates);
+        // (2026-11-02、利用者の決定) ほぼ平らな階段・坂の板 (上下の差 0.3 m 未満) と、床に接する踊り場の板のうち、短い辺が一段の奥行より長いものを床の板にする (Landings の後。StationFloorBuilder.FlatStairsToFloor)
+        plates = StationFloorBuilder.FlatStairsToFloor(plates, out var flatToFloor, out var landingToFloor);
+        if (flatToFloor + landingToFloor > 0)
+            Log($"「{ShortName(tree.Root.Place.Record)}」 ほぼ平らな階段・坂の板 {flatToFloor} 枚と、床に接する踊り場の板 {landingToFloor} 枚を床の板にしました");
         Mark("板");
         var floors = StationFloorBuilder.Levels(plates);
         Mark("階");
@@ -1731,9 +1736,10 @@ internal sealed class StationMapExports : INotifyPropertyChanged
                 if (state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying)
                 {
                     BatchText = $"マップをまとめて取り込む: 照合中 {i + 1} / {roots.Count} か所目 ({NameOf(r)})";
-                    if (await VerifyAsync(r.Place.Record)) { skipFresh++; skippedFresh.Add(sn); continue; }
+                    if (await VerifyAsync(r.Place.Record) && !StationMeshCache.OldVersionOnDisk(StationMeshCache.PathOf(JsonPath(sn)))) { skipFresh++; skippedFresh.Add(sn); continue; }
                 }
-                else if (state == Ship3DCacheState.Fresh) { skipFresh++; skippedFresh.Add(sn); continue; }
+                // (2026-11-02) 保存した読み取りの結果が前の版の地図は、最新でも取り込む (全部書き出す。IsFreshOnDisk と同じ)
+                else if (state == Ship3DCacheState.Fresh && !StationMeshCache.OldVersionOnDisk(StationMeshCache.PathOf(JsonPath(sn)))) { skipFresh++; skippedFresh.Add(sn); continue; }
                 if (HasForeignFile(sn)) { skipForeign++; skippedForeign.Add(sn); continue; }
                 candidates.Add(r);
             }

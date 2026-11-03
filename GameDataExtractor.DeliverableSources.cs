@@ -461,8 +461,11 @@ public partial class GameDataExtractor
         catch (SqliteException) { return null; }
     }
 
-    // ゲームの店の表 (game_shops) はあるが、DB の価格との紐づけ (shop_price_links) の表がまだ無い・前の形か。そうなら起動後に RebuildShopPriceLinks で作る
-    public bool NeedsShopPriceLinks()
+    // ゲームの店の表 (game_shops) はあるが、DB の価格との紐づけ (shop_price_links) の表がまだ無い・前の形か、前の決まりで作ったものか。そうなら起動後に RebuildShopPriceLinks で作る
+    public bool NeedsShopPriceLinks() => ShopPriceLinksNeedReason() != null;
+
+    // 紐づけを作り直す理由 (起動後のログの文に使う)。作り直さなくてよいなら null
+    public string? ShopPriceLinksNeedReason()
     {
         EnsureDb();
         using var cmd = _db!.CreateCommand();
@@ -470,7 +473,16 @@ public partial class GameDataExtractor
         cmd.Parameters.AddWithValue("@a", ShopTables.GameShopsTable);
         cmd.Parameters.AddWithValue("@b", ShopTables.ShopPriceLinksTable);
         // 前の形の表 (場所の列 location_record が無い) も作り直す
-        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0 || ShopTables.LinksTableLacksLocationColumn(_db);
+        if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0 || ShopTables.LinksTableLacksLocationColumn(_db)) return "がまだ無い・前の形なので作ります";
+        // 紐づけの決まりが変わった (前の版の決まりで作った): 店の表に行があるときだけ一度作り直す (RebuildLinks が今の版を記録する)
+        if (ReadMetaValue(ShopTables.LinksRuleMetaKey) == ShopTables.LinksRuleVersion) return null;
+        try
+        {
+            cmd.Parameters.Clear();
+            cmd.CommandText = $"SELECT EXISTS (SELECT 1 FROM {ShopTables.GameShopsTable}) AND EXISTS (SELECT 1 FROM {ShopTables.ShopPriceLinksTable})";
+            return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0 ? "の決まりが変わったので作り直します" : null;
+        }
+        catch (SqliteException) { return null; }   // 表が無い
     }
 
     // DB の価格 (item_shop_prices・trade_cache.db の trade_prices) とゲームの店の紐づけ (shop_price_links) を作り直す。紐づけた価格の名前の数を返す
@@ -3146,6 +3158,7 @@ public partial class GameDataExtractor
         //     (候補が複数でも、そのうち 1 つがほかの候補全部の祖先なら、その祖先)
         //   店: その場所と子孫の場所の店を、店の名前の部分と正規化して、名前が完全一致 → Entity 名の語が完全一致 → 名前が含む → Entity 名が含む の順に照らし、
         //     1 つに決まった店 (MatchShop)。trade は COMMODITY の店だけを見る
+        //   item で名前では店が 1 つに決まらないものは、販売内容 (売っている品目の種類) で店に結ぶ (MatchByContents)
         //   場所は決まったが店が 1 つに決まらないものは、場所で結ぶ (shop_id は ''、location_record に場所、match は 'location')
         // 紐づけの表は最初に新しい形にする (下の早い return でも、次の起動で NeedsShopPriceLinks が真にならないように)。
         // trade_cache.db が無い・読めないときは trade の行だけ前を残し、作れた紐づけが全体で 0 行なら前を全部残す
@@ -3170,7 +3183,8 @@ public partial class GameDataExtractor
                 }
             }
             catch (SqliteException ex) when (ex.SqliteErrorCode == 1) { }   // 表が無い
-            if (shops.Count == 0 || locs.Count == 0) return new LinkResult(0, 0, 0, 0, 0, 0, new(), false, "店の表が空な");
+            // 早い return でも今の決まりの版を記録する (次の起動で NeedsShopPriceLinks が真にならないように。紐づけは次に店の表・価格を作り直したときに作る)
+            if (shops.Count == 0 || locs.Count == 0) { SetMeta(db, LinksRuleMetaKey, LinksRuleVersion); return new LinkResult(0, 0, 0, 0, 0, 0, new(), false, "店の表が空な"); }
 
             var children = new Dictionary<string, List<string>>(StringComparer.Ordinal);
             foreach (var (rn, l) in locs)
@@ -3238,6 +3252,25 @@ public partial class GameDataExtractor
                 }
                 return null;
             }
+            // 店を探す場所: 決まった場所 (place) より深い段が、星図の場所 (店が無い場所も含む) の名前と完全一致し、それが place の子孫で 1 つ
+            // (複数なら Decide と同じくほかの全部の祖先) に決まるなら、その場所 (深い段から照らし、place 自身に当たったらそこで止める)。
+            // 例: "Stanton - Crusader - Orison - Cloudview Center - Crusader Industries Showroom - Ship Weapons" は場所が Crusader (Stanton2) に決まるが、
+            //     段 "Orison" が Stanton2 の下の Orison なので、店は Orison の下だけで探す (Seraphim Station の店に結ばない)
+            var locsByNorm = locs.GroupBy(kv => Norm(kv.Value.Name), StringComparer.Ordinal).Where(g => g.Key.Length > 0)
+                .ToDictionary(g => g.Key, g => g.Select(kv => kv.Key).ToList(), StringComparer.Ordinal);
+            string Narrow(string place, IEnumerable<string> segsDeepFirst)
+            {
+                foreach (var seg in segsDeepFirst)
+                {
+                    if (!locsByNorm.TryGetValue(Norm(seg), out var recs)) continue;
+                    if (recs.Contains(place, StringComparer.Ordinal)) return place;
+                    var under = recs.Where(rn => IsAncestor(place, rn)).ToList();
+                    if (under.Count == 0) continue;
+                    var top = under.Where(a => under.All(b => b == a || IsAncestor(a, b))).ToList();
+                    if (top.Count == 1) return top[0];
+                }
+                return place;
+            }
             // 店: 候補の中で、次の順に照らして 1 つに決まった店
             //   1. 名前 (game_shops.name) が完全一致  2. Entity 名を "_" で区切った語のどれかが完全一致  3. 名前が含む (片方が片方を含む)  4. Entity 名が含む
             (string Id, string How)? MatchShop(List<(string Id, string Name, string Inv, string Loc, string Entity)> cands, string label)
@@ -3278,17 +3311,22 @@ public partial class GameDataExtractor
             catch (SqliteException ex) when (ex.SqliteErrorCode == 1) { }
             var itemDistinct = itemKeys.Select(k => k.Location).Distinct(StringComparer.Ordinal).Count();
             var itemDone = new HashSet<string>(StringComparer.Ordinal);
+            // 場所は決まったが名前で店が決まらなかった売り場 (売り場の名前・場所・場所の決め方・店の名前の部分・場所と店の間の段)
+            // ShopPlace は店を探す場所 (Narrow)、ShopPlaceType はその星図の種類
+            var pendingItems = new List<(string Location, string Place, string How, string Label, List<string> Mids, string ShopPlace, string ShopPlaceType)>();
             foreach (var (location, source) in itemKeys)
             {
                 if (!itemDone.Add(location)) continue;
                 (string Record, string How)? place;
                 string label;
+                List<string> segsDeep = [];   // 場所の段 (深い順。cstone だけ。店を探す場所を絞るのに使う: Narrow)
                 if (source == "cstone")
                 {
                     var t = location.Split(" - ").Select(x => x.Trim()).ToList();
                     if (t.Count < 2) { unmatched.Add(("item", location, "形が「星系 - … - 店」でない")); continue; }
                     var head = t[0].Split(" > ").Select(x => x.Trim()).ToList();
-                    place = ResolvePlace(head[0], head.Skip(1).Concat(t.Skip(1).Take(t.Count - 2)).Reverse().ToList());
+                    segsDeep = head.Skip(1).Concat(t.Skip(1).Take(t.Count - 2)).Reverse().ToList();
+                    place = ResolvePlace(head[0], segsDeep);
                     label = t[^1];
                 }
                 else if (source == "uex")
@@ -3306,10 +3344,26 @@ public partial class GameDataExtractor
                 }
                 else { unmatched.Add(("item", location, "出どころが cstone / uex でない")); continue; }
                 if (place == null) { unmatched.Add(("item", location, "場所が 1 つに決まらない")); continue; }
-                var cands = ShopsUnder(place.Value.Record).Where(s => !s.Inv.Equals("COMMODITY", StringComparison.OrdinalIgnoreCase)).ToList();
+                // 店は、深い段が指す場所 (Narrow) の下だけで探す
+                var shopPlace = Narrow(place.Value.Record, segsDeep);
+                var cands = ShopsUnder(shopPlace).Where(s => !s.Inv.Equals("COMMODITY", StringComparison.OrdinalIgnoreCase)).ToList();
                 var hitShop = MatchShop(cands, label);
                 if (hitShop != null) { links.Add((hitShop.Value.Id, "item", location, place.Value.How + "," + hitShop.Value.How, place.Value.Record)); itemShop++; }
-                else { links.Add(("", "item", location, MatchLocation, place.Value.Record)); itemLoc++; }
+                else
+                {
+                    // 名前で店が決まらなかったもの: 下の販売内容の照らし (MatchByContents) に回す (cstone は場所と店の間の段も渡す)
+                    var mids = new List<string>();
+                    if (source == "cstone") { var tt = location.Split(" - ").Select(x => x.Trim()).ToList(); mids = tt.Skip(1).Take(tt.Count - 2).ToList(); }
+                    pendingItems.Add((location, place.Value.Record, place.Value.How, label, mids, shopPlace, locs.TryGetValue(shopPlace, out var spl) ? spl.Type : ""));
+                }
+            }
+            // 名前で店まで結べなかった売り場は、販売内容 (売っている品目の種類) で店に結ぶ (MatchByContents)。結べなかったものは今までどおり場所で結ぶ
+            var byContents = MatchByContents(db, pendingItems, links.Where(l => l.ShopId.Length > 0).Select(l => l.ShopId).ToHashSet(StringComparer.Ordinal),
+                ShopsUnder, rn => locs.TryGetValue(rn, out var l) ? l.Name : "", rn => locs.TryGetValue(rn, out var l) ? l.Parent : "");
+            foreach (var p in pendingItems)
+            {
+                if (byContents.TryGetValue(p.Location, out var hit)) { links.Add((hit.Id, "item", p.Location, p.How + "," + hit.How, p.Place)); itemShop++; }
+                else { links.Add(("", "item", p.Location, MatchLocation, p.Place)); itemLoc++; }
             }
 
             // コモディティの端末 (trade_prices の is_current = 1 の terminal)
@@ -3347,7 +3401,10 @@ public partial class GameDataExtractor
 
             // 作れた紐づけが 0 行なら、前を全部残す
             if (links.Count == 0)
+            {
+                SetMeta(db, LinksRuleMetaKey, LinksRuleVersion);   // 早い return でも版を記録する (上の店の表が空なときと同じ)
                 return new LinkResult(itemDistinct, 0, 0, tradeDistinct, 0, 0, unmatched, false, "紐づけが 1 行も作れなかった");
+            }
             using (var tx = db.BeginTransaction())
             {
                 using (var del = db.CreateCommand())
@@ -3372,7 +3429,165 @@ public partial class GameDataExtractor
                 }
                 tx.Commit();
             }
+            // 今の決まりで作り直したことを記録する (決まりが変わったら起動後に一度作り直す: NeedsShopPriceLinks)
+            SetMeta(db, LinksRuleMetaKey, LinksRuleVersion);
             return new LinkResult(itemDistinct, itemShop, itemLoc, tradeDistinct, tradeShop, tradeLoc, unmatched, true, TradeKept: !tradeOk);
+        }
+
+        // 紐づけの決まりの版 (gamedata_meta の LinksRuleMetaKey)。決まりを変えたら上げる (前の版で作った紐づけは起動後に作り直す)
+        // 2: 販売内容で店に結ぶ (MatchByContents) を足した (2026-11-02、利用者の指示「名前は拾えるはず　そもそも場所と販売内容が決まってるし同種の店複数はそうない」)
+        internal const string LinksRuleMetaKey = "shop_price_links_rule", LinksRuleVersion = "2";
+
+        // ── 販売内容で店に結ぶ ──
+        // 売り場の種類 (売っている品目のうち半分より多いものの種類。どれも半分以下なら決まらない):
+        //   乗り物 (NOITEM_Vehicle…)、個人の武器 (WeaponPersonal (Gadget を除く)・WeaponAttachment (Utility を除く))、アーマー (Char_Armor_…)、
+        //   服 (Char_Clothing_…)、医療品 (FPS_Consumable の Medical・MedPack)、船の部品 (ContentsShipTypes)
+        // ゲームの店の種類: Entity 名と店の名前 (game_shops.name) を正規化した文字に、種類ごとの言葉 (ContentsShopWords) が入っているもの (2 つ以上の種類に当たる店は種類なし)
+        private const string KindVehicle = "乗り物", KindFpsWeapon = "個人の武器", KindArmor = "アーマー", KindClothing = "服", KindMedical = "医療品", KindShipParts = "船の部品";
+        private static readonly HashSet<string> ContentsShipTypes = new(StringComparer.Ordinal)
+            { "WeaponGun", "Cooler", "Shield", "QuantumDrive", "PowerPlant", "MissileLauncher", "Missile", "Turret", "TurretBase", "WeaponDefensive", "Radar" };
+        private static readonly (string Kind, string[] Words)[] ContentsShopWords =
+        [
+            (KindVehicle, ["dealership", "shipshop", "shipdealer"]),
+            (KindShipParts, ["shipweapons", "shipparts", "shipcomponent"]),
+            (KindFpsWeapon, ["personalweapons", "fpsitems", "weaponsmith", "fpsweapons", "weaponshop", "livefireweapons", "gunshop"]),
+            (KindArmor, ["armor"]),
+            (KindClothing, ["clothing"]),
+            (KindMedical, ["pharmacy", "medical"]),
+        ];
+        // 店の名前の部分の語のうち、ほかの店を指しているかを見るときに使わない語 (どの店にも付く言葉)
+        private static readonly HashSet<string> ContentsGenericWords = new(StringComparer.Ordinal) { "shop", "shops", "store" };
+
+        private static string? ItemContentsKind(string type, string subType) =>
+            type.StartsWith("NOITEM_Vehicle", StringComparison.Ordinal) ? KindVehicle
+            : type == "WeaponPersonal" && subType != "Gadget" || type == "WeaponAttachment" && subType != "Utility" ? KindFpsWeapon
+            : type.StartsWith("Char_Armor_", StringComparison.Ordinal) ? KindArmor
+            : type.StartsWith("Char_Clothing_", StringComparison.Ordinal) ? KindClothing
+            : type == "FPS_Consumable" && subType is "Medical" or "MedPack" ? KindMedical
+            : ContentsShipTypes.Contains(type) ? KindShipParts
+            : null;
+
+        private static string? ShopContentsKind(string entity, string name)
+        {
+            var t = Norm(entity) + " " + Norm(name);
+            var kinds = ContentsShopWords.Where(k => k.Words.Any(w => t.Contains(w, StringComparison.Ordinal))).Select(k => k.Kind).ToList();
+            return kinds.Count == 1 ? kinds[0] : null;
+        }
+
+        // Entity 名の語 (小文字。区切りの塊を、さらに大文字の始まり・数字の境で区切る。ShopTree.EntityWords と同じ区切り方)
+        private static IEnumerable<string> EntityWordsLower(string entity) =>
+            Regex.Matches(entity, @"[A-Za-z0-9]+").SelectMany(t => Regex.Matches(t.Value, @"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+").Select(w => w.Value.ToLowerInvariant()));
+
+        // 名前で店が決まらなかった売り場 (pending) を、販売内容で店に結ぶ。売り場の名前 → (店の shop_id, match)。
+        // 決まり (どれも、1 つに決まらないものは結ばない):
+        //   1. 売り場の種類が決まらないものは結ばない。売り場の名前の部分の語 (4 文字以上、shop などの言葉を除く) が、場所の別の種類の店の Entity 名の語と同じなら、
+        //      その店を指しているので結ばない (例 "Cargo Shop" は SCShop_CargoOfficePyroStation を指す)
+        //      店を探す場所 (ShopPlace。深い段が指す場所: Narrow) が惑星・衛星・恒星 (Planet・Moon・Star) のものは結ばない
+        //      (広い所の中の、別の基地の店に結ばないため)。例 "Pyro - Terminus - Rough Landing - shop_terminal" は場所が Pyro6 までしか決まらないが、
+        //      段 "Rough Landing" が Pyro6 の下の Outpost を指すので ShopPlace はその Outpost になり、その下の店しか指せない
+        //   売り場がその店を指せる (Allowed) のは、店が ShopPlace の下にあり、かつ店が売り場の場所そのものにあるか、
+        //      店が子の場所にあって、売り場の場所と店の間の段の名前がその子の場所の名前に入っている (場所の名前には入っていない) とき
+        //      (例 Clinic の Pharmacy は "… - Clinic - medical_shop" だけが指せる。"… - Hangar Transit - Unique quality" は指せない)
+        //   2. 場所 (と子孫) の店のうち同じ種類の店 (コモディティの店・名前ですでに結んだ店・ここで結んだ店を除く) が 1 つで、
+        //      同じ場所の同じ種類の売り場のうち、その店を指せる売り場が 1 つなら結ぶ (店が場所そのものなら "店:販売内容"、子の場所なら "店:販売内容と段"。
+        //      例 "Ruin Station - Clinic - medical_shop" と Ruin Clinic の Pharmacy)
+        //   3. 2 で結んだ売り場の名前の部分 (正規化) → 店の Entity 名 が 1 つに決まるものを覚え、ほかの場所の、まだ結んでいない同じ名前の売り場を、
+        //      候補 (2 と同じ) のうち同じ Entity 名でその売り場が指せる店が 1 つなら結ぶ ("店:ほかの場所と同じ名前"。例 "Guns" は Pyro の休憩所の SCShop_Pyro_RestStop_BlackMarket_FPSItems)
+        //   2 と 3 を、新しく結べるものが無くなるまで繰り返す
+        private static Dictionary<string, (string Id, string How)> MatchByContents(SqliteConnection db,
+            List<(string Location, string Place, string How, string Label, List<string> Mids, string ShopPlace, string ShopPlaceType)> pending, HashSet<string> nameLinked,
+            Func<string, List<(string Id, string Name, string Inv, string Loc, string Entity)>> shopsUnder, Func<string, string> placeName, Func<string, string> parentOf)
+        {
+            var result = new Dictionary<string, (string Id, string How)>(StringComparer.Ordinal);
+            if (pending.Count == 0) return result;
+            // 売り場ごとの品目の種類 (品目の重複は 1 つ)
+            var keys = pending.Select(p => p.Location).ToHashSet(StringComparer.Ordinal);
+            var items = new Dictionary<string, Dictionary<string, string?>>(StringComparer.Ordinal);
+            try
+            {
+                using var cmd = db.CreateCommand();
+                cmd.CommandText = "SELECT p.location, p.uuid, COALESCE(x.item_type, ''), COALESCE(x.sub_type, '') FROM item_shop_prices p LEFT JOIN item_index x ON x.uuid = p.uuid " +
+                                  "WHERE p.kind IN (@b, @r) AND p.price IS NOT NULL AND p.location <> ''";
+                cmd.Parameters.AddWithValue("@b", ShopPriceStore.KindBuy);
+                cmd.Parameters.AddWithValue("@r", ShopPriceStore.KindRent);
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    var loc = r.GetString(0);
+                    if (!keys.Contains(loc)) continue;
+                    if (!items.TryGetValue(loc, out var d)) items[loc] = d = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+                    d.TryAdd(r.GetString(1), ItemContentsKind(r.GetString(2), r.GetString(3)));
+                }
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode == 1) { return result; }   // 表・列が無い
+            string? KindOf(string loc)
+            {
+                if (!items.TryGetValue(loc, out var d) || d.Count == 0) return null;
+                return d.Values.Where(k => k != null).GroupBy(k => k!).FirstOrDefault(g => g.Count() * 2 > d.Count)?.Key;
+            }
+            // 1. 種類が決まり、名前がほかの種類の店を指していない売り場
+            var open = new List<(string Location, string Place, string Label, List<string> Mids, string Kind, string ShopPlace)>();
+            foreach (var p in pending)
+            {
+                if (p.ShopPlaceType is "Planet" or "Moon" or "Star") continue;   // 広い所 (別の基地の店に結ばない)
+                if (KindOf(p.Location) is not { } kind) continue;
+                var words = Regex.Split(p.Label, "[^A-Za-z0-9]+").Select(Norm).Where(w => w.Length >= 4 && !ContentsGenericWords.Contains(w)).ToHashSet(StringComparer.Ordinal);
+                if (words.Count > 0 && shopsUnder(p.Place).Any(s => ShopContentsKind(s.Entity, s.Name) != kind && EntityWordsLower(s.Entity).Any(words.Contains))) continue;
+                open.Add((p.Location, p.Place, p.Label, p.Mids, kind, p.ShopPlace));
+            }
+            bool Under(string anc, string rn)
+            {
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                for (var cur = rn; cur.Length > 0 && seen.Add(cur); cur = parentOf(cur))
+                    if (cur == anc) return true;
+                return false;
+            }
+            // 売り場 o がその店 s を指せるか (上の決まりの Allowed)
+            bool Allowed((string Location, string Place, string Label, List<string> Mids, string Kind, string ShopPlace) o, (string Id, string Name, string Inv, string Loc, string Entity) s)
+            {
+                if (!Under(o.ShopPlace, s.Loc)) return false;
+                if (s.Loc == o.Place) return true;
+                var shopPlace = Norm(placeName(s.Loc));
+                var here = Norm(placeName(o.Place));
+                return o.Mids.Select(Norm).Any(m => m.Length > 0 && shopPlace.Contains(m, StringComparison.Ordinal) && !here.Contains(m, StringComparison.Ordinal));
+            }
+            var used = new HashSet<string>(nameLinked, StringComparer.Ordinal);
+            List<(string Id, string Name, string Inv, string Loc, string Entity)> Cands(string place, string kind) =>
+                shopsUnder(place).Where(s => !s.Inv.Equals("COMMODITY", StringComparison.OrdinalIgnoreCase) && !used.Contains(s.Id) && ShopContentsKind(s.Entity, s.Name) == kind).ToList();
+            var entityOf = new Dictionary<string, string>(StringComparer.Ordinal);   // 結んだ売り場 → 店の Entity 名
+            while (true)
+            {
+                var added = 0;
+                // 2. 場所と種類で 1 つに決まるもの
+                foreach (var g in open.Where(o => !result.ContainsKey(o.Location)).GroupBy(o => (o.Place, o.Kind)).ToList())
+                {
+                    var cs = Cands(g.Key.Place, g.Key.Kind);
+                    if (cs.Count != 1) continue;
+                    var allowed = g.Where(o => Allowed(o, cs[0])).ToList();
+                    if (allowed.Count != 1) continue;
+                    var pk = (allowed[0].Location, How: cs[0].Loc == g.Key.Place ? "店:販売内容" : "店:販売内容と段");
+                    result[pk.Location] = (cs[0].Id, pk.How);
+                    entityOf[pk.Location] = cs[0].Entity;
+                    used.Add(cs[0].Id);
+                    added++;
+                }
+                // 3. ほかの場所で結んだ同じ名前の売り場と同じ Entity 名の店
+                var learned = open.Where(o => entityOf.ContainsKey(o.Location)).GroupBy(o => Norm(o.Label))
+                    .Select(g => (Label: g.Key, Entities: g.Select(o => entityOf[o.Location]).Distinct(StringComparer.OrdinalIgnoreCase).ToList()))
+                    .Where(x => x.Label.Length > 0 && x.Entities.Count == 1).ToDictionary(x => x.Label, x => x.Entities[0], StringComparer.Ordinal);
+                foreach (var o in open)
+                {
+                    if (result.ContainsKey(o.Location) || !learned.TryGetValue(Norm(o.Label), out var ent)) continue;
+                    var cs = Cands(o.Place, o.Kind).Where(s => s.Entity.Equals(ent, StringComparison.OrdinalIgnoreCase) && Allowed(o, s)).ToList();
+                    if (cs.Count != 1) continue;
+                    result[o.Location] = (cs[0].Id, "店:ほかの場所と同じ名前");
+                    entityOf[o.Location] = cs[0].Entity;
+                    used.Add(cs[0].Id);
+                    added++;
+                }
+                if (added == 0) break;
+            }
+            return result;
         }
     }
 }

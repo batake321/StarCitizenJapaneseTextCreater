@@ -1232,7 +1232,9 @@ internal sealed class SocpakContents
     //      (「Rental」を除く理由: Cargo Center の socpak (cargo_office_001) には、貨物の店 SCShop_Cargo_Office と、乗り物の貸し出しの店 SCShop_Cargo_Office_Rentals
     //      (ShopKiosk_Rentals の端末) の 2 つがあり、貸し出しの端末は Cargo Center の端末ではないため。RR_HUR_LEO で確かめた)
     // Pos の無い Entity は使わない
-    private static readonly string[] TerminalNeedles = ["Kiosk", "CloneLocationAdmin", "HospitalCheckIn", "Refinery", "Shop_Terminal", "LoadingPlatform", "LandingArea", "LoadingArea", "SCShop", "InstancedHangarGateway"];
+    private static readonly string[] TerminalNeedles = ["Kiosk", "CloneLocationAdmin", "HospitalCheckIn", "Refinery", "Shop_Terminal", "LoadingPlatform", "LandingArea", "LoadingArea", "SCShop", "InstancedHangarGateway",
+        // (2026-11-02) 外部のドッキングポート (EntityClass「Station_DockingTube」の Entity。SCItemDockingTube の HUDDisplayName が @dockingport_01・@ui_interactor_dockingport_01 など)
+        "DockingTube"];
 
     private sealed record SocEnt(string Cls, string Name, string Guid, (double X, double Y, double Z)? Pos, (double W, double X, double Y, double Z)? Rot, List<string> Links, XElement E);
 
@@ -1320,6 +1322,16 @@ internal sealed class SocpakContents
             return double.TryParse((string?)d.Attribute("x"), st, inv, out var x) && double.TryParse((string?)d.Attribute("y"), st, inv, out var y) && double.TryParse((string?)d.Attribute("z"), st, inv, out var z) ? (x, y, z) : null;
         }
         static string Hud(XElement en, string comp) => (string?)en.Descendants(comp).FirstOrDefault()?.Attribute("HUDDisplayName") ?? "";
+        // AI 専用の印の付いた着陸パッド・ドッキングポートは外す (2026-11-02、利用者の指示「プレイヤーは使えない場所」):
+        //   LandingArea は canBeUsedBy="AI"、SCItemDockingTube は CanBeUsedBy="AI" (属性の名前の大文字・小文字が部品で違うので、どちらも見る)。
+        //   写しで確かめた: Stanton Gateway の保安ドック (stanton/station/sec/secdock_vert_complete.socpak) の Dock1〜3_LandingArea (@landing_pad_01〜10 が 3 組) と
+        //   Station_DockingTube_vert_01〜03 (@ui_interactor_secdock_a〜c_dockingport) に付いている
+        static bool AiOnly(XElement en, string comp)
+        {
+            var c = en.Descendants(comp).FirstOrDefault();
+            var v = (string?)c?.Attribute("canBeUsedBy") ?? (string?)c?.Attribute("CanBeUsedBy");
+            return string.Equals(v, "AI", StringComparison.OrdinalIgnoreCase);
+        }
         var exDone = new HashSet<string>(StringComparer.Ordinal);
         foreach (var e in ents)
         {
@@ -1327,7 +1339,17 @@ internal sealed class SocpakContents
             if (e.Cls == "LandingArea" && e.Pos is { } pp)
             {
                 exDone.Add(e.Guid);
+                if (AiOnly(e.E, "LandingArea")) continue;
                 Exteriors.Add(new StationExterior(-1, "pad", e.Guid, e.Cls, e.Name, pp, e.Rot) { NameKey = Hud(e.E, "LandingArea"), Size = Dims(e.E) });
+            }
+            // (2026-11-02、利用者の指示「外部のドッキングポートは番号が大事」) 外部のドッキングポート: EntityClass「Station_DockingTube」の Entity。
+            //   名前の鍵は SCItemDockingTube の HUDDisplayName (写しで確かめた: Stanton Gateway @dockingport_01・02 と保安ドックの @ui_interactor_secdock_a〜c_dockingport、
+            //   Checkmate @ui_interactor_dockingport_01・@dockingport_02、Levski @ui_interactor_dockingport_01〜04、HUR-L1 @ui_interactor_dockingport_01・02)
+            else if (e.Cls == "Station_DockingTube" && e.Pos is { } dp)
+            {
+                exDone.Add(e.Guid);
+                if (AiOnly(e.E, "SCItemDockingTube")) continue;
+                Exteriors.Add(new StationExterior(-1, "dock", e.Guid, e.Cls, e.Name, dp, e.Rot) { NameKey = Hud(e.E, "SCItemDockingTube") });
             }
             else if (e.Cls == "LoadingArea" && e.Pos is { } lp)
             {

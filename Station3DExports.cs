@@ -16,7 +16,8 @@ namespace StarCitizenJapaneseTextCreater;
 //     置き場所 (Ship3DExports.Folder の下の stations3d\<短い名前>\)・最大容量 (Ship3DExports.MaxMb。船・地図と合わせて数え、Ship3DExports.EnforceLimit が古い順に消す。
 //     キーは "station3d:<短い名前>")・待ち行列・同時数・CPU 使用率 (Ship3DExports.WaitTurnAsync・TryAcquireExtraRun)・進み具合の欄 (Ship3DExports.Jobs。Ship3DJob の Kind は Station3D)・
 //     StarBreakerRunner・Ship3DP4kIndex・Ship3DExports.CurrentStamp。照合は地図と同じ考え (元ファイルの大きさと CRC、木の形のハッシュ StationMapExports.TreeHash)。
-//   書き出す範囲 (親の決定): ルートとその直下の Child (木 StationTree の深さ 0 と 1 のインスタンスのうち socpak のあるもの)。名前で決め打ちしない。
+//   書き出す範囲 (親の決定): ルートとその直下の Child (木 StationTree の深さ 0 と 1 のインスタンスのうち socpak のあるもの)。
+//     それより深いものは、socpak のパスに /ext/ を含む外装の部品だけ (ExtPathPart。2026-11-02、利用者の決定)。
 //     starbreaker の socpak export は Child を書き出さないので、socpak ごとに 1 つの GLB に書き出し、置き方 (インスタンスの ToStation) は scene.json に書いてビューアが置く。
 //     同じ socpak を何か所にも置くとき (武器の台・貨物エレベーターなど) は GLB は 1 つ。
 //     書き出しの引数: --materials none --no-lights --lod 3 (調査担当 C の下調べ: 1 か所 2〜3 秒・5〜22 MB。LOD 0 だと大きく重い)
@@ -43,13 +44,19 @@ internal sealed class Station3DExports : INotifyPropertyChanged
 
     public const string Mark = "StarCitizenJapaneseTextCreater.station3d";
     // scene.json の形の版。これより古いものは「書き出しが要る」(StateOf が None) として扱う
-    public const int Format = 1;
+    // 2: 画像 (テクスチャ。Station3DTextures) を足した (2026-11-02)。1 の 3D は「書き出しが要る」になり、自動の取り直し (ScanAsync) で書き出し直す
+    // 3: 深さ 2 以上の外装の部品 (ExtPathPart) を足した (2026-11-02、利用者の決定。Checkmate の本体が深さ 2・3 にあり描かれていなかった)
+    // 4: 外部のドッキングポートの印 (markers.docks) を足した (2026-11-02、利用者の指示「外部のドッキングポートは番号が大事」)
+    public const int Format = 4;
     public const string KeyPrefix = "station3d:";
     public const string SceneFile = "scene.json";
     // 書き出す LOD (調査担当 C の下調べで決めたもの)
     public const int Lod = 3;
     // 書き出す深さ (ルート 0 とその直下の Child 1。親の決定)
     public const int MaxPartDepth = 1;
+    // 深さ MaxPartDepth より深くても書き出す部品: socpak のパスにこれを含むもの (外装。2026-11-02、利用者の決定「A」=
+    // 「深さ 2 以上のうち、置き場所のパスに /ext/ を含む部品だけを足す」。Checkmate の本体 (util_a/ext/rs_util_001_construct/ の腕・中心・下の塔など) は深さ 2・3 にある)
+    public const string ExtPathPart = "/ext/";
     // 始める前に要る置き場所のドライブの空き (地図の取り込みと同じ値。1 回の GLB は 22 MB 程度だが、同時に動かす分と書き終えるまでの前の版の分に余裕を見る)
     public const long MinFreeBytes = StationMapExports.MinFreeBytes;
     // 予想時間の係数 (2026-11-02、この PC、LIVE、scratchpad\agentC の harness で 5 か所を書き出した実測で決めた。説明は報告と EstimateSeconds)
@@ -58,6 +65,9 @@ internal sealed class Station3DExports : INotifyPropertyChanged
     public const double ParallelSlowdown = StationMapExports.ParallelSlowdown;
     // 予想の大きさ: socpak の .soc にある CGF の p4k の中の大きさの合計 (StationMapExports.SocGeometryBytes) × この値 (実測。報告)
     public const double GlbPerGeometryByte = 0.14;
+    // 画像の取り出しの予想 (秒)。2026-11-02、写しで実測: 画像を全部取り出す Checkmate 298 枚 7.4 秒、使い回しのある HUR-L1 6.7 秒・GrimHEX 4.8 秒
+    // (p4k extract 2 回と dds to-png-all 1 回。Station3DTextures の説明)
+    public const double TextureSeconds = 8;
 
     private Station3DExports()
     {
@@ -203,7 +213,20 @@ internal sealed class Station3DExports : INotifyPropertyChanged
         return res;
     }
 
-    public static long CacheBytes() => CachedEntries().Sum(e => e.Bytes);
+    // 場所ごとのフォルダと、画像の共通のフォルダ (Station3DTextures) を合わせた大きさ
+    public static long CacheBytes() => CachedEntries().Sum(e => e.Bytes) + Station3DTextures.Bytes();
+
+    // 画像の共通のフォルダのうち、どの場所からも使われていない画像を消す (場所の 3D を消した後。書き出し中は、書きかけの場所が使う画像を消さないよう、しない)
+    private void CollectTexturesIfIdle()
+    {
+        if (_byShort.Count > 0) return;
+        try
+        {
+            var freed = Station3DTextures.Collect(CachedEntries().Select(e => e.Scene.FullName));
+            if (freed > 0) Log($"どの場所からも使われていない画像を消しました ({Ship3DExports.FormatBytes(freed)})");
+        }
+        catch (Exception ex) { Log($"使われていない画像を消せませんでした: {ex.Message}"); }
+    }
 
     // 置き場所に同じ名前のフォルダがあり、それがこのアプリのもの (scene.json の頭に印) でなければ true (上書きしない)
     private static bool HasForeignFolder(string shortName) => Directory.Exists(PlaceFolder(shortName)) && ReadOurHeader(shortName) == null
@@ -385,6 +408,7 @@ internal sealed class Station3DExports : INotifyPropertyChanged
             return;
         }
         DeleteOurCache(shortName);
+        CollectTexturesIfIdle();
         Notice = $"「{shortName}」はパッチで元データが変わったので、3D を消しました ({reason})。［読み込み］で書き出し直せます";
         Log(Notice);
         RaiseStateChanged();
@@ -404,6 +428,7 @@ internal sealed class Station3DExports : INotifyPropertyChanged
         if (!_pendingDelete.Contains(shortName) || _views.ContainsKey(shortName) || _byShort.ContainsKey(shortName)) return;
         _pendingDelete.Remove(shortName);
         DeleteOurCache(shortName);
+        CollectTexturesIfIdle();
         Notice = $"「{shortName}」はパッチで元データが変わったので、3D を消しました。［読み込み］で書き出し直せます";
         Log(Notice);
         RaiseStateChanged();
@@ -415,6 +440,7 @@ internal sealed class Station3DExports : INotifyPropertyChanged
         var shortName = ShortOfKey(key);
         if (_views.ContainsKey(shortName) || _byShort.ContainsKey(shortName) || _verifying.ContainsKey(shortName)) return false;
         if (!DeleteOurCache(shortName)) return false;
+        CollectTexturesIfIdle();
         RaiseStateChanged();
         return true;
     }
@@ -605,6 +631,11 @@ internal sealed class Station3DExports : INotifyPropertyChanged
                     .Where(x => x.Head != null && !x.Head.Outdated && !SameStamp(x.Head, stamp))
                     .OrderByDescending(x => x.Scene.LastWriteTimeUtc).Select(x => (x.Short, Record: x.Head!.Record)).ToList());
                 cands = cands.Where(x => !_byShort.ContainsKey(x.Short) && !_verifying.ContainsKey(x.Short) && !_pendingDelete.Contains(x.Short)).ToList();
+                // 形式の古い 3D (画像の無い形式 1 など。Format) は照合せずに取り直しに並べる (地図の自動の変換と同じ考え)
+                var outdated = await Task.Run(() => CachedEntries().Select(e => ShortOfKey(e.Key))
+                    .Where(sn => ReadOurHeader(sn) is { Outdated: true }).ToList());
+                foreach (var sn in outdated.Where(sn => !_byShort.ContainsKey(sn) && !_verifying.ContainsKey(sn) && !_pendingDelete.Contains(sn)))
+                    QueueRefresh(sn, $"形式が古い (形式 {ReadOurHeader(sn)?.Format}。今は {Format})");
                 if (cands.Count == 0) continue;
                 Log($"自動の取り直し ({why}): Data.p4k の印が違う場所 {cands.Count} か所を 1 か所ずつ照合します (変わっていた場所は取り直しに並べます)");
                 var sw = Stopwatch.StartNew();
@@ -644,7 +675,7 @@ internal sealed class Station3DExports : INotifyPropertyChanged
         public double Seconds { get; init; }
     }
 
-    // 書き出しの計画: 木を辿り (中身も読む。印に使う外の設備のため)、深さ MaxPartDepth までのインスタンスのうち socpak のあるものを部品にする
+    // 書き出しの計画: 木を辿り (中身も読む。印に使う外の設備のため)、深さ MaxPartDepth までと、それより深い外装 (ExtPathPart) のインスタンスのうち socpak のあるものを部品にする
     internal static Plan MakePlan(StationIndex index, StationRoot root, Dictionary<ulong, (long Size, uint Crc)> p4k, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
@@ -653,7 +684,8 @@ internal sealed class Station3DExports : INotifyPropertyChanged
         var notFound = 0;
         foreach (var i in tree.Instances)
         {
-            if (i.Depth > MaxPartDepth || i.Socpak.Length == 0) continue;
+            if (i.Socpak.Length == 0) continue;
+            if (i.Depth > MaxPartDepth && !i.Socpak.Contains(ExtPathPart, StringComparison.OrdinalIgnoreCase)) continue;
             if (!i.Found) { notFound++; continue; }
             parts.Add(new Part(i.Socpak, i.ToStation, i.Depth));
         }
@@ -671,7 +703,7 @@ internal sealed class Station3DExports : INotifyPropertyChanged
     internal static double EstimateSeconds(int runs, int parallel)
     {
         var p = Math.Max(1, Math.Min(parallel, runs));
-        return BaseSeconds + runs * SecondsPerRun / p * (1 + ParallelSlowdown * (p - 1));
+        return BaseSeconds + TextureSeconds + runs * SecondsPerRun / p * (1 + ParallelSlowdown * (p - 1));
     }
 
     internal static long EstimateBytes(Plan plan) => (long)(plan.GeometryBytes * GlbPerGeometryByte);
@@ -890,7 +922,8 @@ internal sealed class Station3DExports : INotifyPropertyChanged
             job.Watch.Stop();
             Log($"「{job.Name}」({shortName}) の 3D を書き出しました: {job.Watch.Elapsed.TotalSeconds:F1} 秒、starbreaker {plan.Socpaks.Count} 回 " +
                 $"(時間の足し合わせ {result.RunSeconds:F1} 秒、同時に動いた最大 {result.MaxActive} 本)、GLB 合計 {Ship3DExports.FormatBytes(result.GlbBytes)} " +
-                $"(予想 {Ship3DExports.FormatBytes(EstimateBytes(plan))})、部品 {plan.Parts.Count}、印 {result.Markers}、照合用の元ファイル {result.Sources} 個");
+                $"(予想 {Ship3DExports.FormatBytes(EstimateBytes(plan))})、部品 {plan.Parts.Count}、印 {result.Markers}、照合用の元ファイル {result.Sources} 個" +
+                (result.Tex is { } tx ? $"。画像 {tx.Textures} 枚 (取り出した {tx.Decoded}・使い回した {tx.Reused})・{tx.Seconds:F1} 秒" : ""));
             job.SetPhase(Ship3DJobPhase.Done, "");
             // 自動の取り直し (InBatch) の中では古いものを消さない (並べたものが全部終わったときに 1 回だけ。ProcessRefreshAsync)
             if (!job.InBatch) ex.EnforceLimit(justExported: job.Short);
@@ -906,7 +939,7 @@ internal sealed class Station3DExports : INotifyPropertyChanged
         }
     }
 
-    internal sealed record BuildResult(long GlbBytes, double RunSeconds, int MaxActive, int Markers, int Sources);
+    internal sealed record BuildResult(long GlbBytes, double RunSeconds, int MaxActive, int Markers, int Sources, Station3DTextures.Result? Tex = null);
 
     // 書き出しの本体 (UI に触れない。画面なしの確かめからも呼ぶ): socpak ごとに starbreaker で GLB を作り、scene.json を書く。
     //   starbreaker は自分の枠 1 本のほかに、tryExtra が許すだけ並行に動かす (地図の取り込み StationFloorBuilder.ExportAsync と同じ考え)。
@@ -981,14 +1014,24 @@ internal sealed class Station3DExports : INotifyPropertyChanged
             Log($"「{ShortName(record)}」の書き出しで starbreaker が {list.Count} 回失敗しました:\n{string.Join("\n", list)}");
             throw new InvalidOperationException($"starbreaker が失敗しました: {list[0]}");
         }
+        // 画像 (テクスチャ): 材質の .mtl と画像を取り出して、共通のフォルダに置く (Station3DTextures)
+        onStage?.Invoke("画像");
+        var tex = await Station3DTextures.BuildAsync(files.Select(f => Path.Combine(work, f)).ToList(), exe, stamp, work, ct, onStage, tryExtra, releaseExtra);
+        Log($"「{ShortName(record)}」の画像: 材質 {tex.Materials} のうち画像を貼る {tex.MaterialsWithTex}、画像 {tex.Textures} 枚 (取り出した {tex.Decoded}・使い回した {tex.Reused}・" +
+            $"取り出せなかった {tex.Missing})、{tex.Seconds:F1} 秒");
         onStage?.Invoke("照合用の元ファイル");
         var p4k = await Ship3DP4kIndex.GetAsync(stamp);
         var sources = BuildSources(index, plan, p4k);
+        // 画像の元 (.mtl・.dds・.dds.N) も照合に入れる (変わったら取り直す)
+        var seenSrc = sources.Select(x => x.Path).ToHashSet(StringComparer.Ordinal);
+        foreach (var path in tex.Sources)
+            if (seenSrc.Add(path))
+                sources.Add(p4k.TryGetValue(Ship3DEstimator.Hash(path), out var v) ? new Ship3DExports.SourceFile { Path = path, Size = v.Size, Crc = v.Crc } : new Ship3DExports.SourceFile { Path = path, Size = -1, Crc = 0 });
         onStage?.Invoke("scene.json を書く");
         var glbBytes = files.Sum(f => new FileInfo(Path.Combine(work, f)).Length);
-        var (json, markers) = WriteScene(plan, files, record, stamp, sources, work);
+        var (json, markers) = WriteScene(plan, files, record, stamp, sources, work, tex);
         await File.WriteAllTextAsync(Path.Combine(work, SceneFile), json, new UTF8Encoding(false), ct);
-        return new BuildResult(glbBytes, runSeconds, maxActive, markers, sources.Count);
+        return new BuildResult(glbBytes, runSeconds, maxActive, markers, sources.Count, tex);
     }
 
     private static string Quote(string s) => "\"" + s.Replace("\"", "\\\"") + "\"";
@@ -1048,9 +1091,9 @@ internal sealed class Station3DExports : INotifyPropertyChanged
     // scene.json を作る。戻り値は JSON と印の数
     //   files: [{file, socpak, bytes}]、parts: [{f: files の番号, d: 木の深さ (ルート 0), xf: [x, y, z, qw, qx, qy, qz]}] (局所。z 上)
     //   markers: pads [{pos, key, size}] (key は HUDDisplayName。無ければ "")、hangars [{pos, size (S・M・L・XL。無ければ ""), gatewaySize}]、
-    //            freight [{pos, deck (外部貨物の区画の鍵 @cargodeck_NN。無ければ ""), deckGuess}]。pos は局所 (z 上)
+    //            freight [{pos, deck (外部貨物の区画の鍵 @cargodeck_NN。無ければ ""), deckGuess}]、docks [{pos, key (SCItemDockingTube の HUDDisplayName)}]。pos は局所 (z 上)
     private static (string Json, int Markers) WriteScene(Plan plan, List<string> files, string record, Ship3DExports.P4kStamp stamp,
-        List<Ship3DExports.SourceFile> sources, string work)
+        List<Ship3DExports.SourceFile> sources, string work, Station3DTextures.Result? tex = null)
     {
         using var ms = new MemoryStream();
         int markers = 0;
@@ -1078,10 +1121,32 @@ internal sealed class Station3DExports : INotifyPropertyChanged
                 w.WriteString("file", files[i]);
                 w.WriteString("socpak", plan.Socpaks[i]);
                 w.WriteNumber("bytes", new FileInfo(Path.Combine(work, files[i])).Length);
+                // 材質の名前 → [画像の番号 (textures の), 繰り返し]
+                if (tex != null && i < tex.PerFile.Count && tex.PerFile[i].Count > 0)
+                {
+                    w.WriteStartObject("mats");
+                    foreach (var (name, (ti, tiling)) in tex.PerFile[i].OrderBy(kv => kv.Key, StringComparer.Ordinal))
+                    {
+                        w.WriteStartArray(name); w.WriteNumberValue(ti); w.WriteNumberValue(Math.Round(tiling, 4)); w.WriteEndArray();
+                    }
+                    w.WriteEndObject();
+                }
                 w.WriteEndObject();
             }
             w.WriteEndArray();
             var fileOf = plan.Socpaks.Select((s, i) => (s, i)).ToDictionary(t => t.s, t => t.i, StringComparer.Ordinal);
+            // 画像 (共通のフォルダ stations3d\_textures の中のファイル名)
+            w.WriteStartArray("textures");
+            foreach (var t in tex?.Files ?? new List<string>()) w.WriteStringValue(t);
+            w.WriteEndArray();
+            // 暗い画像 (光る所の形だけを持つ画像など。Station3DTextures.DarkLuma) の textures の番号
+            w.WriteStartArray("darkTextures");
+            foreach (var d in tex?.Dark ?? new List<int>()) w.WriteNumberValue(d);
+            w.WriteEndArray();
+            // 画像ごとの平均の明るさ (0〜255。分からなければ -1。textures と同じ並び)
+            w.WriteStartArray("textureLuma");
+            foreach (var l in tex?.Luma ?? new List<int>()) w.WriteNumberValue(l);
+            w.WriteEndArray();
             w.WriteStartArray("parts");
             foreach (var p in plan.Parts)
             {
@@ -1110,6 +1175,15 @@ internal sealed class Station3DExports : INotifyPropertyChanged
                 // 区分は地図の JSON (StationMapJson の exterior.hangars) と同じ (2 Small・4 Medium・5 Large・6 XL)
                 w.WriteString("size", x.GatewaySize switch { 2 => "S", 4 => "M", 5 => "L", 6 => "XL", _ => "" });
                 w.WriteNumber("gatewaySize", x.GatewaySize);
+                w.WriteEndObject(); markers++;
+            }
+            w.WriteEndArray();
+            // 外部のドッキングポート (2026-11-02、利用者の指示「外部のドッキングポートは番号が大事」)。LEO の場所でも書く
+            // (前は record に「_LEO」のある場所で書かなかったが、利用者の指摘「LEO はいらないと言ってないよね？」で消した)。AI 専用のものは StationMapData.ReadTerminals で外してある
+            w.WriteStartArray("docks");
+            foreach (var x in plan.Tree.Exteriors.Where(x => x.Kind == "dock"))
+            {
+                w.WriteStartObject(); Vec("pos", x.Pos); w.WriteString("key", x.NameKey);
                 w.WriteEndObject(); markers++;
             }
             w.WriteEndArray();

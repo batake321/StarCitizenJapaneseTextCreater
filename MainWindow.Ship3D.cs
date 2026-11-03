@@ -157,11 +157,11 @@ public partial class MainWindow
     private void UpdateShip3DUsageText()
     {
         if (txtShip3DUsage == null) return;
-        // 船・ステーションの地図・ステーションの 3D を合わせた使用量 (最大容量はどれも合わせて数える)
+        // 船・ステーションの地図・ステーションの 3D (画像の共通のフォルダを含む) を合わせた使用量 (最大容量はどれも合わせて数える)
         var files = Ship3DExports.CachedFiles();
         var stations = StationMapExports.CachedFiles();
         var st3d = Station3DExports.CachedEntries();
-        txtShip3DUsage.Text = $"今の使用量: {Ship3DExports.FormatBytes(files.Sum(f => f.Length) + stations.Sum(f => f.Length + StationMapExports.MeshCacheBytes(f)) + st3d.Sum(e => e.Bytes))} ({files.Count} 隻・{stations.Count} か所・3D {st3d.Count} か所)";
+        txtShip3DUsage.Text = $"今の使用量: {Ship3DExports.FormatBytes(files.Sum(f => f.Length) + stations.Sum(f => f.Length + StationMapExports.MeshCacheBytes(f)) + st3d.Sum(e => e.Bytes) + Station3DTextures.Bytes())} ({files.Count} 隻・{stations.Count} か所・3D {st3d.Count} か所)";
     }
 
     // ［マップをまとめて取り込む］は、船の［船舶・車両をまとめて取り込む］と同じく、CPU 使用率が 90% 以上のときと、ステーションのまとめて取り込むが動いている間と、

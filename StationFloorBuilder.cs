@@ -32,8 +32,9 @@ internal sealed record StationGlbMesh(string Mesh, (double X, double Y, double Z
 // 床・階段の板 1 つ (局所)。Hull は xy の凸包 (反時計回り)。Ramp は傾いた床の板 (スロープ)。スロープは Stair も true にし、階段と同じに扱う
 // Group は床のまとまり (StationFloorBuilder.AssignGroups。-1 はまとまりに入らない)
 // Link は踊り場でつないだ階段の鍵 (StationFloorBuilder.Landings。-1 はインスタンスごとにまとめる)。Landing は階段の一部にした踊り場の床の板
+// Depth は板の歩ける水平な面の本当の奥行 (帯の幅。StationShape.LevelDepths。形の数の無い板は NaN で、凸包の短いほうの幅で見る。DeeperThanTread)
 internal sealed record StationPlate(int Instance, string Mesh, bool Stair, (double X, double Y)[] Hull, double Top, double Bottom, bool Ramp = false, int Group = -1,
-    int Link = -1, bool Landing = false);
+    int Link = -1, bool Landing = false, double Depth = double.NaN);
 
 // 書き出しの 1 回分 (Pattern を starbreaker に渡し、Socpaks のうち出てきたものを使う)
 internal sealed record StationExportJob(string Pattern, IReadOnlyList<string> Socpaks, int Matched);
@@ -908,6 +909,9 @@ internal static class StationFloorBuilder
         public double SlopeCoherence;
         // 水平な面の段 (下から。高さ・xy は段の中の面積の重みの平均、面積)
         public List<(double Z, double Area, double X, double Y)> Levels = new();
+        // (2026-11-02、利用者の指示「奥行で床か階段か決めろ」・親の決定 (A)) Levels の段ごとの本当の奥行 (水平な面の帯の幅。LevelDepth。面積が StepMinArea 未満の段は NaN)。
+        // 凸包の幅では、L 字の段 (stairs_cornerin_04x04x0125_a の踏み面。凸包の短い幅 1.8〜2.7 m) の奥行が測れないため
+        public List<double> LevelDepths = new();
         // 歩ける面 (水平な面と歩ける坂) の点: xy の凸包の頂点 (z 付き)
         public (double X, double Y, double Z)[] Hull = [];
         public double WalkLo = double.MaxValue, WalkHi = double.MinValue;
@@ -1012,6 +1016,60 @@ internal static class StationFloorBuilder
     }
 
     // 三角形を行列 w (列優先) で移して、形の数を数える
+    // (2026-11-02、親の決定 (A)) 水平な面 (三角形の集まり) の本当の奥行: 升目 (TreadTol 0.02 m。升目が LevelDepthMaxCells を超える大きな面は升目を広げる) に
+    // 三角形を塗り、塗った升目から塗っていない升目までの距離 (8 方向の距離の近似。斜めは √2) のいちばん大きいもの d から、(2d − 1) × 升目 を帯の幅とする。
+    // 幅 0.5 m の帯は 0.50 m、4 × 4 m の面は 4.0 m、幅 0.5 m の L 字の帯は 0.50 m (誤差は升目 1 つ分)。三角形が無ければ NaN
+    public const int LevelDepthMaxCells = 4_000_000;
+    public static double LevelDepth(List<((double X, double Y) A, (double X, double Y) B, (double X, double Y) C)> tris)
+    {
+        if (tris.Count == 0) return double.NaN;
+        double x0 = double.MaxValue, y0 = double.MaxValue, x1 = double.MinValue, y1 = double.MinValue;
+        foreach (var (a, b, c) in tris)
+            foreach (var p in new[] { a, b, c }) { x0 = Math.Min(x0, p.X); y0 = Math.Min(y0, p.Y); x1 = Math.Max(x1, p.X); y1 = Math.Max(y1, p.Y); }
+        if (!(x1 >= x0 && y1 >= y0) || !double.IsFinite(x1 - x0) || !double.IsFinite(y1 - y0)) return double.NaN;
+        double cell = TreadTol;
+        if ((x1 - x0) / cell * ((y1 - y0) / cell) > LevelDepthMaxCells) cell = Math.Sqrt((x1 - x0) * (y1 - y0) / LevelDepthMaxCells);
+        int nx = (int)Math.Ceiling((x1 - x0) / cell) + 3, ny = (int)Math.Ceiling((y1 - y0) / cell) + 3;
+        var d = new float[nx * ny];
+        foreach (var (a, b, c) in tris)
+        {
+            int i0 = Math.Max(1, (int)Math.Floor((Math.Min(a.X, Math.Min(b.X, c.X)) - x0) / cell) + 1), i1 = Math.Min(nx - 2, (int)Math.Ceiling((Math.Max(a.X, Math.Max(b.X, c.X)) - x0) / cell) + 1);
+            int j0 = Math.Max(1, (int)Math.Floor((Math.Min(a.Y, Math.Min(b.Y, c.Y)) - y0) / cell) + 1), j1 = Math.Min(ny - 2, (int)Math.Ceiling((Math.Max(a.Y, Math.Max(b.Y, c.Y)) - y0) / cell) + 1);
+            for (int j = j0; j <= j1; j++)
+                for (int i = i0; i <= i1; i++)
+                {
+                    double px = x0 + (i - 0.5) * cell, py = y0 + (j - 0.5) * cell;
+                    double s1 = (b.X - a.X) * (py - a.Y) - (b.Y - a.Y) * (px - a.X), s2 = (c.X - b.X) * (py - b.Y) - (c.Y - b.Y) * (px - b.X), s3 = (a.X - c.X) * (py - c.Y) - (a.Y - c.Y) * (px - c.X);
+                    if ((s1 >= 0 && s2 >= 0 && s3 >= 0) || (s1 <= 0 && s2 <= 0 && s3 <= 0)) d[j * nx + i] = float.MaxValue;
+                }
+        }
+        const float D1 = 1f, D2 = 1.41421356f;
+        for (int j = 1; j < ny - 1; j++)
+            for (int i = 1; i < nx - 1; i++)
+            {
+                int k = j * nx + i; if (d[k] == 0) continue;
+                d[k] = Math.Min(d[k], Math.Min(Math.Min(d[k - 1] + D1, d[k - nx] + D1), Math.Min(d[k - nx - 1] + D2, d[k - nx + 1] + D2)));
+            }
+        float best = 0;
+        for (int j = ny - 2; j >= 1; j--)
+            for (int i = nx - 2; i >= 1; i--)
+            {
+                int k = j * nx + i; if (d[k] == 0) continue;
+                d[k] = Math.Min(d[k], Math.Min(Math.Min(d[k + 1] + D1, d[k + nx] + D1), Math.Min(d[k + nx + 1] + D2, d[k + nx - 1] + D2)));
+                best = Math.Max(best, d[k]);
+            }
+        return best <= 0 ? double.NaN : Math.Max(1, 2 * best - 1) * cell;
+    }
+
+    // 板の Depth: 形の段 (LevelDepths) のうち、高さが lo − LevelJoin 〜 hi + LevelJoin に入る段の本当の奥行のいちばん大きいもの (無ければ NaN)
+    private static double PlateDepth(StationShape sh, double lo, double hi)
+    {
+        double best = double.NaN;
+        for (int i = 0; i < sh.Levels.Count && i < sh.LevelDepths.Count; i++)
+            if (sh.Levels[i].Z >= lo - LevelJoin && sh.Levels[i].Z <= hi + LevelJoin && !double.IsNaN(sh.LevelDepths[i]) && !(sh.LevelDepths[i] <= best)) best = sh.LevelDepths[i];
+        return best;
+    }
+
     private static StationShape ShapeOf(List<float[]> tris, double[] w)
     {
         var s = new StationShape();
@@ -1021,6 +1079,7 @@ internal static class StationFloorBuilder
         var walk = new List<(double X, double Y, double Z)>();
         var flatPts = new List<(double X, double Y, double Z)>();   // 水平な面の点 (z は三角形の中心の高さ)
         var slopePts = new List<(double X, double Y, double Z)>();  // 歩ける坂の面の点
+        var flatTris = new List<(double Z, (double X, double Y) A, (double X, double Y) B, (double X, double Y) C)>();   // 水平な面の三角形 (z は三角形の中心の高さ。段ごとの奥行に使う)
         double mnx = double.MaxValue, mxx = double.MinValue, mny = double.MaxValue, mxy = double.MinValue, mnz = double.MaxValue, mxz = double.MinValue;
         (double X, double Y, double Z) P(float[] t, int o) =>
             (w[0] * t[o] + w[4] * t[o + 1] + w[8] * t[o + 2] + w[12], w[1] * t[o] + w[5] * t[o + 1] + w[9] * t[o + 2] + w[13], w[2] * t[o] + w[6] * t[o + 1] + w[10] * t[o + 2] + w[14]);
@@ -1047,6 +1106,7 @@ internal static class StationFloorBuilder
                 if (cz >= cosFlat)
                 {
                     flatPts.Add((a.X, a.Y, zc)); flatPts.Add((b.X, b.Y, zc)); flatPts.Add((c.X, c.Y, zc));
+                    flatTris.Add((zc, (a.X, a.Y), (b.X, b.Y), (c.X, c.Y)));
                     s.FlatArea += area;
                     var key = (long)Math.Round(zc / LevelBin);
                     var o = bins.GetValueOrDefault(key);
@@ -1084,13 +1144,18 @@ internal static class StationFloorBuilder
             s.MainHull = ConvexHull3(flatPts.Where(p => Math.Abs(p.Z - main.Z) <= MainBand).Select(p => (p.X, p.Y, main.Z)).ToList());
         }
         GuessKind(s);
+        foreach (var l in s.Levels)
+            s.LevelDepths.Add(l.Area >= StepMinArea ? LevelDepth(flatTris.Where(t => Math.Abs(t.Z - l.Z) <= LevelJoin).Select(t => (t.A, t.B, t.C)).ToList()) : double.NaN);
         // (2026-11-02、親の指示) 床と階段を 1 つに持つ部品: 段の並び・坂 (Guess が階段) があり、縦横とも FloorSideMin 以上の平らな段もあるもの。
         // Orison の base_16x16x04_stairs_001_a は、下の平らな面 −25.62 m (60.85 m²)・段 15 (2.66 m²、0.25 m おき)・上の平らな面 −21.57 m (192.68 m²) を 1 つに持つ
         // (2026-11-02、利用者の指示「面積でなく、縦横の長さと形状がいい」) 広い平らな面は、段の水平な面の凸包の短いほうの幅と長いほうの長さが両方 FloorSideMin 以上のもの
-        foreach (var l in s.Levels.Where(l => l.Area >= StepMinArea))
+        // (2026-11-02、親の決定 (A)) 短いほうの幅は、凸包の幅でなく本当の奥行 (LevelDepths) で見る (L 字の段の踏み面が広い平らな面になり、床の板になっていた。RR_ARC_L4)
+        for (int li = 0; li < s.Levels.Count; li++)
         {
+            var l = s.Levels[li];
+            if (l.Area < StepMinArea) continue;
             var lh = ConvexHull3(flatPts.Where(p => Math.Abs(p.Z - l.Z) <= LevelJoin).Select(p => (p.X, p.Y, l.Z)).ToList());
-            if (lh.Length >= 3 && MinWidth(lh) >= FloorSideMin && MaxLength(lh) >= FloorSideMin) s.BigLevels.Add((l.Z, l.Area, lh));
+            if (lh.Length >= 3 && s.LevelDepths[li] >= FloorSideMin && MaxLength(lh) >= FloorSideMin) s.BigLevels.Add((l.Z, l.Area, lh));
         }
         if (s.Guess == StationMeshKind.Stair && s.BigLevels.Count > 0)
         {
@@ -1519,6 +1584,57 @@ internal static class StationFloorBuilder
         return h.Length >= 3 && MinWidth(h) >= min;
     }
 
+    // (2026-11-02、利用者の決定「「案 1 に加え、上下の差 0.3 m 未満の平らな坂・階段の板も床に戻す」 奥行で床か階段か決めろ。階段の奥行は場所では大きくは変わらない」。
+    //  親の答え: 比べる長さは板の短い辺 (凸包の短いほうの幅)。一段の奥行 0.50 m (TreadMin) より長ければ床、以下なら階段。測りの誤差は TreadTol (0.02 m))
+    // 床か階段かの奥行の境: 短い辺がこれより長い板を床にする。TreadMin は Seraphim の階段の一段の進み 0.5 m (段の中心の xy の差。2026-11-02 に
+    // stairs_04x02x01_a・stairs_04x04x08_a・stairs_04x06x03_a・stairs_06x02x01_a・stairs_02x02x01_a・util_stairs_a_mid_a・util_stairs_a_mid_04_a・stair_straight_08x02x01_a で
+    // どれも 0.50 m と測り直した。上面の幅は段の鼻の重なりで 0.44〜0.48 m と短く出る)。その測りの誤差 TreadTol を足し、0.52 m より長いものを床にする
+    public const double FlatStairRise = 0.3;
+    public static double FloorDepthMin => TreadMin + TreadTol;
+    // (2026-11-02、親の決定 (A)) 板の本当の奥行 (Depth) で見る。形の数の無い板 (Depth が NaN) だけ凸包の短いほうの幅で見る
+    static bool DeeperThanTread(StationPlate p) => (double.IsNaN(p.Depth) ? MinWidth2(p.Hull) : p.Depth) > FloorDepthMin;
+
+    // 1. 平らな坂・階段の板: 階段・坂の板 (Stair) のうち、踊り場 (Landings が踊り場にした板) でなく、上下の差 (Top − Bottom) が FlatStairRise m 未満で、
+    //    短い辺が一段の奥行より長いもの (DeeperThanTread) を床の板にする。床と接するかは見ない
+    // 2. 案 1 (調べの担当 D の表の案 1「踊り場の板が床の板と xy 0.3 m 以内・高さの差 0.5 m 未満で接し、短い辺 1.0 m 以上なら床に戻す」。
+    //    短い辺の決まりは、親の答えにより 1 と同じ奥行の決まりに置き換えた): 踊り場の板 (Landing) のうち、床の板 (階段でない板) と
+    //    xy のすき間 SurfaceGap (0.3 m) 以内・上面の高さの差 SurfaceRise (0.5 m) 未満で接し、短い辺が一段の奥行より長いものを床に戻す。
+    //    戻した板も床として、変わらなくなるまで繰り返す (D のハーネス scratchpad\isle\h\Landing.cs の Apply と同じ。接するかの見方 (Touch) も同じ)。
+    // 床にした板は、坂・踊り場・階段のつながり (Link) を外し、底を上面にする (D のハーネスと同じ)。Landings の後に呼ぶ (StationMapExports.ComposeJson)
+    public static List<StationPlate> FlatStairsToFloor(List<StationPlate> plates, out int flatChanged, out int landingChanged)
+    {
+        static StationPlate ToFloor(StationPlate p) => p with { Stair = false, Ramp = false, Landing = false, Link = -1, Bottom = p.Top };
+        int n = 0;
+        var cur = plates.Select(p =>
+        {
+            if (!p.Stair || p.Landing || p.Top - p.Bottom >= FlatStairRise) return p;
+            if (!DeeperThanTread(p)) return p;
+            n++;
+            return ToFloor(p);
+        }).ToList();
+        flatChanged = n;
+        int total = 0;
+        while (true)
+        {
+            var floorsP = cur.Where(p => !p.Stair).ToList();
+            var change = new Dictionary<StationPlate, StationPlate>(ReferenceEqualityComparer.Instance);
+            foreach (var l in cur.Where(p => p.Landing))
+            {
+                if (!DeeperThanTread(l)) continue;
+                double x0 = l.Hull.Min(q => q.X) - SurfaceGap, x1 = l.Hull.Max(q => q.X) + SurfaceGap, y0 = l.Hull.Min(q => q.Y) - SurfaceGap, y1 = l.Hull.Max(q => q.Y) + SurfaceGap;
+                if (floorsP.Any(f => !ReferenceEquals(f, l) && Math.Abs(f.Top - l.Top) < SurfaceRise
+                        && f.Hull.Max(q => q.X) >= x0 && f.Hull.Min(q => q.X) <= x1 && f.Hull.Max(q => q.Y) >= y0 && f.Hull.Min(q => q.Y) <= y1
+                        && HullGap(l.Hull, f.Hull) <= SurfaceGap))
+                    change[l] = ToFloor(l);
+            }
+            if (change.Count == 0) break;
+            total += change.Count;
+            cur = cur.Select(p => change.TryGetValue(p, out var q) ? q : p).ToList();
+        }
+        landingChanged = total;
+        return cur;
+    }
+
     private static double MinWidth2((double X, double Y)[] h) => MinWidth(h.Select(p => (p.X, p.Y, 0.0)).ToArray());
     private static double MaxLength2((double X, double Y)[] h) => MaxLength(h.Select(p => (p.X, p.Y, 0.0)).ToArray());
 
@@ -1739,7 +1855,7 @@ internal static class StationFloorBuilder
                 var bh = ConvexHull(bp.Select(p => (p.X, p.Y)).ToList());
                 if (bh.Length < 3) continue;
                 var bz = bp.Average(p => p.Z);
-                res.Add(new StationPlate(inst.Index, mesh, false, bh, bz, bz));
+                res.Add(new StationPlate(inst.Index, mesh, false, bh, bz, bz, Depth: PlateDepth(sh, b.Z, b.Z)));
             }
             var rem = sh.Levels.Where(l => l.Area >= StepMinArea && !sh.BigLevels.Any(b => Math.Abs(b.Z - l.Z) <= LevelJoin)).OrderBy(l => l.Z).ToList();
             double lo, hi;
@@ -1762,7 +1878,8 @@ internal static class StationFloorBuilder
             {
                 double cx = sh.StepHull.Average(c => c.X), cy = sh.StepHull.Average(c => c.Y);
                 double top = inst.ToStation.Apply((cx, cy, hi)).Z, bottom = inst.ToStation.Apply((cx, cy, lo)).Z;
-                res.Add(new StationPlate(inst.Index, mesh, true, shl, Math.Max(top, bottom), Math.Min(top, bottom), sh.GuessRamp));
+                res.Add(new StationPlate(inst.Index, mesh, true, shl, Math.Max(top, bottom), Math.Min(top, bottom), sh.GuessRamp,
+                    Depth: rem.Count > 0 ? rem.Select(l => PlateDepth(sh, l.Z, l.Z)).Where(x => !double.IsNaN(x)).DefaultIfEmpty(double.NaN).Max() : double.NaN));
             }
             return res;
         }
@@ -1778,7 +1895,7 @@ internal static class StationFloorBuilder
             var mh = ConvexHull(mp.Select(p => (p.X, p.Y)).ToList());
             if (mh.Length < 3) return null;
             var z = mp.Average(p => p.Z);
-            return new StationPlate(inst.Index, mesh, false, mh, z, z);
+            return new StationPlate(inst.Index, mesh, false, mh, z, z, Depth: PlateDepth(sh, sh.MainZ, sh.MainZ));
         }
         if (sh.Hull.Length < 3 || sh.FlatArea + sh.SlopeArea <= 0) return null;
         var big = sh.Levels.Where(l => l.Area >= StepMinArea).ToList();
@@ -1792,7 +1909,7 @@ internal static class StationFloorBuilder
         double cx = sh.Hull.Average(c => c.X), cy = sh.Hull.Average(c => c.Y);
         double top = inst.ToStation.Apply((cx, cy, hi)).Z, bottom = inst.ToStation.Apply((cx, cy, lo)).Z;
         var ramp = sh.GuessRamp || kind == StationMeshKind.Floor;
-        return new StationPlate(inst.Index, mesh, true, wh, Math.Max(top, bottom), Math.Min(top, bottom), ramp);
+        return new StationPlate(inst.Index, mesh, true, wh, Math.Max(top, bottom), Math.Min(top, bottom), ramp, Depth: PlateDepth(sh, lo, hi));
     }
 
     // 床のまとまり: 板 (床・階段・スロープ) どうしを、xy の箱の間が GroupGap (3 m) 以内で、上面の高さの差が GroupMaxRise (60 m) 以内なら同じまとまりにする (つながりで広げる)。
@@ -1894,7 +2011,18 @@ internal static class StationFloorBuilder
     //     配送センターの 5 段 (段の灯り light_landing、つなぐ床 -9.72 m と -8.47 m、差 1.26 m) が、数段の階段に入る値
     //   LevelRangeMax 3.0 m: 利用者が 1 層と確かめた Seraphim のガレリアの下の層 (装備の店の層) の床の上面の範囲 -10.75〜-7.90 m (幅 2.85 m) を 1 つに収める値
     public const double SmallStairRise = 1.3;
-    public const double LevelRangeMax = 3.0;
+    // (2026-11-02、利用者の規則「小さな段差は装飾。床の高さに範囲を加え、これでひとくくりにする。但し、50cm 以上の隣接する床を同一視しないように。
+    //  間に床と見なした定義されたものがあることが条件。」と、その答え「直は 30cm 程度だろう？」「ひとつとみなすなら、1.6m 程度だし、一段だったら 30cm 程度」
+    //  「(1 つの階の高さの幅は) Seraphim の5段以下の高さに合わせてわずかに幅を持たせる」「繋がっていなくても高低差がわずかなら一緒にしないと見にくい」)
+    //   DirectStepRise 0.3 m: 間に階段の無い、直に接する床どうしを同じ階にする上面の差 (一段)。利用者の「一段だったら 30cm 程度」と、前からの利用者の想定
+    //     「階段の一段の高さが30cm以内」(Seraphim の実測は一段 0.25 m)。Checkmate の Admin の脇の床の板 (137.40・138.40・139.15 m、差 1.0 m と 0.75 m) はまとめない
+    //   StairJoinRise・LevelRangeMax 1.625 m (SmallStepRise と同じ値): 複数の段のある階段を 1 つとみなして上下の床を結ぶ高さの差の上限と、1 つの階の高さの幅の上限。
+    //     利用者の「ひとつとみなすなら、1.6m 程度」「Seraphim の5段以下の高さに合わせてわずかに幅を持たせる」。一段 0.30 m (利用者の想定の上限) の 5 段 1.5 m に、
+    //     一段の半分ほど (0.125 m) を足した値で、一段 0.25 m (Seraphim の実測) なら 6.5 段。前の LevelRangeMax 3.0 m (Seraphim のガレリアの下の層 -10.75〜-7.90 m を
+    //     1 つに収める値) から変えた
+    public const double DirectStepRise = 0.3;
+    public const double StairJoinRise = SmallStepRise;
+    public const double LevelRangeMax = SmallStepRise;
     // 明らかに階が違う階段の境目 (2026-11-02、親の決定): 階段のまとまりの高さ (板の Bottom〜Top) と、両端に接する床の上面の差の、両方がこの値以上のときだけ、
     // 両端の床を別の層にする (Sheets の Ends)。数段の階段の判定 (SmallStairRise 1.3 m) とは分けた。
     // 値の根拠: 4 段の部品 stairs_04x02x01_a は、利用者が数段と見ている Seraphim のガレリアの 4 段 (「ガレリアの踊り場以外の 4・5 段の階段」) と同じ部品で、
@@ -2062,6 +2190,12 @@ internal static class StationFloorBuilder
         return Enumerable.Range(0, stairs.Count).GroupBy(Find).Select(g => g.Select(i => stairs[i]).ToList()).ToList();
     }
 
+    // (2026-11-02、利用者の指示「偽でいいわけないよね」・親の決定 (a)) 階段の板どうしが、実際に続いている段か: 凸包のすき間が JoinGap (1 m) 以内で、
+    // 高さの範囲が一段 (DirectStepRise 0.3 m) 以内で続くもの (前は xy の箱が JoinGap 以内で、高さが JoinRise 0.6 m 以内)。
+    // 地図の階段の線 (StationRouteGraph.Stairs) のまとめ方に使う。床どうしをつなぐ数段の階段の見方 (StairClusters。Levels) は前のまま
+    public static bool StairsContinue(StationPlate a, StationPlate b) =>
+        a.Bottom <= b.Top + DirectStepRise && b.Bottom <= a.Top + DirectStepRise && HullGap(a.Hull, b.Hull) <= JoinGap;
+
     // 階段の板をまとめる鍵: 踊り場でつないだ階段 (Link) はその鍵、ほかはインスタンス (StairClusters・StationRouteGraph.Stairs)
     public static int StairKey(StationPlate p) => p.Link >= 0 ? -2 - p.Link : p.Instance;
 
@@ -2192,9 +2326,11 @@ internal static class StationFloorBuilder
         }
         // (2026-11-01、利用者の規則) 「1 明らかに階が違う階段と、数段の階段を分ける。2 数段の階段でつながっていると思しきフロアは同じ階層とする。
         // 高さの違いが 0.5 m 未満とか? その階層の高さの範囲を作成し、その範囲が 2 m 未満である限り、加えたエリアを高さの範囲に加える」
-        //   ① 同じ高さでつながる床: xy の箱が GroupGap (3 m) 以内で、上面の差が SmallStairRise 未満の床の板どうし。
+        //   ① 同じ高さでつながる床: xy の箱が GroupGap (3 m) 以内で、上面の差が DirectStepRise (0.3 m。一段) 未満の床の板どうし
+        //      (2026-11-02 に SmallStairRise 1.3 m から変えた。DirectStepRise の説明)。
         //   ② 階段・スロープのまとまり (StairClusters) は、接する床の板 (JoinGap 以内、高さはまとまりの範囲 ± JoinRise) の上面の差 (いちばん高い − いちばん低い) が
-        //      SmallStairRise 未満なら「数段の階段」としてその床どうしを結び、それ以上なら「明らかに階が違う階段」として結ばない (StationRouteGraph.Stairs が階段にする)。
+        //      StairJoinRise (1.625 m。2026-11-02 に SmallStairRise 1.3 m から変えた) 未満なら「数段の階段」としてその床どうしを結び、
+        //      それ以上なら「明らかに階が違う階段」として結ばない (StationRouteGraph.Stairs が階段にする)。
         //   ③ 結びを上面の差の小さい順に見て、2 つの組を合わせた高さの範囲 (床の板の上面のいちばん低い〜いちばん高い) の幅が LevelRangeMax 未満のときだけ合わせる。
         //   ④ 結ばれていない組どうしも、高さ (中央値) の差の小さい順に、合わせた範囲の幅が LevelRangeMax 未満で、上下に重ならず、上下の並びが食い違わなければ合わせる
         //      (前の「重ならない所は同じ階」を、③ の範囲の上限の中に限ったもの)。
@@ -2208,7 +2344,7 @@ internal static class StationFloorBuilder
                 int i = order[oi], j = order[oj];
                 if (!(box[i].MinY - GroupGap <= box[j].MaxY && box[j].MinY - GroupGap <= box[i].MaxY)) continue;
                 var dz = Math.Abs(gp[i].Top - gp[j].Top);
-                if (dz < SmallStairRise) edges.Add((i, j, dz));
+                if (dz < DirectStepRise) edges.Add((i, j, dz));
             }
         var clusterTouch = new List<(List<StationPlate> Cl, List<int> Touch)>();
         int bigEnds = 0;
@@ -2223,7 +2359,7 @@ internal static class StationFloorBuilder
             var rise = touch.Count >= 2 ? gp[touch[^1]].Top - gp[touch[0]].Top : double.NaN;
             // 数段の階段は、下の端と上の端の両方 (± JoinRise) に接する床があるものだけ (片方の端にしか床の無い階段は、つなぐ床どうしの差が測れないため、
             // 階が違う側に入れる。Checkmate の精錬所の util_stairs_a_mid_a (-457.83〜-453.38 m) は、下の端の床だけに接していて、差 0.01 m で数段に入っていた)
-            if (touch.Count >= 2 && rise < SmallStairRise && touch.Any(i => Math.Abs(gp[i].Top - lo) <= JoinRise) && touch.Any(i => Math.Abs(gp[i].Top - hi) <= JoinRise))
+            if (touch.Count >= 2 && rise < StairJoinRise && touch.Any(i => Math.Abs(gp[i].Top - lo) <= JoinRise) && touch.Any(i => Math.Abs(gp[i].Top - hi) <= JoinRise))
             {
                 for (int k = 1; k < touch.Count; k++) edges.Add((touch[k - 1], touch[k], Math.Abs(gp[touch[k]].Top - gp[touch[k - 1]].Top)));
                 LastSmallStairs.Add((cl, rise, touch.Select(i => gp[i].Top).ToList()));

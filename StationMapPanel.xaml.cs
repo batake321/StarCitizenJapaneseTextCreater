@@ -249,7 +249,7 @@ public partial class StationMapPanel : UserControl
     {
         _model = null;
         _viewerMap = null;
-        _pendingFocus = null;
+        _pendingShop = null;
         _loadWatch.Stop();
         _record = "";
         if (_viewShort != null) { StationMapExports.Instance.ReleaseView(_viewShort); _viewShort = null; }
@@ -1035,7 +1035,7 @@ public partial class StationMapPanel : UserControl
         if (_pin is { } pin) Send(new { type = "pin", pos = new[] { pin.Pos.X, pin.Pos.Y, pin.Pos.Z }, floor = pin.Floor });
         SendEnds();
         _ = SendIconsAsync();
-        if (_pendingFocus is { } focus) { _pendingFocus = null; Send(focus); }
+        if (_pendingShop is { } pending) { _pendingShop = null; pending(); }
     }
 
     private void SendCurrent()
@@ -1147,6 +1147,7 @@ public partial class StationMapPanel : UserControl
 
     // ［詳細］の店の［マップに表示］(MapPanel.ShowShopInMapTab): 出している地図の中のその店を目的地にし (地図の上で店を押したとき (ビューアの pick) と同じ)、
     // 店の階を開いて店に寄せる (区画の一覧で区画を選んだときと同じく、階の一覧を合わせてビューアに floor と focus を送る)。
+    // 店の区画は、地図で区画を押したとき (ビューアの section) と同じく、区画の一覧で選び・ビューアで強調し・販売品の枠を出す。
     // 店は名札の名前と同じ結び方 (ShopOf: CryGUID と Entity 名) で地図の店に結ぶ。同じ店に結べる地図の店が 2 つ以上あれば、階のあるものの最初。
     // 戻り値: 状態の欄に出す知らせ (選べたときは null)
     public string? SelectShop(ShopTreeShop shop)
@@ -1161,21 +1162,42 @@ public partial class StationMapPanel : UserControl
         txtDestFilter.Text = "";
         RefreshPlaceLists();
         string? note = null;
-        if (hit.Floor.Length > 0)
+        if (hit.Floor.Length == 0) note = $"「{shop.Name}」は地図のどの階にも載っていないので、目的地にだけしました";
+        // 店の区画: 地図で区画を押したとき (ビューアの section) と同じく、区画の一覧で選び、ビューアで区画を強調し、販売品の枠を出す。
+        // ビューアは区画には寄せず (fit: false)、今までどおり店に寄せる (focus)
+        var sec = hit.Section.Length > 0 ? m.Sections.FirstOrDefault(s => s.Id == hit.Section) : null;
+        // 開く階: 店の階。店に階が無く区画があれば区画の階 (SectionFloor。区画の一覧で区画を選んだときと同じ)。左の階の一覧とビューアの階 (load の floor・section の floor) を同じにする
+        var secFloor = hit.Floor.Length > 0 ? hit.Floor : sec != null ? SectionFloor(sec) : "";
+        if (secFloor.Length > 0) SelectFloorInList(secFloor);
+        if (sec != null)
         {
-            SelectFloorInList(hit.Floor);
-            object focus = new { type = "focus", pos = new[] { hit.Pos.X, hit.Pos.Y, hit.Pos.Z }, floor = hit.Floor, size = 40 };
-            // ビューアの用意がまだなら、地図を送るとき (SendLoad) に寄せる (階は load の floor で開く)
-            if (_viewerReady) { Send(new { type = "floor", id = hit.Floor }); Send(focus); }
-            else _pendingFocus = focus;
+            if (txtSectionFilter.Text.Length > 0) { _suppress = true; txtSectionFilter.Text = ""; _suppress = false; RefreshSections(); }
+            _suppress = true;
+            try
+            {
+                lstSections.SelectedItem = (lstSections.ItemsSource as List<SectionRow>)?.FirstOrDefault(r => r.Id == sec.Id);
+                if (lstSections.SelectedItem != null) lstSections.ScrollIntoView(lstSections.SelectedItem);
+            }
+            finally { _suppress = false; }
         }
-        else note = $"「{shop.Name}」は地図のどの階にも載っていないので、目的地にだけしました";
+        // ビューアへ送る (floor: 階を開く知らせも送るか。ビューアの用意の前は、階は load の floor (_floor) で開くので送らない)
+        void ToViewer(bool floor)
+        {
+            if (floor && secFloor.Length > 0) Send(new { type = "floor", id = secFloor });
+            if (sec != null) Send(new { type = "section", id = sec.Id, floor = secFloor, fit = false });
+            // 販売品の枠: 地図で店の印を押したとき (ビューアの pick) と同じく、店の区画 (section) をそのまま渡す。区画の無い店は枠を消す
+            SendSales(hit.Section.Length > 0 ? hit.Section : null);
+            if (hit.Floor.Length > 0) Send(new { type = "focus", pos = new[] { hit.Pos.X, hit.Pos.Y, hit.Pos.Z }, floor = hit.Floor, size = 40 });
+        }
+        // ビューアの用意がまだなら、地図を送るとき (SendLoad) に送る
+        if (_viewerReady) ToViewer(true);
+        else _pendingShop = () => ToViewer(false);
         SendEnds();
         _ = RouteAsync();
         return note;
     }
-    // ビューアの用意の前に頼まれた、店に寄せる知らせ (SelectShop。SendLoad で送る)
-    private object? _pendingFocus;
+    // ビューアの用意の前に頼まれた、店を選ぶ知らせ (SelectShop。区画の強調・販売品の枠・店に寄せる。SendLoad で送る)
+    private Action? _pendingShop;
 
     private void SelectFloorInList(string fid)
     {

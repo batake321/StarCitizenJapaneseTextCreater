@@ -2909,7 +2909,8 @@ public partial class MainWindow : Window
                     // 同じ Step 6c で作るので、無ければ一緒に作る
                     var needsOre = extractor.NeedsOreLocations() || extractor.NeedsShopTables() || extractor.NeedsMissionMapPlaces();
                     // 店と DB の価格の紐づけ (shop_price_links) だけが無い・前の形なら、それだけを作る (Data.p4k は読まない)
-                    var needsShopLinks = !needsOre && extractor.NeedsShopPriceLinks();
+                    var shopLinksReason = needsOre ? null : extractor.ShopPriceLinksNeedReason();
+                    var needsShopLinks = shopLinksReason != null;
                     // 判定をそのままログに残す (作るとき・作らないときとも)
                     Log($"[起動後の作り直し] 判定: 積載量 {needsCargo}・資源の種類 {needsResources}・口の定義 {needsPorts}・BP {needsBlueprints}・場所名 {needsStarmap}・"
                         + $"追加の品目 {needsExtra}・採掘できる場所 {extractor.NeedsOreLocations()}・星図の場所と店 {extractor.NeedsShopTables()}・契約の地図 {extractor.NeedsMissionMapPlaces()}・"
@@ -3031,7 +3032,7 @@ public partial class MainWindow : Window
                         ct.ThrowIfCancellationRequested();
                         try
                         {
-                            Log("[お店] 店と DB の価格の紐づけ (shop_price_links) がまだ無い・前の形なので作ります");
+                            Log($"[お店] 店と DB の価格の紐づけ (shop_price_links) {shopLinksReason}");
                             extractor.StatusChanged += Log;
                             try { extractor.RebuildShopPriceLinks(); }
                             finally { extractor.StatusChanged -= Log; }
