@@ -1,5 +1,5 @@
 {
-  "pledgeRoot": ".list-items li",
+  "pledgeRoot": ".list-items > li",
   "pledgeId": ".js-pledge-id",
   "pledgeName": ".js-pledge-name",
   "pledgeValue": ".js-pledge-value",

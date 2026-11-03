@@ -316,7 +316,8 @@ public class MeltSimResult
 // 既定値はファイルが無くても動くように JSON と同じ内容を持たせてある。
 public class HangarSelectors
 {
-    public string PledgeRoot { get; set; } = ".list-items li";
+    // 直下の li だけ (2026-11-03): 船の改装の内訳 (custo-row の li.custo-choice) まで pledge として拾い、必須項目が空で同期が止まっていた
+    public string PledgeRoot { get; set; } = ".list-items > li";
     public string PledgeId { get; set; } = ".js-pledge-id";
     public string PledgeName { get; set; } = ".js-pledge-name";
     public string PledgeValue { get; set; } = ".js-pledge-value";

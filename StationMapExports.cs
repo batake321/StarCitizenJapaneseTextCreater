@@ -832,7 +832,10 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         var sw = Stopwatch.StartNew();
         var t = new List<string>();
         void Mark(string step) { t.Add($"{step} {sw.Elapsed.TotalSeconds:F1}"); sw.Restart(); }
-        var plates0 = StationFloorBuilder.Plates(tree, set);
+        var platesAll = StationFloorBuilder.Plates(tree, set);
+        // (2026-11-03) はしごの板は階・階段の板の処理に入れず、階を作った後に床とつなぐ (StationRouteGraph.Ladders)
+        var ladders = platesAll.Where(p => p.Ladder).ToList();
+        var plates0 = platesAll.Where(p => !p.Ladder).ToList();
         if (StationFloorBuilder.LastBadPlates > 0)
             Log($"「{ShortName(tree.Root.Place.Record)}」 座標が壊れた板 {StationFloorBuilder.LastBadPlates} 枚を使いませんでした (部品: {string.Join("、", StationFloorBuilder.LastBadPlateNames.Distinct().Take(10))})");
         var plates = StationFloorBuilder.DropOverheadPlates(plates0, out var droppedPlates);
@@ -862,8 +865,13 @@ internal sealed class StationMapExports : INotifyPropertyChanged
         Mark("区画の名前");
         var stairNoEnd = new List<StationFloating>();
         var stairs = StationRouteGraph.Stairs(tree, plates, floors, stairNoEnd);
+        var ladderLinks = StationRouteGraph.Ladders(ladders, plates, floors);
+        if (ladders.Count > 0 || StationFloorBuilder.LastGhostArenaHeaps > 0)
+            Log($"「{ShortName(tree.Root.Place.Record)}」 はしご {ladders.Count} 本 (床とつないだもの {ladderLinks.Count})、Ghost Arena のゴミの山の板 {StationFloorBuilder.LastGhostArenaHeaps} 枚");
         // (2026-11-02、利用者の決定「エレベーターとつながった名前優先」) 階段でエレベーターの止まる階とつながる階に、その階の名前を付ける (階段が決まってから)
         StationRouteGraph.NameByStairs(tree, floors, stairs);
+        // はしごは階の名前の借り (NameByStairs) には使わず、道と表示にだけ足す
+        stairs.AddRange(ladderLinks);
         Mark("階段");
         var lines = StationRouteGraph.TransitLines(tree);
         var transit = StationRouteGraph.TransitList(tree, lines, floors);

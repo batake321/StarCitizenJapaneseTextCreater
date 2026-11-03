@@ -684,16 +684,27 @@ internal static class StationRouteGraph
                 // いちばん低いものの階 (下の端) といちばん高いものの階 (上の端)。2 つの階が無ければ前と同じ探し方 (EndFloor。まとまりの下の端・上の端の高さ ± 1.5 m)。
                 // 踊り場でつないだまとまりに、となりの階段の板が入り、まとまりの下の端が床の 2 m 下になって EndFloor で端の階が見つからず、階段ごと消えていた
                 // (fin45 の Area18 の Arccorp Tower の屋上の階段 rooftop_bg_small_01: まとまり 371.72〜381.60 m、接する床 373.75・381.25 m)
+                // (2026-11-03、利用者の決まり「歩ける面は高さの差 0.5 m 未満でつながる」) 階段・坂の板に高さの面 (StationPlate.Plane) があれば、接する所での板の高さが
+                // 床の板の上面と SurfaceRise 未満で合うときだけ接するとみなす (Touches)。面の無い板は前と同じく板の高さの範囲で見る
+                bool Touches(StationPlate sp, StationPlate fp) => fp.Top >= sp.Bottom - StationFloorBuilder.SurfaceRise && fp.Top <= sp.Top + StationFloorBuilder.SurfaceRise
+                    && StationFloorBuilder.HullGap(sp.Hull, fp.Hull) <= StationFloorBuilder.JoinGap && StationFloorBuilder.MeetsAt(sp, fp, fp.Top, StationFloorBuilder.JoinGap) != false;
+                // 階段・坂の板 sp の頂点のうち、床の板 fp にいちばん近いもの (高さの面があれば、その頂点での高さが fp の上面と SurfaceRise 未満のものだけ。無ければ null)
+                (double X, double Y)? Vertex(StationPlate sp, StationPlate fp)
+                {
+                    var vs = sp.Hull.Where(h => sp.Plane == null || Math.Abs(StationFloorBuilder.HeightAt(sp, h.X, h.Y) - fp.Top) < StationFloorBuilder.SurfaceRise).ToList();
+                    return vs.Count == 0 ? null : vs.MinBy(h => StationFloorBuilder.DistToConvex(fp.Hull, h.X, h.Y));
+                }
                 StationFloor? fb = null, ft = null;
+                var touching = new List<(StationFloor F, StationPlate Fp)>();
                 if (own.Any(f => f.PlateSet != null))
                 {
                     double tlo = double.MaxValue, thi = double.MinValue;
                     foreach (var f in own)
                         if (floorPlates.TryGetValue(f.Id, out var fl))
                             foreach (var fp in fl)
-                                if (ps.Any(sp => fp.Top >= sp.Bottom - StationFloorBuilder.SurfaceRise && fp.Top <= sp.Top + StationFloorBuilder.SurfaceRise
-                                    && StationFloorBuilder.HullGap(sp.Hull, fp.Hull) <= StationFloorBuilder.JoinGap))
+                                if (ps.Any(sp => Touches(sp, fp)))
                                 {
+                                    touching.Add((f, fp));
                                     if (fp.Top < tlo) { tlo = fp.Top; fb = f; }
                                     if (fp.Top > thi) { thi = fp.Top; ft = f; }
                                 }
@@ -716,9 +727,11 @@ internal static class StationRouteGraph
                     var near = floorPlates.TryGetValue(f.Id, out var fl) ? fl.Where(fp => Math.Abs(fp.Top - z) <= StationFloorBuilder.SurfaceRise).ToList() : null;
                     var best = (X: fallback.Hull.Average(q => q.X), Y: fallback.Hull.Average(q => q.Y)); var bd = StairEndSnap;
                     if (near != null)
-                        foreach (var v in ps.SelectMany(p => p.Hull))
+                        foreach (var (sp0, v) in ps.SelectMany(p => p.Hull.Select(h => (p, h))))
                             foreach (var fp in near)
                             {
+                                // (2026-11-03) 高さの面のある板は、頂点での高さが床の板の上面と SurfaceRise 未満のときだけ端の点にする
+                                if (sp0.Plane != null && Math.Abs(StationFloorBuilder.HeightAt(sp0, v.X, v.Y) - fp.Top) >= StationFloorBuilder.SurfaceRise) continue;
                                 var d = StationFloorBuilder.DistToConvex(fp.Hull, v.X, v.Y);
                                 if (d < bd) { bd = d; var len = Math.Sqrt((cx - v.X) * (cx - v.X) + (cy - v.Y) * (cy - v.Y)); var k = len > 0.5 ? 0.5 / len : 0; best = (v.X + (cx - v.X) * k, v.Y + (cy - v.Y) * k); }
                             }
@@ -734,17 +747,27 @@ internal static class StationRouteGraph
                 // (2026-11-02) 端の階の床の板が、階段の別の所 (端の点から StairEndLink より離れた所) にも接していれば、そこへも結ぶ (形 outline は書かない)。
                 // 同じ階の床が階段の両脇に分かれているとき、片方にしか端の点が無く、もう片方 (店のある側) が道でつながらなかった
                 // (ARC_LEO の Galleria 77.8 m: 階段の上の端が x −1024 の側だけになり、Admin と Bar のある x −1015 の側が乗り場からたどれなかった)
-                foreach (var (endF, endPt, other, otherF, isTop) in new[] { (ft, et, eb, fb, true), (fb, eb, et, ft, false) })
+                // (2026-11-03、利用者の決まり「歩ける面はすき間無し・高さの差 0.5 m 未満でつながる (別の階どうしでも)」) 端の階のほかに、階段の下の端・上の端の高さ
+                // (SurfaceRise 未満) で階段に接する床の板のある階も、その端の側として同じく結ぶ (端の点は無いので、全部の接する所から結ぶ)。
+                // RR_P6_L4 の stairs_06x06x03_a (131.75〜134.81 m) は、下の端の階がいちばん低い接する板 (131.51 m) の階になり、下の端で接する 131.75 m の床の階が結ばれていなかった
+                var ends = new List<(StationFloor EndF, (double X, double Y)? EndPt, (double X, double Y) Other, StationFloor OtherF, bool IsTop)> { (ft, et, eb, fb, true), (fb, eb, et, ft, false) };
+                foreach (var f in touching.Select(t => t.F).Distinct().Where(f => f != fb && f != ft))
+                {
+                    if (touching.Any(t => t.F == f && Math.Abs(t.Fp.Top - hi.Top) < StationFloorBuilder.SurfaceRise)) ends.Add((f, null, eb, fb, true));
+                    if (touching.Any(t => t.F == f && Math.Abs(t.Fp.Top - lo.Bottom) < StationFloorBuilder.SurfaceRise)) ends.Add((f, null, et, ft, false));
+                }
+                foreach (var (endF, endPt, other, otherF, isTop) in ends)
                 {
                     if (!floorPlates.TryGetValue(endF.Id, out var efl)) continue;
-                    var added = new List<(double X, double Y)> { endPt };
+                    var added = new List<(double X, double Y)>();
+                    if (endPt is { } ep0) added.Add(ep0);
                     foreach (var fp in efl)
                     {
-                        if (Math.Abs(fp.Top - endF.Z) > StationFloorBuilder.SurfaceRise && !(fp.Top >= endF.ZMin && fp.Top <= endF.ZMax)) continue;
-                        var sp = ps.Where(q => fp.Top >= q.Bottom - StationFloorBuilder.SurfaceRise && fp.Top <= q.Top + StationFloorBuilder.SurfaceRise
-                            && StationFloorBuilder.HullGap(q.Hull, fp.Hull) <= StationFloorBuilder.JoinGap).FirstOrDefault();
-                        if (sp == null) continue;
-                        var v = sp.Hull.MinBy(h => StationFloorBuilder.DistToConvex(fp.Hull, h.X, h.Y));
+                        if (endPt is { } && Math.Abs(fp.Top - endF.Z) > StationFloorBuilder.SurfaceRise && !(fp.Top >= endF.ZMin && fp.Top <= endF.ZMax)) continue;
+                        // 足した階 (端の点の無い階) は、その端の高さで接する板だけ
+                        if (endPt == null && !touching.Any(t => t.F == endF && ReferenceEquals(t.Fp, fp) && Math.Abs(fp.Top - (isTop ? hi.Top : lo.Bottom)) < StationFloorBuilder.SurfaceRise)) continue;
+                        var sp = ps.Where(q => Touches(q, fp)).FirstOrDefault();
+                        if (sp == null || Vertex(sp, fp) is not { } v) continue;
                         if (added.Any(a => Math.Sqrt((a.X - v.X) * (a.X - v.X) + (a.Y - v.Y) * (a.Y - v.Y)) <= StairEndLink)) continue;
                         added.Add(v);
                         res.Add(isTop ? new StationStair((other.X, other.Y, otherF.Z), (v.X, v.Y, endF.Z), otherF.Id, endF.Id, src, stInst, null, landing)
@@ -820,6 +843,39 @@ internal static class StationRouteGraph
             bool Door((double X, double Y, double Z) q) => doors.Any(d => Dist(d, q) <= ModuleEndRadius);
             if (!Door(lo) || !Door(hi)) continue;
             res.Add(new StationStair((lo.X, lo.Y, fb.Z), (hi.X, hi.Y, ft.Z), fb.Id, ft.Id, "module", inst.Index));
+        }
+        return res;
+    }
+
+    // (2026-11-03、利用者の決定「はしごは入れる」「ア」) はしご (StationFloorBuilder.LadderPlates) を床の板 (階段でない板) とつなぐ。xy で SurfaceGap (0.3 m) 以内の床の板のうち、
+    // 上面が ① はしごの高さの範囲 (Bottom〜Top) の中にあるもの (2026-11-03、親の決定。はしごの上の端の部品は上の床より 0.8〜1 m 高く出ていて、
+    // ② だけでは RR_P6_L4 で 15 本中 0 本しかつながらなかった。RR_P6_LEO の room_b_sm_refinery_ladder_start_a は −468.15〜−457.34 m で、上の床は −458.12 m)、
+    // または ② 下の端・上の端との高さの差が SurfaceRise (0.5 m) 未満のもの (前の決まり。下の床は端より少し低いことがある。同じはしごの下の床は −468.62 m) とつなぐ。
+    // 当たる床の板のうち上面のいちばん低いものの階を下の端の階、いちばん高いものの階を上の端の階にし、2 つの階が違うときだけ (階段 Stairs と同じ) はしご
+    // (Source "ladder"。道順の辺は kind ladder。形 outline ははしごの部品の箱の xy の凸包) にする。端の点の高さは、ほかの階段と同じく端の階の高さ
+    public static List<StationStair> Ladders(IReadOnlyList<StationPlate> ladders, IReadOnlyList<StationPlate> plates, IReadOnlyList<StationFloor> floors)
+    {
+        var res = new List<StationStair>();
+        if (ladders.Count == 0) return res;
+        var fps = plates.Where(p => !p.Stair).Select(p => (P: p, F: StationFloorBuilder.PlateFloor(p, floors))).Where(t => t.F != null).ToList();
+        foreach (var l in ladders)
+        {
+            double x0 = l.Hull.Min(q => q.X) - StationFloorBuilder.SurfaceGap, x1 = l.Hull.Max(q => q.X) + StationFloorBuilder.SurfaceGap;
+            double y0 = l.Hull.Min(q => q.Y) - StationFloorBuilder.SurfaceGap, y1 = l.Hull.Max(q => q.Y) + StationFloorBuilder.SurfaceGap;
+            (StationPlate P, StationFloor F)? lo = null, hi = null;
+            foreach (var (p, f) in fps)
+            {
+                var inRange = p.Top >= l.Bottom && p.Top <= l.Top;
+                var nearEnd = Math.Abs(p.Top - l.Bottom) < StationFloorBuilder.SurfaceRise || Math.Abs(p.Top - l.Top) < StationFloorBuilder.SurfaceRise;
+                if (!inRange && !nearEnd) continue;
+                if (p.Hull.Max(q => q.X) < x0 || p.Hull.Min(q => q.X) > x1 || p.Hull.Max(q => q.Y) < y0 || p.Hull.Min(q => q.Y) > y1) continue;
+                if (StationFloorBuilder.HullGap(l.Hull, p.Hull) > StationFloorBuilder.SurfaceGap) continue;
+                if (lo == null || p.Top < lo.Value.P.Top) lo = (p, f!);
+                if (hi == null || p.Top > hi.Value.P.Top) hi = (p, f!);
+            }
+            if (lo is not { } b || hi is not { } t || b.F == t.F) continue;
+            double cx = l.Hull.Average(q => q.X), cy = l.Hull.Average(q => q.Y);
+            res.Add(new StationStair((cx, cy, b.F.Z), (cx, cy, t.F.Z), b.F.Id, t.F.Id, "ladder", l.Instance, new[] { l.Hull }));
         }
         return res;
     }
@@ -1053,7 +1109,7 @@ internal static class StationRouteGraph
         {
             var st = stairs[i];
             int a = AddNode("stair", st.Instance, $"stair{i}", "bot", st.Bottom, ":b", st.From), b = AddNode("stair", st.Instance, $"stair{i}", "top", st.Top, ":t", st.To);
-            g.Link(new StationEdge(a, b, Dist(st.Bottom, st.Top) * StairFactor, "stair"));
+            g.Link(new StationEdge(a, b, Dist(st.Bottom, st.Top) * StairFactor, st.Source == "ladder" ? "ladder" : "stair"));
         }
         BuildLap("節点");
         // 徒歩 (同じ区画・同じ階): いちばん近い WalkNeighbors 個
@@ -1895,8 +1951,8 @@ internal static class StationRouteGraph
         foreach (var (from, to, e) in path)
         {
             var kind = e.Kind is "walk" or "door" or "rmxml" or "floor" ? "walk" : e.Kind;
-            var dist = kind is "walk" or "stair" ? Dist(g.Nodes[from].Pos, g.Nodes[to].Pos) : 0;
-            if (res.Count > 0 && res[^1].Kind == kind && (kind is "walk" or "stair" || res[^1].Line == e.Line && res[^1].Dir == e.Dir))
+            var dist = kind is "walk" or "stair" or "ladder" ? Dist(g.Nodes[from].Pos, g.Nodes[to].Pos) : 0;
+            if (res.Count > 0 && res[^1].Kind == kind && (kind is "walk" or "stair" or "ladder" || res[^1].Line == e.Line && res[^1].Dir == e.Dir))
             {
                 var last = res[^1];
                 res[^1] = last with { Distance = last.Distance + dist, To = to, Floor = FloorName(to), Stop = kind == "tram" ? StopOf(g, to) : last.Stop };
@@ -1926,6 +1982,7 @@ internal static class StationRouteGraph
                 // 回りの向き (Orison の道筋の名前 Looping_A_・B_) が無い路線 (New Babbage・Lorville) は向きを書かない
                 "tram" => s.Dir.Length > 0 ? $"シャトル（{s.Dir}回り）で {stop}" : $"シャトルで {stop}",
                 "stair" => $"階段で {s.Floor} へ",
+                "ladder" => $"はしごで {s.Floor} へ",
                 _ => s.Kind,
             });
         }
@@ -1941,7 +1998,7 @@ internal static class StationMapJson
     // 一覧に出す階の、描く床の形の面積の下限 (m²)。値: Checkmate の Cargo Deck の 3 階 (9 m²)・Contested Zone の 8 階 (24 m²) などの小さな切れ端は出さず、
     // 貨物のエレベーターの階 (Ext. Freight の 1 階、47〜50 m²。乗り場と行き先がある) は出す値として決めた
     public const double MinListedFloorArea = 30;
-    public const int Format = 19;   // 2: 道順のグラフの経由点を waypoints にまとめた形 (Write の graph の説明)。3: 階・区画の名前を訳と星図の場所の名前で付けるようにした (取り込みが NameFloors・NameSections に localize・placeNames を渡す。2026-11-01)。4: 区画の name を表示の名前にし、Child の entityName を entity に移した。階の名前を代表の 1 つ・訳のある名前だけにした (2026-11-01)。5: 地区 (districts) を足した (2026-11-01)。6: transit に lineInternal を足し、タグの無いエレベーターの行き先の名前を引くようにした (2026-11-01)。7: floors に reachable (乗り場からたどれない階は false。その階の区画の多角形は書かない)、transit のエレベーターに place (乗り場を含む区画の名前) を足した。床も店も無い箱だけの区画の多角形を書かないようにした (2026-11-01)。8: 階を真上から見た重なりで分けるようにした (Levels)。floors に implemented を足し、transit の kind (elevator・elevator-noride) を実装されているかの判定で決めるようにした (2026-11-01) 9: transit のトラムの乗り場に nextGateway・nextStop・nextDistrict (次の駅)、floors に stackGroup・stackLevel (行き先の鍵で決めた重ねる順番) を足した (2026-11-01) 10: 階を、数段の階段 (1.3 m 未満) でつながる床を高さの範囲 3 m 未満のあいだ足す作り方にした (利用者の規則、2026-11-01)。 11: 何も無い層を一覧から外し、階の名前をデータの名前だけにした。店の名前に area_label・販売データの名前を足した (2026-11-01)。 12: 頭に一覧に出る階の数 (listedFloors。StationMapExports.Finish が書く) を足した。 13: 乗り場の判定・地区の条件を直した (2026-11-01)。 14: 通路の部品 (corridor_*) を床にし、店の名前を階の名前・括弧の候補に使わないようにし、重ねる順を階の単位にし、新しい乗り物の仕組み (sctransport*) の乗り場を拾うようにした (2026-11-01)。 15: stairs に outline (階段の板の真上から見た形) を足し、明らかに階が違う階段の両端の床を別の層にし、エレベーターとつながった階の名前を階段でつながる階に付けるようにした (2026-11-02)。 16: 床・階段を部品の形 (GLB の三角形の上向きの面) で判定し、板を実際の面の高さで作り、部品の名前と種類を表に登録するようにした (2026-11-02)。 17: 区画の floors の環を、板を格子に塗った輪郭から板ごとの凸包そのものにした (四角い部品は四角のまま。環どうしは重なることがある。2026-11-02、利用者の決定「A」)。 18: 端末 (terminals)・外の設備 (exterior: pads・hangars・freight・decks) を足し、木から外す Child (HarvestableObjectContainer など) のうち部分木に床・階段の部品のあるものを外さないようにした (excludedChildren に外した Child を書く。2026-11-02)。 19: 同梱の部品の表に「該当しない」(none) の部品 86 種を足し (利用者の決定「1 OK」)、ほぼ平らな階段・坂の板 (上下の差 0.3 m 未満) と床に接する踊り場の板のうち、短い辺が一段の奥行 (0.5 m + 誤差 0.02 m) より長いものを床の板にし、階のまとめ方を変えた (直に接する床は差 0.3 m 未満、階段でつなぐ床は 1.625 m 未満、1 つの階の高さの幅は 1.625 m 未満。StationFloorBuilder.DirectStepRise・StairJoinRise・LevelRangeMax。利用者の決定。2026-11-02)。
+    public const int Format = 20;   // 2: 道順のグラフの経由点を waypoints にまとめた形 (Write の graph の説明)。3: 階・区画の名前を訳と星図の場所の名前で付けるようにした (取り込みが NameFloors・NameSections に localize・placeNames を渡す。2026-11-01)。4: 区画の name を表示の名前にし、Child の entityName を entity に移した。階の名前を代表の 1 つ・訳のある名前だけにした (2026-11-01)。5: 地区 (districts) を足した (2026-11-01)。6: transit に lineInternal を足し、タグの無いエレベーターの行き先の名前を引くようにした (2026-11-01)。7: floors に reachable (乗り場からたどれない階は false。その階の区画の多角形は書かない)、transit のエレベーターに place (乗り場を含む区画の名前) を足した。床も店も無い箱だけの区画の多角形を書かないようにした (2026-11-01)。8: 階を真上から見た重なりで分けるようにした (Levels)。floors に implemented を足し、transit の kind (elevator・elevator-noride) を実装されているかの判定で決めるようにした (2026-11-01) 9: transit のトラムの乗り場に nextGateway・nextStop・nextDistrict (次の駅)、floors に stackGroup・stackLevel (行き先の鍵で決めた重ねる順番) を足した (2026-11-01) 10: 階を、数段の階段 (1.3 m 未満) でつながる床を高さの範囲 3 m 未満のあいだ足す作り方にした (利用者の規則、2026-11-01)。 11: 何も無い層を一覧から外し、階の名前をデータの名前だけにした。店の名前に area_label・販売データの名前を足した (2026-11-01)。 12: 頭に一覧に出る階の数 (listedFloors。StationMapExports.Finish が書く) を足した。 13: 乗り場の判定・地区の条件を直した (2026-11-01)。 14: 通路の部品 (corridor_*) を床にし、店の名前を階の名前・括弧の候補に使わないようにし、重ねる順を階の単位にし、新しい乗り物の仕組み (sctransport*) の乗り場を拾うようにした (2026-11-01)。 15: stairs に outline (階段の板の真上から見た形) を足し、明らかに階が違う階段の両端の床を別の層にし、エレベーターとつながった階の名前を階段でつながる階に付けるようにした (2026-11-02)。 16: 床・階段を部品の形 (GLB の三角形の上向きの面) で判定し、板を実際の面の高さで作り、部品の名前と種類を表に登録するようにした (2026-11-02)。 17: 区画の floors の環を、板を格子に塗った輪郭から板ごとの凸包そのものにした (四角い部品は四角のまま。環どうしは重なることがある。2026-11-02、利用者の決定「A」)。 18: 端末 (terminals)・外の設備 (exterior: pads・hangars・freight・decks) を足し、木から外す Child (HarvestableObjectContainer など) のうち部分木に床・階段の部品のあるものを外さないようにした (excludedChildren に外した Child を書く。2026-11-02)。 19: 同梱の部品の表に「該当しない」(none) の部品 86 種を足し (利用者の決定「1 OK」)、ほぼ平らな階段・坂の板 (上下の差 0.3 m 未満) と床に接する踊り場の板のうち、短い辺が一段の奥行 (0.5 m + 誤差 0.02 m) より長いものを床の板にし、階のまとめ方を変えた (直に接する床は差 0.3 m 未満、階段でつなぐ床は 1.625 m 未満、1 つの階の高さの幅は 1.625 m 未満。StationFloorBuilder.DirectStepRise・StairJoinRise・LevelRangeMax。利用者の決定。2026-11-02)。 20: 階段・坂の板に歩ける面の高さの面 (StationPlate.Plane) を持たせ、階段の端・接する床・続く板を、接する所の高さ (差 0.5 m 未満。利用者の決まり「歩ける面はすき間無し・高さの差 0.5 m 未満でつながる」) で見るようにした。階段の端の高さで接する端の階でない階も結ぶ。はしご (名前に ladder のある部品) を下の端・上の端で床とつなぐ stairs (source ladder) と辺 (kind ladder) を足し、Ghost Arena の部分のゴミの山 (trash_heap・trash_bag_pile) を板にした (2026-11-03)。
 
     public static string Write(StationIndex index, StationTree tree, IReadOnlyList<StationFloor> floors, IReadOnlyList<StationSection> sections,
         IReadOnlyList<StationStair> stairs, IReadOnlyList<StationTransit> transit, StationGraph graph, StarRotRule rule = StationIndex.DefaultRule)
