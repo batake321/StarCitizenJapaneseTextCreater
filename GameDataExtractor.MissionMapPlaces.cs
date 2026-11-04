@@ -37,9 +37,9 @@ public partial class GameDataExtractor
     //     map_type: 場所の種類 (星図の種類の名前か、StationPlace.TypeCave などの星図に無い種類)。system: 星系 (starmap_locations.system)
     //     name: リンクの文字 (地図の窓の一覧の表示と同じ決まり。星図の場所は英語名 (同じ星系に同じ名前があれば親の名前を（）で添える)、
     //       星図に載っていない場所は種類の言葉か共有元の場所の名前に、乗っている天体の名前を（）で添えたもの)
-    //     named: 名前がゲームの名前か (星図の名前が record 名のままの「名前の無い場所」は、名前を星図外の場所と同じ決まり (StationMapWindow.UnlistedNames。
+    //     named: 名前がゲームの名前か (星図の名前が record 名のままの「名前の無い場所」は、名前を星図外の場所と同じ決まり (StationPlaceList.UnlistedNames。
     //       種類の言葉と、自転する天体の名前) で作り、1 にする (2026-11-02、親の決定「B」・名前は案 A)。0 の行は今は作らない)
-    //     has_floor: 床のメッシュがあるか (StationMapWindow.HasFloorMesh。星図の場所も星図外の場所も調べる (2026-11-02))。画面は 0 の場所に「（床なし）」を付ける
+    //     has_floor: 前は床のメッシュがあるかを調べていた。(2026-11-04、利用者の決定「やめる」) 調べをやめ、いつも 1 (列は前の版の DB と同じ形のために残す)
     //     content_key: 同じ地図の鍵 (StationContentKey.Of。地図の窓の一覧の ▼ のまとまりと同じ鍵)。画面は同じ鍵の場所を 1 つのリンクにまとめる
     // インデックス構築 (Step 6c) で作り直す (作れなかったときは前の表を残す)。書くときは 3 つとも消して今の形で作り直す
     internal static readonly string[] MissionMapTables = ["mission_map_vars", "mission_map_sets", "mission_map_places"];
@@ -279,13 +279,13 @@ public partial class GameDataExtractor
         }
         var tWrite = sw.Elapsed.TotalSeconds;
 
-        // 画面に出る数 (StationMapWindow.IsListedPlace と名前のある場所だけ。契約ごとの地図の数。同じ地図の鍵の場所は 1 つと数える (画面と同じ))
+        // 画面に出る数 (StationPlaceList.IsListedPlace と名前のある場所だけ。契約ごとの地図の数。同じ地図の鍵の場所は 1 つと数える (画面と同じ))
         var placeBy = data.Places.ToDictionary(x => x.MapRecord, StringComparer.Ordinal);
         int show1to10 = 0, showMany = 0, hiddenOnly = 0;
         foreach (var g in data.Vars.GroupBy(v => v.Mission))
         {
             var shown = g.SelectMany(v => data.Sets[v.SetId]).Distinct(StringComparer.Ordinal)
-                .Where(rec => placeBy[rec] is var pl && pl.Named && StationMapWindow.IsListedPlace(pl.MapType, rec.StartsWith(StationPlace.UnlistedPrefix, StringComparison.Ordinal), pl.HasFloor))
+                .Where(rec => placeBy[rec] is var pl && pl.Named && StationPlaceList.IsListedPlace(pl.MapType))
                 .Select(rec => placeBy[rec].ContentKey).Distinct(StringComparer.Ordinal).Count();
             if (shown == 0) hiddenOnly++;
             else if (shown <= 10) show1to10++;
@@ -696,7 +696,7 @@ public partial class GameDataExtractor
             return name.Length > 0 && !string.Equals(name, dot >= 0 ? record[(dot + 1)..] : record, StringComparison.Ordinal);
         }
         // 地図を作る種類 (星図の場所では、一覧の種類のチェックのある種類と同じ。恒星は入らない) の、星系ごとの同じ名前
-        var dupNames = starmap.Where(r => StationMapWindow.IsListedPlace(r.Place.Type, false, true))
+        var dupNames = starmap.Where(r => StationPlaceList.IsListedPlace(r.Place.Type))
             .GroupBy(r => (r.Place.System.ToLowerInvariant(), r.Name.ToLowerInvariant())).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet();
         var info = new Dictionary<string, (string Type, string System, string Name, bool Named, bool HasFloor)>(StringComparer.Ordinal);
         var floorCache = new Dictionary<string, bool>(StringComparer.Ordinal);
@@ -706,9 +706,9 @@ public partial class GameDataExtractor
             var root = search.Roots[record];
             if (root.Place.IsUnlisted)
             {
-                var (_, label) = StationMapWindow.UnlistedNames(root, rec => byRecord.TryGetValue(rec, out var s) ? s.Name : null,
+                var (_, label) = StationPlaceList.UnlistedNames(root, rec => byRecord.TryGetValue(rec, out var s) ? s.Name : null,
                     uuid => byUuid.TryGetValue(uuid, out var b) ? b.Name : null);
-                v = (root.Place.Type, root.Place.System, label, true, StationMapWindow.HasFloorMesh(idx, root, floorCache));
+                v = (root.Place.Type, root.Place.System, label, true, true);
             }
             else
             {
@@ -719,9 +719,9 @@ public partial class GameDataExtractor
                     name = $"{row.Name}（{parent.Name}）";
                 // 名前の無い場所 (星図の名前が record 名のまま) は、内部の名前を出さないよう、星図外の場所と同じ決まりの名前にする
                 if (!HasGameName(record, row.Name))
-                    name = StationMapWindow.UnlistedNames(root, rec => byRecord.TryGetValue(rec, out var s) ? s.Name : null,
+                    name = StationPlaceList.UnlistedNames(root, rec => byRecord.TryGetValue(rec, out var s) ? s.Name : null,
                         uuid => byUuid.TryGetValue(uuid, out var b) ? b.Name : null).Label;
-                v = (row.Place.Type, row.Place.System, name, true, StationMapWindow.HasFloorMesh(idx, root, floorCache));
+                v = (row.Place.Type, row.Place.System, name, true, true);
             }
             return info[record] = v;
         }

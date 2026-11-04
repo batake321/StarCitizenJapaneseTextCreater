@@ -1,0 +1,624 @@
+using System.IO;
+using System.Text.Json;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.Wpf;
+
+namespace StarCitizenJapaneseTextCreater;
+
+// ステーションの地図の新しい方式 (StationView3D) の別ウィンドウ (モードレス。画面はコードで作る)。
+// (2026-11-04、利用者の決定「Data.p4k から見る所の区域だけを、開いたときにその場で取り出して描く（前もってデータを作らない）」)
+//   開くと: 場所の木 (Data.p4k の索引から) と地図の JSON (取り込み済みのもの。乗り場・階段・店・端末・階の名前) で StationView3D.Session を作り、
+//     一時の置き場 (Ship3DExports.WorkFolder の下の view3d_<短い名前>_<GUID>\) に station.json を書いてビューア (wwwroot\stationmap\view3d.html) を開く。
+//   ビューアが地点を頼むと ({type:'region', id, c, r}): まわり ±r m の区画だけを取り出して計算し (Session.BuildRegionAsync)、r<id>\ に書いて知らせる ({type:'regionReady'})。
+//     取り出している間は {type:'regionProgress', done, total} を送る。ビューアが読み終えたら ({type:'regionLoaded'}) その地点の置き場を消す。窓を閉じたら一時の置き場を全部消す。
+//   取り出しの同時数: 1 本は必ず動かし (CPU 使用率が 90% 以上の間は待つ。ゲームのアイコンの取り出しと同じ)、2 本目からは同時数の上限の決まり (Ship3DExports.TryAcquireExtraRun) で足す。
+//   WebView2 の用意は船・ステーションの 3D と同じ Ship3DWeb.InitAsync。置き場は Ship3DExports.CacheHost (→ Ship3DExports.Folder) から fetch で読む
+// (2026-11-04、利用者の指示「map に出し、別ウィンドウボタンで。」) 画面の中身は StationView3DView (Grid) にして、［マップ］タブの中 (MapPanel) と
+// 別ウィンドウ (StationView3DWindow) の両方で同じものを使う
+public sealed class StationView3DWindow : Window
+{
+    public StationView3DView View { get; }
+    public StationView3DWindow(string record, string name, Func<string, string, string>? shopLabel = null, Func<string, string, object?>? shopSales = null, string? focusShop = null)
+    {
+        View = new StationView3DView(record, name, shopLabel, shopSales, focusShop);
+        Title = $"ステーションの 3D (新しい方式) - {View.PlaceTitle}";
+        Width = 1400; Height = 900;
+        Content = View;
+        Closed += (_, _) => View.Close3D();
+    }
+}
+
+public sealed class StationView3DView : Grid
+{
+    // 場所の名前 (窓の題・［マップ］タブの帯に出す)
+    public string PlaceTitle => _title;
+    public string Record => _record;
+    private readonly string _record, _shortName, _title;
+    private readonly WebView2 _web = new();
+    private readonly TextBlock _overlay = new() { Foreground = Brushes.White, FontSize = 28, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(16), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+    private readonly CancellationTokenSource _cts = new();
+    private CancellationTokenSource? _regionCts;
+    private StationView3D.Session? _session;
+    // マイハンガーの Session (site → Session。site は "hangar:" + ハンガーの socpak)。ステーションは site ""
+    private readonly Dictionary<string, StationView3D.Session> _hangarSessions = new(StringComparer.Ordinal);
+    private StationView3D.Loc? _loc;
+    private StationView3D.Extractor? _extract;
+    private string _tempDir = "";
+    private bool _ownInUse;
+    private readonly Func<string, string, string>? _shopLabel;
+    private readonly Func<string, string, object?>? _shopSales;
+
+    // shopLabel: 店 (CryGUID, Entity 名) → アプリの地図の店の名前。shopSales: 店 → 販売品の枠の知らせ ({type:'sales', title, shops}。地図の［MAP］の販売品の枠と同じもの)
+    // focusShop: 開いたときの行き先にする店 (Entity 名。［詳細］の店の［MAP］)。無ければビューアの決まり
+    private readonly string? _focusShop;
+    public StationView3DView(string record, string name, Func<string, string, string>? shopLabel = null, Func<string, string, object?>? shopSales = null, string? focusShop = null)
+    {
+        _record = record; _shopLabel = shopLabel; _shopSales = shopSales; _focusShop = focusShop;
+        _shortName = StationPlaces.ShortName(record);
+        _title = string.IsNullOrWhiteSpace(name) ? _shortName : name;
+        Background = new SolidColorBrush(Color.FromRgb(0x11, 0x11, 0x11));
+        Children.Add(_web);
+        Children.Add(_overlay);
+        // 初めて画面に出たときに始める (［マップ］タブで隠してから出し直しても、始めるのは 1 回)
+        Loaded += async (_, _) => { if (_started) return; _started = true; await StartAsync(); };
+    }
+    private bool _started;
+    private bool _closed;
+
+    // 閉じる (窓を閉じた・［マップ］タブでほかの場所に替えた): 取り出しを止め、WebView2 を捨て、一時の置き場を消す
+    public void Close3D()
+    {
+        if (_closed) return;
+        _closed = true;
+        _cts.Cancel();
+        _regionCts?.Cancel();
+        try { _web.Dispose(); } catch { }
+        DeleteTemp();
+    }
+
+    private void Overlay(string text)
+    {
+        _overlay.Text = text;
+        _overlay.Visibility = text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async Task StartAsync()
+    {
+        if (Ship3DExports.CurrentStamp() is not { } stamp) { _web.Visibility = Visibility.Collapsed; Overlay("ゲームの Data.p4k が見つかりません。設定タブのゲームのフォルダとチャンネルを確かめてください。"); return; }
+        Overlay("準備中…");
+        var ct = _cts.Token;
+        try
+        {
+            _tempDir = Path.Combine(Ship3DExports.WorkFolder, $"view3d_{_shortName}_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(_tempDir);
+            var record = _record;
+            _session = await Task.Run(() =>
+            {
+                // 区画の置き方の一覧と場所の中身 (DB。LayoutFor)。2D の地図の JSON は使わない (2026-11-04、利用者の決定「名前を 2d からとるのをやめるだけの話」)
+                var layout = LayoutFor(record, stamp, ct);
+                _stationLayout = layout;
+                var ini = Path.Combine(Path.GetDirectoryName(stamp.Path) ?? "", "data", "Localization", "japanese_(japan)", "global.ini");
+                var loc = new StationView3D.Loc(ini, Path.Combine(DetailPanel.WorkDir(), "translations.db"));
+                _loc = loc;
+                var s = new StationView3D.Session(layout, "", loc, terminalLabel: StationTerminalKinds.Label, shopLabel: _shopLabel);
+                File.WriteAllBytes(Path.Combine(_tempDir, "station.json"), s.StationJson());
+                return s;
+            }, ct);
+            _extract = StationView3D.OwnExtractor(stamp.Path,
+                m => App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」 {m}"));
+            await Ship3DWeb.InitAsync(_web);
+        }
+        catch (OperationCanceledException) { return; }
+        catch (Exception ex)
+        {
+            _web.Visibility = Visibility.Collapsed;
+            Overlay($"3D (新しい方式) を開けませんでした: {ex.Message}");
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」を開けませんでした: {ex}");
+            return;
+        }
+        var core = _web.CoreWebView2!;
+        core.WebMessageReceived += OnMessage;
+        var folder = Ship3DExports.Folder;
+        try { core.ClearVirtualHostNameToFolderMapping(Ship3DExports.CacheHost); } catch { }
+        core.SetVirtualHostNameToFolderMapping(Ship3DExports.CacheHost, folder, CoreWebView2HostResourceAccessKind.Allow);
+        Overlay("");
+        core.Navigate($"https://{Ship3DWeb.ViewerHost}/stationmap/view3d.html?data={Uri.EscapeDataString(UrlOf(_tempDir))}&title={Uri.EscapeDataString(_title)}&app=1" + (_focusShop is { Length: > 0 } fs ? $"&goto={Uri.EscapeDataString(fs)}" : ""));
+    }
+
+    // 置き場 (Ship3DExports.Folder) の下のフォルダの URL (最後に /)
+    private static string UrlOf(string dir)
+    {
+        var rel = Path.GetRelativePath(Ship3DExports.Folder, dir).Replace('\\', '/');
+        return $"https://{Ship3DExports.CacheHost}/{string.Join("/", rel.Split('/').Select(Uri.EscapeDataString))}/";
+    }
+
+    private void Post(object o)
+    {
+        try { _web.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(o)); }
+        catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] ビューアへ送れませんでした: {ex.Message}"); }
+    }
+
+    private async void OnMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(e.WebMessageAsJson);
+            var r = doc.RootElement;
+            var type = r.TryGetProperty("type", out var t) ? t.GetString() : null;
+            if (type == "regionLoaded" && r.TryGetProperty("id", out var lid))
+            {
+                // ビューアが読み終えた地点の置き場を消す
+                var d = Path.Combine(_tempDir, $"r{lid.GetInt32()}");
+                try { if (Directory.Exists(d)) Directory.Delete(d, true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+                return;
+            }
+            if (type == "sales")
+            {
+                // 店の端末を押したとき (2026-11-04、利用者の指示「押したら売ってるリストと値段を出してほしい」): 端末の店 (地図の JSON の端末の shop・shopEntity) の販売品
+                var g = r.TryGetProperty("guid", out var gv) ? gv.GetString() ?? "" : "";
+                var en = r.TryGetProperty("entity", out var ev) ? ev.GetString() ?? "" : "";
+                var msg = _shopSales?.Invoke(g, en);
+                Post(msg ?? new { type = "sales", title = "販売品", shops = new List<object> { new { name = en, note = "販売データが紐づいていません。" } } });
+                return;
+            }
+            if (type == "here")
+            {
+                await HereAsync();
+                return;
+            }
+            if (type == "hangar")
+            {
+                await OpenHangarAsync(r.TryGetProperty("size", out var zv) ? zv.GetString() ?? "" : "");
+                return;
+            }
+            if (type != "region" || _session == null || _extract == null) return;
+            var site = r.TryGetProperty("site", out var sv) ? sv.GetString() ?? "" : "";
+            var siteSession = site.Length == 0 ? _session : _hangarSessions.GetValueOrDefault(site);
+            if (siteSession == null) { Post(new { type = "regionError", id = r.GetProperty("id").GetInt32(), message = "マイハンガーの用意が終わっていません" }); return; }
+            var id = r.GetProperty("id").GetInt32();
+            var c = r.GetProperty("c").EnumerateArray().Select(x => x.GetDouble()).ToArray();
+            var rad = r.GetProperty("r").GetDouble();
+            _regionCts?.Cancel();
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+            _regionCts = cts;
+            var dir = Path.Combine(_tempDir, $"r{id}");
+            var progress = new Progress<(int Done, int Total)>(p => Post(new { type = "regionProgress", id, done = p.Done, total = p.Total }));
+            try
+            {
+                var session = siteSession; var extract = _extract;
+                var st = await Task.Run(() => session.BuildRegionAsync(c, rad, dir, extract, AcquireAsync, progress, cts.Token), cts.Token);
+                Post(new { type = "regionReady", id, @base = UrlOf(dir), extractSeconds = st.ExportSeconds, computeSeconds = st.ComputeSeconds, seconds = st.BuildSeconds, socpaks = st.Socpaks, missing = st.Missing });
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」の地点を作れませんでした: {ex}");
+                Post(new { type = "regionError", id, message = ex.Message });
+            }
+        }
+        catch (Exception ex)
+        {
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] ビューアからの知らせを扱えませんでした: {ex.Message}");
+        }
+    }
+
+    // マイハンガー (2026-11-04、利用者の指示「マイハンガーの S M L XL がない」): 旧アプリ (StationMapPanel.ShowHangarAsync) と同じく、
+    // StationHangarCatalog.Resolve (場所の既定のハンガー → 入口の class) でハンガーを選び、ハンガーの地図を用意 (StationMapExports.EnsureHangarAsync。無ければ取り込む) して、
+    // その区画の置き方の一覧 (無ければゲームデータの索引と場所の木から作る) で Session を作る。ビューアには {type:'hangarReady', site, data, title, how} を返す
+    private async Task OpenHangarAsync(string size)
+    {
+        var title = $"マイハンガー（{size}）";
+        try
+        {
+            if (_loc == null) throw new InvalidOperationException("まだ準備中です");
+            if (Ship3DExports.CurrentStamp() is not { } stamp) throw new InvalidOperationException("ゲームの Data.p4k が見つかりません。設定タブのゲームのフォルダとチャンネルを確かめてください。");
+            var cat = await StationHangarCatalog.GetAsync(stamp, _cts.Token);
+            // ハンガーの入口 (class と大きさ) は、場所の中身 (DB) から (2D の地図は使わない)
+            var entrances = (_stationLayout?.Place?.Hangars ?? new()).Select(h => (h.Class, h.Size)).ToList();
+            var choice = cat.Resolve(_shortName, size, entrances, out var note);
+            if (choice == null) throw new InvalidOperationException(note);
+            var site = "hangar:" + choice.Socpak;
+            var dir = Path.Combine(_tempDir, "h" + _hangarSessions.Count);
+            if (!_hangarSessions.TryGetValue(site, out var hs))
+            {
+                var hrec = StationHangars.RecordOf(choice.Socpak);
+                var loc = _loc; var ct = _cts.Token;
+                hs = await Task.Run(() => new StationView3D.Session(LayoutFor(hrec, stamp, ct), "", loc, terminalLabel: StationTerminalKinds.Label), ct);
+                Directory.CreateDirectory(dir);
+                await File.WriteAllBytesAsync(Path.Combine(dir, "station.json"), hs.StationJson(), _cts.Token);
+                _hangarSessions[site] = hs;
+                _hangarDirs[site] = dir;
+            }
+            Overlay("");
+            var name = StationView3D.HangarTitle(_loc, choice.NameKey);
+            Post(new { type = "hangarReady", site, data = UrlOf(_hangarDirs[site]), title = name.Length > 0 ? name : title, how = choice.How });
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」の{title}を開けませんでした: {ex}");
+            Post(new { type = "hangarError", message = ex.Message });
+        }
+    }
+    private readonly Dictionary<string, string> _hangarDirs = new(StringComparer.Ordinal);
+
+    // ===== ［現在位置］ (2026-11-04、利用者の指示「2D 地図は消して」で、2D の地図の［現在位置］を 3D に向け直した) =====
+    // ［マップ］タブの［現在位置］と同じ処理 (MapPanel.CaptureCurrentAsync。/showlocation を送って App.Config.MapCurrent を入れ替える)。MainWindow がつなぐ
+    public static Func<string, Task<(bool Ok, string Status)>>? CaptureHook { get; set; }
+    // 取った座標 (星系の座標) を、この場所のルート (StationRoot.ToLocal) で場所の座標に直す。自転する場所 (都市) は、取った時刻の自転の角度
+    // (StationRoot.CorrectedTheta。データの式 + 設定の補正値 MapSpinCorrections) を使い、さらに取った時刻の前後 HereFitSeconds 秒を HereFitStep 秒ずつずらして、
+    // 点が区画の箱 (一覧の置かれた所の箱のうち、大きさ HereBoxMax m 未満のもの) の中に入る時刻のうち、取った時刻にいちばん近いものを使う
+    // (2D の地図は床の上に入る時刻を探していた (FitStanding)。3D は床の判定を前もって持たないので、区画の箱で代える。1 秒で点が数百 m〜2 km 動くため)。
+    // ビューアには {type:'here', ok, pos, note} を返す (pos は場所の座標)
+    private const double HereFitSeconds = 1.5, HereFitStep = 0.02, HereBoxMax = 500;
+    private StationRoot? _root;
+    private async Task HereAsync()
+    {
+        try
+        {
+            var status = "";
+            if (CaptureHook is { } hook)
+            {
+                var (ok, st) = await hook("ステーションの 3D (新しい方式)");
+                status = st;
+                if (!ok) { Post(new { type = "here", ok = false, note = $"現在位置を取れませんでした: {st}" }); return; }
+            }
+            var cur = App.Config.MapCurrent;
+            if (cur.Utc <= 0) { Post(new { type = "here", ok = false, note = "現在位置がまだありません (［マップ］タブの［現在位置］で取ってください)" }); return; }
+            if (Ship3DExports.CurrentStamp() is not { } stamp) { Post(new { type = "here", ok = false, note = "ゲームの Data.p4k が見つかりません" }); return; }
+            var record = _record; var ct = _cts.Token;
+            _root ??= await Task.Run(() =>
+            {
+                if (StationHangars.IsRecord(record)) return StationHangars.RootOf(record);
+                using var index = StationIndex.Build(stamp.Path, ct);
+                var places = StationPlaces.LoadPlaces(DetailPanel.DbPath()).Select(p => p.Place).ToList();
+                return index.FindRoots(places, ct: ct).Roots.TryGetValue(record, out var r) ? r : null;
+            }, ct);
+            if (_root is not { } root) { Post(new { type = "here", ok = false, note = "ゲームデータの中にこの場所のルートが見つかりませんでした" }); return; }
+            var global = (cur.X, cur.Y, cur.Z);
+            var note = "";
+            (double X, double Y, double Z) local;
+            if (!root.Spins) local = root.ToLocal(global);
+            else
+            {
+                var body = BodyRecordOfUuid(root.SpinUuid);
+                if (body == null) { Post(new { type = "here", ok = false, note = "自転する天体が星図に見つからないので、現在位置を出せません" }); return; }
+                var corr = App.Config.MapSpinCorrections;
+                var boxes = (_stationLayout?.Instances ?? new()).Where(i => i.Lo != null && i.Hi != null && i.Hi[0] - i.Lo[0] < HereBoxMax && i.Hi[1] - i.Lo[1] < HereBoxMax && i.Hi[2] - i.Lo[2] < HereBoxMax).ToList();
+                bool InBox((double X, double Y, double Z) q) => boxes.Any(i => q.X >= i.Lo![0] && q.X <= i.Hi![0] && q.Y >= i.Lo[1] && q.Y <= i.Hi[1] && q.Z >= i.Lo[2] && q.Z <= i.Hi[2]);
+                (double X, double Y, double Z)? best = null; double bestDt = 0;
+                for (double k = 0; k <= HereFitSeconds + 1e-9 && best == null; k += HereFitStep)
+                    foreach (var dt in k == 0 ? new[] { 0.0 } : new[] { -k, k })
+                    {
+                        if (root.CorrectedTheta(cur.Utc + dt, body, corr) is not { } th) continue;
+                        var q = root.ToLocal(global, StationIndex.DefaultRule, th);
+                        if (InBox(q)) { best = q; bestDt = dt; break; }
+                    }
+                if (best is { } b) { local = b; if (bestDt != 0) note = $"（取った時刻を {bestDt:+0.00;-0.00} 秒ずらして区画の中に合わせました）"; }
+                else if (root.CorrectedTheta(cur.Utc, body, corr) is { } th0) { local = root.ToLocal(global, StationIndex.DefaultRule, th0); note = "（区画の中に合わせられませんでした。取った時刻のままの位置です）"; }
+                else { Post(new { type = "here", ok = false, note = "自転の角度が分からないので、現在位置を出せません" }); return; }
+            }
+            Post(new { type = "here", ok = true, pos = new[] { local.X, local.Y, local.Z }, note = (status.Length > 0 ? status + " " : "") + note });
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」の現在位置を出せませんでした: {ex}");
+            Post(new { type = "here", ok = false, note = $"現在位置を出せませんでした: {ex.Message}" });
+        }
+    }
+
+    // 自転する天体の uuid → 星図の record 名 (gamedata_cache.db の starmap_locations を読み取り専用で引く)。引けなければ null
+    private static string? BodyRecordOfUuid(string uuid)
+    {
+        try
+        {
+            var db = DetailPanel.DbPath();
+            if (!File.Exists(db)) return null;
+            using var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={db};Mode=ReadOnly");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT record_name FROM starmap_locations WHERE lower(uuid) = $u LIMIT 1";
+            cmd.Parameters.AddWithValue("$u", uuid.ToLowerInvariant());
+            return cmd.ExecuteScalar() as string;
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException) { return null; }
+    }
+    private StationView3D.Layout? _stationLayout;
+
+    // 区画の置き方の一覧と場所の中身 (view3d_layout.db。StationView3DLayout が裏で一括に作る)。裏の糸から呼ぶ。
+    // DB がまだ今の Data.p4k の印でなければ (裏で作っている途中・まだ始まっていない)、裏の一括を始めて (動いていればそれに合流して) 終わるまで待つ。
+    // 待つ間は画面の真ん中に大きく「準備中…（済んだ数 / 全部）」を出す。ハンガーの中 (StationHangars の record) は一括に入らないので、無ければその 1 か所を作って DB に足す
+    private StationView3D.Layout LayoutFor(string record, Ship3DExports.P4kStamp stamp, CancellationToken ct)
+    {
+        var db = StationView3DLayout.DbPath;
+        var key = StationView3DLayout.GameKey(stamp);
+        if (StationView3D.ReadLayoutDb(db, key, record) is { } hit) return hit;
+        if (!StationView3D.LayoutDbIsCurrent(db, key))
+        {
+            var task = StationView3DLayout.Start("3D の窓を開いた");
+            while (!task.Wait(500, ct))
+            {
+                var (d, n) = StationView3DLayout.Progress;
+                Dispatcher.BeginInvoke(() => Overlay($"準備中…\n区画の置き方の一覧と場所の中身を、全部の場所の分まとめて作っています ({d} / {n} か所)"));
+            }
+            if (StationView3D.ReadLayoutDb(db, key, record) is { } hit2) return hit2;
+        }
+        if (!StationHangars.IsRecord(record)) throw new InvalidOperationException("ゲームデータの中にこの場所が見つかりませんでした" + (StationView3DLayout.LastError is { } e ? $" ({e})" : ""));
+        Dispatcher.BeginInvoke(() => Overlay("準備中…\nハンガーの中の区画の置き方の一覧を作っています"));
+        lock (StationView3DLayout.PutLock)
+        {
+            using var index = StationIndex.Build(stamp.Path, ct);
+            var layout = StationView3D.LayoutOf(index, StationTree.Load(index, StationHangars.RootOf(record), contents: true, ct: ct));
+            StationView3D.PutLayoutDb(db, key, record, layout);
+            return layout;
+        }
+    }
+
+    // 取り出しを 1 本始めてよくなるまで待つ (クラスの説明)。返した IDisposable で返す
+    private async Task<IDisposable> AcquireAsync(CancellationToken ct)
+    {
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            var got = await Dispatcher.InvokeAsync(() =>
+            {
+                if (!_ownInUse && !Ship3DExports.CpuHighNow) { _ownInUse = true; return 1; }
+                if (_ownInUse && Ship3DExports.Instance.TryAcquireExtraRun()) return 2;
+                return 0;
+            });
+            if (got == 1) return new Release(() => Dispatcher.BeginInvoke(() => _ownInUse = false));
+            if (got == 2) return new Release(() => Dispatcher.BeginInvoke(() => Ship3DExports.Instance.ReleaseExtraRun()));
+            await Task.Delay(500, ct);
+        }
+    }
+
+    private sealed class Release(Action a) : IDisposable
+    {
+        private Action? _a = a;
+        public void Dispose() { Interlocked.Exchange(ref _a, null)?.Invoke(); }
+    }
+
+    private void DeleteTemp()
+    {
+        if (_tempDir.Length == 0) return;
+        var d = _tempDir;
+        // 取り出し中の処理が終わるのを少し待ってから消す (20 秒たっても消せなければ残る)
+        _ = Task.Run(async () =>
+        {
+            for (int i = 0; i < 20; i++)
+            {
+                try { if (Directory.Exists(d)) Directory.Delete(d, true); return; }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { await Task.Delay(1000); }
+            }
+        });
+    }
+}
+
+// 区画の置き方の一覧と場所の中身の DB (view3d_layout.db) を裏で一括に作る (2026-11-04、利用者の決定「裏でやっとく」)。
+//   いつ: アプリの起動の後 (Ship3DExports の自動の取り直しと同じ時: 起動の後 AutoRefreshDelay たってから) と、Data.p4k の印が変わったとき。
+//   DB が今の印で作ったものなら何もしない。動いている間に呼ばれたら、動いているものを返す (同時に 1 本だけ)。
+//   作り終える前に 3D の窓を開いたときは、窓がこれに合流して、終わるまで「準備中…（済んだ数 / 全部）」を出して待つ (StationView3DWindow.LayoutFor)。
+//   作るもの: 星図の場所の表 (ゲームデータの DB の starmap_locations) をルート探しして見つかった場所の全部 (StationView3D.BuildLayoutDb)
+//   同梱 (2026-11-04、利用者の指示「DBに入れたものは配れる。時価データでなくアドレスだから」): インストール先 (AppContext.BaseDirectory) に view3d_layout.db があり、
+//   その印が今のゲームの版と同じなら、作らずに置き場所へ写す (起動の後・窓を開いたとき)。印が違えば (パッチが来た) 裏で作り直す。
+//   印 (GameKey) は、どの PC でも同じになるよう、Data.p4k と同じフォルダの build_manifest.id の Branch・Version・RequestedP4ChangeNum にする
+//   (読めなければ、その PC の Data.p4k の印 (パス・大きさ・更新日時)。その DB は配っても使われない)
+internal static class StationView3DLayout
+{
+    public static string DbPath => Path.Combine(StationPlaces.Folder, StationView3D.LayoutDbName);
+    // 一括で並べる最大の本数 (試しの道具で全部の場所を作って計った値: 1 本 347 秒・メモリのピーク 3.5 GB、4 本 355 秒・3.1 GB。門で待つので速くはならないが、メモリのピークは下がった)
+    public const int LayoutParallelMax = 4;
+    public static string BundledPath => Path.Combine(AppContext.BaseDirectory, StationView3D.LayoutDbName);
+
+    // 前の版の 2D の地図と古い方式のステーションの 3D のファイルを消す (2026-11-04、利用者の指示「2D 地図は消して」「他のユーザーも更新時に消す仕組みで」)。
+    // いつ: アプリの起動の後 (MainWindow が裏で呼ぶ)。置き場所は設定の 3D の置き場所 (Ship3DExports.Folder)。
+    // 消すもの (ファイルの名前の決まりで見分ける):
+    //   stations の直下の *.json (2D の地図)・*.meshes.gz・*.meshes.keys (2D の地図の読み取りの保存)・*.layout.json (前の区画の置き方の一覧)。view3d_layout.db* は消さない
+    //   stations\hangars の *.json・*.meshes.gz・*.meshes.keys (ハンガーの中の 2D の地図)。ハンガーの表 hangar_catalog.json は 3D で使うので消さない
+    //   stations3d フォルダ (古い方式のステーションの 3D) を丸ごと
+    // 全部消せたら、作業ディレクトリに印のファイル (OldMapsCleanedMark) を書いて、次からは消しに行かない。消せなかったもの (使用中など) があれば印を書かず、次の起動でまた試す
+    public const string OldMapsCleanedMark = "old_station_maps_removed.txt";
+    public static void CleanupOldMaps()
+    {
+        var mark = Path.Combine(App.Config.WorkingDirectory, OldMapsCleanedMark);
+        try { if (File.Exists(mark)) return; } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return; }
+        int removed = 0, failed = 0; long bytes = 0;
+        var names = new List<string>();
+        void Del(FileInfo f)
+        {
+            try { var len = f.Length; f.Delete(); removed++; bytes += len; if (names.Count < 20) names.Add(f.Name); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { failed++; Log($"前の版の地図のファイルを消せませんでした (次の起動でまた試します): {f.FullName}: {ex.Message}"); }
+        }
+        static bool Is2DFile(string name) => name.EndsWith(".json", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".meshes.gz", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith(".meshes.keys", StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            var st = new DirectoryInfo(StationPlaces.Folder);
+            if (st.Exists)
+                foreach (var f in st.GetFiles())
+                    if (Is2DFile(f.Name)) Del(f);
+            var hg = new DirectoryInfo(StationPlaces.HangarFolder);
+            if (hg.Exists)
+                foreach (var f in hg.GetFiles())
+                    if (Is2DFile(f.Name) && !f.Name.Equals(StationHangarCatalog.FileName, StringComparison.OrdinalIgnoreCase)) Del(f);
+            var old3d = new DirectoryInfo(Path.Combine(Ship3DExports.Folder, "stations3d"));
+            if (old3d.Exists)
+            {
+                foreach (var f in old3d.GetFiles("*", SearchOption.AllDirectories)) Del(f);
+                if (failed == 0) try { old3d.Delete(true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { failed++; Log($"古い方式のステーションの 3D のフォルダを消せませんでした: {ex.Message}"); }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { failed++; Log($"前の版の地図のファイルを消せませんでした: {ex.Message}"); }
+        if (removed > 0) Log($"前の版の 2D の地図・古い方式のステーションの 3D のファイルを {removed} 個 ({bytes / 1048576.0:F1} MB) 消しました: {string.Join(", ", names)}{(removed > names.Count ? " ほか" : "")}");
+        if (failed == 0)
+            try { File.WriteAllText(mark, $"{DateTime.Now:o} 消したファイル {removed} 個 ({bytes} バイト)\n"); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log($"消した印を書けませんでした (次の起動でもう一度見ます): {ex.Message}"); }
+    }
+    public static string GameKey(Ship3DExports.P4kStamp stamp)
+    {
+        var dir = Path.GetDirectoryName(stamp.Path) ?? "";
+        var (version, change, branch) = GameDataExtractor.ReadBuildManifestFile(Path.Combine(dir, "build_manifest.id"));
+        return version != null && change != null ? $"build|{branch}|{version}|{change}" : "p4k|" + stamp.Key;
+    }
+    // 同梱の DB が今の版のものなら、置き場所へ写す (写したら true)
+    private static bool CopyBundled(string key)
+    {
+        try
+        {
+            if (!File.Exists(BundledPath) || !StationView3D.LayoutDbIsCurrent(BundledPath, key)) return false;
+            Directory.CreateDirectory(StationPlaces.Folder);
+            var tmp = DbPath + ".copy";
+            File.Copy(BundledPath, tmp, true);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            File.Move(tmp, DbPath, true);
+            Log($"同梱の区画の置き方の一覧 (版 {key}) を置き場所へ写しました");
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log($"同梱の区画の置き方の一覧を写せませんでした: {ex.Message}"); return false; }
+    }
+    public static readonly object PutLock = new();
+    private static readonly object Gate = new();
+    private static Task? _task;
+    private static string _taskKey = "";
+    private static int _done, _total;
+    public static (int Done, int Total) Progress => (Volatile.Read(ref _done), Volatile.Read(ref _total));
+    public static string? LastError { get; private set; }
+    private static void Log(string m) => App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] {m}");
+
+    // 動いているか (設定タブの［マップをまとめて取り込む］の表示に使う)。Changed は始めた・済んだときに (どの糸からでも) 呼ぶ
+    public static bool Running { get { lock (Gate) return _task != null && !_task.IsCompleted; } }
+    public static event Action? Changed;
+    public static bool IsCurrent() => Ship3DExports.CurrentStamp() is { } st && StationView3D.LayoutDbIsCurrent(DbPath, GameKey(st));
+    // DB の問題 (2026-11-04、利用者の指示「問題あれば有効、なければ無効」。設定タブの［マップをまとめて取り込む］の有効・無効と横の文)。問題が無ければ null。
+    // 問題: Data.p4k が見つからない・DB が無い・今の Data.p4k の版で作っていない・作れなかった場所がある・作りかけ (.tmp) が残っている
+    public static string? Problem()
+    {
+        if (Ship3DExports.CurrentStamp() is not { } st) return "ゲームの Data.p4k が見つかりません";
+        if (!File.Exists(DbPath)) return File.Exists(DbPath + ".tmp") ? "作りかけで止まっています" : "まだ作っていません";
+        if (!StationView3D.LayoutDbIsCurrent(DbPath, GameKey(st))) return "今のパッチの版で作っていません";
+        if (int.TryParse(StationView3D.LayoutDbMeta(DbPath, "failed"), out var f) && f > 0) return $"作れなかった場所が {f} か所あります";
+        if (File.Exists(DbPath + ".tmp") && !Running) return "作りかけで止まっています";
+        return null;
+    }
+
+    // force: 今の版の DB があっても作り直す (設定タブの［マップをまとめて取り込む］)
+    public static Task Start(string why, bool force = false)
+    {
+        if (Ship3DExports.CurrentStamp() is not { } stamp) return Task.CompletedTask;
+        var key = GameKey(stamp);
+        lock (Gate)
+        {
+            if (_task != null && !_task.IsCompleted && _taskKey == key) return _task;
+            if (!force)
+            {
+                if (StationView3D.LayoutDbIsCurrent(DbPath, key)) return Task.CompletedTask;
+                lock (PutLock) if (CopyBundled(key)) return Task.CompletedTask;
+            }
+            _taskKey = key; _done = 0; _total = 0; LastError = null;
+            var job = NewJob();
+            _task = Task.Factory.StartNew(() => Build(stamp, why, force, job), CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        }
+        Changed?.Invoke();
+        return _task;
+    }
+
+    // 進み具合の欄 (Ship3DProgressPanel。船の書き出しと同じ欄) に出す 1 行 (2026-11-04、利用者の指摘「バーが出ない」)。取り消しのボタンで止められる (job.Cts)。
+    // ％と残り (2026-11-04、利用者の指摘「予想が11分まで伸びた。予想とは？」で、場所の数でなく重さで見るように直した):
+    //   予想の総時間 (EstimatedSeconds) を、済んだ重さの割合 f (BuildLayoutDb の weightProgress。場所ごとの前の秒、無ければ置かれた所の数から見込んだ重さ) が
+    //   WeightMin 未満の間は前に作ったときの秒 (DB の meta の seconds。無ければ FirstGuessSeconds)、その後は「経過 ÷ f」にして、Ship3DJob の「経過 ÷ (経過 + 残り)」で出す。
+    //   重い場所から始めるので、最後に長い場所が残って予想が伸び続けることが少なくなる
+    private const double FirstGuessSeconds = 350;
+    private static Ship3DJob? NewJob()
+    {
+        var disp = Application.Current?.Dispatcher;
+        if (disp == null) return null;
+        var job = new Ship3DJob("view3d_layout", "view3d-layout", "区画の置き方の一覧", null) { Kind = Ship3DJobKind.Station, LogTag = "区画の置き方の一覧" };
+        job.EstimatedSeconds = PreviousSeconds() ?? FirstGuessSeconds;
+        disp.Invoke(() => { Ship3DExports.Instance.AddJob(job); job.Watch.Start(); job.SetPhase(Ship3DJobPhase.Exporting, "区画の置き方の一覧を作っています"); });
+        return job;
+    }
+    // 前に作ったときにかかった秒 (DB の meta の seconds)。無ければ null
+    private static double? PreviousSeconds()
+    {
+        try
+        {
+            if (!File.Exists(DbPath)) return null;
+            using var c = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={DbPath};Mode=ReadOnly;Pooling=False");
+            c.Open();
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = "SELECT value FROM meta WHERE key = 'seconds'";
+            return double.TryParse(cmd.ExecuteScalar() as string, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) && v > 0 ? v : null;
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException) { return null; }
+    }
+    private const double WeightMin = 0.02;
+    private static void JobProgress(Ship3DJob? job, double f)
+    {
+        if (job == null) return;
+        var e = job.Watch.Elapsed.TotalSeconds;
+        if (f >= WeightMin) job.EstimatedSeconds = e / f;
+        Application.Current?.Dispatcher.BeginInvoke(job.Refresh);
+    }
+    private static void JobEnd(Ship3DJob? job, Ship3DJobPhase phase)
+    {
+        if (job == null) return;
+        Application.Current?.Dispatcher.BeginInvoke(() =>
+        {
+            job.Watch.Stop();
+            job.SetPhase(phase, "");
+            Ship3DExports.Instance.RemoveJob(job);
+        });
+    }
+
+    private static void Build(Ship3DExports.P4kStamp stamp, string why, bool force, Ship3DJob? job)
+    {
+        var ct = job?.Cts.Token ?? CancellationToken.None;
+        var phase = Ship3DJobPhase.Done;
+        try
+        {
+            lock (PutLock)
+            {
+                var key = GameKey(stamp);
+                if (!force && StationView3D.LayoutDbIsCurrent(DbPath, key)) return;
+                Log($"区画の置き方の一覧と場所の中身を裏で一括に作ります ({why})");
+                var places = StationPlaces.LoadPlaces(DetailPanel.DbPath()).Select(p => p.Place).ToList();
+                using var index = StationIndex.Build(stamp.Path);
+                var roots = index.FindRoots(places).Roots;
+                Directory.CreateDirectory(StationPlaces.Folder);
+                // 並べる数: 船の書き出しと同じ決まり (Ship3DExports.MaxParallelExports: CPU の数の半分と空きメモリ ÷ 3 GB の小さいほう) で、最大 LayoutParallelMax 本。
+                // メモリは BuildLayoutDb の門 (StationView3D.LayoutMemGate) で 4 GB 以下に抑える (親の決定)。1 か所を始める前に、CPU 使用率が 90% 以上なら下がるまで待つ
+                var par = Math.Min(LayoutParallelMax, Ship3DExports.MaxParallelExports().Limit);
+                var res = StationView3D.BuildLayoutDb(DbPath, key, index, roots, (d, n) => { Volatile.Write(ref _done, d); Volatile.Write(ref _total, n); }, ct, par,
+                    c => { while (Ship3DExports.CpuHighNow) Task.Delay(1000, c).Wait(c); }, f => JobProgress(job, f));
+                Log($"並べた数 {par}");
+                Log($"一括で作りました: 場所 {res.Places}・置かれた所 {res.Instances}・socpak {res.Socpaks}・{res.Bytes / 1024} KB・{res.Seconds:F1} 秒" +
+                    (res.Failed.Count > 0 ? $"。作れなかった場所 {res.Failed.Count}: {string.Join(" / ", res.Failed)}" : ""));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            phase = Ship3DJobPhase.Cancelled;
+            LastError = "取り消しました";
+            Log("一括で作るのを取り消しました (前の DB はそのまま)");
+            try { File.Delete(DbPath + ".tmp"); } catch (Exception e2) when (e2 is IOException or UnauthorizedAccessException) { }
+        }
+        catch (AggregateException ae) when (ae.InnerExceptions.All(x => x is OperationCanceledException))
+        {
+            phase = Ship3DJobPhase.Cancelled;
+            LastError = "取り消しました";
+            Log("一括で作るのを取り消しました (前の DB はそのまま)");
+            try { File.Delete(DbPath + ".tmp"); } catch (Exception e2) when (e2 is IOException or UnauthorizedAccessException) { }
+        }
+        catch (Exception ex)
+        {
+            phase = Ship3DJobPhase.Failed;
+            LastError = ex.Message;
+            Log($"一括で作れませんでした: {ex}");
+        }
+        finally { JobEnd(job, phase); _ = Task.Run(() => Changed?.Invoke()); }
+    }
+}

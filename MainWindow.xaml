@@ -2554,6 +2554,8 @@
                                     <TextBox x:Name="txtShip3DMaxMB" Width="90" VerticalAlignment="Center"
                                              ToolTip="キャッシュの最大容量 (MB)。置き場所のドライブの残り容量より小さい値だけ指定できます。超えたら、書き出しが終わるたびに古いものから消します。「設定を保存」で有効になります"/>
                                     <TextBlock x:Name="txtShip3DUsage" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
+                                    <CheckBox x:Name="chkShip3DNoSave" Content="3D モデルを保存しない" VerticalAlignment="Center" Margin="16,0,0,0"
+                                              ToolTip="入れると、船の 3D を見るたびにゲームデータ (Data.p4k) から直接読み、置き場所には保存しません (表示をやめたら消します)。［船舶・車両をまとめて取り込む］は使えなくなります。切ると (既定)、読んだものを置き場所に保存し、次からはそれを使います。「設定を保存」で有効になります"/>
                                 </StackPanel>
 
                                 <StackPanel Grid.Row="3" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="0,6,0,4">
@@ -2561,7 +2563,7 @@
                                     <Button x:Name="btnShip3DBatch" Content="船舶・車両をまとめて取り込む" Click="Ship3DBatch_Click" Padding="14,6" ToolTipService.ShowOnDisabled="True"
                                             ToolTip="保有している船 (所持船と Hangar 同期の船) を先に、その後に［詳細］の船の一覧の残りを、ゲームデータから書き出してキャッシュに入れます。始める前に隻数・予想時間・予想サイズを出します"/>
                                     <Button x:Name="btnStationBatch" Content="マップをまとめて取り込む" Click="StationBatch_Click" Padding="14,6" Margin="8,0,0,0" ToolTipService.ShowOnDisabled="True"
-                                            ToolTip="ゲームデータの中に見つかったステーション・都市の地図 (階ごとの床・道順) を、StarBreaker で床の形を取り出して作り、置き場所の stations フォルダに入れます。始める前に件数・予想時間・予想サイズを出します。取り消しは下の進み具合の欄の［まとめて取り消し］です"/>
+                                            ToolTip="ゲームデータ (Data.p4k) から、全部の場所の区画の置き方の一覧と場所の中身 (乗り場・店・端末・ハンガーの入口) をまとめて作り直し、置き場所の stations フォルダの view3d_layout.db に入れます。ステーションの 3D (新しい方式) の窓はこれを使います (ゲームの形・画像は入れません)。ふだんは起動の後とパッチの後に裏で作るので、押さなくても使えます"/>
                                     <TextBlock x:Name="txtShip3DBatchState" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
                                     <TextBlock x:Name="txtStationBatchState" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
                                 </StackPanel>
@@ -2570,7 +2572,7 @@
                                 <local:Ship3DProgressPanel Grid.Row="4" Grid.ColumnSpan="3" Margin="0,4"/>
 
                                 <TextBlock Grid.Row="5" Grid.ColumnSpan="3" TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontSize="12"
-                                           Text="［詳細］タブで船を出しているときの［3D 表示］［別ウィンドウ］で使う 3D モデルを、選択中のチャンネルのゲームデータ (Data.p4k) から StarBreaker で書き出して置いておきます (テクスチャ付き・船内込み)。ゲームデータが変わると書き出し直します。［船舶・車両をまとめて取り込む］［マップをまとめて取り込む］は、予想サイズの合計が最大容量を超える手前で止めます (古いものを消して入れ替えません)。CPU 使用率が 90% 以上のときは書き出しを始めません。ステーション・都市の地図 (階ごとの床・道順) も、同じゲームデータから StarBreaker で床の形を取り出して作り、結果だけを置き場所の stations フォルダに置きます (途中のファイルは済んだら消します)。最大容量・使用量は船とステーションの地図を合わせて数えます。"/>
+                                           Text="［詳細］タブで船を出しているときの［3D 表示］［別ウィンドウ］は、取り込み済みの船はその 3D モデルを、取り込んでいない船は選択中のチャンネルのゲームデータ (Data.p4k) から直接読んで出します (テクスチャ付き・船内込み)。「3D モデルを保存しない」を入れていなければ、読んだものを置いておきます。ゲームデータが変わると読み直します。［船舶・車両をまとめて取り込む］は、予想サイズの合計が最大容量を超える手前で止めます (古いものを消して入れ替えません)。CPU 使用率が 90% 以上のときは書き出しを始めません。ステーション・都市の 3D (新しい方式) は、区画の置き方の一覧 (stations フォルダの view3d_layout.db) だけを置き、形は開いたときにゲームデータから見る所の分だけ取り出して描きます。"/>
                             </Grid>
                         </GroupBox>
 

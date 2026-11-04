@@ -74,17 +74,21 @@ internal static class Ship3DWeb
         core.SetVirtualHostNameToFolderMapping(ViewerHost, Path.Combine(AppContext.BaseDirectory, "wwwroot"), CoreWebView2HostResourceAccessKind.DenyCors);
     }
 
-    // その船の GLB をビューアで開く (キャッシュのフォルダは開くたびに割り当て直す。設定で置き場所を変えたときのため)
-    public static void Show(WebView2 web, string shortName, string title)
+    // その船の GLB をビューアで開く (キャッシュのフォルダは開くたびに割り当て直す。設定で置き場所を変えたときのため)。
+    // glbPath: 置き場所の中の別のファイル (保存しない設定で直接読んだものは作業用のフォルダにある。Ship3DExports.GetViewPathAsync)。null なら <短い名前>.glb
+    public static void Show(WebView2 web, string shortName, string title, string? glbPath = null)
     {
         var core = web.CoreWebView2 ?? throw new InvalidOperationException("WebView2 が用意できていません");
         var folder = Ship3DExports.Folder;
         try { core.ClearVirtualHostNameToFolderMapping(Ship3DExports.CacheHost); } catch { }
         core.SetVirtualHostNameToFolderMapping(Ship3DExports.CacheHost, folder, CoreWebView2HostResourceAccessKind.Allow);
         long ticks = 0;
-        try { ticks = File.GetLastWriteTimeUtc(Ship3DExports.GlbPath(shortName)).Ticks; } catch { }
+        var file = glbPath ?? Ship3DExports.GlbPath(shortName);
+        try { ticks = File.GetLastWriteTimeUtc(file).Ticks; } catch { }
+        var rel = Path.GetRelativePath(folder, file).Replace('\\', '/');
+        if (rel.StartsWith("../", StringComparison.Ordinal) || Path.IsPathRooted(rel)) throw new InvalidOperationException($"3D モデルが置き場所の外にあります: {file}");
         // ?v= は書き出し直したときに前の GLB を使わないため (ファイルの更新日時)
-        var glb = $"https://{Ship3DExports.CacheHost}/{Uri.EscapeDataString(shortName)}.glb?v={ticks}";
+        var glb = $"https://{Ship3DExports.CacheHost}/{string.Join('/', rel.Split('/').Select(Uri.EscapeDataString))}?v={ticks}";
         var url = $"https://{ViewerHost}/ship3d/viewer.html?glb={Uri.EscapeDataString(glb)}&title={Uri.EscapeDataString(title)}";
         core.Navigate(url);
     }

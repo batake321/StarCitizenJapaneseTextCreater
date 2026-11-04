@@ -133,8 +133,10 @@ public partial class MainWindow : Window
         mapPanel.EnsureGameLogStarted = gameLogPanel.EnsureStarted;
         // ［マップ］の自動の取得: ［ゲームログ］の追い読みで量子ジャンプの目的地の選択・到着の行を見たら知らせる
         gameLogPanel.QuantumEventSeen += mapPanel.OnQuantumEvent;
-        // ステーションの地図の［現在位置］: ［マップ］の［現在位置］と同じ処理 (マップタブが開かれていなくても動く。MapPanel.CaptureCurrentAsync)
-        StationMapWeb.CaptureHook = mapPanel.CaptureCurrentAsync;
+        // ステーションの 3D (新しい方式) の［現在位置］: ［マップ］の［現在位置］と同じ処理 (マップタブが開かれていなくても動く。MapPanel.CaptureCurrentAsync)
+        StationView3DView.CaptureHook = mapPanel.CaptureCurrentAsync;
+        // 前の版の 2D の地図・古い方式のステーションの 3D のファイルを消す (1 回だけ。消せなかったものがあれば次の起動でまた。StationView3DLayout.CleanupOldMaps)
+        _ = Task.Run(StationView3DLayout.CleanupOldMaps);
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -2492,7 +2494,7 @@ public partial class MainWindow : Window
         try
         {
             var places = svc.ReadMapPlaces(members.Select(x => x.RecordName).Distinct(StringComparer.Ordinal).ToList())
-                .Where(p => p.Named && StationMapWindow.IsListedPlace(p.MapType, p.MapRecord.StartsWith(StationPlace.UnlistedPrefix, StringComparison.Ordinal), p.HasFloor))
+                .Where(p => p.Named && StationPlaceList.IsListedPlace(p.MapType))
                 .GroupBy(p => p.MapRecord, StringComparer.Ordinal).Select(g => g.First())
                 .ToList();
             // 同じ地図 (同じ地図の鍵 ContentKey。地図の窓の一覧の ▼ のまとまりと同じ) の場所は 1 つのリンクにまとめる (2026-11-01、利用者
@@ -2504,11 +2506,8 @@ public partial class MainWindow : Window
                 {
                     var first = g.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ThenBy(p => p.MapRecord, StringComparer.Ordinal).First();
                     var count = g.Count();
-                    var label = count == 1 ? first.Name : $"▼ {StationMapWindow.GroupName(g.Select(p => p.Name))}（{count} か所）";
-                    // 床の形のデータの無い場所 (2026-11-02、利用者「床が出ないものは床なしと表示」): 床のメッシュの無い場所 (has_floor) と、取り込んだら
-                    // 空の地図だった場所 (StationMapExports.IsEmptyMap)。地図の窓の一覧 (StationMapWindow.IsNoFloorPlace) と同じ。
-                    // 同じ地図のまとまりは、全部の場所が床なしのときだけ付ける (親の決定「A」)
-                    if (g.All(p => !p.HasFloor || StationMapExports.IsEmptyMap(p.MapRecord))) label += StationMapWindow.NoFloorSuffix;
+                    var label = count == 1 ? first.Name : $"▼ {StationPlaceList.GroupName(g.Select(p => p.Name))}（{count} か所）";
+                    // (2026-11-04、利用者の決定「やめる」) 「（床なし）」の印はやめた
                     return (Record: first.MapRecord, first.Name, Label: label);
                 })
                 .OrderBy(x => x.Label.TrimStart('▼', ' '), StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Record, StringComparer.Ordinal)
@@ -2539,16 +2538,12 @@ public partial class MainWindow : Window
         }
     }
 
-    // 地図のリンク: 階層マップの窓を開いてその場所を選ぶ。取り込んでいなくても開く (2026-11-01、親の決定。星図に載っていない場所は［詳細］が無く、
-    // ここで開かないと［読み込み］へたどり着けないため)。取り込んでいない・照合中などは、窓の地図の欄の知らせと［読み込み］のボタンで扱う
-    // (StationMapPanel.ShowAsync・StationMapWindow.UpdateBar。［詳細］から開くときの、取り込み済みでなければ知らせて開かない動きは変えない)
+    // 地図のリンク: その場所のステーションの 3D (新しい方式) の窓を開く (2026-11-04、利用者の指示「2D 地図は消して」で、2D の地図の窓から替えた)
     private void OpenMissionMap(string record, string name)
     {
         try
         {
-            var win = new StationMapWindow(record, name, null);
-            if (IsLoaded) win.Owner = this;
-            win.Show();
+            StationView3DShops.Open(record, name, null, null, this);
         }
         catch (Exception ex)
         {
@@ -2896,7 +2891,7 @@ public partial class MainWindow : Window
                     Log("[起動後の作り直し] 名前の書き戻しを終えました。ゲームデータの DB を調べます");
 
                     using var extractor = new GameDataExtractor(workDir);
-                    if (!extractor.IsReady) return (0, 0, 0, 0, 0, 0, "starbreaker か Data.p4k が見つからない");
+                    if (!extractor.IsReady) return (0, 0, 0, 0, 0, 0, "Data.p4k が見つからない");
                     var needsCargo = extractor.NeedsShipCargo();
                     var needsResources = extractor.NeedsResourceTypes();
                     var needsPorts = extractor.NeedsCharacterPorts();
@@ -3048,7 +3043,7 @@ public partial class MainWindow : Window
                 _startupBackfillCts = cts;
                 _startupBackfillTask = task;
             }
-            var (count, resourceCount, blueprintCount, starmapCount, extraCount, _, skipped) = await task;
+            var (count, resourceCount, blueprintCount, starmapCount, extraCount, oreCount, skipped) = await task;
             if (skipped != null)
             {
                 Log($"[品目の追加] 採掘レーザー・鉱石ポッドなどの取り込みをしませんでした ({skipped})");
@@ -3065,6 +3060,7 @@ public partial class MainWindow : Window
                 gameLogPanel?.ClearNameCache();   // 取り出した資源名を使うよう、［ゲームログ］の名前の覚えを捨てる
                 orePanel?.Reload();               // ［鉱石］の資源の一覧 (グループ) も読み直す
             }
+            else if (oreCount > 0) orePanel?.Reload();   // ［鉱石］のシグネチャー (ore_signatures) を作り直したときも読み直す
             if (resourceCount > 0 || blueprintCount > 0) blueprintPanel?.Reload();   // ［BP］(資源名・原石の精錬後・blueprints) を読み直す
             if (blueprintCount > 0) powerPanel?.Reload();   // ［電力管理］の品質の増減 (blueprints) も
             if (blueprintCount > 0) RefreshMyComponentsForBlueprints();   // 所持コンポーネントの品質の列・［品質を入力］が押せるかも
@@ -3173,10 +3169,8 @@ public partial class MainWindow : Window
                 // ［価格の取得を中止］で止めていたときも続けない
                 StartShopPriceFetch(_gameDataExtractor.DbPath, afterRebuild: false, onlyIfInterrupted: true);
             }
-            else if (_gameDataExtractor.IsStarBreakerInstalled)
-                txtGameDataStatus.Text = "未インデックス (インデックス構築で高速化)";
             else
-                txtGameDataStatus.Text = "StarBreaker 未導入 (初回は自動ダウンロード)";
+                txtGameDataStatus.Text = "未インデックス (インデックス構築で高速化)";
         }
         catch (Exception ex)
         {

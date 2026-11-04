@@ -80,7 +80,11 @@ internal readonly record struct StationXf(double X, double Y, double Z, double Q
 internal sealed record StationPlace(string Record, string Uuid, string Type, string System)
 {
     // ステーション・都市として地図を作る種類 (Manmade 系・LandingZone)
-    public bool IsStation => Type.StartsWith("Manmade", StringComparison.Ordinal) || Type == "LandingZone";
+    public bool IsStation => Type.StartsWith("Manmade", StringComparison.Ordinal) || Type == "LandingZone" || IsHangar;
+    // (2026-11-03、利用者の指示「ハンガーのエレベーターは、マイハンガー (S M L XL 等) で、ハンガーのマップを出してほしい」) プレイヤーのハンガーの中 (instanced の区域。
+    // 星図の場所ではない)。record は HangarRecordPrefix + ハンガーの socpak のキー (StationHangars.RecordOf)。ステーションと同じ扱い (IsStation) で木を辿る
+    public const string TypeHangar = "Hangar";
+    public bool IsHangar => Type == TypeHangar;
     // 地図を作れる種類 (2026-11-01、利用者の決定): ステーション・都市 (IsStation) に、前哨基地 (Outpost・Outpost_InvalidQT)・小惑星 (Asteroid・Asteroid_ValidQT)・下の 4 種類を足したもの。
     // FindRoots はこの種類のルートを探す。まとめての取り込みの対象は IsStation のものだけ (呼ぶ側で IsStation で絞る)
     // (2026-11-01、利用者の指示「ミッションで使われるマップは全部出すべき」) PointOfInterest・Anomaly・JumpPoint・NavPoint も足した。
@@ -203,6 +207,10 @@ internal sealed class StationRootSearch
 // p4k の中の socpak の位置表と、socpak の直下の xml の読み取り (読んだものは覚える)
 internal sealed class StationIndex : IDisposable
 {
+    // 区画の中身 (SocpakContents.Read) を、場所の木どうしで使い回す置き場 (2026-11-04、区画の置き方の一覧を一括で作るとき (StationView3D.BuildLayoutDb) だけ入れる。
+    // null なら今までどおり木ごとに読む)。同じ socpak の中身は 1 回だけ読む
+    public System.Collections.Concurrent.ConcurrentDictionary<string, SocpakContents?>? SharedContents { get; set; }
+
     // 恒星の回転の規則の既定 (計画の照合の結果)
     public const StarRotRule DefaultRule = StarRotRule.Float32;
     // ルートを探すときの深さの上限 (恒星の Child を 0。Checkmate のルートは 2)
@@ -894,7 +902,8 @@ internal sealed class StationTree
         {
             ct.ThrowIfCancellationRequested();
             if (inst.Socpak.Length == 0 || !inst.Found) continue;
-            if (!cache.TryGetValue(inst.Socpak, out var c)) cache[inst.Socpak] = c = SocpakContents.Read(index, inst.Socpak);
+            if (!cache.TryGetValue(inst.Socpak, out var c))
+                cache[inst.Socpak] = c = index.SharedContents is { } sc ? sc.GetOrAdd(inst.Socpak, k => SocpakContents.Read(index, k)) : SocpakContents.Read(index, inst.Socpak);
             if (c == null) continue;
             var xf = inst.ToStation;
             foreach (var m in c.Meta)
@@ -914,6 +923,27 @@ internal sealed class StationTree
             foreach (var x in c.Exteriors) Exteriors.Add(x with { Instance = inst.Index, Pos = xf.Apply(x.Pos), Rot = Rq(x.Rot) });
         }
         LinkFreightDecks();
+        if (Root.Place.IsHangar) SplitShipElevators();
+    }
+
+    // (2026-11-03、親の決定「船のエレベーターの台 (LoadingPlatform_ShipElevator_*) は、貨物エレベーターに入れず、船のエレベーターとして出します」) ハンガーの地図だけ:
+    // 外の設備の freight (LoadingPlatformManager の台) のうち、船の着陸の場所 (pad。EntityClass LandingArea) と同じ所 (ShipElevatorJoin m 以内) にあるものを、
+    // 外の設備から外し、端末の種類 shipelev (船のエレベーター) にする (地図の印・端末の一覧に出す)。
+    // 実データ (2026-11-03、ハーネス): hangar_smlfrnt_001_rest_occu は LoadingPlatform_ShipElevator_HangarSmallFront と LandingArea_ShipElevator_HangarSmallFront が同じ (0, -43, 4.5)、
+    // hangar_xltop_001_orison は 0.8 m (高さだけ)、hangar_xltop_001_lorville は同じ、hangar_medfrnt_002_rest_rund は 0.5 m (高さだけ)。
+    // 貨物エレベーターの台 (LoadingPlatform_FreightElevator_*) は、いちばん近い pad から 20 m 以上離れていた
+    public const double ShipElevatorJoin = 2;
+    private void SplitShipElevators()
+    {
+        static double D((double X, double Y, double Z) a, (double X, double Y, double Z) b) => Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y) + (a.Z - b.Z) * (a.Z - b.Z));
+        var pads = Exteriors.Where(e => e.Kind == "pad").ToList();
+        for (int i = Exteriors.Count - 1; i >= 0; i--)
+        {
+            var f = Exteriors[i];
+            if (f.Kind != "freight" || !pads.Any(p => D(p.Pos, f.Pos) <= ShipElevatorJoin)) continue;
+            Exteriors.RemoveAt(i);
+            Terminals.Add(new StationTerminal(f.Instance, "shipelev", f.Guid, f.EntityClass, f.EntityName, f.Pos, f.Rot, "pad+LoadingPlatform"));
+        }
     }
 
     // 外の貨物エレベーターの台 (freight) と外部貨物の区画 (deck。LoadingArea、HUDDisplayName @cargodeck_NN) の対応 (2026-11-02)。

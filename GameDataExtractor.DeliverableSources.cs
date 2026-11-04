@@ -135,9 +135,7 @@ public partial class GameDataExtractor
                 sw.Restart();
                 StatusChanged?.Invoke($"{P} DCB を JSON に書き出し中 ({i + 1}/{DeliverableDcbChunks.Length})...");
                 if (Directory.Exists(jsonDir)) Directory.Delete(jsonDir, true);
-                await RunStarBreakerAsync(_dcbPath is { } dcbFile
-                    ? $"dcb extract --dcb \"{dcbFile}\" -o \"{jsonDir}\" --format json --filter \"{filter}\""
-                    : $"dcb extract --p4k \"{p4kPath}\" -o \"{jsonDir}\" --format json --filter \"{filter}\"", ct);
+                await RunDcbExtractJsonAsync(_dcbPath, p4kPath, jsonDir, filter, ct);   // (2026-11-04) starbreaker の dcb extract の代わり (アプリの中の読み取り)
                 tDump += sw.Elapsed.TotalSeconds;
                 sw.Restart();
                 // 当たるレコードの無い小分けではフォルダができない (0 件の書き出しは成功で終わる) ので、そのときは読まない
@@ -162,7 +160,7 @@ public partial class GameDataExtractor
                 StatusChanged?.Invoke($"{P} ロードアウトの XML を読み込み中...");
                 var loDir = Path.Combine(dir, "loadouts");
                 Directory.CreateDirectory(loDir);
-                await RunStarBreakerAsync($"p4k extract --p4k \"{p4kPath}\" -o \"{loDir}\" --filter \"Data/Scripts/Loadouts/**\"", ct);
+                await RunP4kExtractAsync(p4kPath, loDir, "Data/Scripts/Loadouts/**", ct);
                 (loadoutItems, loadoutFiles, loadoutBad) = await Task.Run(() => DeliverableDcb.ReadLoadoutItemNames(Path.Combine(loDir, "Data"), ct), ct);
                 tLoadout = sw.Elapsed.TotalSeconds;
             }
@@ -201,7 +199,7 @@ public partial class GameDataExtractor
                 try
                 {
                     using var ddl = _db!.CreateCommand();
-                    ddl.CommandText = OreLocationsDdl;
+                    ddl.CommandText = OreLocationsDdl + OreSignaturesDdl;
                     ddl.ExecuteNonQuery();
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -222,6 +220,27 @@ public partial class GameDataExtractor
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     StatusChanged?.Invoke($"[採掘できる場所] 書き込めませんでした (前のデータを残します): {ex.Message}");
+                }
+                // シグネチャー (ore_signatures。同じ読み込みで作った行)。0 行なら前の行を残し、表が無ければ空の表だけ作る (ore_locations と同じ扱い)
+                try
+                {
+                    var sigRows = finder.OreSignatures;
+                    if (sigRows.Count == 0)
+                    {
+                        using var ddl = _db!.CreateCommand();
+                        ddl.CommandText = OreSignaturesDdl;
+                        ddl.ExecuteNonQuery();
+                        StatusChanged?.Invoke("[シグネチャー] 1 行も作れませんでした (前のデータを残します)");
+                    }
+                    else
+                    {
+                        WriteOreSignatures(sigRows);
+                        StatusChanged?.Invoke($"[シグネチャー] {sigRows.Count} 行 (掘り方と岩の種類 {sigRows.Select(r => (r.Method, r.Rock)).Distinct().Count()} 件)");
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    StatusChanged?.Invoke($"[シグネチャー] 書き込めませんでした (前のデータを残します): {ex.Message}");
                 }
             }
             // 6b. 星図の場所 (starmap_locations) とゲームの店 (game_shops)、それと DB の価格との紐づけ (shop_price_links)。
@@ -359,6 +378,63 @@ public partial class GameDataExtractor
     internal readonly record struct OreLocationRow(string ResourceUuid, string ResourceRecord, string Preset, string Place, string System, string Method,
         string Rock, double Chance, double MinPct, double MaxPct, double PartProbability, double GroupProbability);
 
+    // ── 採掘のシグネチャー (ore_signatures。［鉱石］タブのシグネチャー。DeliverableSourceFinder.FindOreLocations が ore_locations と一緒に作る) ──
+    // 1 行 = (掘り方, 岩の種類) の RS と群れ 1 組 (全 HarvestableProviderPreset の 3 つのグループの HarvestableElement から。同じ行は 1 つ):
+    //   method / rock: ore_locations と同じ文字 (掘り方・岩の種類の英語名)
+    //   signature: 岩のエンティティの SSCSignatureSystemParams の radarProperties.baseSignatureParams.signatures[4] (RS。岩 1 個の値)
+    //   grade: 格 (Common / Uncommon / Rare / Epic / Legendary。MineableComposition の record 名の頭の語。無ければ '')
+    //   cluster_min / cluster_max: HarvestableElement の clustering (HarvestableClusterPreset) の clusterParamsArray の minSize の最小 / maxSize の最大 (群れが無ければ NULL)
+    //   cluster_probability: その probabilityOfClustering (群れになる確率 %。群れが無ければ NULL)
+    // 同じ (method, rock) で群れが違えば行が分かれる (例 Beryl)。
+    // インデックス構築 (Step 6c) で作り直す (作れなかったときは前の行を残す)。前の版の DB には表が無いので、起動後に一度だけ作る (NeedsOreLocations → RebuildOreLocationsAsync)
+    internal const string OreSignaturesTable = "ore_signatures";
+    internal const string OreSignaturesDdl = """
+
+        CREATE TABLE IF NOT EXISTS ore_signatures (
+            method TEXT NOT NULL,
+            rock TEXT NOT NULL,
+            signature REAL NOT NULL,
+            grade TEXT NOT NULL,
+            cluster_min INTEGER,
+            cluster_max INTEGER,
+            cluster_probability REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ore_signatures_method_rock ON ore_signatures(method, rock);
+        """;
+
+    internal readonly record struct OreSignatureRow(string Method, string Rock, double Signature, string Grade, int? ClusterMin, int? ClusterMax, double? ClusterProbability);
+
+    // ore_signatures を入れ替える (表が無ければ作る)
+    private void WriteOreSignatures(List<OreSignatureRow> rows)
+    {
+        using var tx = _db!.BeginTransaction();
+        using (var ddl = _db.CreateCommand())
+        {
+            ddl.Transaction = tx;
+            ddl.CommandText = OreSignaturesDdl + "DELETE FROM ore_signatures;";
+            ddl.ExecuteNonQuery();
+        }
+        using (var ins = _db.CreateCommand())
+        {
+            ins.Transaction = tx;
+            ins.CommandText = "INSERT INTO ore_signatures(method,rock,signature,grade,cluster_min,cluster_max,cluster_probability) VALUES(@m,@k,@s,@g,@mn,@mx,@p)";
+            var pM = ins.Parameters.Add("@m", SqliteType.Text);
+            var pK = ins.Parameters.Add("@k", SqliteType.Text);
+            var pS = ins.Parameters.Add("@s", SqliteType.Real);
+            var pG = ins.Parameters.Add("@g", SqliteType.Text);
+            var pMn = ins.Parameters.Add("@mn", SqliteType.Integer);
+            var pMx = ins.Parameters.Add("@mx", SqliteType.Integer);
+            var pP = ins.Parameters.Add("@p", SqliteType.Real);
+            foreach (var r in rows)
+            {
+                pM.Value = r.Method; pK.Value = r.Rock; pS.Value = r.Signature; pG.Value = r.Grade;
+                pMn.Value = (object?)r.ClusterMin ?? DBNull.Value; pMx.Value = (object?)r.ClusterMax ?? DBNull.Value; pP.Value = (object?)r.ClusterProbability ?? DBNull.Value;
+                ins.ExecuteNonQuery();
+            }
+        }
+        tx.Commit();
+    }
+
     // ore_locations を入れ替える (表が無ければ作る)
     private void WriteOreLocations(List<OreLocationRow> rows)
     {
@@ -396,14 +472,15 @@ public partial class GameDataExtractor
         tx.Commit();
     }
 
-    // インデックスを構築した DB で、ore_locations の表がまだ無いか (前の版で構築した DB・前の版のバックアップを取り込んだ DB)。
+    // インデックスを構築した DB で、ore_locations かシグネチャー (ore_signatures) の表がまだ無いか (前の版で構築した DB・前の版のバックアップを取り込んだ DB)。
     // 起動後の RebuildOreLocationsAsync を走らせるか決めるため。表は EnsureDb では作らない (無いことを印にする)
     public bool NeedsOreLocations()
     {
         EnsureDb();
         using var cmd = _db!.CreateCommand();
-        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM item_index) AND NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @t)";
+        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM item_index) AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (@t, @s)) < 2";
         cmd.Parameters.AddWithValue("@t", OreLocationsTable);
+        cmd.Parameters.AddWithValue("@s", OreSignaturesTable);
         return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
     }
 
@@ -544,7 +621,6 @@ public partial class GameDataExtractor
         var p4kPath = FindDataP4k()
             ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
 
-        await EnsureStarBreakerAsync();
         EnsureDb();
 
         Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
@@ -563,9 +639,9 @@ public partial class GameDataExtractor
             if (IsIndexBuildRunning) return 0;
             using (var ddl = _db!.CreateCommand())
             {
-                // 採掘できる場所の表は、作れなかったときも空で作る (次の起動で走り直さないように)。
+                // 採掘できる場所・シグネチャーの表は、作れなかったときも空で作る (次の起動で走り直さないように)。
                 // 星図の場所・店・紐づけの表は空で作らない (今の形で作れなかったら、次の起動でまた試す)
-                ddl.CommandText = OreLocationsDdl;
+                ddl.CommandText = OreLocationsDdl + OreSignaturesDdl;
                 ddl.ExecuteNonQuery();
             }
             // 店・星図の表が今の形でできていなければ、そうと分かるように知らせる (印は WriteShopTables が今の形で作れたときだけ書いている)
@@ -583,7 +659,9 @@ public partial class GameDataExtractor
             using var cnt = _db.CreateCommand();
             cnt.CommandText = "SELECT COUNT(*) FROM ore_locations";
             var oreCount = Convert.ToInt32(cnt.ExecuteScalar() ?? 0L);
-            StatusChanged?.Invoke($"[採掘できる場所] 起動後の作り直しを終えました (ore_locations は今 {oreCount} 行)");
+            cnt.CommandText = "SELECT COUNT(*) FROM ore_signatures";
+            var sigCount = Convert.ToInt32(cnt.ExecuteScalar() ?? 0L);
+            StatusChanged?.Invoke($"[採掘できる場所] 起動後の作り直しを終えました (ore_locations は今 {oreCount} 行・ore_signatures は今 {sigCount} 行)");
             return oreCount;
         }
         finally
@@ -1866,6 +1944,9 @@ public partial class GameDataExtractor
         {
             var rows = new List<OreLocationRow>();
             var compCache = new Dictionary<string, OreComposition?>(StringComparer.Ordinal);
+            var clusterCache = new Dictionary<string, (int?, int?, double?)>(StringComparer.Ordinal);
+            OreSignatures.Clear();
+            _sigSeen.Clear();
             foreach (var rel in _d.Files)
             {
                 if (!_d.Rec.TryGetValue(rel, out var hpp) || hpp == null || !hpp.StartsWith("HarvestableProviderPreset.", StringComparison.Ordinal)) continue;
@@ -1889,7 +1970,14 @@ public partial class GameDataExtractor
                         {
                             var rp = Num(Get(h, "relativeProbability"));
                             if (rp <= 0) continue;
-                            if (CompositionOf(h, compCache) is not { } comp) continue;
+                            if (CompositionOf(h, compCache, out var signature) is not { } comp) continue;
+                            // シグネチャー (ore_signatures): 岩のエンティティの RS と、HarvestableElement の clustering の群れ
+                            if (signature is { } rs)
+                            {
+                                var (cMin, cMax, cProb) = ClusterOf(RefString(h, "clustering"), clusterCache);
+                                var sigRow = new OreSignatureRow(method, comp.Rock, rs, OreGradeOf(comp.Record), cMin, cMax, cProb);
+                                if (_sigSeen.Add(sigRow)) OreSignatures.Add(sigRow);
+                            }
                             var chance = rp / sum * 100;
                             foreach (var part in comp.Parts)
                             {
@@ -1921,8 +2009,67 @@ public partial class GameDataExtractor
             public double Chance, Min, Max, Prob, GroupProbability;
         }
 
-        // 岩の種類 1 つ: 名前と、中の資源 (同じ資源の行はまとめたもの)
-        private sealed record OreComposition(string Rock, List<(string Uuid, string Record, double Min, double Max, double Prob)> Parts);
+        // 岩の種類 1 つ: 名前と、MineableComposition の record 名 (格を名前から決めるため)、中の資源 (同じ資源の行はまとめたもの)
+        private sealed record OreComposition(string Rock, string Record, List<(string Uuid, string Record, double Min, double Max, double Prob)> Parts);
+
+        // シグネチャーの行 (FindOreLocations が ore_locations の行と一緒に作る。同じ行は 1 つ)
+        public List<OreSignatureRow> OreSignatures { get; } = new();
+        private readonly HashSet<OreSignatureRow> _sigSeen = new();
+
+        // 格: MineableComposition の record 名 ("MineableComposition.LegendaryShipMineables_Quantainium" など) の頭の語
+        // (Common / Uncommon / Rare / Epic / Legendary)。データに格の欄は無く、record 名から決める。当たらなければ "" (ROC・手掘りの岩は名前に格が無い)
+        private static readonly string[] OreGradeWords = ["Uncommon", "Common", "Rare", "Epic", "Legendary"];
+        private static string OreGradeOf(string compRecord)
+        {
+            var name = compRecord.StartsWith("MineableComposition.", StringComparison.Ordinal) ? compRecord["MineableComposition.".Length..] : compRecord;
+            foreach (var w in OreGradeWords)
+                if (name.StartsWith(w, StringComparison.OrdinalIgnoreCase)) return w;
+            return "";
+        }
+
+        // HarvestableElement の clustering (HarvestableClusterPreset) → (群れの岩の数の最小 (clusterParamsArray[] の minSize の最小)・最大 (maxSize の最大)、
+        // 群れになる確率 (probabilityOfClustering))。clustering が空・引けない・clusterParamsArray が空なら (null, null, null)。参照の文字で覚える
+        private (int? Min, int? Max, double? Prob) ClusterOf(string? clusterRef, Dictionary<string, (int?, int?, double?)> cache)
+        {
+            if (clusterRef == null) return (null, null, null);
+            if (cache.TryGetValue(clusterRef, out var hit)) return hit;
+            (int?, int?, double?) result = (null, null, null);
+            if (RefText(clusterRef) is { } text)
+            {
+                using var cd = JsonDocument.Parse(text);
+                if (cd.RootElement.TryGetProperty("_RecordValue_", out var cv) && cv.ValueKind == JsonValueKind.Object)
+                {
+                    var ps = Arr(Get(cv, "clusterParamsArray"));
+                    if (ps.Count > 0)
+                        result = ((int)ps.Min(p => Num(Get(p, "minSize"))), (int)ps.Max(p => Num(Get(p, "maxSize"))), Num(Get(cv, "probabilityOfClustering")));
+                }
+            }
+            return cache[clusterRef] = result;
+        }
+
+        // 岩のエンティティの RS (SSCSignatureSystemParams の radarProperties.baseSignatureParams.signatures[4])。無ければ null
+        private static double? RockSignature(JsonElement root)
+        {
+            double? found = null;
+            void Find(JsonElement o)
+            {
+                if (found != null) return;
+                if (o.ValueKind == JsonValueKind.Object)
+                {
+                    if (Str(o, "_Type_") == "SSCSignatureSystemParams")
+                    {
+                        var sigs = Arr(Get(Get(Get(o, "radarProperties"), "baseSignatureParams"), "signatures"));
+                        if (sigs.Count > 4 && sigs[4].ValueKind == JsonValueKind.Number && sigs[4].GetDouble() is var d && d > 0) found = d;
+                        return;
+                    }
+                    foreach (var p in o.EnumerateObject()) Find(p.Value);
+                }
+                else if (o.ValueKind == JsonValueKind.Array)
+                    foreach (var v in o.EnumerateArray()) Find(v);
+            }
+            Find(root);
+            return found;
+        }
 
         // 参照の文字 (file://…/libs/foundry/records/…/x.json) のレコードの JSON の文字。records の下のパスで引き、引けなければファイル名で引く
         // (ファイル名だけで引くと、同じ名前のファイルが別のフォルダにあるとき (例 mining/mineableelements/ice_raw.json) 違うレコードになるため)。
@@ -1939,9 +2086,11 @@ public partial class GameDataExtractor
         private static string? RefString(JsonElement o, string key) =>
             o.ValueKind == JsonValueKind.Object && o.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String && (v.GetString() ?? "").Length > 0 ? v.GetString() : null;
 
-        // HarvestableElement → 岩の種類 (辿れなければ null)。MineableComposition の参照の文字で覚える
-        private OreComposition? CompositionOf(JsonElement h, Dictionary<string, OreComposition?> cache)
+        // HarvestableElement → 岩の種類 (辿れなければ null)。MineableComposition の参照の文字で覚える。
+        // signature: その岩のエンティティの RS (RockSignature。エンティティまで辿れない・無ければ null)
+        private OreComposition? CompositionOf(JsonElement h, Dictionary<string, OreComposition?> cache, out double? signature)
         {
+            signature = null;
             string? entityRef = null;
             if (RefString(h, "harvestable") is { } presetRef)
             {
@@ -1966,6 +2115,7 @@ public partial class GameDataExtractor
                         foreach (var v in o.EnumerateArray()) Find(v);
                 }
                 Find(ed.RootElement);
+                signature = RockSignature(ed.RootElement);
             }
             if (compRef == null) return null;
             if (cache.TryGetValue(compRef, out var hit)) return hit;
@@ -1994,7 +2144,7 @@ public partial class GameDataExtractor
                         if (i < 0) parts.Add((uuid, record, mn, mx, pr));
                         else parts[i] = (uuid, parts[i].Record, Math.Min(parts[i].Min, mn), Math.Max(parts[i].Max, mx), Math.Max(parts[i].Prob, pr));
                     }
-                    if (parts.Count > 0) result = new OreComposition(rock, parts);
+                    if (parts.Count > 0) result = new OreComposition(rock, compRecord, parts);
                 }
             }
             return cache[compRef] = result;

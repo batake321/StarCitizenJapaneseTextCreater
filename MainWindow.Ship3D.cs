@@ -4,23 +4,22 @@ using System.Windows.Controls;
 
 namespace StarCitizenJapaneseTextCreater;
 
-// 設定タブの「3D モデル」の欄 (Ship3DExports): 置き場所 (参照…)・置き場所のドライブの容量・最大容量・今の使用量 (船とステーションの地図の合計)・［船舶・車両をまとめて取り込む］・
-// ［マップをまとめて取り込む］(StationMapExports)
+// 設定タブの「3D モデル」の欄 (Ship3DExports): 置き場所 (参照…)・置き場所のドライブの容量・最大容量・今の使用量 (船)・保存しない・［船舶・車両をまとめて取り込む］・
+// ［マップをまとめて取り込む］(StationView3DLayout。区画の置き方の一覧を作り直す)
 public partial class MainWindow
 {
     private const long Ship3DMB = 1024 * 1024;
 
-    // 2 つのまとめて取り込むのボタンの ToolTip の元の文 (XAML のもの。後ろに今の Data.p4k で取り込んだ数・取り込んでいない数を足して出す)
+    // 船のまとめて取り込むのボタンの ToolTip の元の文 (XAML のもの。後ろに今の Data.p4k で取り込んだ数・取り込んでいない数を足して出す)
     private string _ship3DBatchTip = "";
-    private string _stationBatchTip = "";
 
     // Window_Loaded から
     private void InitShip3DSettings()
     {
         _ship3DBatchTip = btnShip3DBatch.ToolTip as string ?? "";
-        _stationBatchTip = btnStationBatch.ToolTip as string ?? "";
         txtShip3DFolder.Text = Ship3DExports.Folder;
         txtShip3DMaxMB.Text = Ship3DExports.MaxMb.ToString();
+        chkShip3DNoSave.IsChecked = App.Config.Ship3DNoSave;
         UpdateShip3DDriveText();
         UpdateShip3DUsageText();
         // 「全部取り込み済み」の数え直しは、知らせが短い間に続けて来たら 1 回にまとめる (最後の知らせから 300 ms 後に、UI スレッドの外で数える)
@@ -38,28 +37,15 @@ public partial class MainWindow
             {
                 UpdateShip3DBatchButton();
                 UpdateShip3DUsageText();
-                // BatchActive の知らせはステーションのまとめての段階の文が変わるたびにも来る (NotifyStationBatchChanged) ので、
                 // 船のまとめてが始まった・終わったときだけ数え直す
                 var active = Ship3DExports.Instance.ShipBatchActive;
                 if (active != _lastShipBatchActive) { _lastShipBatchActive = active; RequestBatchRecount(); }
             }
         };
-        // ステーションの地図: 取り込み・照合・地図を書いた / 消した・まとめて取り込むの段階が変わったとき
-        StationMapExports.Instance.StateChanged += () => { UpdateShip3DUsageText(); UpdateStationBatchButton(); RequestBatchRecount(); };
-        StationMapExports.Instance.PropertyChanged += (_, e) =>
-        {
-            // 段階の文 (BatchText) が変わっただけのときは数え直さない
-            if (e.PropertyName is nameof(StationMapExports.BatchActive) or nameof(StationMapExports.BatchText)) UpdateStationBatchButton();
-            if (e.PropertyName == nameof(StationMapExports.BatchActive)) RequestBatchRecount();
-        };
+        // 区画の置き方の一覧 (view3d_layout.db) を作っている・作り終えたとき
+        StationView3DLayout.Changed += () => Dispatcher.BeginInvoke(UpdateStationBatchButton);
         // Data.p4k の印が変わったとき (設定タブを開いたままパッチが入ったとき等)
         Ship3DExports.Instance.P4kStampChanged += RequestBatchRecount;
-        // (2026-11-02、利用者の決定「b も」) 取り込み済みの地図の形式が今と違えば、裏で自動で作り直す (StationMapExports.AutoConvertAsync の説明)。
-        // 起動の後 AutoConvertDelay たってから 1 回と、Data.p4k の印が変わったとき
-        var autoTimer = new System.Windows.Threading.DispatcherTimer { Interval = StationMapExports.AutoConvertDelay };
-        autoTimer.Tick += (_, _) => { autoTimer.Stop(); StationMapExports.Instance.StartAutoConvert("起動の後"); };
-        autoTimer.Start();
-        Ship3DExports.Instance.P4kStampChanged += () => StationMapExports.Instance.StartAutoConvert("Data.p4k の印が変わった");
         // 設定タブを開いたとき: 全部取り込み済みかを出し直す (パッチで Data.p4k が変わっていれば押せるようになる)
         tabMain.SelectionChanged += (_, e) =>
         {
@@ -73,7 +59,6 @@ public partial class MainWindow
 
     // 最後に数えた結果 (まだ数えていなければ null)
     private BatchCountState? _shipBatchCounts;
-    private BatchCountState? _stationBatchCounts;
     private System.Windows.Threading.DispatcherTimer? _batchCountTimer;
     private bool _batchCountRunning;
     private bool _batchCountAgain;
@@ -98,16 +83,13 @@ public partial class MainWindow
             do
             {
                 _batchCountAgain = false;
-                var (ships, maps) = await Task.Run(() =>
+                var ships = await Task.Run(() =>
                 {
                     var stamp = Ship3DExports.CurrentStamp();
-                    return (CountOnDisk(BatchTargetRecord.Ships, stamp, Ship3DExports.IsFreshOnDisk),
-                            CountOnDisk(BatchTargetRecord.Maps, stamp, StationMapExports.IsFreshOnDisk));
+                    return CountOnDisk(BatchTargetRecord.Ships, stamp, Ship3DExports.IsFreshOnDisk);
                 });
                 _shipBatchCounts = FinishCount(ships, Ship3DExports.Instance.HeldBack);
-                _stationBatchCounts = FinishCount(maps, StationMapExports.Instance.HeldBack);
                 UpdateShip3DBatchButton();
-                UpdateStationBatchButton();
             } while (_batchCountAgain);
         }
         catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[3D モデル] まとめて取り込むの取り込み済みの数を数えられませんでした: {ex.Message}"); }
@@ -157,55 +139,51 @@ public partial class MainWindow
     private void UpdateShip3DUsageText()
     {
         if (txtShip3DUsage == null) return;
-        // 船・ステーションの地図・ステーションの 3D (画像の共通のフォルダを含む) を合わせた使用量 (最大容量はどれも合わせて数える)
+        // 船の使用量 (2026-11-04、ステーションの 2D の地図・古い方式のステーションの 3D を消したので船だけ)
         var files = Ship3DExports.CachedFiles();
-        var stations = StationMapExports.CachedFiles();
-        var st3d = Station3DExports.CachedEntries();
-        txtShip3DUsage.Text = $"今の使用量: {Ship3DExports.FormatBytes(files.Sum(f => f.Length) + stations.Sum(f => f.Length + StationMapExports.MeshCacheBytes(f)) + st3d.Sum(e => e.Bytes) + Station3DTextures.Bytes())} ({files.Count} 隻・{stations.Count} か所・3D {st3d.Count} か所)";
+        txtShip3DUsage.Text = $"今の使用量: {Ship3DExports.FormatBytes(files.Sum(f => f.Length))} ({files.Count} 隻)";
     }
 
     // ［マップをまとめて取り込む］は、船の［船舶・車両をまとめて取り込む］と同じく、CPU 使用率が 90% 以上のときと、ステーションのまとめて取り込むが動いている間と、
     // 今の Data.p4k で全部取り込み済みのとき (BatchRecordCounts) は使えない
     // (取り消しは進み具合の欄の［まとめて取り消し］。船とステーションのまとめてを両方取り消す)
+    // (2026-11-04、利用者の指示「もう、2D は使わない手、マップの取り込みは取り込む場所関係じゃないの？」) ［マップをまとめて取り込む］は、
+    // 3D (新しい方式) の区画の置き方の一覧と場所の中身 (view3d_layout.db。StationView3DLayout) を、全部の場所の分まとめて作り直す。2D の地図は作らない。
+    // 動いている間はボタンを使えなくし、横に済んだ数を出す (0.5 秒ごと)
+    private System.Windows.Threading.DispatcherTimer? _layoutTimer;
     private void UpdateStationBatchButton()
     {
         if (btnStationBatch == null) return;
-        var st = StationMapExports.Instance;
-        var ex = Ship3DExports.Instance;
-        // 数えた結果は RecountBatchTargetsAsync が出す (ここでは数えない)。動いている間はボタンは使えず、ToolTip は前のまま
-        var allDone = false;
-        if (!st.BatchActive)
+        var running = StationView3DLayout.Running;
+        btnStationBatch.IsEnabled = !running;
+        if (running)
         {
-            allDone = BatchAllDone(_stationBatchCounts);
-            btnStationBatch.ToolTip = _stationBatchTip + BatchRecordTip(_stationBatchCounts, "か所");
+            var (d, n) = StationView3DLayout.Progress;
+            txtStationBatchState.Text = $"区画の置き方の一覧を作っています ({d} / {n} か所)";
+            if (_layoutTimer == null)
+            {
+                _layoutTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+                _layoutTimer.Tick += (_, _) => UpdateStationBatchButton();
+                _layoutTimer.Start();
+            }
         }
-        btnStationBatch.IsEnabled = !ex.CpuHigh && !st.BatchActive && !allDone;
-        txtStationBatchState.Text = st.BatchActive ? st.BatchText : allDone ? "マップは今のパッチでは全部取り込み済み" : "";
+        else
+        {
+            _layoutTimer?.Stop(); _layoutTimer = null;
+            // 問題が無ければ無効 (船の［船舶・車両をまとめて取り込む］の「全部取り込み済みなら無効」と同じ形)、問題があれば有効にして横に理由
+            var problem = StationView3DLayout.Problem();
+            btnStationBatch.IsEnabled = problem != null;
+            txtStationBatchState.Text = problem == null ? "区画の置き方の一覧は今のパッチでは作り済み"
+                : StationView3DLayout.LastError is { } err ? $"区画の置き方の一覧を作れませんでした: {err} ({problem})"
+                : $"区画の置き方の一覧: {problem}";
+        }
     }
 
-    private async void StationBatch_Click(object sender, RoutedEventArgs e)
+    private void StationBatch_Click(object sender, RoutedEventArgs e)
     {
-        var st = StationMapExports.Instance;
         btnStationBatch.IsEnabled = false;
-        // 船の［まとめて取り込む］と同じく、欄の置き場所・最大容量が今の設定と違えば先に反映して保存する
-        var folderNow = string.IsNullOrEmpty(App.Config.Ship3DFolder) ? Ship3DExports.DefaultFolder : App.Config.Ship3DFolder;
-        if (txtShip3DMaxMB.Text.Trim() != Ship3DExports.MaxMb.ToString()
-            || !string.Equals(txtShip3DFolder.Text.Trim(), folderNow, StringComparison.OrdinalIgnoreCase))
-        {
-            SaveShip3DSettings();
-            SaveConfigToFile(showError: false);
-        }
-        try { await st.RunBatchAsync(this); }
-        catch (Exception ex)
-        {
-            App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの地図] まとめて取り込むを始められませんでした: {ex}");
-            MessageBox.Show(this, $"マップをまとめて取り込むを始められませんでした: {ex.Message}", "ステーションの地図", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-        finally
-        {
-            UpdateStationBatchButton();
-            UpdateShip3DUsageText();
-        }
+        StationView3DLayout.Start("［マップをまとめて取り込む］", force: true);
+        UpdateStationBatchButton();
     }
 
     // ［船舶・車両をまとめて取り込む］は、CPU 使用率が 90% 以上のときと、まとめて取り込むが動いている間と、
@@ -221,8 +199,10 @@ public partial class MainWindow
             allDone = BatchAllDone(_shipBatchCounts);
             btnShip3DBatch.ToolTip = _ship3DBatchTip + BatchRecordTip(_shipBatchCounts, "隻");
         }
-        btnShip3DBatch.IsEnabled = !ex.CpuHigh && !ex.ShipBatchActive && !allDone;
-        txtShip3DBatchState.Text = ex.CpuHigh ? $"CPU 使用率 {ex.CpuPercent:F0}% のため書き出しを始められません (90% 未満になったら使えます)"
+        // (2026-11-04) 「3D モデルを保存しない」のときは、取り込み (保存) のためのまとめて取り込むは使えない
+        btnShip3DBatch.IsEnabled = !ex.CpuHigh && !ex.ShipBatchActive && !allDone && !Ship3DExports.NoSave;
+        txtShip3DBatchState.Text = Ship3DExports.NoSave && !ex.ShipBatchActive ? "「3D モデルを保存しない」のため使えません"
+            : ex.CpuHigh ? $"CPU 使用率 {ex.CpuPercent:F0}% のため書き出しを始められません (90% 未満になったら使えます)"
             : allDone ? "船舶・車両は今のパッチでは全部取り込み済み" : "";
     }
 
@@ -272,7 +252,9 @@ public partial class MainWindow
             txtShip3DMaxMB.Text = Ship3DExports.MaxMb.ToString();
         }
         else App.Config.Ship3DMaxMB = maxMb;
+        App.Config.Ship3DNoSave = chkShip3DNoSave.IsChecked == true;
         UpdateShip3DDriveText();
+        UpdateShip3DBatchButton();
         UpdateShip3DUsageText();
         // 置き場所が変わるとキャッシュの有無が変わるので、［詳細］・別ウィンドウのボタンを決め直す
         Ship3DExports.Instance.NotifySettingsChanged();

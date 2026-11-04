@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <Version>2.5.4</Version>
+    <Version>2.6.0</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <UseWPF>true</UseWPF>
@@ -42,10 +42,6 @@
     <None Update="sc48_stations_facilities.csv">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <!-- ステーションの階層マップ: 部品の名前 → 床・階段の種類の同梱の表 (StationMeshKinds) -->
-    <None Update="station_mesh_kinds.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
     <None Update="hangar_selectors.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
@@ -65,12 +61,8 @@
     <None Update="wwwroot\three\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <!-- ステーションの階層マップのビューア (wwwroot\stationmap。SVG と素の JS) -->
+    <!-- ステーションの 3D (新しい方式) のビューア (wwwroot\stationmap の view3d.*。three.js は wwwroot	hree を使う) -->
     <None Update="wwwroot\stationmap\**\*">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <!-- ステーションの 3D 表示のビューア (wwwroot\station3d。three.js は wwwroot\three を使う) -->
-    <None Update="wwwroot\station3d\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

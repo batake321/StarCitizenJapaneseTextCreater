@@ -187,7 +187,9 @@ public partial class Ship3DWindow : Window
 
     private bool _showing;
 
-    // 選んでいる船のキャッシュがあれば出す (Data.p4k が変わっていれば照合してから)。無ければ［読み込み］を押すよう出す
+    // 選んでいる船を出す (2026-11-04、利用者の決定「取り込み済みなら取り込みデータ、取り込みしてなければ直接」):
+    // 取り込み済みならそれ (Data.p4k が変わっていれば照合してから)、無ければゲームデータから直接読む (確認の窓は出さない。1 つの船につき 1 回だけ試す)
+    private string? _directTried;
     private async Task ShowIfCachedAsync()
     {
         var record = _record;
@@ -195,23 +197,28 @@ public partial class Ship3DWindow : Window
         var ex = Ship3DExports.Instance;
         var state = ex.StateOf(record);
         if (state == Ship3DCacheState.NoGame) { ShowOverlay("ゲームの Data.p4k が見つかりません。設定タブのゲームのフォルダとチャンネルを確かめてください。"); return; }
-        if (state == Ship3DCacheState.None)
+        if (state == Ship3DCacheState.None && string.Equals(_directTried, record, StringComparison.OrdinalIgnoreCase))
         {
-            ShowOverlay(ex.IsExporting(record) ? "書き出し中です。終わったらここに出します。" : "この船の 3D モデルはまだ取り込んでいません。上の［読み込み］でゲームデータから取り込んでください。");
+            if (ex.IsExporting(record)) ShowOverlay("ゲームデータから読み込み中です。終わったらここに出します。");
             return;
         }
         _showing = true;
         try
         {
-            if (state != Ship3DCacheState.Fresh) ShowOverlay("照合中 (パッチで Data.p4k が変わったので、この船の元データを確かめています)...");
-            var path = await ex.GetCachedPathAsync(record);
+            if (state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying) ShowOverlay("照合中 (パッチで Data.p4k が変わったので、この船の元データを確かめています)...");
+            else if (state == Ship3DCacheState.None)
+            {
+                _directTried = record;
+                ShowOverlay("ゲームデータから読み込んでいます (進み具合は上の欄に出ます)...");
+            }
+            var path = await ex.GetViewPathAsync(record, _name, this);
             if (!string.Equals(record, _record, StringComparison.OrdinalIgnoreCase) || _shownShort != null) return;
             if (path == null)
             {
-                ShowOverlay("この船の元データがパッチで変わったので、キャッシュを消しました。上の［読み込み］で取り込み直してください。");
+                ShowOverlay("この船の 3D モデルを読み込めませんでした (理由はアプリのログにあります)。");
                 return;
             }
-            await ShowModelAsync(record);
+            await ShowModelAsync(record, path);
         }
         finally
         {
@@ -220,7 +227,7 @@ public partial class Ship3DWindow : Window
         }
     }
 
-    private async Task ShowModelAsync(string record)
+    private async Task ShowModelAsync(string record, string? glbPath = null)
     {
         if (_webFailed) return;
         try { await (_webInit ??= Ship3DWeb.InitAsync(web3D)); }
@@ -235,7 +242,7 @@ public partial class Ship3DWindow : Window
         var shortName = Ship3DExports.ShortName(record);
         Ship3DExports.Instance.AcquireView(shortName);
         _shownShort = shortName;
-        try { Ship3DWeb.Show(web3D, shortName, _name); }
+        try { Ship3DWeb.Show(web3D, shortName, _name, glbPath); }
         catch (Exception ex)
         {
             App.AppendStartupLog(App.Config.WorkingDirectory, $"[3D モデル] 別ウィンドウで表示できませんでした: {ex}");
@@ -286,15 +293,17 @@ public partial class Ship3DWindow : Window
         var shortName = Ship3DExports.ShortName(_record);
         var job = ex.Jobs.FirstOrDefault(j => j.Short.Equals(shortName, StringComparison.OrdinalIgnoreCase));
         // 自動の取り直しの順番待ちの間も押せる (押すとその船をいちばん先にする。Ship3DExports.IsRefreshWaiting・PromoteRefresh)
-        btnImport.IsEnabled = state == Ship3DCacheState.None && job == null && !ex.CpuHigh || ex.IsRefreshWaiting(_record);
+        // (2026-11-04) 「3D モデルを保存しない」のときは取り込み (保存) の［読み込み］は使わない (開いたときに直接読む)
+        btnImport.IsEnabled = !Ship3DExports.NoSave && (state == Ship3DCacheState.None && job == null && !ex.CpuHigh || ex.IsRefreshWaiting(_record));
         txtShipState.Text = job != null ? $"書き出し中: {job.Text}"
             : state switch
             {
                 Ship3DCacheState.Fresh => "キャッシュあり",
                 Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying => "照合中 (パッチで Data.p4k が変わったので元データを確かめています)",
                 Ship3DCacheState.NoGame => "ゲームの Data.p4k が見つかりません",
-                _ => ex.CpuHigh ? $"キャッシュなし。CPU 使用率 {ex.CpuPercent:F0}% のため取り込みを始められません (90% 未満になったら使えます)"
-                                : "キャッシュなし (［読み込み］でゲームデータから取り込みます)",
+                _ => Ship3DExports.NoSave ? "保存しない設定 (開いたときにゲームデータから直接読みます)"
+                    : ex.CpuHigh ? $"キャッシュなし。CPU 使用率 {ex.CpuPercent:F0}% のため、下がってから読み込みます"
+                                : "キャッシュなし (開いたときにゲームデータから直接読みます)",
             };
     }
 

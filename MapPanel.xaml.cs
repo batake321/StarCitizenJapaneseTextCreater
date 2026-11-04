@@ -116,8 +116,6 @@ public partial class MapPanel : UserControl
         App.Config.MapView = tag;
         SaveConfig?.Invoke();
         _ = RenderAsync();
-        // 場所の階層マップを出していれば、星系図に戻す (星系のボタンは星系図を選ぶ操作なので)
-        if (_placeMode) _ = FadeAsync(toPlace: false);
     }
 
     // ===== WebView2 =====
@@ -191,14 +189,14 @@ public partial class MapPanel : UserControl
             if (root.TryGetProperty("type", out var et) && et.ValueKind == JsonValueKind.String && et.GetString() == "scripterror")
             {
                 string Str(string name) => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
-                StationMapWeb.LogScriptError("[マップ] 星系図のエラー", App.Config.MapView ?? "", Str("where"), Str("message"), Str("stack"));
+                LogScriptError("[マップ] 星系図のエラー", App.Config.MapView ?? "", Str("where"), Str("message"), Str("stack"));
                 return;
             }
             // 拡大の上限でさらに拡大したときの、近くの地図のある場所 (MapScript の enterNear)
             if (root.TryGetProperty("type", out var ty) && ty.ValueKind == JsonValueKind.String && ty.GetString() == "enterplace")
             {
                 if (root.TryGetProperty("rec", out var rc) && rc.GetString() is { Length: > 0 } rec && MapPlaceByRecordName(rec) is { } mp)
-                    _ = ShowPlaceAsync(mp.Record, mp.Name);
+                    OpenPlace(mp.Record, mp.Name, null);
                 return;
             }
             if (!root.TryGetProperty("map", out var m) || m.ValueKind != JsonValueKind.String) return;
@@ -259,8 +257,8 @@ public partial class MapPanel : UserControl
                 QuantumStateProvider?.Invoke(), _marks, _amenityIcons ? AmenityIcons.Url : null);
             if (count == 0) { ShowMessage("座標のある星系がありません"); _pageView = null; return; }
             txtMessage.Visibility = Visibility.Collapsed;
-            // 場所の階層マップを出している間は、星系図は隠したまま (書き換えだけする)
-            if (!_placeMode) webMap.Visibility = Visibility.Visible;
+            // 3D を出している間は、星系図は隠したまま (書き換えだけする)
+            if (pnlPlace.Visibility != Visibility.Visible) webMap.Visibility = Visibility.Visible;
             _navDone = new TaskCompletionSource();
             webMap.CoreWebView2.NavigateToString(html);
             _pageView = view;
@@ -292,7 +290,7 @@ public partial class MapPanel : UserControl
     // (ボタンを押せなくし、自動の取得を割り込ませない)。取得中 (自動の取得の途中) に押されたときは切り替えない
     private async void BtnCurrent_Click(object sender, RoutedEventArgs e) => await CaptureCurrentAsync();
 
-    // ［現在位置］と同じ処理の公開の入口 (ステーションの地図の［現在位置］(StationMapWeb.CaptureHook) からも呼ぶ)。
+    // ［現在位置］と同じ処理の公開の入口 (ステーションの 3D (新しい方式) の［現在位置］(StationView3DWindow.CaptureHook) からも呼ぶ)。
     // 戻り値: 座標を取れたか (取得中に呼ばれたときは false) と、そのときのマップタブの状態の欄の文 (取れなかった理由など)。
     // マップタブが開かれていない (この欄が画面に無い) ときは、図の作り直しを次に開いたときに回す (RenderOrDeferAsync。
     // 画面に無い WebView2 の初期化は画面に出るまで終わらないので、そのまま待つと取得中のまま止まり、自動の取得も動かなくなる)
@@ -1122,31 +1120,44 @@ public partial class MapPanel : UserControl
     // ［詳細］の［地図表示］などから呼ぶ (アプリにマップタブは 1 つ)
     private static MapPanel? s_instance;
     // 場所の階層マップを出しているか (星系図は隠す)
-    private bool _placeMode;
-    // 階層マップに出している (最後に出した) 場所の record 名 (StarMapObject.… か Unlisted.…) と名前。無ければ null
-    private string? _placeRecord;
-    private string _placeName = "";
+    // ページのスクリプトのエラー (［マップ］タブの星系図の MapScript) をアプリのログに書く。
+    // 書くもの: 場所 (place)・処理 (where)・エラーの文・スタックの先頭 ScriptErrorStackLines 行。
+    // 同じ文 (prefix・場所・処理・エラーの文が同じ) は ScriptErrorGap に 1 回だけ書く (続けて出てもログがあふれないように。抑えた数は次に書くときに添える)
+    private const int ScriptErrorStackLines = 5;
+    private static readonly TimeSpan ScriptErrorGap = TimeSpan.FromSeconds(5);
+    private static readonly Dictionary<string, (DateTime At, int Skipped)> s_scriptErrors = new(StringComparer.Ordinal);
+    internal static void LogScriptError(string prefix, string place, string where, string message, string stack)
+    {
+        var key = $"{prefix}\n{place}\n{where}\n{message}";
+        var now = DateTime.UtcNow;
+        int skipped;
+        lock (s_scriptErrors)
+        {
+            if (s_scriptErrors.TryGetValue(key, out var last) && now - last.At < ScriptErrorGap)
+            {
+                s_scriptErrors[key] = (last.At, last.Skipped + 1);
+                return;
+            }
+            skipped = last.Skipped;
+            s_scriptErrors[key] = (now, 0);
+        }
+        var lines = stack.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Trim()).Take(ScriptErrorStackLines).ToList();
+        var sb = new StringBuilder($"{prefix}: 場所 {(place.Length > 0 ? place : "(無し)")}、処理 {(where.Length > 0 ? where : "(不明)")}、{message}");
+        if (skipped > 0) sb.Append($" (前に書いてから同じエラーをあと {skipped} 回抑えました)");
+        if (lines.Count > 0) sb.Append(" | スタック: ").Append(string.Join(" / ", lines));
+        App.AppendStartupLog(App.Config.WorkingDirectory, sb.ToString());
+    }
+
+
     // 星系図に出している地図のある場所の印 (BuildMarks。RenderAsync・PostUpdate で作り直す)
     private MapMarks? _marks;
-    // タブを初めて開いたときの、現在位置の場所の階層マップを出す判断をしたか / 地図を出せる場所の調べを始めたか
-    private bool _initialPlaceDone, _scanStarted;
-    // 地図の取り込みの状態が変わったら、少し待ってから星系図を作り直す (印の実線・破線を合わせる。続けて変わるときにまとめる)
+    // 区画の置き方の一覧 (view3d_layout.db) が作り直されたら、少し待ってから星系図を作り直す (印を合わせる)
     private readonly System.Windows.Threading.DispatcherTimer _marksTimer = new() { Interval = TimeSpan.FromSeconds(1) };
-    // 自転する天体の uuid (小文字) → 星図の record 名 (星図に載っていない場所の位置に使う。DB を読み取り専用で引いて覚える)
-    private static readonly Dictionary<string, string?> s_bodyByUuid = new(StringComparer.Ordinal);
 
+    // (2026-11-04、利用者の指示「2D 地図は消して」) 場所の地図は、［マップ］タブの中の 2D の地図をやめ、ステーションの 3D (新しい方式) の窓で開く
     private void InitPlaceMap()
     {
-        placeMap.ZoomedOut += () => { if (_placeMode) _ = ShowStarAsync(); };
-        Action onState = () => Dispatcher.BeginInvoke(() =>
-        {
-            UpdatePlaceBar();
-            _marksTimer.Stop();
-            _marksTimer.Start();
-        });
-        StationMapExports.Instance.StateChanged += onState;
-        Ship3DExports.Instance.StateChanged += () => Dispatcher.BeginInvoke(UpdatePlaceBar);
-        Ship3DExports.Instance.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(Ship3DExports.OverallText)) Dispatcher.BeginInvoke(UpdatePlaceBar); };
+        StationView3DLayout.Changed += () => Dispatcher.BeginInvoke(() => { _marksTimer.Stop(); _marksTimer.Start(); });
         _marksTimer.Tick += async (_, _) =>
         {
             _marksTimer.Stop();
@@ -1155,39 +1166,73 @@ public partial class MapPanel : UserControl
         };
     }
 
-    // ［詳細］の［地図表示］・取り込みの終わり (DetailPanel): ［マップ］タブに切り替えて、その場所の階層マップを出す。
-    // タブの切り替えは、このパネルを入れている TabItem を選ぶ (MainWindow には手を入れない)。押したボタンの処理が終わってから切り替える
-    public static void ShowPlaceInMapTab(string recordName, string name)
+    // ［詳細］の［地図表示］(DetailPanel): その場所の 3D (新しい方式) の窓を開く
+    public static void ShowPlaceInMapTab(string recordName, string name) => OpenPlace(recordName, name, null);
+
+    // ［詳細］の店の［MAP］(DetailPanel): その店のある場所の 3D の窓を開き、その店を行き先にする
+    public static void ShowShopInMapTab(string recordName, string name, ShopTreeShop shop) => OpenPlace(recordName, name, shop.EntityName);
+
+    // 3D の窓を開く。店の名前・販売品は［詳細］と同じ ShopTree で引く (作れなければ無しで開く)
+    // (2026-11-04、利用者の指示「map に出し、別ウィンドウボタンで。」) ［マップ］タブに切り替えて、その場所の 3D をタブの中 (pnlPlace) に出す。
+    // ［マップ］タブがまだ無い (作る前) ときだけ、別ウィンドウで開く
+    private static void OpenPlace(string recordName, string name, string? focusShop)
     {
         var p = s_instance;
-        if (p == null) return;
+        if (p == null) { StationView3DShops.Open(recordName, name, null, focusShop, Application.Current?.MainWindow); return; }
         p.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () =>
         {
             for (DependencyObject? d = p; d != null; d = LogicalTreeHelper.GetParent(d))
                 if (d is TabItem tab) { tab.IsSelected = true; break; }
-            _ = p.ShowPlaceAsync(recordName, name);
+            _ = p.ShowPlace3DAsync(recordName, name, focusShop);
         });
     }
 
-    // ［詳細］の店の［マップに表示］(DetailPanel): ［マップ］タブに切り替えて、店のある場所の階層マップを出し、その店を選ぶ (ShowPlaceAsync の shop)。
-    // 切り替え方は ShowPlaceInMapTab と同じ
-    public static void ShowShopInMapTab(string recordName, string name, ShopTreeShop shop)
+    // タブの中の 3D (StationView3DView)。同じ場所で店の指定が無ければ、出していたものをそのまま出す (星系図との行き来で読み直さない)
+    private StationView3DView? _place3D;
+    private string _place3DName = "";
+    private ShopTree? _place3DTree;
+    private async Task ShowPlace3DAsync(string recordName, string name, string? focusShop)
     {
-        var p = s_instance;
-        if (p == null) return;
-        p.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () =>
+        if (_place3D == null || _place3D.Record != recordName || focusShop != null)
         {
-            for (DependencyObject? d = p; d != null; d = LogicalTreeHelper.GetParent(d))
-                if (d is TabItem tab) { tab.IsSelected = true; break; }
-            _ = p.ShowPlaceAsync(recordName, name, shop);
-        });
+            var tree = _tree;
+            if (tree == null)
+            {
+                try { tree = await GetTreeAsync(); }
+                catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 「{name}」の 3D に渡す店の表を作れませんでした: {ex.Message}"); }
+            }
+            _place3D?.Close3D();
+            Func<string, string, string>? label = tree == null ? null : (g, e) => StationView3DShops.ShopLabel(tree, recordName, g, e);
+            Func<string, string, object?>? sales = tree == null ? null : (g, e) => StationView3DShops.Sales(tree, recordName, g, e);
+            _place3D = new StationView3DView(recordName, name, label, sales, focusShop);
+            _place3DName = name;
+            _place3DTree = tree;
+            placeHost.Content = _place3D;
+        }
+        txtPlaceName.Text = _place3D.PlaceTitle;
+        webMap.Visibility = Visibility.Collapsed;
+        pnlPlace.Visibility = Visibility.Visible;
     }
 
-    // 星系図の印・ラベルを押した (scjt://detail/… のリンク)。地図のある場所なら、その場所の階層マップへ移る (2026-11-01、利用者の決定「A 情報ボタンを付ける　押すと詳細に。」)。
+    // ［星系図に戻る］: 3D を隠して星系図を出す (3D は捨てない)
+    private void BtnPlaceBack_Click(object sender, RoutedEventArgs e)
+    {
+        pnlPlace.Visibility = Visibility.Collapsed;
+        webMap.Visibility = Visibility.Visible;
+    }
+
+    // ［別ウィンドウ］: 同じ場所の 3D を別のウィンドウで開く (タブの中の 3D はそのまま)
+    private void BtnPlaceWindow_Click(object sender, RoutedEventArgs e)
+    {
+        if (_place3D is not { } v) return;
+        StationView3DShops.Open(v.Record, _place3DName, _place3DTree, null, Window.GetWindow(this));
+    }
+
+    // 星系図の印・ラベルを押した (scjt://detail/… のリンク)。地図のある場所なら、その場所の 3D の窓を開く (2026-11-01、利用者の決定「A 情報ボタンを付ける　押すと詳細に。」)。
     // 地図の無い場所は今までどおり［詳細］タブで開く。押したときの動きを決めるのはここ 1 か所
     private void OnMarkerClicked(string record)
     {
-        if (MapPlaceOf(record) is { } mp) { _ = ShowPlaceAsync(mp.Record, mp.Name); return; }
+        if (MapPlaceOf(record) is { } mp) { OpenPlace(mp.Record, mp.Name, null); return; }
         if (record.StartsWith(StationPlace.UnlistedPrefix, StringComparison.Ordinal)) return;   // 星図に載っていない場所には詳細が無い
         OpenDetail(record);
     }
@@ -1199,174 +1244,38 @@ public partial class MapPanel : UserControl
         return MapPlaceByRecordName(record);
     }
 
-    // record 名 (StarMapObject.… か Unlisted.…) → 地図のある場所 (印を出している場所だけ)。無ければ null
+    // record 名 (StarMapObject.…) → 地図のある場所 (印を出している場所だけ)。無ければ null
     private (string Record, string Name)? MapPlaceByRecordName(string recordName)
     {
         var marks = _marks;
         if (marks == null) return null;
         if (marks.Has.ContainsKey(recordName) && _tree?.NodeByStarmapRecord(recordName) is { } n) return (n.RecordName, n.Name);
-        foreach (var u in marks.Unlisted) if (u.Record == recordName) return (u.Record, u.Name);
         return null;
     }
 
-    // 星系図の地図のある場所の印。
-    //   星図の場所: 取り込み済みの地図がある (StationMapExports の状態が Fresh・照合待ち・照合中) 場所と、地図を出せる場所の調べ (StationMapWindow.EnsureScanAsync) が済んでいれば
-    //     別ウィンドウの一覧と同じ決まり (StationMapWindow.IsMapPlace: 一覧に出す種類で、床のある場所) の場所。座標の無い場所は描けないので入れない。
-    //   星図に載っていない場所: 調べが済んでいれば、その一覧 (StationMapWindow.UnlistedPlaces) の場所。位置はルートの局所の原点を StationRoot.ToGlobal で星系の座標にしたもの
-    //     (自転する天体の上なら、その天体の今の角度 (CurrentLocation.ThetaAt。星系図の場所と同じ補正値込み)。天体を引けなければデータの式 (StationRoot.DataTheta))
+    // 星系図の地図のある場所の印: 区画の置き方の一覧 (view3d_layout.db) にある星図の場所で、座標のあるもの (3D の窓で開ける場所)。
+    // 印は全部「取り込み済み」(実線)。星図に載っていない場所 (Unlisted.…) の印は出さない (位置を出すのに場所のルートが要るため。2D の地図の調べと一緒にやめた)
     private static MapMarks BuildMarks(ShopTree tree, double unix)
     {
-        var ex = StationMapExports.Instance;
-        bool Imported(string rec) => ex.StateOf(rec) is Ship3DCacheState.Fresh or Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying;
-        var scan = StationMapWindow.ScanReady;
+        var inDb = AmenityMapHints.All();
         var has = new Dictionary<string, bool>(StringComparer.Ordinal);
         foreach (var n in tree.Places)
-        {
-            if (!n.Position.HasValue) continue;
-            var imp = Imported(n.RecordName);
-            if (imp || scan && StationMapWindow.IsMapPlace(n)) has[n.RecordName] = imp;
-        }
-        var unlisted = new List<(string Record, string Name, string System, (double X, double Y, double Z) Pos, bool Imported)>();
-        if (scan)
-            foreach (var u in StationMapWindow.UnlistedPlaces)
-                if (u.Root is { } r && UnlistedPos(tree, r, unix) is { } pos) unlisted.Add((u.Record, u.Name, u.System, pos, Imported(u.Record)));
-        return new MapMarks(has, unlisted);
+            if (n.Position.HasValue && inDb.ContainsKey(n.RecordName)) has[n.RecordName] = true;
+        return new MapMarks(has, new List<(string Record, string Name, string System, (double X, double Y, double Z) Pos, bool Imported)>());
     }
 
-    // 星図に載っていない場所の位置 (星系の座標)。自転する天体の角度が分からなければ null
-    private static (double X, double Y, double Z)? UnlistedPos(ShopTree tree, StationRoot r, double unix)
-    {
-        double theta = 0;
-        if (r.Spins)
-        {
-            var bodyRec = BodyRecordOfUuid(r.SpinUuid);
-            var body = bodyRec != null ? tree.NodeByStarmapRecord(bodyRec) : null;
-            if (body != null && CurrentLocation.ThetaAt(body, unix) is { } th) theta = th;
-            else if (r.DataTheta(unix) is { } dt) theta = dt;
-            else return null;
-        }
-        var g = r.ToGlobal((0, 0, 0), StationIndex.DefaultRule, theta);
-        return double.IsFinite(g.X) && double.IsFinite(g.Y) ? g : null;
-    }
+    // ページを作った後 (前は 2D の地図の調べと、現在位置の場所の地図を出す判断をしていた。3D の窓は自分で開かないので、何もしない)
+    private void AfterRender(ShopTree tree) { }
 
-    // 自転する天体の uuid → 星図の record 名 (gamedata_cache.db の starmap_locations を読み取り専用で引く。StationMapPanel.RecordOfUuid と同じ引き方)。引けなければ null
-    private static string? BodyRecordOfUuid(string uuid)
+    // 場所の今の位置 (星系図に描く位置) と星系。星図の場所は CurrentLocation.PlacePosition (今の自転の角度)。無ければ null
+    private (string System, double X, double Y)? PlacePositionOf(ShopTree tree, string recordName)
     {
-        var key = uuid.ToLowerInvariant();
-        lock (s_bodyByUuid) if (s_bodyByUuid.TryGetValue(key, out var hit)) return hit;
-        string? rec = null;
-        try
+        if (tree.NodeByStarmapRecord(recordName) is { Position: not null } n)
         {
-            var db = DetailPanel.DbPath();
-            if (File.Exists(db))
-            {
-                using var conn = new SqliteConnection($"Data Source={db};Mode=ReadOnly");
-                conn.Open();
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = "SELECT record_name FROM starmap_locations WHERE lower(uuid) = $u LIMIT 1";
-                cmd.Parameters.AddWithValue("$u", key);
-                rec = cmd.ExecuteScalar() as string;
-            }
+            var p = CurrentLocation.PlacePosition(n, CurrentLocation.ThetasAt(tree.Places.Where(pl => pl.Root == n.Root), _effective?.Unix ?? Now()));
+            return (n.Root.System, p.X, p.Y);
         }
-        catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 自転する天体を星図で引けませんでした: {ex.Message}"); }
-        lock (s_bodyByUuid) s_bodyByUuid[key] = rec;
-        return rec;
-    }
-
-    // ページを作った後: 地図を出せる場所の調べを (まだなら) 裏で始め、済んだら印を足すために作り直す。
-    // タブを初めて開いたときは、現在位置が取り込み済みの地図のある場所 (かその親) の中なら、その階層マップを出す
-    private void AfterRender(ShopTree tree)
-    {
-        // ［情報］の使える・使えないは場所の一覧 (ShopTree) で決めるので、読んだ後に決め直す
-        UpdatePlaceBar();
-        if (!_scanStarted)
-        {
-            _scanStarted = true;
-            if (!StationMapWindow.ScanReady)
-                _ = Task.Run(async () =>
-                {
-                    if (await StationMapWindow.EnsureScanAsync()) await Dispatcher.InvokeAsync(() => { _marksTimer.Stop(); _marksTimer.Start(); });
-                });
-        }
-        if (_initialPlaceDone) return;
-        _initialPlaceDone = true;
-        var inside = MapState(tree, CurrentView(), _effective, LogPlaceNode(tree, LandingPlaceProvider?.Invoke()), LogRunning(), Now())
-            .Maps.Select(m => m.Overlay.InsidePlace).FirstOrDefault(p => p != null);
-        for (var n = inside; n != null && !n.IsStar; n = n.Parent)
-            if (_marks?.Has.TryGetValue(n.RecordName, out var imported) == true && imported) { _ = ShowPlaceAsync(n.RecordName, n.Name); break; }
-    }
-
-    // 場所の階層マップを出す (未取り込みなら、地図の欄に知らせと、上の帯に［読み込み］)。読み込んでから星系図とクロスフェードで入れ替える
-    // shop: ［詳細］の店の［マップに表示］(ShowShopInMapTab) で頼まれた店。地図を出せたら、その店を選ぶ (StationMapPanel.SelectShop。目的地にして店の階を開く)。
-    //   地図の店に結べないとき・階に載っていないときは、場所の地図を出したまま状態の欄に知らせる。地図を出せないとき (未取り込みなど) は地図の欄の知らせのまま
-    // 地図を出している途中の場所 (ShowPlaceAsync が店の表の作成・ShowAsync を待っている間。無ければ null) と、その間に最後に頼まれた店
-    private string? _placeLoading;
-    private ShopTreeShop? _placeLoadingShop;
-
-    private async Task ShowPlaceAsync(string recordName, string name, ShopTreeShop? shop = null)
-    {
-        // 頼まれた場所を出すので、タブを初めて開いたときの現在位置の場所の判断はもうしない (後から上書きしない)
-        _initialPlaceDone = true;
-        _placeRecord = recordName;
-        _placeName = name;
-        txtPlaceName.Text = name;
-        btnSwitch.IsEnabled = true;
-        UpdatePlaceBar();
-        // 同じ場所の地図を出している途中 (店の表の作成・ShowAsync を待っている間) に、また頼まれた: 地図は出し直さず (ShowAsync を 2 回走らせない)、
-        // 頼まれた店だけ覚える。出している側が、出し終えてから最後に頼まれた店を選ぶ
-        if (_placeLoading == recordName) { _placeLoadingShop = shop; return; }
-        if (placeMap.Record != recordName)
-        {
-            // 地図のビューアは、出したときの枠の大きさで寄せる (viewer.js の fitFloor)。隠したまま (Collapsed) だと大きさを測れないので、
-            // 透明のまま (Opacity 0) 出しておく。読み込みの間は星系図の操作を止めないよう、押せないようにする (FadeAsync で戻す)
-            if (pnlPlace.Visibility != Visibility.Visible)
-            {
-                pnlPlace.IsHitTestVisible = false;
-                pnlPlace.Visibility = Visibility.Visible;
-            }
-            txtStatus.Text = $"「{name}」の地図を読み込み中...";
-            // 地図の店の名前・販売品・店を選ぶこと (StationMapPanel.ShopOf) は ShopTree で引く。星系図をまだ出していない (［詳細］の［MAP］で
-            // ［マップ］タブを初めて開いた) ときは _tree がまだ無いので、ここで作って (RenderAsync と同じ GetTreeAsync) 渡す。作れなければ今までどおり無しで出す
-            _placeLoading = recordName;
-            _placeLoadingShop = shop;
-            try
-            {
-                var tree = _tree;
-                if (tree == null)
-                {
-                    try { tree = await GetTreeAsync(); }
-                    catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 「{name}」の地図に渡す店の表を作れませんでした: {ex.Message}"); }
-                    if (_placeRecord != recordName) return;
-                }
-                await placeMap.ShowAsync(recordName, name, tree);
-            }
-            finally { if (_placeLoading == recordName) _placeLoading = null; }
-            if (_placeRecord != recordName) return;
-            // 出している途中に同じ場所がまた頼まれていれば、最後に頼まれた店 (店の無い頼みなら選ばない)
-            shop = _placeLoadingShop;
-            _placeLoadingShop = null;
-            txtStatus.Text = "";
-        }
-        if (shop != null && placeMap.Record == recordName) txtStatus.Text = placeMap.SelectShop(shop) ?? "";
-        await FadeAsync(toPlace: true);
-    }
-
-    // 星系図へ戻る: 出していた場所を真ん中に、拡大の上限で出す (その星系図がページに無ければ、その星系 1 つの表示にする)
-    private async Task ShowStarAsync()
-    {
-        if (_placeRecord is { } rec && _tree != null && PlacePositionOf(_tree, rec) is { } at)
-        {
-            var view = CurrentView();
-            if (view != ViewAll && !string.Equals(view, at.System, StringComparison.OrdinalIgnoreCase))
-            {
-                App.Config.MapView = SystemNames.FirstOrDefault(n => n.Equals(at.System, StringComparison.OrdinalIgnoreCase)) ?? ViewAll;
-                SaveConfig?.Invoke();
-                await RenderAsync();
-                await WaitNavigatedAsync();
-            }
-            FocusStar(at.System, at.X, at.Y);
-        }
-        await FadeAsync(toPlace: false);
+        return null;
     }
 
     // ページを作り直した (NavigateToString) 後、読み込みが終わるまで待つ (作り直した直後に送る知らせが届かないため。最大 5 秒)
@@ -1383,89 +1292,6 @@ public partial class MapPanel : UserControl
         var save = SystemNames.FirstOrDefault(n => n.Equals(system, StringComparison.OrdinalIgnoreCase)) ?? system;
         try { webMap.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "mapfocus", save, x, y })); }
         catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 星系図の表示を変えられませんでした: {ex.Message}"); }
-    }
-
-    // 場所の今の位置 (星系図に描く位置) と星系。星図の場所は CurrentLocation.PlacePosition (今の自転の角度)、星図に載っていない場所は印の位置。無ければ null
-    private (string System, double X, double Y)? PlacePositionOf(ShopTree tree, string recordName)
-    {
-        if (tree.NodeByStarmapRecord(recordName) is { Position: not null } n)
-        {
-            var p = CurrentLocation.PlacePosition(n, CurrentLocation.ThetasAt(tree.Places.Where(pl => pl.Root == n.Root), _effective?.Unix ?? Now()));
-            return (n.Root.System, p.X, p.Y);
-        }
-        if (_marks?.Unlisted.FirstOrDefault(u => u.Record == recordName) is { Record.Length: > 0 } u) return (u.System, u.Pos.X, u.Pos.Y);
-        return null;
-    }
-
-    // 星系図と場所の階層マップを、透明度を変えて入れ替える (FadeMs。出す方を 0 → 1、隠す方を 1 → 0 にして、終わったら隠す方を Collapsed)
-    private Task FadeAsync(bool toPlace)
-    {
-        _placeMode = toPlace;
-        btnSwitch.Content = toPlace ? "星系図" : "場所の地図";
-        btnSwitch.ToolTip = toPlace ? "その場所を真ん中にした星系図に戻ります" : "最後に出した場所の地図 (ステーションなどの階層マップ) に切り替えます";
-        btnSwitch.IsEnabled = toPlace || _placeRecord != null;
-        UIElement show = toPlace ? pnlPlace : webMap, hide = toPlace ? webMap : pnlPlace;
-        show.IsHitTestVisible = true;
-        hide.IsHitTestVisible = false;
-        if (show.Visibility == Visibility.Visible && show.Opacity >= 1 && hide.Visibility != Visibility.Visible) return Task.CompletedTask;
-        var tcs = new TaskCompletionSource();
-        show.Visibility = Visibility.Visible;
-        var dur = new Duration(TimeSpan.FromMilliseconds(FadeMs));
-        var aIn = new DoubleAnimation(show.Opacity >= 1 ? 0 : show.Opacity, 1, dur);
-        var aOut = new DoubleAnimation(hide.Opacity, 0, dur);
-        aOut.Completed += (_, _) =>
-        {
-            // 途中で逆向きの切り替えが始まっていれば、隠さない
-            if (_placeMode == toPlace) hide.Visibility = Visibility.Collapsed;
-            tcs.TrySetResult();
-        };
-        show.BeginAnimation(OpacityProperty, aIn);
-        hide.BeginAnimation(OpacityProperty, aOut);
-        return tcs.Task;
-    }
-
-    // 上の帯: 場所の地図の状態 (別ウィンドウの StationMapWindow.UpdateBar と同じ決まり) と［読み込み］［情報］の使える・使えない
-    private void UpdatePlaceBar()
-    {
-        if (_placeRecord is not { } rec) return;
-        var ex = StationMapExports.Instance;
-        var state = ex.StateOf(rec);
-        var key = StationMapExports.KeyOf(StationMapExports.ShortName(rec));
-        var job = Ship3DExports.Instance.Jobs.FirstOrDefault(j => j.Short.Equals(key, StringComparison.OrdinalIgnoreCase));
-        btnPlaceImport.IsEnabled = state == Ship3DCacheState.None && job == null && !Ship3DExports.Instance.CpuHigh;
-        // ［情報］は星図の場所だけ (星図に載っていない場所には詳細が無い)
-        btnPlaceInfo.IsEnabled = _tree?.NodeByStarmapRecord(rec) != null;
-        txtPlaceState.Text = job != null ? $"取り込み中: {job.Text}"
-            : state switch
-            {
-                Ship3DCacheState.Fresh => "取り込み済み",
-                Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying => "照合中 (パッチで Data.p4k が変わったので元データを確かめています)",
-                Ship3DCacheState.NoGame => "ゲームの Data.p4k が見つかりません",
-                _ => Ship3DExports.Instance.CpuHigh ? $"未取り込み。CPU 使用率 {Ship3DExports.Instance.CpuPercent:F0}% のため取り込みを始められません (90% 未満になったら使えます)"
-                                                    : "未取り込み (［読み込み］でゲームデータから取り込みます)",
-            };
-    }
-
-    // ［読み込み］: 予想を出して確かめてから裏で取り込む。終わったら、まだその場所を出していれば地図の欄が出す (StationMapPanel.OnExported)
-    private async void BtnPlaceImport_Click(object sender, RoutedEventArgs e)
-    {
-        if (_placeRecord is not { } rec) return;
-        btnPlaceImport.IsEnabled = false;
-        await StationMapExports.Instance.ImportAsync(rec, _placeName, Window.GetWindow(this));
-        UpdatePlaceBar();
-    }
-
-    // ［情報］: この場所の詳細を［詳細］タブで開く (星系図の印を押したときの今までの動き)
-    private void BtnPlaceInfo_Click(object sender, RoutedEventArgs e)
-    {
-        if (_placeRecord is { } rec && _tree?.NodeByStarmapRecord(rec) is { } n) OpenDetail(n.Record);
-    }
-
-    // ［場所の地図］／［星系図］
-    private void BtnSwitch_Click(object sender, RoutedEventArgs e)
-    {
-        if (_placeMode) _ = ShowStarAsync();
-        else if (_placeRecord is { } rec) _ = ShowPlaceAsync(rec, _placeName);
     }
 
     // ===== 場所の検索 =====
@@ -1582,7 +1408,7 @@ public partial class MapPanel : UserControl
     {
         popSearch.IsOpen = false;
         if (it == null || _tree == null) return;
-        if (it.HasMap) { _ = ShowPlaceAsync(it.Record, it.Name); return; }
+        if (it.HasMap) { OpenPlace(it.Record, it.Name, null); return; }
         _ = ShowStarAtAsync(it.Record);
     }
 
@@ -1598,7 +1424,6 @@ public partial class MapPanel : UserControl
             await WaitNavigatedAsync();
         }
         FocusStar(at.System, at.X, at.Y);
-        if (_placeMode) await FadeAsync(toPlace: false);
     }
 
     private const string MapCss = """

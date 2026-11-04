@@ -26,9 +26,6 @@
             <!-- オンのとき、量子ジャンプの目的地の選択・移動中・到着・区間 1 の終わり、着陸、ゲームの世界に出たときに自動で座標を取る (MapPanel.OnQuantumEvent)。状態は Config.MapAutoCapture -->
             <CheckBox x:Name="chkAutoCapture" Content="QT・着陸・ゲーム開始のときに自動で現在位置を取る" VerticalAlignment="Center" Margin="6,0,6,0"
                       ToolTip="量子ジャンプの目的地を選んだときはすぐ (取れなければ 3 秒おきにあと 2 回)、移動中になってから 15 秒後と 45 秒後、到着・区間 1 の終わり・着陸場に着いたとき・ゲームの世界に出たとき (読み込み画面が閉じた・復活) は 2 秒後に、［現在位置］と同じ取り方で座標を取ります (ゲームの窓が前にあり、mobiGlas が閉じているときだけ。前に自動で取り始めてから 10 秒以内は取りません)"/>
-            <!-- 星系図 ⇔ 場所の階層マップ (MapPanel.BtnSwitch_Click)。星系図のときは、最後に出した場所の地図へ (まだ無ければ押せない) -->
-            <Button x:Name="btnSwitch" Content="場所の地図" Padding="10,2" Margin="12,0,6,0" Click="BtnSwitch_Click" IsEnabled="False"
-                    ToolTip="星系図と、最後に出した場所の地図 (ステーションなどの階層マップ) を切り替えます"/>
             <!-- 場所の検索 (MapPanel.TxtSearch_TextChanged)。名前の一部で探し、選ぶと地図のある場所はその地図、ほかは星系図のその位置へ -->
             <TextBlock Text="場所" VerticalAlignment="Center" Margin="6,0,4,0"/>
             <Grid>
@@ -47,20 +44,19 @@
         </StackPanel>
 
         <wv2:WebView2CompositionControl x:Name="webMap" Grid.Row="1"/>
-        <!-- 場所の階層マップ (星系図と同じ所に重ねる。初めは隠す) -->
-        <DockPanel x:Name="pnlPlace" Grid.Row="1" Visibility="Collapsed" Opacity="0" Background="White">
-            <!-- 場所の名前・地図の状態 (取り込み済み・未取り込みなど。別ウィンドウのバーと同じ決まり)・［読み込み］・［情報］ -->
-            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,4">
-                <TextBlock x:Name="txtPlaceName" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <Button x:Name="btnPlaceImport" Content="読み込み" Padding="10,2" Margin="0,0,6,0" Click="BtnPlaceImport_Click" IsEnabled="False"
-                        ToolTip="この場所の地図 (床の形・店・乗り場・道順) をゲームデータ (選択中のチャンネルの Data.p4k) から取り込みます"/>
-                <Button x:Name="btnPlaceInfo" Content="情報" Padding="10,2" Margin="0,0,6,0" Click="BtnPlaceInfo_Click"
-                        ToolTip="この場所の詳細を［詳細］タブで開きます"/>
-                <TextBlock x:Name="txtPlaceState" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
-            </StackPanel>
-            <local:StationMapPanel x:Name="placeMap" UseComposition="True"/>
-        </DockPanel>
         <!-- 図を出せないとき (インデックスが未構築・WebView2 が使えない) の文字 -->
         <TextBlock x:Name="txtMessage" Grid.Row="1" Visibility="Collapsed" Margin="4" TextWrapping="Wrap" FontSize="14"/>
+        <!-- ステーションの 3D (新しい方式) (2026-11-04、利用者の指示「map に出し、別ウィンドウボタンで。」)。星系図と同じ所に重ね、出している間は星系図を隠す。
+             上の帯: 場所の名前・［星系図に戻る］・［別ウィンドウ］ (MapPanel.ShowPlace3D) -->
+        <DockPanel x:Name="pnlPlace" Grid.Row="1" Visibility="Collapsed">
+            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,4">
+                <TextBlock x:Name="txtPlaceName" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <Button x:Name="btnPlaceBack" Content="星系図に戻る" Padding="10,2" Margin="0,0,6,0" Click="BtnPlaceBack_Click"
+                        ToolTip="星系図に戻ります (3D はそのまま残し、星系図の印から同じ場所を選ぶと続きから出します)"/>
+                <Button x:Name="btnPlaceWindow" Content="別ウィンドウ" Padding="10,2" Margin="0,0,6,0" Click="BtnPlaceWindow_Click"
+                        ToolTip="この場所の 3D を別のウィンドウで開きます"/>
+            </StackPanel>
+            <ContentControl x:Name="placeHost"/>
+        </DockPanel>
     </Grid>
 </UserControl>

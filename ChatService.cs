@@ -1597,11 +1597,6 @@ public class ChatService
         // DB にデータがない場合、インデックス未構築を通知して自動構築を試みる
         if (_queryService?.HasData() != true)
         {
-            if (_gameDataExtractor != null && !_gameDataExtractor.IsStarBreakerInstalled)
-            {
-                Log("StarBreaker not installed, attempting auto-install...");
-                try { await _gameDataExtractor.EnsureStarBreakerAsync(); } catch { }
-            }
             if (_gameDataExtractor?.IsReady == true && !(_queryService?.HasData() == true))
             {
                 Log("Auto-building structured index...");
@@ -2508,7 +2503,7 @@ public class ChatService
         }
         catch (Exception ex) { Log($"UEX contracts error: {ex.Message}"); }
 
-        Log($"GameDataExtractor ready={_gameDataExtractor?.IsReady}, installed={_gameDataExtractor?.IsStarBreakerInstalled}");
+        Log($"GameDataExtractor ready={_gameDataExtractor?.IsReady}");
         if (_gameDataExtractor?.IsReady == true)
         {
             try

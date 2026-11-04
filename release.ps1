@@ -53,7 +53,8 @@ Write-Host "=== Bundle DB ===" -ForegroundColor Cyan
 $workDir = Join-Path $ProjectDir "AppData"
 # 同梱してよい DB はこの 3 つだけ。
 # 所持船・My Hangar・所持コンポーネント・装備の設定は trade_cache.db に入っており、これは個人データなので絶対に同梱しない
-$allowedDbs = @("translations.db", "gamedata_cache.db", "equipment_cache.db")
+# (2026-11-04) view3d_layout.db はステーションの 3D (新しい方式) の区画の置き方の一覧 (socpak のパス・行列・箱・端末などの位置。ゲームの形・画像・個人データは無い)
+$allowedDbs = @("translations.db", "gamedata_cache.db", "equipment_cache.db", "view3d_layout.db")
 # gamedata_cache.db と translations.db は WAL (journal_mode=WAL) で使う。書き込みはまず <名前>-wal に入り、DB の本体だけを写すと中身が抜けるので、
 # -wal が 0 バイトでなければ止める (アプリを閉じると、閉じるときのチェックポイントで -wal が空になる)
 foreach ($db in @("gamedata_cache.db", "translations.db")) {
@@ -62,14 +63,31 @@ foreach ($db in @("gamedata_cache.db", "translations.db")) {
         throw "アプリを一度起動して閉じ直してから実行してください ($wal に、まだ DB に書き戻していない中身があります)"
     }
 }
+# view3d_layout.db は作業ディレクトリでなく、3D の置き場所 (設定の Ship3DFolder、空なら %TEMP%\StarCitizenJapaneseTextCreater\ship3d) の stations にある
+$ship3dFolder = ""
+$settingsPath = Join-Path $env:LOCALAPPDATA "StarCitizenJapaneseTextCreater\appsettings.json"
+if (Test-Path $settingsPath) { try { $ship3dFolder = [string]((Get-Content $settingsPath -Raw | ConvertFrom-Json).Ship3DFolder) } catch { } }
+if ([string]::IsNullOrWhiteSpace($ship3dFolder)) { $ship3dFolder = Join-Path ([System.IO.Path]::GetTempPath()) "StarCitizenJapaneseTextCreater\ship3d" }
+$layoutDbSrc = Join-Path $ship3dFolder "stations\view3d_layout.db"
 foreach ($db in $allowedDbs) {
-    $src = Join-Path $workDir $db
+    $src = if ($db -eq "view3d_layout.db") { $layoutDbSrc } else { Join-Path $workDir $db }
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $PublishDir $db) -Force
         Write-Host "  Bundled: $db ($("{0:N1} MB" -f ((Get-Item $src).Length / 1MB)))" -ForegroundColor Green
     } else {
         Write-Host "  Skip: $db (not found in $workDir)" -ForegroundColor Yellow
     }
+}
+
+# view3d_layout.db の版の印 (meta の stamp) が「build|」(build_manifest.id の版) で始まるかを確かめる。始まっていなければ (その PC の Data.p4k の印「p4k|」で作ったもの)、
+# ほかの PC では使われない DB なので、リリースを止める (アプリで［マップをまとめて取り込む］を押して作り直してから実行する)。
+# DB の中の文字を見る (SQLite の行は UTF-8 の文字のまま入るので、印の文字列があるかで分かる)
+$layoutDbPub = Join-Path $PublishDir "view3d_layout.db"
+if (Test-Path $layoutDbPub) {
+    $layoutText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($layoutDbPub))
+    if ($layoutText -notmatch 'scjt-view3d-layoutdb-') { throw "view3d_layout.db の形の印が見つかりません ($layoutDbPub)" }
+    if ($layoutText -match 'p4k\|' -or $layoutText -notmatch 'build\|') { throw "view3d_layout.db の版の印が build_manifest.id の版 (build|...) ではありません。アプリの設定タブの［マップをまとめて取り込む］で作り直してから実行してください" }
+    Write-Host "  view3d_layout.db: 版の印 build|… を確かめました" -ForegroundColor Green
 }
 
 # 同梱する gamedata_cache.db と translations.db を DELETE 方式の 1 つのファイルにする (WAL の見出しのままだと、書けないフォルダ
@@ -262,7 +280,7 @@ $rc = Get-Content (Join-Path $PublishDir "$ProjectName.runtimeconfig.json") -Raw
 $runtimes = @($rc.runtimeOptions.frameworks | ForEach-Object { [ordered]@{ name = $_.name; version = $_.version } })
 if ($runtimes.Count -eq 0 -and $rc.runtimeOptions.framework) { $runtimes = @([ordered]@{ name = $rc.runtimeOptions.framework.name; version = $rc.runtimeOptions.framework.version }) }
 
-$deltaDbNames = @("gamedata_cache.db", "translations.db", "equipment_cache.db")
+$deltaDbNames = @("gamedata_cache.db", "translations.db", "equipment_cache.db", "view3d_layout.db")
 $exeForDelta = Join-Path $PublishDir "$ProjectName.exe"
 $newAssets = @{}   # 載せる添付の名前 → ファイル
 $manifestFiles = @()

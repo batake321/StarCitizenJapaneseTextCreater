@@ -10,6 +10,75 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*" MinHeight="140"/>
         </Grid.RowDefinitions>
+        <!-- 右: シグネチャー (スキャナーの数字から鉱石の種類・岩の数・格を出す。gamedata_cache.db の ore_signatures と ore_locations) -->
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" MinWidth="400"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="430" MinWidth="280"/>
+        </Grid.ColumnDefinitions>
+
+        <GridSplitter Grid.Column="1" Grid.RowSpan="3" Width="5" Margin="4,0" HorizontalAlignment="Center" VerticalAlignment="Stretch" Background="#DDD"/>
+
+        <GroupBox Grid.Column="2" Grid.RowSpan="3" Header="シグネチャー (スキャナーの数字から鉱石を調べる)">
+            <Grid Margin="4">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="110"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="シグネチャー:" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                    <TextBox x:Name="txtSignature" Grid.Column="1" VerticalAlignment="Center" FontFamily="Consolas" FontSize="14"
+                             TextChanged="Signature_TextChanged" ToolTip="スキャナーに出た数字 (例 9510)"/>
+                </Grid>
+                <Grid Grid.Row="1" Margin="0,6,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="場所:" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                    <ComboBox x:Name="cmbSigPlace" Grid.Column="1" VerticalAlignment="Center" DisplayMemberPath="Display" TextSearch.TextPath="Display"
+                              SelectionChanged="SigPlace_SelectionChanged">
+                        <ComboBox.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <VirtualizingStackPanel/>
+                            </ItemsPanelTemplate>
+                        </ComboBox.ItemsPanel>
+                    </ComboBox>
+                </Grid>
+                <TextBlock x:Name="txtSigLocation" Grid.Row="2" Margin="0,4,0,0" Foreground="#666" FontSize="11" TextWrapping="Wrap"/>
+                <TextBlock Grid.Row="3" Margin="0,4,0,0" Foreground="#B26A00" FontSize="11" TextWrapping="Wrap"
+                           Text="数字 = 1 個の値 × 岩の数 は推定です (ゲームデータ・一次資料に式は書かれていません)。"/>
+                <TextBlock x:Name="txtSigSummary" Grid.Row="4" Margin="0,6,0,4" FontWeight="Bold" TextWrapping="Wrap"/>
+                <DataGrid x:Name="dgSignature" Grid.Row="5" AutoGenerateColumns="False" IsReadOnly="True"
+                          CanUserAddRows="False" CanUserDeleteRows="False" SelectionMode="Single" GridLinesVisibility="Horizontal"
+                          AlternatingRowBackground="#FAFAFA" FontSize="12" HeadersVisibility="Column" HorizontalScrollBarVisibility="Auto">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="区分" Binding="{Binding Kind}" Width="Auto"/>
+                        <DataGridTextColumn Header="鉱石" Binding="{Binding Ore}" Width="*">
+                            <DataGridTextColumn.ElementStyle>
+                                <Style TargetType="TextBlock"><Setter Property="FontWeight" Value="Bold"/></Style>
+                            </DataGridTextColumn.ElementStyle>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Header="岩の数" Binding="{Binding Count}" Width="Auto">
+                            <DataGridTextColumn.ElementStyle>
+                                <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/><Setter Property="FontFamily" Value="Consolas"/></Style>
+                            </DataGridTextColumn.ElementStyle>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Header="格" Binding="{Binding Grade}" Width="Auto"/>
+                        <DataGridTextColumn Header="この場所で出る割合" Binding="{Binding Chance}" Width="Auto"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </GroupBox>
 
         <!-- 上段: 在庫 -->
         <GroupBox Grid.Row="0" Header="在庫 (資源 × 品質)" Margin="0,0,0,4">

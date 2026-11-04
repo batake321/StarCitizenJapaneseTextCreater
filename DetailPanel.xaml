@@ -63,42 +63,18 @@
             </StackPanel>
         </StackPanel>
 
-        <!-- ステーションの地図 (ステーション・都市 (星図の Manmade 系・LandingZone)・前哨基地 (Outpost 系)・小惑星 (Asteroid 系) の詳細を出しているときだけ出す。DetailPanel.xaml.cs の IsStationPlace。船の 3D のバーにならう)。
-             ［読み込み］でゲームデータから取り込み (終わったら［マップ］タブに出す)、［地図表示］は［マップ］タブ (MapPanel) で、［別ウィンドウ］は StationMapWindow で出す。
-             この欄の中には地図を出さない (2026-11-01、利用者の指示「詳細の欄の地図はマップに切り替える方式にする」) -->
+        <!-- ステーションの 3D (新しい方式) (ステーション・都市 (星図の Manmade 系・LandingZone)・前哨基地 (Outpost 系)・小惑星 (Asteroid 系) の詳細を出しているときだけ出す。DetailPanel.xaml.cs の IsStationPlace)。
+             (2026-11-04、利用者の指示「2D 地図は消して」) 前の 2D の地図・古い方式の 3D のバーをやめ、［3D 表示］で新しい方式の 3D の窓を開く (StationView3DShops.Open)。
+             店の詳細のときは［マップに表示］だけを出し、その店を行き先にして開く -->
         <StackPanel x:Name="pnlStation" Grid.Row="4" Margin="0,0,0,4" Visibility="Collapsed">
-            <TextBlock Text="ステーションの地図" FontWeight="Bold" Margin="0,0,0,3"/>
+            <TextBlock Text="ステーションの 3D" FontWeight="Bold" Margin="0,0,0,3"/>
             <StackPanel Orientation="Horizontal">
-            <Button x:Name="btnStationImport" Content="読み込み" Padding="10,2" Margin="0,0,6,0" Click="BtnStationImport_Click"
-                    ToolTip="この場所の地図 (床の形・店・乗り場・道順) をゲームデータ (選択中のチャンネルの Data.p4k) から取り込みます"/>
-            <Button x:Name="btnStationMap" Content="地図表示" Padding="10,2" Click="BtnStationMap_Click"
-                    ToolTip="［マップ］タブに切り替えて、この場所の地図を出します (未取り込みなら［マップ］タブに［読み込み］を出します)"/>
-            <Button x:Name="btnStationWindow" Content="別ウィンドウ" Padding="10,2" Margin="6,0,0,0" Click="BtnStationWindow_Click"
-                    ToolTip="この場所の地図を別のウィンドウに出します (ウィンドウの上でほかのステーションに切り替えられます)"/>
-            <!-- 店の詳細のときだけ出す (上の 3 つは隠す): 店のある場所の地図を［マップ］タブに出し、その店を選ぶ (DetailPanel.xaml.cs の BtnShopMap_Click) -->
+            <Button x:Name="btnStationMap" Content="3D 表示" Padding="10,2" Click="BtnStationMap_Click"
+                    ToolTip="この場所の 3D (新しい方式) の窓を開きます。形は、見る所の分だけゲームデータ (選択中のチャンネルの Data.p4k) から取り出して描きます"/>
+            <!-- 店の詳細のときだけ出す (上のボタンは隠す): 店のある場所の 3D の窓を開き、その店を行き先にする (DetailPanel.xaml.cs の BtnShopMap_Click) -->
             <Button x:Name="btnShopMap" Content="マップに表示" Padding="10,2" Click="BtnShopMap_Click" Visibility="Collapsed"
-                    ToolTip="［マップ］タブに切り替えて、この店のある場所の地図を出し、この店を目的地にして店の階を開きます"/>
+                    ToolTip="この店のある場所の 3D (新しい方式) の窓を開き、この店を行き先にします"/>
             <TextBlock x:Name="txtStation" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
-            </StackPanel>
-            <!-- ステーションの 3D 表示 (2026-11-02、利用者の指示「詳細に、3D で船のようにStation を立体で見たい…内部のマップボタンを付けて、マップに自動切換え表示の機能も欲しい」)。
-                 船の 3D のバーと同じ並び: ［読み込み］でゲームデータから書き出し (Station3DExports)、［3D 表示］は下の欄 (web3D)、［別ウィンドウ］は Station3DWindow、
-                 ［内部のマップ］は［マップ］タブに切り替えてこの場所の階層マップを出す (［地図表示］と同じ MapPanel.ShowPlaceInMapTab)。
-                 店の詳細のときは出さない。処理は Station3DDetailPanel.cs -->
-            <StackPanel x:Name="pnlStation3D">
-            <TextBlock Text="ステーションの 3D 表示" FontWeight="Bold" Margin="0,6,0,3"/>
-            <StackPanel Orientation="Horizontal">
-            <Button x:Name="btnStation3DImport" Content="読み込み" Padding="10,2" Margin="0,0,6,0" Click="BtnStation3DImport_Click"
-                    ToolTip="この場所の 3D (外から見た形と、着陸パッド・外部貨物エレベーター・ハンガーの場所) をゲームデータ (選択中のチャンネルの Data.p4k) から書き出します。最新のものがあるとき・書き出し中は使えません"/>
-            <Button x:Name="btnStation3D" Content="3D 表示" Padding="10,2" Click="BtnStation3D_Click"
-                    ToolTip="この場所の 3D を下の欄に出します (書き出し済みの場所だけ)"/>
-            <Button x:Name="btnStation3DWindow" Content="別ウィンドウ" Padding="10,2" Margin="6,0,0,0" Click="BtnStation3DWindow_Click"
-                    ToolTip="この場所の 3D を別のウィンドウに出します (書き出し済みの場所だけ)"/>
-            <Button x:Name="btnStation3DMap" Content="内部のマップ" Padding="10,2" Margin="6,0,0,0" Click="BtnStation3DMap_Click"
-                    ToolTip="［マップ］タブに切り替えて、この場所の階層マップを出します (未取り込みなら［マップ］タブに［読み込み］を出します)"/>
-            <Button x:Name="btnStation3DBack" Content="表に戻る" Padding="10,2" Margin="6,0,0,0" Click="BtnStation3DBack_Click" Visibility="Collapsed"
-                    ToolTip="3D 表示をやめて、詳細の表に戻ります"/>
-            <TextBlock x:Name="txtStation3D" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
-            </StackPanel>
             </StackPanel>
         </StackPanel>
 

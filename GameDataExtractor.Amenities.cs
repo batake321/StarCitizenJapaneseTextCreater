@@ -74,7 +74,6 @@ public partial class GameDataExtractor
         var p4kPath = FindDataP4k()
             ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
 
-        await EnsureStarBreakerAsync();
         EnsureDb();
 
         Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;

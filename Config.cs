@@ -93,6 +93,8 @@ public class AppConfig
     // 最大容量 (MB。0 なら未設定で、初期値 = 置き場所のドライブの残り容量の 1/3、ただし最大 2GB)
     public string Ship3DFolder { get; set; } = "";
     public long Ship3DMaxMB { get; set; } = 0;
+    // (2026-11-04、利用者の決定「設定で取り込み可能」「デフォルトは保存」) true なら 3D モデルを保存しない (表示のたびに Data.p4k から直接読む)
+    public bool Ship3DNoSave { get; set; } = false;
 
     // 自動更新: 起動したときと毎日 AutoUpdateTime (HH:mm) に、新しい版を確かめる (AppUpdater)
     public bool AutoUpdateEnabled { get; set; } = true;

@@ -31,12 +31,11 @@ internal static class GameIcons
                 App.AppendStartupLog(App.Config.WorkingDirectory, "[ゲームのアイコン] CPU 使用率が 90% 以上なので、下がるまで取り出しを待ちます");
                 while (Ship3DExports.CpuHighNow) await Task.Delay(1000, ct);
             }
-            var extractor = new GameDataExtractor(DetailPanel.WorkDir());
-            await extractor.EnsureStarBreakerAsync();
             Directory.CreateDirectory(dir);
             foreach (var f in Filters)
             {
-                var (code, tail) = await StarBreakerRunner.RunAsync(extractor.StarBreakerExe, $"p4k extract --p4k \"{stamp.Path}\" -o \"{dir}\" --filter \"{f}\"", null, null, ct);
+                // (2026-11-04、利用者の決定「starbreaker の処理を自前で持つ」) starbreaker の p4k extract の代わりに、アプリの中の読み取り (P4kTools) で取り出す
+                var (code, tail) = await P4kTools.RunExtractAsync(stamp.Path, dir, f, null, false, ct);
                 if (code != 0)
                 {
                     App.AppendStartupLog(App.Config.WorkingDirectory, $"[ゲームのアイコン] 取り出せませんでした ({f}): 終了コード {code} {tail}");

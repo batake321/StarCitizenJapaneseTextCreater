@@ -12,13 +12,11 @@ namespace StarCitizenJapaneseTextCreater;
 public partial class GameDataExtractor : IDisposable
 {
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(5) };
-    private const string StarBreakerVersion = "v0.2.2";
-    private const string StarBreakerUrl =
-        $"https://github.com/diogotr7/StarBreaker/releases/download/{StarBreakerVersion}/starbreaker-cli-{StarBreakerVersion}-windows-x86_64.zip";
 
+    // (2026-11-04、利用者の決定「starbreaker の処理を自前で持つ」) starbreaker はもう使わない (ダウンロードもしない)。
+    // ToolsDir は前の版の starbreaker の置き場所 (ChatService のログの置き場の予備に使っているので残す)
     public string ToolsDir { get; }
     public string DbPath { get; }
-    public string StarBreakerExe { get; }
 
     public event Action<int, string>? ProgressChanged;
     public event Action<string>? StatusChanged;
@@ -29,7 +27,6 @@ public partial class GameDataExtractor : IDisposable
     {
         ToolsDir = Path.Combine(workingDirectory, "tools", "starbreaker");
         DbPath = Path.Combine(workingDirectory, "gamedata_cache.db");
-        StarBreakerExe = Path.Combine(ToolsDir, "starbreaker.exe");
     }
 
     // DB のファイルを指定して開く (起動時に同梱 DB を作り直すとき、正式名にする前の "gamedata_cache.db.tmp" に対して
@@ -39,8 +36,8 @@ public partial class GameDataExtractor : IDisposable
         DbPath = dbPath;
     }
 
-    public bool IsStarBreakerInstalled => File.Exists(StarBreakerExe);
-    public bool IsReady => IsStarBreakerInstalled && FindDataP4k() != null;
+    // (2026-11-04、利用者の指示「starbreaker の処理を自前で持つ」) ゲームデータの読み取りはアプリの中で行う (船の 3D も)
+    public bool IsReady => FindDataP4k() != null;
 
     public string? FindDataP4k()
     {
@@ -898,10 +895,10 @@ public partial class GameDataExtractor : IDisposable
             var rawDir = Path.Combine(workDir, "raw");
             var convDir = Path.Combine(workDir, "xml");
             Directory.CreateDirectory(rawDir);
-            await RunStarBreakerAsync($"p4k extract --p4k \"{p4kPath}\" -o \"{rawDir}\" --filter \"Data/Scripts/Entities/Vehicles/Implementations/Xml/**\"", ct);
+            await RunP4kExtractAsync(p4kPath, rawDir, "Data/Scripts/Entities/Vehicles/Implementations/Xml/**", ct);
             var xmlDir = Path.Combine(rawDir, "Data", "Scripts", "Entities", "Vehicles", "Implementations", "Xml");
             if (!Directory.Exists(xmlDir)) { StatusChanged?.Invoke("船の XML を取り出せませんでした (ハードポイントの大きさは既定の装備の大きさで代わりにします)"); return; }
-            await RunStarBreakerAsync($"cryxml convert-all -i \"{xmlDir}\" -o \"{convDir}\"", ct);
+            await RunCryXmlConvertAllAsync(xmlDir, convDir, ct);
             if (!Directory.Exists(convDir)) { StatusChanged?.Invoke("船の XML を変換できませんでした (ハードポイントの大きさは既定の装備の大きさで代わりにします)"); return; }
             FillShipPortSizesFromXml(_db!, convDir, m => StatusChanged?.Invoke(m));
         }
@@ -962,7 +959,6 @@ public partial class GameDataExtractor : IDisposable
         var p4kPath = FindDataP4k()
             ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
 
-        await EnsureStarBreakerAsync();
         EnsureDb();
 
         Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
@@ -1013,7 +1009,6 @@ public partial class GameDataExtractor : IDisposable
         var p4kPath = FindDataP4k()
             ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
 
-        await EnsureStarBreakerAsync();
         EnsureDb();
 
         Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
@@ -1102,7 +1097,6 @@ public partial class GameDataExtractor : IDisposable
         var p4kPath = FindDataP4k()
             ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
 
-        await EnsureStarBreakerAsync();
         EnsureDb();
 
         Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
@@ -1243,7 +1237,6 @@ public partial class GameDataExtractor : IDisposable
         var p4kPath = FindDataP4k()
             ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
 
-        await EnsureStarBreakerAsync();
         EnsureDb();
 
         Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
@@ -1351,7 +1344,6 @@ public partial class GameDataExtractor : IDisposable
         var p4kPath = FindDataP4k()
             ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
 
-        await EnsureStarBreakerAsync();
         EnsureDb();
 
         Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
@@ -1966,7 +1958,7 @@ public partial class GameDataExtractor : IDisposable
             {
                 if (Directory.Exists(xmlDir)) Directory.Delete(xmlDir, true);
                 Directory.CreateDirectory(xmlDir);
-                await RunStarBreakerAsync($"p4k extract --p4k \"{p4kPath}\" -o \"{xmlDir}\" --filter \"Data/Scripts/Loadouts/**\"", ct);
+                await RunP4kExtractAsync(p4kPath, xmlDir, "Data/Scripts/Loadouts/**", ct);
                 var dataDir = Path.Combine(xmlDir, "Data");
                 if (Directory.Exists(dataDir))
                     xmlLoader = CreateCargoXmlLoader(dataDir, () => xmlFiles++, () => xmlMissing++);
@@ -2358,7 +2350,7 @@ public partial class GameDataExtractor : IDisposable
             StatusChanged?.Invoke("Data.p4k から Game2.dcb を取り出し中...");
             if (Directory.Exists(dir)) Directory.Delete(dir, true);
             Directory.CreateDirectory(dir);
-            await RunStarBreakerAsync($"p4k extract --p4k \"{p4kPath}\" -o \"{dir}\" --filter \"Data/Game2.dcb\"", ct);
+            await RunP4kExtractAsync(p4kPath, dir, "Data/Game2.dcb", ct);
             var path = Path.Combine(dir, "Data", "Game2.dcb");
             if (File.Exists(path) && new FileInfo(path).Length > 0)
             {
@@ -2491,53 +2483,27 @@ public partial class GameDataExtractor : IDisposable
         }
     }
 
-    // starbreaker を引数 args で動かし、終わるまで待つ (標準出力は読み捨てる)。
-    // 終了コードが 0 でなければ、標準エラーの末尾を添えて例外にする。取り消されたら starbreaker を止めてから取り消しの例外を上げる
-    private async Task RunStarBreakerAsync(string args, CancellationToken ct)
+    // (2026-11-04、利用者の決定「starbreaker の処理を自前で持つ」) starbreaker の p4k extract・cryxml convert-all・dcb extract の代わり (アプリの中の読み取り)。
+    // starbreaker と同じく、Data.p4k を開けない等で全体が失敗したときだけ例外 (1 つずつの読み書きの失敗は数えるだけ)
+    private static async Task RunP4kExtractAsync(string p4kPath, string outDir, string filter, CancellationToken ct)
     {
-        var psi = new ProcessStartInfo
-        {
-            FileName = StarBreakerExe,
-            Arguments = args,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-        };
-        using var proc = Process.Start(psi)!;
-        var stderr = new StringBuilder();
-        proc.ErrorDataReceived += (_, e) => { if (e.Data != null) lock (stderr) stderr.AppendLine(e.Data); };
-        proc.BeginOutputReadLine();
-        proc.BeginErrorReadLine();
-        await WaitStarBreakerExitAsync(proc, ct);
-        if (proc.ExitCode != 0)
-            throw new InvalidOperationException($"starbreaker が失敗しました (終了コード {proc.ExitCode}): {StderrTail(stderr)}");
+        var (code, tail) = await P4kTools.RunExtractAsync(p4kPath, outDir, filter, null, false, ct);
+        if (code != 0) throw new InvalidOperationException($"p4k extract が失敗しました: {tail}");
     }
 
-    // starbreaker の終わりを待つ。取り消されたらプロセス (子プロセスも) を止め、終わるのを待ってから (最大 5 秒。書きかけのファイルを
-    // 握ったままだと、呼ぶ側の後始末で作業フォルダを消せないため) 取り消しの例外を上げる
-    private static async Task WaitStarBreakerExitAsync(Process proc, CancellationToken ct)
+    private static async Task RunCryXmlConvertAllAsync(string inDir, string outDir, CancellationToken ct)
     {
-        try
-        {
-            await proc.WaitForExitAsync(ct);
-        }
-        catch (OperationCanceledException)
-        {
-            try
-            {
-                if (!proc.HasExited)
-                {
-                    proc.Kill(entireProcessTree: true);
-                    proc.WaitForExit(5000);
-                }
-            }
-            catch { }
-            throw;
-        }
+        try { await Task.Run(() => P4kTools.CryXmlConvertAll(inDir, outDir), ct); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { throw new InvalidOperationException($"cryxml convert-all が失敗しました: {e.Message}", e); }
     }
 
-    // 標準エラーの末尾 (長すぎる場合は最後の 500 文字)
+    // dcb extract --format json --filter <glob> (dcbFile が null なら Data.p4k の Game2.dcb)
+    private static async Task RunDcbExtractJsonAsync(string? dcbFile, string p4kPath, string outDir, string filter, CancellationToken ct)
+    {
+        try { await Task.Run(() => DataCoreCli.ExtractJson(DataCoreShared.Get(dcbFile, p4kPath), outDir, filter, null, ct), ct); }
+        catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException) { throw new InvalidOperationException($"dcb extract が失敗しました: {e.Message}", e); }
+    }
+
     private static string StderrTail(StringBuilder stderr)
     {
         string text;
@@ -2765,46 +2731,6 @@ public partial class GameDataExtractor : IDisposable
         cmd.ExecuteNonQuery();
     }
 
-    public async Task EnsureStarBreakerAsync()
-    {
-        if (IsStarBreakerInstalled) return;
-
-        StatusChanged?.Invoke("StarBreaker CLI をダウンロード中...");
-        ProgressChanged?.Invoke(0, "ダウンロード中...");
-
-        Directory.CreateDirectory(ToolsDir);
-        var zipPath = Path.Combine(ToolsDir, "starbreaker-cli.zip");
-
-        using (var response = await Http.GetAsync(StarBreakerUrl, HttpCompletionOption.ResponseHeadersRead))
-        {
-            response.EnsureSuccessStatusCode();
-            var totalBytes = response.Content.Headers.ContentLength ?? 0;
-
-            using var contentStream = await response.Content.ReadAsStreamAsync();
-            using var fileStream = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None);
-
-            var buffer = new byte[81920];
-            long downloaded = 0;
-            int bytesRead;
-            while ((bytesRead = await contentStream.ReadAsync(buffer)) > 0)
-            {
-                await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead));
-                downloaded += bytesRead;
-                if (totalBytes > 0)
-                {
-                    var pct = (int)(downloaded * 100 / totalBytes);
-                    ProgressChanged?.Invoke(pct, $"ダウンロード中... {downloaded / 1024 / 1024}MB / {totalBytes / 1024 / 1024}MB");
-                }
-            }
-        }
-
-        StatusChanged?.Invoke("展開中...");
-        ZipFile.ExtractToDirectory(zipPath, ToolsDir, overwriteFiles: true);
-        File.Delete(zipPath);
-
-        ProgressChanged?.Invoke(100, "StarBreaker CLI 準備完了");
-    }
-
     // requestShopPriceFetch: 構築が終わったら売り場・価格の裏の取得を始めてもらうか。設定タブの構築は、構築の後の処理
     // (日本語名・固有名詞キャッシュ) を済ませてから MainWindow が RequestShopPriceFetch を呼ぶので false にする
     public async Task BuildIndexAsync(string dataP4kPath, CancellationToken ct = default, bool requestShopPriceFetch = true)
@@ -2947,7 +2873,6 @@ public partial class GameDataExtractor : IDisposable
         if (dbShort != null || tempShort != null)
             throw new IOException("ディスク容量不足: " + string.Join("、", new[] { dbShort, tempShort }.Where(x => x != null)));
 
-        await EnsureStarBreakerAsync();
         EnsureDb();
         using var dcbScope = await UseExtractedDcbAsync(dataP4kPath, ct);
 
@@ -4028,7 +3953,6 @@ public partial class GameDataExtractor : IDisposable
         var p4kPath = FindDataP4k()
             ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
 
-        await EnsureStarBreakerAsync();
         EnsureDb();
 
         Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
@@ -4287,7 +4211,6 @@ public partial class GameDataExtractor : IDisposable
         var p4kPath = FindDataP4k()
             ?? throw new FileNotFoundException("Data.p4k が見つかりません。設定のゲームパスを確認してください。");
 
-        await EnsureStarBreakerAsync();
         EnsureDb();
 
         Action<string>? relay = progress != null ? msg => progress.Report(msg) : null;
@@ -6090,7 +6013,7 @@ public partial class GameDataExtractor : IDisposable
     public async Task<string?> QueryGameDataAsync(string query)
     {
         var p4kPath = FindDataP4k();
-        if (p4kPath == null || !IsStarBreakerInstalled) return null;
+        if (p4kPath == null) return null;
 
         var sb = new StringBuilder();
         var tasks = new List<Task<string?>>();
@@ -6189,7 +6112,7 @@ public partial class GameDataExtractor : IDisposable
     public async Task<string?> QueryMissionsAsync(string query)
     {
         var p4kPath = FindDataP4k();
-        if (p4kPath == null || !IsStarBreakerInstalled) return null;
+        if (p4kPath == null) return null;
         return await QueryMissionsInternalAsync(p4kPath, query);
     }
 
@@ -6302,7 +6225,7 @@ public partial class GameDataExtractor : IDisposable
     public async Task<string?> QueryCommoditiesAsync(string query)
     {
         var p4kPath = FindDataP4k();
-        if (p4kPath == null || !IsStarBreakerInstalled) return null;
+        if (p4kPath == null) return null;
 
         var cacheKey = $"commodity:{query}";
         var cached = GetCache(cacheKey);
@@ -6646,57 +6569,27 @@ public partial class GameDataExtractor : IDisposable
             onProgress?.Invoke(cached.Length);
             return cached;
         }
-        var psi = new ProcessStartInfo
-        {
-            FileName = StarBreakerExe,
-            // 構築中は最初に取り出した Game2.dcb を読む (UseExtractedDcbAsync)
-            Arguments = _dcbPath is { } dcb
-                ? $"dcb query \"{recordType}\" --dcb \"{dcb}\" --filter \"{filter}\""
-                : $"dcb query \"{recordType}\" --p4k \"{p4kPath}\" --filter \"{filter}\"",
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
-        };
-
-        using var proc = Process.Start(psi)!;
-        var stderr = new StringBuilder();
-        proc.ErrorDataReceived += (_, e) => { if (e.Data != null) lock (stderr) stderr.AppendLine(e.Data); };
-        proc.BeginErrorReadLine();
-        var sb = new StringBuilder();
-        var buffer = new char[65536];
-        int bytesRead;
-        long totalChars = 0;
+        // (2026-11-04、利用者の決定「starbreaker の処理を自前で持つ」) starbreaker の dcb query の代わりに、アプリの中の読み取り (DataCoreShared・DataCoreCli) で
+        // 同じ出力の文字を作る。構築中は最初に取り出した Game2.dcb を読む (UseExtractedDcbAsync)。DataCore は 1 回読んだら使い回す
+        ct.ThrowIfCancellationRequested();
+        var dcbFile = _dcbPath;
+        string output;
+        bool ok;
         try
         {
-            while ((bytesRead = await proc.StandardOutput.ReadAsync(buffer, ct)) > 0)
-            {
-                sb.Append(buffer, 0, bytesRead);
-                totalChars += bytesRead;
-                onProgress?.Invoke(totalChars);
-            }
+            output = await Task.Run(() => DataCoreShared.Query(dcbFile, p4kPath, recordType, filter), ct);
+            ok = true;
         }
-        catch (OperationCanceledException)
+        catch (InvalidOperationException ex)
         {
-            // 取り消されたら starbreaker を止めてから取り消しの例外を上げる
-            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
-            throw;
+            // 当てはまる record が無いときは空 (失敗ではない。DataCoreShared.Query が空を返す)。そのほかの失敗は知らせ、空で続ける (例外にはしない)
+            StatusChanged?.Invoke($"dcb query が失敗しました ({recordType} / {filter}): {ex.Message}");
+            output = "";
+            ok = false;
         }
-        await WaitStarBreakerExitAsync(proc, ct);
-        // 終了コードが 0 でなければ知らせる。ただし当てはまる record が無いとき (starbreaker は終了コード 1 で
-        // "error: no ... records matching filter" を出す) は失敗ではないので知らせない。
-        // 呼び出し側は今までどおり取れた出力 (失敗なら空) で続ける (例外にはしない)
-        if (proc.ExitCode != 0)
-        {
-            string err;
-            lock (stderr) err = stderr.ToString();
-            if (!err.Contains("records matching filter", StringComparison.Ordinal))
-                StatusChanged?.Invoke($"starbreaker dcb query が失敗しました (終了コード {proc.ExitCode}, {recordType} / {filter}): {StderrTail(stderr)}");
-        }
-        var output = sb.ToString();
-        // 失敗したもの (終了コードが 0 でない) は置いておかない (後の段階では今までどおり問い合わせ直す)
-        if (proc.ExitCode == 0 && output.Length > 0) TryWriteCachedQuery(recordType, filter, output);
+        onProgress?.Invoke(output.Length);
+        // 失敗したものは置いておかない (後の段階では今までどおり問い合わせ直す)
+        if (ok && output.Length > 0) TryWriteCachedQuery(recordType, filter, output);
         return output;
     }
 

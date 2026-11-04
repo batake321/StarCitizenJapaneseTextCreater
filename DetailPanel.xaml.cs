@@ -993,15 +993,17 @@ public partial class DetailPanel : UserControl
         var shortName = Ship3DExports.ShortName(_ship3DRecord);
         var job = ex.Jobs.FirstOrDefault(j => j.Short.Equals(shortName, StringComparison.OrdinalIgnoreCase));
         // 自動の取り直しの順番待ちの間も押せる (押すとその船をいちばん先にする。Ship3DExports.IsRefreshWaiting・PromoteRefresh)
-        btnShip3DImport.IsEnabled = state == Ship3DCacheState.None && job == null && !ex.CpuHigh || ex.IsRefreshWaiting(_ship3DRecord);
+        // (2026-11-04) 「3D モデルを保存しない」のときは取り込み (保存) の［読み込み］は使わない (［3D 表示］で直接読む)
+        btnShip3DImport.IsEnabled = !Ship3DExports.NoSave && (state == Ship3DCacheState.None && job == null && !ex.CpuHigh || ex.IsRefreshWaiting(_ship3DRecord));
         txtShip3D.Text = job != null ? $"3D モデル: 書き出し中 {job.Text}"
             : state switch
             {
                 Ship3DCacheState.Fresh => "3D モデル: キャッシュあり",
                 Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying => "3D モデル: 照合中 (パッチで Data.p4k が変わったので元データを確かめています)",
                 Ship3DCacheState.NoGame => "3D モデル: ゲームの Data.p4k が見つかりません",
-                _ => ex.CpuHigh ? $"3D モデル: キャッシュなし。CPU 使用率 {ex.CpuPercent:F0}% のため取り込みを始められません (90% 未満になったら使えます)"
-                                : "3D モデル: キャッシュなし (［読み込み］でゲームデータから取り込みます)",
+                _ => Ship3DExports.NoSave ? "3D モデル: 保存しない設定 (［3D 表示］でゲームデータから直接読みます)"
+                    : ex.CpuHigh ? $"3D モデル: キャッシュなし。CPU 使用率 {ex.CpuPercent:F0}% のため、下がってから読み込みます"
+                                : "3D モデル: キャッシュなし (［3D 表示］でゲームデータから直接読みます)",
             };
     }
 
@@ -1010,21 +1012,17 @@ public partial class DetailPanel : UserControl
         lstCandidates.SelectedItem is ListItem item && item.Record.Equals(record, StringComparison.OrdinalIgnoreCase) && item.Name.Length > 0
             ? item.Name : Ship3DExports.ShortName(record);
 
-    // 表示に使える GLB のパス (Data.p4k が変わっていれば照合してから)。無ければ［読み込み］を押すよう知らせて null (書き出しはしない)
-    private async Task<string?> CachedPathOrNotifyAsync(string record, string name)
+    // 表示に使う GLB のパス (2026-11-04、利用者の決定「取り込み済みなら取り込みデータ、取り込みしてなければ直接」):
+    // 取り込み済みならそれ (Data.p4k が変わっていれば照合してから)、無ければゲームデータから直接読む (確認の窓は出さない。進み具合は進み具合の欄に出る)。
+    // 読めなければ null (知らせは Ship3DExports が出す)
+    private async Task<string?> ViewPathAsync(string record, string name)
     {
         var ex = Ship3DExports.Instance;
         var state = ex.StateOf(record);
         if (state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying) txtShip3D.Text = "3D モデル: 照合中 (パッチで Data.p4k が変わったので元データを確かめています)";
-        var path = await ex.GetCachedPathAsync(record);
+        var path = await ex.GetViewPathAsync(record, name, Window.GetWindow(this));
         UpdateShip3DButtons();
-        if (path != null) return path;
-        var msg = state == Ship3DCacheState.NoGame ? "ゲームの Data.p4k が見つかりません。設定タブのゲームのフォルダとチャンネルを確かめてください。"
-            : ex.IsExporting(record) ? $"「{name}」の 3D モデルは書き出し中です。終わってから出してください。"
-            : state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying ? $"「{name}」の元データがパッチで変わったので、キャッシュを消しました。［読み込み］で取り込み直してください。"
-            : $"「{name}」の 3D モデルはまだ取り込んでいません。［読み込み］でゲームデータから取り込んでください。";
-        MessageBox.Show(Window.GetWindow(this), msg, "3D 表示", MessageBoxButton.OK, MessageBoxImage.Information);
-        return null;
+        return path;
     }
 
     // ［読み込み］: 予想を出して確かめてから裏で書き出す。終わったとき、まだその船の詳細を出していれば下の欄に 3D を出す (別の船に移っていたら知らせだけ)
@@ -1042,28 +1040,28 @@ public partial class DetailPanel : UserControl
             txtStatus.Text = $"「{name}」の 3D モデルを取り込みました (その船の詳細の［3D 表示］で出せます)";
             return;
         }
-        await ShowShip3DAsync(record, name);
+        await ShowShip3DAsync(record, name, path);
     }
 
-    // ［3D 表示］: 取り込み済みなら下の欄に出す (書き出しはしない)
+    // ［3D 表示］: 下の欄に出す (取り込み済みならそれ、無ければゲームデータから直接読む)
     private async void BtnShip3D_Click(object sender, RoutedEventArgs e)
     {
         var record = _ship3DRecord;
         if (record == null) return;
         var name = _ship3DName;
-        if (await CachedPathOrNotifyAsync(record, name) == null) return;
+        var path = await ViewPathAsync(record, name);
+        if (path == null) return;
         if (!string.Equals(record, _ship3DRecord, StringComparison.OrdinalIgnoreCase)) return;
-        await ShowShip3DAsync(record, name);
+        await ShowShip3DAsync(record, name, path);
     }
 
-    // ［別ウィンドウ］: 取り込み済みなら別のウィンドウ (モードレス) に出す (書き出しはしない)
-    private async void BtnShip3DWindow_Click(object sender, RoutedEventArgs e)
+    // ［別ウィンドウ］: 別のウィンドウ (モードレス) に出す (読み込みは窓の側でする。取り込み済みならそれ、無ければゲームデータから直接読む)
+    private void BtnShip3DWindow_Click(object sender, RoutedEventArgs e)
     {
         var record = _ship3DRecord;
         if (record == null) return;
         var name = _ship3DName;
         var owner = Window.GetWindow(this);
-        if (await CachedPathOrNotifyAsync(record, name) == null) return;
         try
         {
             var win = new Ship3DWindow(record, name);
@@ -1083,7 +1081,7 @@ public partial class DetailPanel : UserControl
     private void BtnShip3DBack_Click(object sender, RoutedEventArgs e) => HideShip3D();
 
     // 下の欄に 3D を出す (詳細の表の WebView2 は隠すだけで、中身はそのまま)
-    private async Task ShowShip3DAsync(string record, string name)
+    private async Task ShowShip3DAsync(string record, string name, string? glbPath = null)
     {
         try { await (_web3DInit ??= Ship3DWeb.InitAsync(web3D)); }
         catch (Exception ex)
@@ -1099,7 +1097,7 @@ public partial class DetailPanel : UserControl
         if (_ship3DShown != null) Ship3DExports.Instance.ReleaseView(_ship3DShown);
         Ship3DExports.Instance.AcquireView(shortName);
         _ship3DShown = shortName;
-        try { Ship3DWeb.Show(web3D, shortName, name); }
+        try { Ship3DWeb.Show(web3D, shortName, name, glbPath); }
         catch (Exception ex)
         {
             AppendAppLog($"[3D モデル] 表示できませんでした: {ex}");
@@ -1141,25 +1139,23 @@ public partial class DetailPanel : UserControl
     // バーを出している店 (店の詳細のとき。［マップに表示］だけを出す。場所の詳細のときは null)
     private ShopTreeShop? _stationShop;
 
-    // 店のある場所: 店の場所かその上で、最初の、地図の一覧に出る場所 (IsStationPlace の種類で、別ウィンドウの一覧と同じ決まり StationMapWindow.IsMapPlace)。無ければ null
+    // 店のある場所: 店の場所かその上で、最初の、3D (新しい方式) で開ける場所 (IsStationPlace の種類で、区画の置き方の一覧 (view3d_layout.db) にある場所)。無ければ null
     private static ShopTreeNode? StationMapPlaceOf(ShopTreeShop shop)
     {
+        var inDb = AmenityMapHints.All();
         for (var n = shop.Location; n != null && !n.IsStar; n = n.Parent)
-            if (IsStationPlace(n) && StationMapWindow.IsMapPlace(n)) return n;
+            if (IsStationPlace(n) && inDb.ContainsKey(n.RecordName)) return n;
         return null;
     }
 
-    // バーの場所を決める (null なら隠す)。shop があれば店の詳細 (place は店のある場所。［読み込み］［地図表示］［別ウィンドウ］は隠し、［マップに表示］だけを出す)
+    // バーの場所を決める (null なら隠す)。shop があれば店の詳細 (place は店のある場所。［3D 表示］は隠し、［マップに表示］だけを出す)
     private void SetStationTarget(ShopTreeNode? place, ShopTree? tree, ShopTreeShop? shop = null)
     {
         _stationDetailRecord = shop?.Record ?? place?.Record;
         _stationPlace = place;
         _stationTree = tree;
         _stationShop = place == null ? null : shop;
-        var placeButtons = _stationShop != null ? Visibility.Collapsed : Visibility.Visible;
-        btnStationImport.Visibility = btnStationMap.Visibility = btnStationWindow.Visibility = placeButtons;
-        // ステーションの 3D 表示のバー (店の詳細では出さない。場所が変われば 3D 表示をやめる。Station3DDetailPanel.cs)
-        SetStation3DTarget(_stationShop == null ? place : null);
+        btnStationMap.Visibility = _stationShop != null ? Visibility.Collapsed : Visibility.Visible;
         btnShopMap.Visibility = _stationShop != null ? Visibility.Visible : Visibility.Collapsed;
         if (place == null)
         {
@@ -1169,136 +1165,52 @@ public partial class DetailPanel : UserControl
         if (!_stationHooked)
         {
             _stationHooked = true;
-            // 取り込みが加わった / 終わった・照合・地図を書いた / 消した・CPU 使用率が 90% をまたいだら、ボタンを決め直す
-            StationMapExports.Instance.StateChanged += UpdateStationButtons;
-            Ship3DExports.Instance.StateChanged += UpdateStationButtons;
-            Ship3DExports.Instance.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(Ship3DExports.OverallText)) UpdateStationButtons(); };
+            // 区画の置き方の一覧を作り始めた・作り終えたら、文を決め直す
+            StationView3DLayout.Changed += () => Dispatcher.BeginInvoke(UpdateStationButtons);
         }
         pnlStation.Visibility = Visibility.Visible;
         UpdateStationButtons();
-        // パッチで Data.p4k が変わっていれば、この場所の元データを照合する (終わったら StateChanged でボタンを決め直す)
-        if (StationMapExports.Instance.StateOf(place.RecordName) == Ship3DCacheState.NeedsVerify) _ = StationMapExports.Instance.VerifyAsync(place.RecordName);
     }
     private bool _stationHooked;
 
-    // ［読み込み］は、地図が無い (照合で消したものを含む) ときで、取り込み中でなく、CPU 使用率が 90% 未満のときだけ使える (船の［読み込み］と同じ)
+    // 横の文: 区画の置き方の一覧 (view3d_layout.db) の状態
     private void UpdateStationButtons()
     {
         if (_stationPlace == null) return;
-        var ex = StationMapExports.Instance;
-        var state = ex.StateOf(_stationPlace.RecordName);
-        var key = StationMapExports.KeyOf(StationMapExports.ShortName(_stationPlace.RecordName));
-        var job = Ship3DExports.Instance.Jobs.FirstOrDefault(j => j.Short.Equals(key, StringComparison.OrdinalIgnoreCase));
-        btnStationImport.IsEnabled = state == Ship3DCacheState.None && job == null && !Ship3DExports.Instance.CpuHigh;
-        if (_stationShop != null)
-        {
-            // 店の詳細: 店のある場所の地図の状態 (取り込みは［マップ］タブの［読み込み］で)
-            txtStation.Text = $"「{_stationPlace.Name}」の地図: " + (job != null ? $"取り込み中 {job.Text}"
-                : state switch
-                {
-                    Ship3DCacheState.Fresh => "取り込み済み",
-                    Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying => "照合中 (パッチで Data.p4k が変わったので元データを確かめています)",
-                    Ship3DCacheState.NoGame => "ゲームの Data.p4k が見つかりません",
-                    _ => "未取り込み (［マップに表示］で出る［マップ］タブの［読み込み］で取り込めます)",
-                });
-            return;
-        }
-        txtStation.Text = job != null ? $"地図: 取り込み中 {job.Text}"
-            : state switch
-            {
-                Ship3DCacheState.Fresh => "地図: 取り込み済み",
-                Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying => "地図: 照合中 (パッチで Data.p4k が変わったので元データを確かめています)",
-                Ship3DCacheState.NoGame => "地図: ゲームの Data.p4k が見つかりません",
-                _ => Ship3DExports.Instance.CpuHigh ? $"地図: 未取り込み。CPU 使用率 {Ship3DExports.Instance.CpuPercent:F0}% のため取り込みを始められません (90% 未満になったら使えます)"
-                                                    : "地図: 未取り込み (［読み込み］でゲームデータから取り込みます)",
-            };
+        var inDb = AmenityMapHints.All().ContainsKey(_stationPlace.RecordName);
+        txtStation.Text = StationView3DLayout.Running ? "区画の置き方の一覧を作っています (開くと、作り終えるまで待ちます)"
+            : inDb ? "" : "この場所は区画の置き方の一覧にありません (設定タブの［マップをまとめて取り込む］で作り直せます)";
     }
 
-    // 表示に使える地図があるか (Data.p4k が変わっていれば照合してから)。無ければ［読み込み］を押すよう知らせて false (取り込みはしない)
-    private async Task<bool> StationReadyOrNotifyAsync(ShopTreeNode place)
-    {
-        var ex = StationMapExports.Instance;
-        var state = ex.StateOf(place.RecordName);
-        if (await ex.GetCachedPathAsync(place.RecordName) != null) { UpdateStationButtons(); return true; }
-        UpdateStationButtons();
-        var msg = state == Ship3DCacheState.NoGame ? "ゲームの Data.p4k が見つかりません。設定タブのゲームのフォルダとチャンネルを確かめてください。"
-            : ex.IsExporting(place.RecordName) ? $"「{place.Name}」の地図は取り込み中です。終わってから出してください。"
-            : state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying ? $"「{place.Name}」の元データがパッチで変わったので、地図を消しました。［読み込み］で取り込み直してください。"
-            : $"「{place.Name}」の地図はまだ取り込んでいません。［読み込み］でゲームデータから取り込んでください。";
-        MessageBox.Show(Window.GetWindow(this), msg, "ステーションの地図", MessageBoxButton.OK, MessageBoxImage.Information);
-        return false;
-    }
-
-    // ［読み込み］: 予想を出して確かめてから裏で取り込む。終わったとき、まだその場所の詳細を出していれば［マップ］タブに切り替えて地図を出す
-    // (2026-11-01、利用者の指示「詳細の欄の地図はマップに切り替える方式にする」による親の決定「A」)
-    private async void BtnStationImport_Click(object sender, RoutedEventArgs e)
-    {
-        var place = _stationPlace;
-        if (place == null) return;
-        btnStationImport.IsEnabled = false;
-        var path = await StationMapExports.Instance.ImportAsync(place.RecordName, place.Name, Window.GetWindow(this));
-        UpdateStationButtons();
-        if (path == null) return;
-        if (!ReferenceEquals(place, _stationPlace))
-        {
-            txtStatus.Text = $"「{place.Name}」の地図を取り込みました (その場所の詳細の［地図表示］で出せます)";
-            return;
-        }
-        MapPanel.ShowPlaceInMapTab(place.RecordName, place.Name);
-    }
-
-    // ［地図表示］: ［マップ］タブに切り替えて、その場所の地図を出す (MapPanel.ShowPlaceInMapTab)。
-    // 取り込み済みかどうかは見ない (未取り込みなら［マップ］タブが地図の欄に知らせと上の帯に［読み込み］を出す。店の［マップに表示］と同じ。2026-11-02、利用者の決定)
+    // ［3D 表示］: その場所の 3D (新しい方式) の窓を開く
     private void BtnStationMap_Click(object sender, RoutedEventArgs e)
     {
         if (_stationPlace is not { } place) return;
-        MapPanel.ShowPlaceInMapTab(place.RecordName, place.Name);
+        StationView3DShops.Open(place.RecordName, place.Name, _stationTree, null, Window.GetWindow(this));
     }
 
-    // 表の店名の右の「MAP」: その店のある場所 (StationMapPlaceOf) の地図を［マップ］タブに出し、その店を選ぶ (［マップに表示］と同じ。MapPanel.ShowShopInMapTab)。
+    // 表の店名の右の「MAP」: その店のある場所 (StationMapPlaceOf) の 3D の窓を開き、その店を行き先にする (［マップに表示］と同じ)。
     // 店・場所が見つからなければ状態の欄に知らせる
     private async Task ShowShopOnMapAsync(string shopRecord)
     {
         var tree = await GetShopTreeOrNullAsync();
         if (tree != null && tree.ShopsByRecord.TryGetValue(shopRecord, out var shop) && StationMapPlaceOf(shop) is { } place)
         {
-            MapPanel.ShowShopInMapTab(place.RecordName, place.Name, shop);
+            StationView3DShops.Open(place.RecordName, place.Name, tree, shop.EntityName, Window.GetWindow(this));
             return;
         }
-        ShowStatus("この店の場所の地図が見つかりませんでした");
+        ShowStatus("この店の場所の 3D が見つかりませんでした");
     }
 
-    // 店名の右に「MAP」を付ける店: 店のある場所 (かその上) が地図の一覧に出る場所 (StationMapPlaceOf。店の詳細の［マップに表示］と同じ条件) の店の record。
-    // StationMapWindow の覚え (床の無い場所) を読むので、UI のスレッドで作る
+    // 店名の右に「MAP」を付ける店: 店のある場所 (かその上) が 3D で開ける場所 (StationMapPlaceOf。店の詳細の［マップに表示］と同じ条件) の店の record
     private static HashSet<string> MapShopRecords(ShopTree tree) =>
         tree.Shops.Where(s => StationMapPlaceOf(s) != null).Select(s => s.Record).ToHashSet(StringComparer.Ordinal);
 
-    // ［マップに表示］(店の詳細): ［マップ］タブに切り替えて、店のある場所の地図を出し、その店を選ぶ (MapPanel.ShowShopInMapTab)。
-    // 取り込み済みかどうかは見ない (未取り込みなら［マップ］タブが地図の欄に知らせと上の帯に［読み込み］を出す)
+    // ［マップに表示］(店の詳細): 店のある場所の 3D の窓を開き、その店を行き先にする
     private void BtnShopMap_Click(object sender, RoutedEventArgs e)
     {
         if (_stationPlace is not { } place || _stationShop is not { } shop) return;
-        MapPanel.ShowShopInMapTab(place.RecordName, place.Name, shop);
-    }
-
-    // ［別ウィンドウ］: 取り込み済みなら別のウィンドウ (モードレス) に出す
-    private async void BtnStationWindow_Click(object sender, RoutedEventArgs e)
-    {
-        var place = _stationPlace;
-        if (place == null) return;
-        var owner = Window.GetWindow(this);
-        if (!await StationReadyOrNotifyAsync(place)) return;
-        try
-        {
-            var win = new StationMapWindow(place.RecordName, place.Name, _stationTree);
-            if (owner != null && owner.IsLoaded) win.Owner = owner;
-            win.Show();
-        }
-        catch (Exception ex)
-        {
-            AppendAppLog($"[ステーションの地図] 別ウィンドウを開けませんでした: {ex}");
-            MessageBox.Show($"別ウィンドウを開けませんでした: {ex.Message}", "ステーションの地図", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
+        StationView3DShops.Open(place.RecordName, place.Name, _stationTree, shop.EntityName, Window.GetWindow(this));
     }
 
 }
