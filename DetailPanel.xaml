@@ -92,6 +92,8 @@
                 <wv2:WebView2 x:Name="webDetail"/>
                 <!-- 3D は詳細の下に出す (マウスのドラッグで回す・ホイールで拡大縮小。ビューアの操作) -->
                 <wv2:WebView2 x:Name="web3D" Grid.Row="1" Height="340" Visibility="Collapsed"/>
+                <!-- 船でない品の 3D の小さな絵を描くための隠した WebView2 (見せない。ビューアを ?thumb=1 で開いて 1 コマ描き PNG を受け取る。DetailPanel.RenderThumbAsync) -->
+                <wv2:WebView2 x:Name="webThumb" Grid.Row="1" Height="0" Visibility="Collapsed"/>
                 <TextBox x:Name="txtDetail" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, Yu Gothic UI" FontSize="13"
                          VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Padding="6"
                          Visibility="Collapsed"/>

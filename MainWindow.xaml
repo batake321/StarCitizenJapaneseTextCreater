@@ -2535,6 +2535,7 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="140"/>
@@ -2567,7 +2568,15 @@
                                     <TextBlock x:Name="txtStation3DCacheUsage" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
                                 </StackPanel>
 
-                                <StackPanel Grid.Row="4" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="0,6,0,4">
+                                <!-- ステーションの 3D に貼るゲームの画像 (テクスチャ) の長い辺の上限 (px。StationView3DTextures)。0 なら貼らない (単色) -->
+                                <TextBlock Text="ステーションのテクスチャ (px):" Grid.Row="4" VerticalAlignment="Center" Margin="0,4"/>
+                                <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,4">
+                                    <TextBox x:Name="txtStation3DTextureMaxPx" Width="90" VerticalAlignment="Center"
+                                             ToolTip="ステーションの 3D (新しい方式) で部品に貼るゲームの画像 (テクスチャ) の、長い辺の上限 (px。既定 512)。ゲームの画像をこの大きさ以下になる細かさで戻して PNG にし、置き場所の stations3d_textures フォルダに置きます (1 枚 1 回)。0 なら画像を貼りません (単色)。値を変えると、見た場所の保存 (ステーション (GB)) は作り直しになります。「設定を保存」で有効になります"/>
+                                    <TextBlock Text="0 なら画像を貼らない (単色)" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
+                                </StackPanel>
+
+                                <StackPanel Grid.Row="5" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="0,6,0,4">
                                     <!-- 今の Data.p4k で全部取り込み済みのときも使えなくする (MainWindow.Ship3D.cs。理由はボタンの ToolTip に出すので、使えないときも出す) -->
                                     <Button x:Name="btnShip3DBatch" Content="船舶・車両をまとめて取り込む" Click="Ship3DBatch_Click" Padding="14,6" ToolTipService.ShowOnDisabled="True"
                                             ToolTip="保有している船 (所持船と Hangar 同期の船) を先に、その後に［詳細］の船の一覧の残りを、ゲームデータから書き出してキャッシュに入れます。始める前に隻数・予想時間・予想サイズを出します"/>
@@ -2578,9 +2587,9 @@
                                 </StackPanel>
 
                                 <!-- 書き出しの進み具合 (［詳細］タブと同じ中身) -->
-                                <local:Ship3DProgressPanel Grid.Row="5" Grid.ColumnSpan="3" Margin="0,4"/>
+                                <local:Ship3DProgressPanel Grid.Row="6" Grid.ColumnSpan="3" Margin="0,4"/>
 
-                                <TextBlock Grid.Row="6" Grid.ColumnSpan="3" TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontSize="12"
+                                <TextBlock Grid.Row="7" Grid.ColumnSpan="3" TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontSize="12"
                                            Text="［詳細］タブで船を出しているときの［3D 表示］［別ウィンドウ］は、取り込み済みの船はその 3D モデルを、取り込んでいない船は選択中のチャンネルのゲームデータ (Data.p4k) から直接読んで出します (テクスチャ付き・船内込み)。「3D モデルを保存しない」を入れていなければ、読んだものを置いておきます。ゲームデータが変わると読み直します。［船舶・車両をまとめて取り込む］は、予想サイズの合計が最大容量を超える手前で止めます (古いものを消して入れ替えません)。CPU 使用率が 90% 以上のときは書き出しを始めません。ステーション・都市の 3D (新しい方式) は、区画の置き方の一覧 (stations フォルダの view3d_layout.db) だけを置き、形は開いたときにゲームデータから見る所の分だけ取り出して描きます。"/>
                             </Grid>
                         </GroupBox>

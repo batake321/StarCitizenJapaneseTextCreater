@@ -114,19 +114,23 @@ internal ref struct SpanReader
     public double F64() => BinaryPrimitives.ReadDoubleLittleEndian(Take(8));
 }
 
-// 部品の形 (types.rs Mesh のうち、位置・索引・submesh・2 つの箱)。法線・UV・色は持たない (地図・3D の三角形には使わない)
+// 部品の形 (types.rs Mesh のうち、位置・索引・submesh・2 つの箱)。法線・色は持たない。
+// UV (Uvs。u,v の並び。頂点の数 × 2。無ければ null) は、ステーションの 3D にゲームの画像を貼るために読む (2026-11-05、利用者の指示「引いたときは色はビットマップ貼り付けにしてほしい」)
 internal sealed class CryMesh
 {
     public float[] Positions = [];          // x,y,z の並び
+    public float[]? Uvs;                    // u,v の並び (Positions と同じ頂点の順)。無ければ null
     public uint[] Indices = [];
     public List<CrySubMesh> SubMeshes = new();
     public float[] ModelMin = new float[3], ModelMax = new float[3], ScalingMin = new float[3], ScalingMax = new float[3];
     public int VertexCount => Positions.Length / 3;
 
-    // merge_from (位置・索引・submesh・箱)
+    // merge_from (位置・索引・submesh・箱。UV は、どちらかに無ければ無い側を 0 で埋める)
     public void MergeFrom(CryMesh other)
     {
         uint vOff = (uint)VertexCount, iOff = (uint)Indices.Length;
+        if (Uvs != null || other.Uvs != null)
+            Uvs = [.. Uvs ?? new float[VertexCount * 2], .. other.Uvs ?? new float[other.VertexCount * 2]];
         Positions = [.. Positions, .. other.Positions];
         var idx = new uint[Indices.Length + other.Indices.Length];
         Indices.CopyTo(idx, 0);
@@ -188,8 +192,8 @@ internal static class CryIvo
         }
         r.Advance((long)extra * 4);
 
-        // データの流れ (read_streams)
-        float[]? pos = null; bool quant = false; ushort[]? qpos = null; uint[]? idx = null;
+        // データの流れ (read_streams)。UV は要素の 12〜15 (16 バイト) / 16〜19 (20 バイト) バイト目の half × 2 (船の ShipExportMesh と同じ読み方)
+        float[]? pos = null; bool quant = false; ushort[]? qpos = null; uint[]? idx = null; ushort[]? uvRaw = null;
         long nv = numVerts, ni = numIdx;
         while (r.Remaining >= 4)
         {
@@ -204,15 +208,23 @@ internal static class CryIvo
                     if (es == 16)
                     {
                         var b = r.Bytes(nv * 16);
-                        qpos = new ushort[nv * 3];
-                        for (int v = 0; v < nv; v++) for (int k = 0; k < 3; k++) qpos[v * 3 + k] = BinaryPrimitives.ReadUInt16LittleEndian(b[(v * 16 + k * 2)..]);
+                        qpos = new ushort[nv * 3]; uvRaw = new ushort[nv * 2];
+                        for (int v = 0; v < nv; v++)
+                        {
+                            for (int k = 0; k < 3; k++) qpos[v * 3 + k] = BinaryPrimitives.ReadUInt16LittleEndian(b[(v * 16 + k * 2)..]);
+                            uvRaw[v * 2] = BinaryPrimitives.ReadUInt16LittleEndian(b[(v * 16 + 12)..]); uvRaw[v * 2 + 1] = BinaryPrimitives.ReadUInt16LittleEndian(b[(v * 16 + 14)..]);
+                        }
                         quant = true; pos = null;
                     }
                     else if (es == 20)
                     {
                         var b = r.Bytes(nv * 20);
-                        pos = new float[nv * 3];
-                        for (int v = 0; v < nv; v++) for (int k = 0; k < 3; k++) pos[v * 3 + k] = BinaryPrimitives.ReadSingleLittleEndian(b[(v * 20 + k * 4)..]);
+                        pos = new float[nv * 3]; uvRaw = new ushort[nv * 2];
+                        for (int v = 0; v < nv; v++)
+                        {
+                            for (int k = 0; k < 3; k++) pos[v * 3 + k] = BinaryPrimitives.ReadSingleLittleEndian(b[(v * 20 + k * 4)..]);
+                            uvRaw[v * 2] = BinaryPrimitives.ReadUInt16LittleEndian(b[(v * 20 + 16)..]); uvRaw[v * 2 + 1] = BinaryPrimitives.ReadUInt16LittleEndian(b[(v * 20 + 18)..]);
+                        }
                         quant = false; qpos = null;
                     }
                     else throw new InvalidDataException($"頂点の要素の大きさ {es} には対応していません");
@@ -261,6 +273,11 @@ internal static class CryIvo
                 }
         }
         m.Positions = pos!;
+        if (uvRaw != null && uvRaw.Length > 0)
+        {
+            m.Uvs = new float[uvRaw.Length];
+            for (int i = 0; i < uvRaw.Length; i++) m.Uvs[i] = (float)BitConverter.UInt16BitsToHalf(uvRaw[i]);
+        }
         // 索引に page_base を足す
         foreach (var s in subs)
         {

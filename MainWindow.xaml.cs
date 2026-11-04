@@ -1970,6 +1970,7 @@ public partial class MainWindow : Window
                 App.Config.Ship3DMaxMB,
                 App.Config.Ship3DNoSave,
                 App.Config.Station3DCacheMaxGB,
+                App.Config.Station3DTextureMaxPx,
                 App.Config.AutoUpdateEnabled,
                 App.Config.AutoUpdateTime,
                 App.Config.ExtractedBuildVersion,

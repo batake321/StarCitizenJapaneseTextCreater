@@ -21,6 +21,7 @@ public partial class MainWindow
         txtShip3DMaxMB.Text = Ship3DExports.MaxMb.ToString();
         chkShip3DNoSave.IsChecked = App.Config.Ship3DNoSave;
         txtStation3DCacheMaxGB.Text = Station3DCacheMaxGbText();
+        txtStation3DTextureMaxPx.Text = App.Config.Station3DTextureMaxPx.ToString(System.Globalization.CultureInfo.InvariantCulture);
         UpdateStation3DCacheUsageText();
         UpdateShip3DDriveText();
         UpdateShip3DUsageText();
@@ -243,6 +244,15 @@ public partial class MainWindow
             txtStation3DCacheMaxGB.Text = Station3DCacheMaxGbText();
         }
         else App.Config.Station3DCacheMaxGB = gb;
+        // ステーションの 3D に貼るゲームの画像の長い辺の上限 (px。0 以上の整数。0 なら貼らない)。そうでなければ保存せずに知らせ、前の値のまま (2026-11-05)
+        var ptext = txtStation3DTextureMaxPx.Text.Trim();
+        if (!int.TryParse(ptext, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var px) || px < 0)
+        {
+            MessageBox.Show(this, $"ステーションのテクスチャの上限「{ptext}」は数 (px。0 以上の整数。0 なら画像を貼らない) ではないので保存しません。前の値 ({App.Config.Station3DTextureMaxPx}) のままです。",
+                "3D モデル", MessageBoxButton.OK, MessageBoxImage.Warning);
+            txtStation3DTextureMaxPx.Text = App.Config.Station3DTextureMaxPx.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        else App.Config.Station3DTextureMaxPx = px;
         StationView3DCache.NotifySettingsChanged();
         var cache = StationView3DCache.Current;
         _ = Task.Run(() => { cache.Evict(); }).ContinueWith(_ => UpdateStation3DCacheUsageText(), TaskScheduler.FromCurrentSynchronizationContext());

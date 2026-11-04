@@ -3306,8 +3306,8 @@ public partial class GameDataExtractor
         //   場所: 子孫を含めて店が 1 つ以上ある場所 (Star を除く) だけを候補にし、区切りの名前を深い段から順に、その星系の候補の名前と正規化して
         //     完全一致 → 前方一致 (どちらかがもう一方の頭。短いほうが 4 文字以上) で照らし、1 つに決まった最初の段の場所
         //     (候補が複数でも、そのうち 1 つがほかの候補全部の祖先なら、その祖先)
-        //   店: その場所と子孫の場所の店を、店の名前の部分と正規化して、名前が完全一致 → Entity 名の語が完全一致 → 名前が含む → Entity 名が含む の順に照らし、
-        //     1 つに決まった店 (MatchShop)。trade は COMMODITY の店だけを見る
+        //   店: その場所と子孫の場所の店を、店の名前の部分と正規化して、名前が完全一致 → Entity 名の語が完全一致 → 名前が含む → Entity 名が含む
+        //     → (item だけ) Entity 名の語を売り場の名前が含む (含んだ語がいちばん長い店) の順に照らし、1 つに決まった店 (MatchShop)。trade は COMMODITY の店だけを見る
         //   item で名前では店が 1 つに決まらないものは、販売内容 (売っている品目の種類) で店に結ぶ (MatchByContents)
         //   場所は決まったが店が 1 つに決まらないものは、場所で結ぶ (shop_id は ''、location_record に場所、match は 'location')
         // 紐づけの表は最初に新しい形にする (下の早い return でも、次の起動で NeedsShopPriceLinks が真にならないように)。
@@ -3423,7 +3423,14 @@ public partial class GameDataExtractor
             }
             // 店: 候補の中で、次の順に照らして 1 つに決まった店
             //   1. 名前 (game_shops.name) が完全一致  2. Entity 名を "_" で区切った語のどれかが完全一致  3. 名前が含む (片方が片方を含む)  4. Entity 名が含む
-            (string Id, string How)? MatchShop(List<(string Id, string Name, string Inv, string Loc, string Entity)> cands, string label)
+            //   5. (wordInLabel のとき。店の売り場 (item) だけ) 売り場の名前が店の Entity 名の語を含む (EntityNameWords。例 "Kel-To ConStore" → "keltoconstore" は SCShop_Orison_KelTo の語 "kelto" を含む)。
+            //      含んだ語がいちばん長い店が 1 つならその店。同じ長さの店が 2 つ以上なら、Entity 名の語 (店の場所の名前を除く) が少ない店 (その語が全部ほかの候補の語に入っている店。
+            //      つまりほかの候補が「この店の名前 + 余分の語」のもの) が 1 つならその店 (例 "Cousin Crows" は SCShop_CousinCrows_Orison と SCShop_CousinCrows_NonPurchasableShips → 前者、
+            //      "Cargo Shop" は SCShop_Cargo_Office と SCShop_Cargo_Office_Rentals → 前者)。それでも決まらなければ結ばない
+            //      (例 "Refinery Shop" は SCShop_RefineryAdmin_ITEM {refineryadmin, refinery, admin} と SCShop_Refinery_Rentals {refinery, rentals} のどちらの語も片方に収まらない)
+            //      (2026-11-05、利用者の報告「売ってるものがもっと大量にあるのに表示が少なすぎる」: Orison の Kel-To の売り場 "… - Cloudview Center - Stratus - Kel-To ConStore" (63 品) が
+            //      1〜4 のどれにも当たらず場所だけに結ばれ、店には "… - August Dunlow Spaceport - Kel-To" (4 品) だけが結ばれていた)
+            (string Id, string How)? MatchShop(List<(string Id, string Name, string Inv, string Loc, string Entity)> cands, string label, bool wordInLabel = false)
             {
                 var n = Norm(label);
                 if (n.Length == 0 || cands.Count == 0) return null;
@@ -3439,6 +3446,25 @@ public partial class GameDataExtractor
                 {
                     var found = cands.Where(hit).ToList();
                     if (found.Count == 1) return (found[0].Id, how);
+                }
+                if (!wordInLabel) return null;
+                var best = new List<(string Id, HashSet<string> Words)>();
+                int bestLen = 0;
+                foreach (var c in cands)
+                {
+                    var placeNorm = Norm(locs.TryGetValue(c.Loc, out var cl) ? cl.Name : "");
+                    var words = EntityNameWords(c.Entity).Where(w => w != placeNorm).ToHashSet(StringComparer.Ordinal);
+                    var hitLen = words.Where(w => n.Contains(w, StringComparison.Ordinal)).Select(w => w.Length).DefaultIfEmpty(0).Max();
+                    if (hitLen == 0) continue;
+                    if (hitLen > bestLen) { best.Clear(); bestLen = hitLen; }
+                    if (hitLen == bestLen) best.Add((c.Id, words));
+                }
+                if (best.Count == 1) return (best[0].Id, "店:Entity 名の語を売り場の名前が含む");
+                if (best.Count > 1)
+                {
+                    // 同じ長さの語で当たった店が複数: 語が少なく、その語が全部ほかの候補の語に入っている店が 1 つならその店
+                    var shorter = best.Where(x => best.All(y => y.Id == x.Id || x.Words.Count < y.Words.Count && x.Words.IsSubsetOf(y.Words))).ToList();
+                    if (shorter.Count == 1) return (shorter[0].Id, "店:Entity 名の語を売り場の名前が含む(語の少ない店)");
                 }
                 return null;
             }
@@ -3497,7 +3523,7 @@ public partial class GameDataExtractor
                 // 店は、深い段が指す場所 (Narrow) の下だけで探す
                 var shopPlace = Narrow(place.Value.Record, segsDeep);
                 var cands = ShopsUnder(shopPlace).Where(s => !s.Inv.Equals("COMMODITY", StringComparison.OrdinalIgnoreCase)).ToList();
-                var hitShop = MatchShop(cands, label);
+                var hitShop = MatchShop(cands, label, wordInLabel: true);
                 if (hitShop != null) { links.Add((hitShop.Value.Id, "item", location, place.Value.How + "," + hitShop.Value.How, place.Value.Record)); itemShop++; }
                 else
                 {
@@ -3586,7 +3612,9 @@ public partial class GameDataExtractor
 
         // 紐づけの決まりの版 (gamedata_meta の LinksRuleMetaKey)。決まりを変えたら上げる (前の版で作った紐づけは起動後に作り直す)
         // 2: 販売内容で店に結ぶ (MatchByContents) を足した (2026-11-02、利用者の指示「名前は拾えるはず　そもそも場所と販売内容が決まってるし同種の店複数はそうない」)
-        internal const string LinksRuleMetaKey = "shop_price_links_rule", LinksRuleVersion = "2";
+        // 3: 売り場の名前が店の Entity 名の語を含むものを店に結ぶ (MatchShop の 5) を足した (2026-11-05、Orison の Kel-To ConStore の 63 品が場所だけに結ばれていた)
+        // 4: 5 で同じ長さの語の店が複数のとき、語の少ない店 (ほかの候補がその店の語 + 余分の語のもの) に結ぶのを足した (2026-11-05。Cousin Crows・Cargo Shop)
+        internal const string LinksRuleMetaKey = "shop_price_links_rule", LinksRuleVersion = "4";
 
         // ── 販売内容で店に結ぶ ──
         // 売り場の種類 (売っている品目のうち半分より多いものの種類。どれも半分以下なら決まらない):
@@ -3627,6 +3655,13 @@ public partial class GameDataExtractor
         // Entity 名の語 (小文字。区切りの塊を、さらに大文字の始まり・数字の境で区切る。ShopTree.EntityWords と同じ区切り方)
         private static IEnumerable<string> EntityWordsLower(string entity) =>
             Regex.Matches(entity, @"[A-Za-z0-9]+").SelectMany(t => Regex.Matches(t.Value, @"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+").Select(w => w.Value.ToLowerInvariant()));
+
+        // 売り場の名前に含まれるかを見る店の Entity 名の語 (MatchShop の 5): 区切りの塊そのもの (例 "KelTo" → "kelto") と、EntityWordsLower の語の両方。
+        // 正規化 (Norm) して 4 文字以上のもの。どの店にも付く言葉 (EntityNameGenericWords) は除く
+        private static readonly HashSet<string> EntityNameGenericWords = new(StringComparer.Ordinal) { "scshop", "entity", "shop", "shops", "store", "item", "items" };
+        private static HashSet<string> EntityNameWords(string entity) =>
+            Regex.Matches(entity, @"[A-Za-z0-9]+").Select(t => Norm(t.Value)).Concat(EntityWordsLower(entity).Select(Norm))
+                .Where(w => w.Length >= 4 && !EntityNameGenericWords.Contains(w)).ToHashSet(StringComparer.Ordinal);
 
         // 名前で店が決まらなかった売り場 (pending) を、販売内容で店に結ぶ。売り場の名前 → (店の shop_id, match)。
         // 決まり (どれも、1 つに決まらないものは結ばない):

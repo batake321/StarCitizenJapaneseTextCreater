@@ -168,6 +168,9 @@ internal static class StationFill
     //   (2026-11-05、利用者「実際荒いのと詳細で違いがあって落ちるすき間になるものは小さいはず」「短辺が3m を切る」) 幅 (入る円の最大の直径) が MaxHoleWidth 以上の穴は、
     //   落ちるすき間ではなく、ドーム・外側の輪などの大きな面の差なので補わない。升の数が MaxRasterCells を超える穴 (局所の広がりが 500 m 級) も同じ扱いで捨てる (親の決定)。
     public const double MinHoleWidth = 0.5, MaxHoleWidth = 10.0;   // (2026-11-05、利用者「基準を10m 未満にするのは？」: 3 m では店の床 (TDD の中央の床 3.2 m・ダンスフロア 5.6 m) が落ちた)
+    // 幅の上限は、平らでない穴にだけ掛ける (2026-11-05、利用者の報告「階段降りたところと tram の乗り場の間に床がない」: Orison のトラム乗り場の下の階の床は
+    // 1 枚の平らな面で幅 10.48 m あり、上限に引っかかって捨てられていた)。穴の z の広がりが FlatHoleZ 以下 (平らな床) なら幅が上限以上でも残す (親の決定。利用者「床なら厚みが薄い」)
+    public const double FlatHoleZ = 0.5;
 
     // ===== 高さのある立体構造を省く =====
     // (2026-11-05、利用者「床でない 高さのある立体構造は省くべき」「床なら厚みが薄いんじゃないの？」) 形 1 つの補う面の z の広がりが MaxFillHeight 以上なら、
@@ -204,8 +207,9 @@ internal static class StationFill
         var keep = new bool[n];
         foreach (var g in groups.Values)
         {
-            double x0 = double.MaxValue, y0 = double.MaxValue, x1 = double.MinValue, y1 = double.MinValue;
-            foreach (var t in g) for (int k = 0; k < 3; k++) { int b = t * 9 + k * 3; x0 = Math.Min(x0, f[b]); x1 = Math.Max(x1, f[b]); y0 = Math.Min(y0, f[b + 1]); y1 = Math.Max(y1, f[b + 1]); }
+            double x0 = double.MaxValue, y0 = double.MaxValue, x1 = double.MinValue, y1 = double.MinValue, z0 = double.MaxValue, z1 = double.MinValue;
+            foreach (var t in g) for (int k = 0; k < 3; k++) { int b = t * 9 + k * 3; x0 = Math.Min(x0, f[b]); x1 = Math.Max(x1, f[b]); y0 = Math.Min(y0, f[b + 1]); y1 = Math.Max(y1, f[b + 1]); z0 = Math.Min(z0, f[b + 2]); z1 = Math.Max(z1, f[b + 2]); }
+            bool flat = z1 - z0 <= FlatHoleZ;
             if (x1 - x0 < MinHoleWidth || y1 - y0 < MinHoleWidth) { report?.Invoke(x1 - x0, y1 - y0, 0, g.Count, false); continue; }   // 外形の幅が 50 cm 未満なら直径 50 cm の円は入らない
             int W = (int)Math.Ceiling((x1 - x0) / RasterRes) + 3, H = (int)Math.Ceiling((y1 - y0) / RasterRes) + 3;
             bool ok; double width = -1;
@@ -261,7 +265,7 @@ internal static class StationFill
                 double maxR = 0;
                 for (int i = 0; i < d.Length; i++) if (d[i] > 0) maxR = Math.Max(maxR, Math.Sqrt(d[i]) * RasterRes - RasterRes / 2);
                 width = maxR * 2;
-                ok = width >= MinHoleWidth && width < MaxHoleWidth;
+                ok = width >= MinHoleWidth && (flat || width < MaxHoleWidth);
             }
             report?.Invoke(x1 - x0, y1 - y0, width, g.Count, ok);
             if (ok) foreach (var t in g) keep[t] = true;

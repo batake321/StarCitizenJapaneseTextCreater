@@ -44,15 +44,18 @@ internal static class StationView3D
     // 区画 (socpak) 1 つを渡すと、部品ごとの三角形が返る。アプリの中の読み取り (OwnExtractor) で取り出す
     // (2026-11-04、利用者の決定「starbreaker の処理を自前で持つ」(案 A)。前は StarBreaker で GLB に書き出して読んでいた)
     // SourcePart: 部品 1 つ (GLB の子のメッシュ)。Name はメッシュの名前、Mesh はメッシュの三角形 (float32 x9。同じメッシュの部品で共有してよい)、M は socpak の枠へのノードの行列 (4×4、行優先)
-    // CgfPath: 部品の種類 (補う面の表の鍵。無ければ ""）。SizeRef: 大きさ (Small) の判定に使う形 (補う面の追加の部品が、元の部品の形で判定するため。null なら Mesh)
-    public sealed record SourcePart(string Name, float[] Mesh, double[] M, string CgfPath = "", float[]? SizeRef = null);
+    // CgfPath: 部品の種類 (補う面の表の鍵。無ければ ""）。SizeRef: 大きさ (Small) の判定に使う形 (補う面の追加の部品が、元の部品の形で判定するため。null なら Mesh)。
+    // Uv: 三角形の角ごとの UV (float32 x6。Mesh と同じ並び。形に UV が無ければ null)、TexKeys: この部品が使う画像の鍵 (StationView3DTextures.TexInfo.Key)、
+    // Tex: 三角形ごとの TexKeys の番号 (画像の無い三角形は -1。画像を貼らない部品は null) (2026-11-05、利用者の指示「引いたときは色はビットマップ貼り付けにしてほしい」)
+    public sealed record SourcePart(string Name, float[] Mesh, double[] M, string CgfPath = "", float[]? SizeRef = null, float[]? Uv = null, string[]? TexKeys = null, int[]? Tex = null);
     public delegate Task<IReadOnlyList<SourcePart>?> Extractor(string socpak, CancellationToken ct);
 
     // (2026-11-04、利用者の決定「starbreaker の処理を自前で持つ」(案 A)) アプリの中の読み取り (SocpakExporter) で取り出す。
     // starbreaker で GLB に書き出して ReadGlb で読んだときと同じもの: socpak を PATTERN として渡したときに一致する socpak を同じ並びで読み、
     // GLB を ReadGlb で読んだときと同じ部品の名前・三角形・行列にする (行列は GLB の数 (SocpakScene の Matrix) を ReadGlb と同じ順で掛ける)。
     // Data.p4k の目次・DataCore・部品の形は、アプリの中で使い回す (SocpakExporter.Shared。同じ部品の形は 1 回だけ読む。上限 SocpakExporter.MeshCacheBytes)
-    public static Extractor OwnExtractor(string p4kPath, Action<string>? log = null) => (socpak, ct) => Task.Factory.StartNew(() =>
+    // texMaxPx・texFolder: ゲームの画像を貼る (StationView3DTextures。長い辺の上限 px と PNG の置き場。texMaxPx が 0 か texFolder が null なら画像なし = 単色)
+    public static Extractor OwnExtractor(string p4kPath, Action<string>? log = null, int texMaxPx = 0, string? texFolder = null) => (socpak, ct) => Task.Factory.StartNew(() =>
     {
         try
         {
@@ -61,8 +64,9 @@ internal static class StationView3D
             var list = MatchSocpaksCached(ctx.P4k, pattern);
             if (list.Count == 0) { log?.Invoke($"取り出しが失敗しました ({socpak}): no .socpak files matching '{pattern}'"); return (IReadOnlyList<SourcePart>?)null; }
             var scene = SocpakExporter.Export(ctx, list, ct: ct);
+            Func<string, int, StationView3DTextures.TexInfo?>? tex = texMaxPx > 0 && texFolder != null ? (mtl, mat) => StationView3DTextures.Resolve(ctx.P4k, texFolder, mtl, mat, texMaxPx) : null;
             // 粗い形で抜けた床の面を補う (StationFill)。歩くモードの裏の補い (view3d_fill_walk.db) のうち、形の印が今と同じ行も足す
-            var parts = StationFill.Augment(PartsOf(scene), StationFill.Table(Path.Combine(StationPlaces.Folder, LayoutDbName), StationFill.WalkDbPath, ctx.P4k));
+            var parts = StationFill.Augment(PartsOf(scene, tex), StationFill.Table(Path.Combine(StationPlaces.Folder, LayoutDbName), StationFill.WalkDbPath, ctx.P4k));
             GravityCache[socpak] = GravityOf(scene);
             return parts.Count > 0 ? parts : null;
         }
@@ -132,11 +136,23 @@ internal static class StationView3D
         return res;
     }
 
-    // SocpakScene → 部品の並び (ReadGlb と同じ: 区画の子の順、三角形は primitive ごとに索引 3 つずつ、同じ形は同じ配列)
-    public static List<SourcePart> PartsOf(SocpakScene scene)
+    // SocpakScene → 部品の並び (ReadGlb と同じ: 区画の子の順、三角形は primitive ごとに索引 3 つずつ、同じ形は同じ配列)。
+    // tex: 材質 (.mtl のパス, 材質の番号) → 画像 (null なら画像も UV も付けない = 画像なしのときの出来るものは前と同じ)。画像の戻しは、場面に出てくる材質ごとに 1 回、並べて行う
+    public static List<SourcePart> PartsOf(SocpakScene scene, Func<string, int, StationView3DTextures.TexInfo?>? tex = null)
     {
         var res = new List<SourcePart>();
-        var tris = new Dictionary<SocpakScene.Mesh, float[]>(ReferenceEqualityComparer.Instance);
+        var tris = new Dictionary<SocpakScene.Mesh, (float[] T, float[]? Uv, string[]? Keys, int[]? Tex)>(ReferenceEqualityComparer.Instance);
+        // 画像: 出てくる材質 (mtl, 番号) を先に集めて並べて戻す (StationView3DTextures.Resolve は 1 回だけ戻して覚える)
+        var texOf = new Dictionary<(string, int), StationView3DTextures.TexInfo?>();
+        if (tex != null)
+        {
+            var pairs = new HashSet<(string, int)>();
+            foreach (var c in scene.Containers) foreach (var pl in c.Placements)
+                if (pl.Mesh.Uvs != null && pl.Mesh.Mtl.Length > 0) foreach (var mid in pl.Mesh.SubMaterials) pairs.Add((pl.Mesh.Mtl, mid));
+            var arr = pairs.ToArray(); var got = new StationView3DTextures.TexInfo?[arr.Length];
+            Parallel.For(0, arr.Length, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 2) }, i => { got[i] = tex(arr[i].Item1, arr[i].Item2); });
+            for (int i = 0; i < arr.Length; i++) texOf[arr[i]] = got[i];
+        }
         double[] I = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
         // 列優先 (GLB の matrix) → 行優先
         static double[] LMat(double[] m) { var M = new double[16]; for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) M[r * 4 + c] = m[c * 4 + r]; return M; }
@@ -155,15 +171,30 @@ internal static class StationView3D
                 if (!tris.TryGetValue(pl.Mesh, out var T))
                 {
                     var outl = new List<float>();
-                    var P = pl.Mesh.Positions;
-                    foreach (var ix in pl.Mesh.Primitives)
+                    var P = pl.Mesh.Positions; var U = tex != null ? pl.Mesh.Uvs : null;
+                    var uvl = U != null ? new List<float>() : null;
+                    // 画像: primitive (submesh) ごとの材質の番号 → 画像の鍵 (この形で使う鍵の一覧の番号)。無い三角形は -1
+                    var keys = new List<string>(); var keyIx = new Dictionary<string, int>(StringComparer.Ordinal);
+                    var texl = tex != null && U != null ? new List<int>() : null;
+                    for (int pi = 0; pi < pl.Mesh.Primitives.Count; pi++)
                     {
+                        var ix = pl.Mesh.Primitives[pi];
                         int nt = ix.Length / 3 * 3;
-                        for (int i = 0; i < nt; i++) { long v = ix[i]; outl.Add(P[v * 3]); outl.Add(P[v * 3 + 1]); outl.Add(P[v * 3 + 2]); }
+                        int ti = -1;
+                        if (texl != null && pi < pl.Mesh.SubMaterials.Count && pl.Mesh.Mtl.Length > 0 && texOf.TryGetValue((pl.Mesh.Mtl, pl.Mesh.SubMaterials[pi]), out var info) && info != null)
+                        {
+                            if (!keyIx.TryGetValue(info.Key, out ti)) { ti = keys.Count; keys.Add(info.Key); keyIx[info.Key] = ti; }
+                        }
+                        for (int i = 0; i < nt; i++)
+                        {
+                            long v = ix[i]; outl.Add(P[v * 3]); outl.Add(P[v * 3 + 1]); outl.Add(P[v * 3 + 2]);
+                            if (uvl != null) { uvl.Add(U![v * 2]); uvl.Add(U[v * 2 + 1]); }
+                        }
+                        if (texl != null) for (int i = 0; i < nt / 3; i++) texl.Add(ti);
                     }
-                    tris[pl.Mesh] = T = outl.ToArray();
+                    tris[pl.Mesh] = T = (outl.ToArray(), uvl?.ToArray(), keys.Count > 0 ? keys.ToArray() : null, keys.Count > 0 ? texl!.ToArray() : null);
                 }
-                if (T.Length > 0 && M2.All(double.IsFinite)) res.Add(new SourcePart(pl.Mesh.Name, T, M2, pl.Mesh.CgfPath));
+                if (T.T.Length > 0 && M2.All(double.IsFinite)) res.Add(new SourcePart(pl.Mesh.Name, T.T, M2, pl.Mesh.CgfPath, null, T.Uv, T.Keys, T.Tex));
             }
         }
         return res;
@@ -215,7 +246,9 @@ internal static class StationView3D
             _db = translationsDb != null && File.Exists(translationsDb) ? translationsDb : null;
         }
         public bool InJa(string k) => _ja.ContainsKey(k);
-        public string Get(string key)
+        // 覚え (_memo) は複数の糸から引く (StationJson と、裏で作る外から見たときの印 ExteriorMarks) ので、鍵を引く間はロックする
+        public string Get(string key) { lock (_memo) return GetCore(key); }
+        private string GetCore(string key)
         {
             if (string.IsNullOrEmpty(key)) return key;
             if (_memo.TryGetValue(key, out var m)) return m;
@@ -808,12 +841,20 @@ internal static class StationView3D
         private readonly Func<string, string>? _terminalLabel;
         private readonly Func<string, string, string>? _shopLabel;
         private readonly List<double[]> _allShopPos;
+        private readonly string _texUrlBase;
+        // 画像の一覧 (この 1 か所分で出てきた画像。番号は増えるだけなので、使い回した区画の形 (GeoCalc) の番号も合う)。region.json の textures に全部書く
+        private readonly object _texLock = new();
+        private readonly Dictionary<string, int> _texIndex = new(StringComparer.Ordinal);
+        private readonly List<string> _texKeys = new();
+        private int TexIndex(string key) { lock (_texLock) { if (!_texIndex.TryGetValue(key, out var i)) { i = _texKeys.Count; _texKeys.Add(key); _texIndex[key] = i; } return i; } }
         // terminalLabel: 端末の種類 (fleet など) → 画面に出す名前 (アプリの地図の端末の名前 StationTerminalKinds.Label。ゲームの訳に合わせたもの)
         // shopLabel: 店 (CryGUID, Entity 名) → アプリの地図の店の名前 (StationMapPanel の店の名札と同じ「店名（種類）」。名前が無ければ "")
-        public Session(Layout layout, string mapJson, Loc loc, long cacheCapBytes = CacheCapBytes, Func<string, string>? terminalLabel = null, Func<string, string, string>? shopLabel = null)
+        // texUrlBase: 画像 (PNG) をビューアが読む URL の頭 (仮想ホストの /stations3d_textures/。region.json の textures の url = これ + ファイル名)
+        public Session(Layout layout, string mapJson, Loc loc, long cacheCapBytes = CacheCapBytes, Func<string, string>? terminalLabel = null, Func<string, string, string>? shopLabel = null, string texUrlBase = "")
         {
             Layout = layout.Instances; _extraTerminals = layout.Terminals; Loc = loc; _map = mapJson.Length > 0 ? ReadMap(mapJson) : MapOf(layout); _cap = cacheCapBytes; _terminalLabel = terminalLabel; _shopLabel = shopLabel;
             _allShopPos = _map.Shops.Select(s => s.Pos).ToList();
+            _texUrlBase = texUrlBase;
         }
 
         // 使い回しの置き場 (いちばん長く使っていないものから捨てる。全部で _cap まで):
@@ -952,7 +993,7 @@ internal static class StationView3D
                                     lock (lockObj) { computeSec += swG.Elapsed.TotalSeconds; st.SkippedNoHit++; st.Evicted += evb; st.CapHit |= capB; }
                                     return;
                                 }
-                                geo = BuildGeo(src);
+                                geo = BuildGeo(src, TexIndex);
                                 tG = swG.Elapsed.TotalSeconds;
                                 var ev = CachePut(gkey, geo, geo.Bytes, out var capHit);
                                 lock (lockObj) { computeSec += tG; st.Evicted += ev; st.CapHit |= capHit; }
@@ -1013,17 +1054,27 @@ internal static class StationView3D
                 // 店の入口 (view_build6.py の entrances。地点の中の店と、地点の区画の部品で)
                 var swN = System.Diagnostics.Stopwatch.StartNew();
                 var entrances = Entrances(_map, shops, pbox, nearTris);
+                var counters = Counters(shops, pbox);
                 st.ComputeSeconds += swN.Elapsed.TotalSeconds;
+                // 画像の一覧 (区画のファイルの parts の画像の番号 → ここの番号)。url は仮想ホストの PNG、w・h は画素、repeat は UV の繰り返し (材質の UVTiling。u・v 同じ)、
+                // tint は材質の色合い (層 1 の TintColor。0〜1 の r,g,b。ビューアは map × color)
+                List<string> texKeys; lock (_texLock) texKeys = _texKeys.ToList();
+                var textures = texKeys.Select(k => StationView3DTextures.InfoOf(k) is { } ti
+                    ? new { url = _texUrlBase + ti.File, w = ti.W, h = ti.H, repeat = new[] { ti.Tiling, ti.Tiling }, tint = ti.Tint }
+                    : new { url = "", w = 0, h = 0, repeat = new[] { 1f, 1f }, tint = new[] { 1f, 1f, 1f } }).ToList();
                 var json = JsonSerializer.SerializeToUtf8Bytes(new
                 {
                     format = Format,
                     center,
                     r,
                     geos,
+                    textures,
                     // [インスタンスの番号, socpak のファイルの番号, 行列 (3×4), 箱の下, 箱の上, socpak]
                     instances = insts.Where(i => instRec.ContainsKey(i.Index)).Select(i => { var x = instRec[i.Index]; return new object[] { i.Index, x.Geo, x.A, R3(x.Lo), R3(x.Hi), i.Socpak }; }).ToList(),
                     missing,
                     entrances,
+                    // 店のカウンターの箱 (店の名前 → [[下 x,y,z], [上 x,y,z]], … 近い順)。ビューアの「カウンターの前」に立つ所
+                    counters,
                     // 重力の範囲 [種類, 行列 (範囲の枠 → 場所の座標。3×4 行優先), 箱の大きさ | null, 柱の底の多角形 [[x, y], …] | null, 柱の高さ, 名前]。
                     // 地点に掛かる区画のうち、取り出した (形を使い回したものも含む) 区画のもの
                     gravity = insts.SelectMany(i => GravityCache.TryGetValue(i.Socpak, out var gl) ? gl.Select(g =>
@@ -1309,6 +1360,7 @@ internal static class StationView3D
     private sealed class PartBox
     {
         public int Inst; public string Key = ""; public string[] Words = []; public double[] Lo = new double[3], Hi = new double[3]; public int PartIdx;
+        public string Kind = "other";   // 部品の種類 (Part.Kind。カウンターの部品は "counterpart")
     }
     private sealed class NearPart
     {
@@ -1340,6 +1392,8 @@ internal static class StationView3D
         public string Name = "", Key = ""; public string[] Words = []; public string Kind = "other";
         public string CgfPath = "";  // 部品の種類 (形のパス。SourcePart.CgfPath。補う面の追加の部品・区画に直接置かれた形は ""。歩くモードの裏の補い (WalkCheck) で使う)
         public float[] Mesh = [];   // メッシュの三角形 (x9)
+        public float[]? Uv;         // 三角形の角ごとの UV (x6。無ければ null)。画像を貼るためだけ (判定には使わない)
+        public string[]? TexKeys; public int[]? Tex;   // 画像の鍵と、三角形ごとの鍵の番号 (-1 = 画像なし)。SourcePart のまま
         public double[] M = [];     // ノードの行列 (4×4、行優先)
         public int N => Mesh.Length / 9;
         public int[] Idx = [];      // 三角形の角ごとの、部品の点 (ファイルに書く点) の番号
@@ -1366,19 +1420,22 @@ internal static class StationView3D
         public void Give(long n) { lock (_lock) { _avail += n; Monitor.PulseAll(_lock); } }
     }
 
-    // 区画の形を作る: 部品ごとに、点を float32 (socpak の枠 = M·メッシュの点) にして同じ点を 1 つにまとめ、点と番号 (点が 65536 未満なら 2 バイト) を Body に書く
-    private static GeoCalc BuildGeo(IReadOnlyList<SourcePart> src)
+    // 区画の形を作る: 部品ごとに、点を float32 (socpak の枠 = M·メッシュの点) にして同じ点を 1 つにまとめ、点と番号 (点が 65536 未満なら 2 バイト) を Body に書く。
+    // UV のある部品は、同じ点のまとめの鍵に UV も入れ (位置が同じで UV の違う角は別の点)、点ごとの UV (float32 x2) も書く。
+    // texIndex: 画像の鍵 → 地点の一覧 (region.json の textures) の番号。null なら画像の列は書かない
+    private static GeoCalc BuildGeo(IReadOnlyList<SourcePart> src, Func<string, int>? texIndex = null)
     {
         var geo = new GeoCalc { Parts = src.Select(ToPart).ToList() };
         using var ms = new MemoryStream();
         using var bw = new BinaryWriter(ms);
         // 部品ごとの点のまとめは並べて動かす (2026-11-04、利用者の指摘「11/12 が長い」。部品どうしは関わらないので、部品の順に書いた結果は 1 本ずつと同じ)
-        var pv = new (List<float> Verts, double[] Lo, double[] Hi)[geo.Parts.Count];
+        var pv = new (List<float> Verts, List<float>? Uvs, double[] Lo, double[] Hi)[geo.Parts.Count];
         Parallel.For(0, geo.Parts.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 2) }, pi =>
         {
             var p = geo.Parts[pi];
-            var vmap = new Dictionary<(float, float, float), int>();
+            var vmap = new Dictionary<(float, float, float, float, float), int>();
             var verts = new List<float>();
+            var uvs = p.Uv != null ? new List<float>() : null;
             p.Idx = new int[p.N * 3];
             double[] lo = [double.MaxValue, double.MaxValue, double.MaxValue], hi = [double.MinValue, double.MinValue, double.MinValue];
             var M = p.M;
@@ -1386,26 +1443,53 @@ internal static class StationView3D
             {
                 double x = p.Mesh[t * 3], y = p.Mesh[t * 3 + 1], z = p.Mesh[t * 3 + 2];
                 double X = M[0] * x + M[1] * y + M[2] * z + M[3], Y = M[4] * x + M[5] * y + M[6] * z + M[7], Z = M[8] * x + M[9] * y + M[10] * z + M[11];
-                var k = ((float)X, (float)Y, (float)Z);
-                if (!vmap.TryGetValue(k, out var vi)) { vi = vmap.Count; vmap[k] = vi; verts.Add(k.Item1); verts.Add(k.Item2); verts.Add(k.Item3); }
+                float u = uvs != null ? p.Uv![t * 2] : 0f, v = uvs != null ? p.Uv![t * 2 + 1] : 0f;
+                var k = ((float)X, (float)Y, (float)Z, u, v);
+                if (!vmap.TryGetValue(k, out var vi)) { vi = vmap.Count; vmap[k] = vi; verts.Add(k.Item1); verts.Add(k.Item2); verts.Add(k.Item3); if (uvs != null) { uvs.Add(u); uvs.Add(v); } }
                 p.Idx[t] = vi;
                 lo[0] = Math.Min(lo[0], X); hi[0] = Math.Max(hi[0], X); lo[1] = Math.Min(lo[1], Y); hi[1] = Math.Max(hi[1], Y); lo[2] = Math.Min(lo[2], Z); hi[2] = Math.Max(hi[2], Z);
             }
-            pv[pi] = (verts, lo, hi);
+            pv[pi] = (verts, uvs, lo, hi);
         });
         var boxes = new List<double[]>();
         for (int pi = 0; pi < geo.Parts.Count; pi++)
         {
             var p = geo.Parts[pi];
-            var (verts, lo, hi) = pv[pi];
+            var (verts, uvs, lo, hi) = pv[pi];
             pv[pi] = default;
             Align4(bw);
             var vOff = ms.Position;
             foreach (var f in verts) bw.Write(f);
+            long uOff = -1;
+            if (uvs != null) { uOff = ms.Position; foreach (var f in uvs) bw.Write(f); }
             var iOff = ms.Position;
             var i16 = verts.Count / 3 < 65536;
             if (i16) foreach (var i in p.Idx) bw.Write((ushort)i); else foreach (var i in p.Idx) bw.Write((uint)i);
-            geo.PartsJson.Add(new object[] { p.Key, p.Kind, vOff, verts.Count / 3, iOff, p.N, Round3(lo), Round3(hi), i16 ? 2 : 4 });
+            // 画像の番号 (三角形ごとに int32。地点の一覧の番号。画像の無い三角形は -1)。1 つも無い部品は書かない (-1)
+            long tOff = -1;
+            if (texIndex != null && p.Tex != null && p.TexKeys != null)
+            {
+                var map = new int[p.TexKeys.Length];
+                for (int k = 0; k < map.Length; k++) map[k] = texIndex(p.TexKeys[k]);
+                if (p.Tex.Any(t => t >= 0 && t < map.Length))
+                {
+                    Align4(bw);
+                    tOff = ms.Position;
+                    foreach (var t in p.Tex) bw.Write(t >= 0 && t < map.Length ? map[t] : -1);
+                }
+            }
+            // parts の 1 行: [鍵, 種類, 点の位置, 点の数, 番号の位置, 三角形の数, 箱の下, 箱の上, 番号のバイト数, 扉の向き | null, UV の位置 | -1, 画像の番号の位置 | -1]。
+            // 11・12 番目 (UV・画像の番号) は 2026-11-05 に足した (画像を貼る)。UV は点ごとの float32 x2、画像の番号は三角形ごとの int32 (地点の region.json の textures の番号)。
+            // エレベーターの扉の部品だけ 10 番目に「扉の前 (ロビー側) の向き」= 部品の局所の +Y 軸を socpak の枠に回したもの (M の回転の 2 列目。場所の座標への回し (A) は糸の側)。扉でなければ null
+            // (2026-11-05、利用者の指示「指示はドアの向きを見て」。実データで確かめた: Seraphim Station (RR_CRU_LEO) の貨物センターの扉 truck_shaft_door_double_a と
+            //  Orison (Stanton2_Orison) の扉 elevator_door_double_a のどちらも、局所の +Y の側に乗り場の床 (hangar_walkway・elev_lobby_a_event_floor) と呼び出しの端末があり、−Y の側は何も無い (昇降路))
+            // エレベーターの扉の見分け方 (2026-11-05、親の決定): 名前の語に elevator と door・doors がある、または 名前の語に door・doors があり部品の種類 (CgfPath。小文字・/ 区切り) に "/elev/" を含む
+            // (Seraphim の truck_shaft_door_double_a は語に elevator が無く、cga のパス objects/buildingsets/human/lowtech/alpha/int/elev/ で見分ける)。糸 (view3d-worker.js) はこの 10 番目の有無で扉を選ぶ
+            var doorWord = p.Words.Contains("door") || p.Words.Contains("doors");
+            var door = doorWord && (p.Words.Contains("elevator") || p.CgfPath.Replace('\\', '/').ToLowerInvariant().Contains("/elev/", StringComparison.Ordinal));
+            var M4 = p.M;
+            geo.PartsJson.Add(new object?[] { p.Key, p.Kind, vOff, verts.Count / 3, iOff, p.N, Round3(lo), Round3(hi), i16 ? 2 : 4,
+                door ? new[] { Math.Round(M4[1], 4), Math.Round(M4[5], 4), Math.Round(M4[9], 4) } : null, uOff, tOff });
             var rl = Round3(lo); var rh = Round3(hi);
             boxes.Add([rl[0], rl[1], rl[2], rh[0], rh[1], rh[2]]);
         }
@@ -1414,6 +1498,7 @@ internal static class StationView3D
         geo.Body = ms.ToArray();
         geo.PartBoxes = boxes.ToArray();
         geo.Bytes = geo.Body.Length + geo.Parts.Select(p => p.Mesh).Distinct(ReferenceEqualityComparer.Instance).Sum(m => (long)((float[])m!).Length * 4)
+            + geo.Parts.Where(p => p.Uv != null).Select(p => p.Uv!).Distinct(ReferenceEqualityComparer.Instance).Sum(u => (long)((float[])u!).Length * 4)
             + geo.Parts.Sum(p => (long)p.Idx.Length * 4 + 16 * 8 + 128);
         return geo;
     }
@@ -1601,7 +1686,7 @@ internal static class StationView3D
                         l.Add((uint)pi); l.Add((uint)p.Idx[ca]); l.Add((uint)p.Idx[cb]);
                     }
                 }
-            var bx = new PartBox { Inst = inst.Index, Key = p.Key, Words = p.Words, PartIdx = pi };
+            var bx = new PartBox { Inst = inst.Index, Key = p.Key, Words = p.Words, PartIdx = pi, Kind = p.Kind };
             for (int a = 0; a < 3; a++) { bx.Lo[a] = double.MaxValue; bx.Hi[a] = double.MinValue; }
             for (int t = 0; t < V.Length / 3; t++)
                 for (int a = 0; a < 3; a++) { bx.Lo[a] = Math.Min(bx.Lo[a], V[t * 3 + a]); bx.Hi[a] = Math.Max(bx.Hi[a], V[t * 3 + a]); }
@@ -1971,7 +2056,7 @@ internal static class StationView3D
         for (int i = 0; i < sz.Length; i += 3) { mnx = Math.Min(mnx, sz[i]); mxx = Math.Max(mxx, sz[i]); mny = Math.Min(mny, sz[i + 1]); mxy = Math.Max(mxy, sz[i + 1]); }
         var M = sp.M;
         double lx = Math.Sqrt(M[0] * M[0] + M[4] * M[4] + M[8] * M[8]) * (mxx - mnx), ly = Math.Sqrt(M[1] * M[1] + M[5] * M[5] + M[9] * M[9]) * (mxy - mny);
-        return new Part { Name = sp.Name, Key = key, Words = words, Kind = kind, Mesh = sp.Mesh, M = sp.M, Small = Math.Min(lx, ly) < SmallPart, CgfPath = sp.CgfPath };
+        return new Part { Name = sp.Name, Key = key, Words = words, Kind = kind, Mesh = sp.Mesh, M = sp.M, Small = Math.Min(lx, ly) < SmallPart, CgfPath = sp.CgfPath, Uv = sp.Uv != null && sp.Uv.Length == sp.Mesh.Length / 9 * 6 ? sp.Uv : null, TexKeys = sp.TexKeys, Tex = sp.Tex != null && sp.Tex.Length == sp.Mesh.Length / 9 ? sp.Tex : null };
     }
 
     public static List<SourcePart> ReadGlb(string path)
@@ -2183,6 +2268,43 @@ internal static class StationView3D
     }
     private static double[] R3(double[] v) => v.Select(x => Math.Round(x, 3)).ToArray();
 
+    // ===== 店のカウンター (2026-11-05、利用者の指示「行先でショップ選んだ時に…本来カウンターの前にすべき」) =====
+    // 店ごとに、店の中心から EntDist m 以内 (箱までの距離) にあるカウンターの部品 (Kind = counterpart。名前の語に counter) の箱 (場所の座標) を近い順に。
+    // 店の名前 → [[下 x,y,z], [上 x,y,z]], …。ビューアが「カウンターの前」に立つ所を決めるのに使う (既存の entrances は残す)。
+    // 同じ名前の店が地点に 2 つ以上あれば、同じ名前の中に箱をまとめる (同じ箱は 1 つ)。ビューアは店の位置からの距離で選び直す。
+    // 店と同じ階の箱だけ (2026-11-05、利用者の報告「ORISON の KEI-TO は一階なのに、行先て飛んだら 2 階だった」): 箱の z の範囲が店の印の CounterBelow m 下〜CounterAbove m 上に掛かるもの。
+    //   10 m の距離だけでは上の階の別の店のカウンターも入っていた (Orison: Kel-To (印 z 1.45) に、真上の Whammers のカウンター (z 5.58〜6.71) と FTL の「counter」の部品 (z 5.33〜9.83) が入り、
+    //   Whammers (印 z 7.46) に Kel-To のカウンター (z −0.17〜1.08) が入っていた)。実データの店の印とカウンターの箱: 箱の下は印の 1.5〜2.25 m 下、箱の上は印の 0.3〜0.85 m 下
+    //   (Orison の Whammers・Kel-To・Makau・TDD)。値は丸の地点のそばに立つ決まり (ビューアの placeStart: 丸の地点の 2.5 m 下〜0.5 m 上の床) と同じにした
+    private const double CounterBelow = 2.5, CounterAbove = 0.5;
+    private static Dictionary<string, List<double[][]>> Counters(List<Shop> shops, List<PartBox> pbox)
+    {
+        var res = new Dictionary<string, List<double[][]>>(StringComparer.Ordinal);
+        foreach (var sh in shops)
+        {
+            var q = sh.Pos;
+            var lst = new List<(double Dist, PartBox Box)>();
+            foreach (var bx in pbox)
+            {
+                if (bx.Kind != "counterpart") continue;
+                if (bx.Hi[2] < q[2] - CounterBelow || bx.Lo[2] > q[2] + CounterAbove) continue;
+                double d2 = 0;
+                for (int k = 0; k < 3; k++) { var gap = Math.Max(Math.Max(bx.Lo[k] - q[k], q[k] - bx.Hi[k]), 0); d2 += gap * gap; }
+                var dist = Math.Sqrt(d2);
+                if (dist > EntDist) continue;
+                lst.Add((dist, bx));
+            }
+            if (!res.TryGetValue(sh.Name, out var rows)) res[sh.Name] = rows = new List<double[][]>();
+            foreach (var (_, bx) in lst.OrderBy(x => x.Dist))
+            {
+                var row = new[] { R3(bx.Lo), R3(bx.Hi) };
+                if (rows.Any(r => r[0].SequenceEqual(row[0]) && r[1].SequenceEqual(row[1]))) continue;
+                rows.Add(row);
+            }
+        }
+        return res;
+    }
+
     // ===== view.json =====
     private static readonly Dictionary<string, string> TK = new()
     {
@@ -2277,5 +2399,106 @@ internal static class StationView3D
             floors = map.Floors.Select(f => new object[] { f.Id, loc.Name(f.Name), f.Z, f.Name }).ToList(),
         };
         return JsonSerializer.SerializeToUtf8Bytes(o, JsonOpts);
+    }
+
+    // ===== 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート) =====
+    // (2026-11-05、利用者の指示「Seraphim なんか引いて行って外部視点になったときパッドなんかは引き出し線とか前にさんざんやったのを表示するように」「一度作ってんだから、今回入れてよ。外部になったときだけ出して」)
+    // v2.5.3 の旧方式のステーションの 3D (Station3DExports.WriteScene の markers。pads・hangars・docks) の移植。ビューア (view3d.js) が station.json を読んだ後に
+    // {type:'exteriorGet'} で頼み、アプリが {type:'exterior', pads, hangars, docks} で返す (StationView3DWindow)。pos は場所の座標 (z 上)。
+    //   pads  = 着陸パッド: 区画 (socpak) の .soc の Entity のうち EntityClass「LandingArea」。key は LandingArea の HUDDisplayName (@ui_interactor_pad_NN・@landing_pad_NN)。
+    //   docks = 外部のドッキングポート: EntityClass「Station_DockingTube」。key は SCItemDockingTube の HUDDisplayName (@dockingport_NN・@ui_interactor_dockingport_NN・@ui_interactor_secdock_a_dockingport)。
+    //   AI 専用の印の付いた着陸パッド・ドッキングポートは出さない (旧方式 StationMapData.StationTree.ReadTerminals の AiOnly と同じ: LandingArea は canBeUsedBy="AI"、
+    //   SCItemDockingTube は CanBeUsedBy="AI"。属性の名前の大文字・小文字が部品で違うので、どちらも見る)。同じ socpak の中は EntityCryGUID で 1 回だけ。
+    //   text = 鍵のゲームの訳 (Loc。無ければ鍵の「@」を除いたもの。旧方式 Station3DWeb.Labels と同じ)。
+    //   hangars = ハンガーの入口 (区画の置き方の一覧の DB の place_hangars = exterior の hangar。size は GatewaySize の区分 S・M・L・XL、無ければ "")。
+    // 区画の .soc は、一覧の socpak ごとに 1 回だけ読み (Data.p4k の目次 P4kArchive.Shared)、置かれた所ごとに行列 A (LayoutInst。3 行 4 列) で場所の座標にする
+    // (旧方式の StationTree が c.Exteriors を xf.Apply で場所の座標にしていたのと同じ)
+    public static object ExteriorMarks(string p4kPath, Layout layout, Loc loc, CancellationToken ct = default)
+    {
+        var p4k = P4kArchive.Shared(p4kPath);
+        string[] needles = ["LandingArea", "DockingTube"];
+        // socpak → [(種類 pad・dock, 局所の位置, 鍵)]
+        var bySoc = new Dictionary<string, List<(string Kind, (double X, double Y, double Z) Pos, string Key)>>(StringComparer.Ordinal);
+        foreach (var socpak in layout.Instances.Select(i => i.Socpak).Where(s => s.Length > 0).Distinct(StringComparer.Ordinal))
+        {
+            ct.ThrowIfCancellationRequested();
+            var list = new List<(string, (double, double, double), string)>();
+            bySoc[socpak] = list;
+            try
+            {
+                var norm = socpak.Replace('/', '\\');
+                var path = norm.StartsWith(@"data\", StringComparison.OrdinalIgnoreCase) ? norm : @"Data\" + norm;
+                int e = p4k.Find(path);
+                if (e < 0) continue;
+                using var inner = P4kArchive.FromBytes(p4k.Read(e));
+                var exDone = new HashSet<string>(StringComparer.Ordinal);
+                for (int i = 0; i < inner.Count; i++)
+                {
+                    if (!inner.Name(i).EndsWith(".soc", StringComparison.OrdinalIgnoreCase)) continue;
+                    var bytes = inner.Read(i);
+                    var latin1 = Encoding.Latin1.GetString(bytes);
+                    if (!needles.Any(k => latin1.Contains(k, StringComparison.OrdinalIgnoreCase))) continue;
+                    var starts = new List<int>();
+                    for (int at = latin1.IndexOf("CryXmlB", StringComparison.Ordinal); at >= 0; at = latin1.IndexOf("CryXmlB", at + 7, StringComparison.Ordinal)) starts.Add(at);
+                    for (int s = 0; s < starts.Count; s++)
+                    {
+                        var a = starts[s]; var z = s + 1 < starts.Count ? starts[s + 1] : bytes.Length;
+                        if (!needles.Any(k => latin1.IndexOf(k, a, z - a, StringComparison.OrdinalIgnoreCase) >= 0)) continue;
+                        System.Xml.Linq.XDocument doc;
+                        try { doc = CryXmlParser.ParseBinaryBytes(bytes[a..z]); } catch { continue; }
+                        static string Hud(System.Xml.Linq.XElement en, string comp) => (string?)en.Descendants(comp).FirstOrDefault()?.Attribute("HUDDisplayName") ?? "";
+                        static bool AiOnly(System.Xml.Linq.XElement en, string comp)
+                        {
+                            var c = en.Descendants(comp).FirstOrDefault();
+                            var v = (string?)c?.Attribute("canBeUsedBy") ?? (string?)c?.Attribute("CanBeUsedBy");
+                            return string.Equals(v, "AI", StringComparison.OrdinalIgnoreCase);
+                        }
+                        foreach (var en in doc.Descendants("Entity"))
+                        {
+                            var cls = (string?)en.Attribute("EntityClass") ?? "";
+                            if (cls != "LandingArea" && cls != "Station_DockingTube") continue;
+                            var guid = ((string?)en.Attribute("EntityCryGUID") ?? "").Trim().ToLowerInvariant();
+                            if (guid.Length == 0 || exDone.Contains(guid)) continue;
+                            if (StationIndex.ParseVec((string?)en.Attribute("Pos")) is not { } pos) continue;
+                            exDone.Add(guid);
+                            if (cls == "LandingArea")
+                            {
+                                if (AiOnly(en, "LandingArea")) continue;
+                                list.Add(("pad", pos, Hud(en, "LandingArea")));
+                            }
+                            else
+                            {
+                                if (AiOnly(en, "SCItemDockingTube")) continue;
+                                list.Add(("dock", pos, Hud(en, "SCItemDockingTube")));
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is InvalidDataException or IOException or SocpakExporter.SocpakException) { }
+        }
+        var pads = new List<object>();
+        var docks = new List<object>();
+        string Text(string key)
+        {
+            if (key.Length == 0) return "";
+            var t = loc.Get(key);
+            return t == key ? key.TrimStart('@') : t;
+        }
+        foreach (var inst in layout.Instances)
+        {
+            if (!bySoc.TryGetValue(inst.Socpak, out var list) || list.Count == 0) continue;
+            var A = inst.A;
+            foreach (var (kind, p, key) in list)
+            {
+                double[] pos = [
+                    Math.Round(A[0] * p.X + A[1] * p.Y + A[2] * p.Z + A[3], 3),
+                    Math.Round(A[4] * p.X + A[5] * p.Y + A[6] * p.Z + A[7], 3),
+                    Math.Round(A[8] * p.X + A[9] * p.Y + A[10] * p.Z + A[11], 3)];
+                (kind == "pad" ? pads : docks).Add(new { pos, key, text = Text(key) });
+            }
+        }
+        var hangars = (layout.Place?.Hangars ?? new()).Select(h => new { pos = h.Pos, size = h.Size }).ToList();
+        return new { type = "exterior", pads, hangars, docks };
     }
 }

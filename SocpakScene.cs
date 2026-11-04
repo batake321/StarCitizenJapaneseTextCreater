@@ -17,14 +17,19 @@ namespace StarCitizenJapaneseTextCreater;
 // 同じ部品の形は 1 回だけ読み、SocpakMeshCache (容量の上限つき) で区画・地点をまたいで使い回す。
 internal sealed class SocpakScene
 {
-    // 部品の形 1 つ (GLB の mesh 1 つ)。Positions は x,y,z の並び (f32)、Primitives は面を出す submesh ごとの索引 (3 つずつ三角形)
+    // 部品の形 1 つ (GLB の mesh 1 つ)。Positions は x,y,z の並び (f32)、Primitives は面を出す submesh ごとの索引 (3 つずつ三角形)。
+    // Uvs: u,v の並び (Positions と同じ頂点の順。形に UV が無ければ null)、SubMaterials: Primitives ごとの材質の番号 (submesh の MaterialId)、
+    // Mtl: 材質のファイル (.mtl) の Data.p4k の中のパス (引けなければ "")。ゲームの画像を貼るため (2026-11-05、利用者の指示「引いたときは色はビットマップ貼り付けにしてほしい」)
     public sealed class Mesh
     {
         public string Name = ""; public string CgfPath = "";   // CgfPath: 部品の種類 (datacore の形のパス。補う面の表の鍵。2026-11-04)
         public float[] Positions = [];
+        public float[]? Uvs;
         public List<uint[]> Primitives = new();
+        public List<int> SubMaterials = new();
+        public string Mtl = "";
         public double[] Min = new double[3], Max = new double[3];   // accessor の min・max (f32 を double に)
-        public long Bytes => Positions.LongLength * 4 + Primitives.Sum(p => (long)p.Length * 4) + 64;
+        public long Bytes => Positions.LongLength * 4 + (Uvs?.LongLength ?? 0) * 4 + Primitives.Sum(p => (long)p.Length * 4) + 64;
     }
 
     // 置き方 1 つ (GLB の子のノード)。Matrix は列優先 16 (GLB に書いた f32 を読んだ double)
@@ -662,7 +667,7 @@ internal static class SocpakExporter
         finally { ctx.InFlight.TryRemove(new KeyValuePair<string, Lazy<(SocpakScene.Mesh?, string?)>>(key, lazy)); }
     }
 
-    private static SocpakScene.Mesh Renamed(SocpakScene.Mesh m, string name) => new() { Name = name, CgfPath = m.CgfPath, Positions = m.Positions, Primitives = m.Primitives, Min = m.Min, Max = m.Max };
+    private static SocpakScene.Mesh Renamed(SocpakScene.Mesh m, string name) => new() { Name = name, CgfPath = m.CgfPath, Positions = m.Positions, Uvs = m.Uvs, Primitives = m.Primitives, SubMaterials = m.SubMaterials, Mtl = m.Mtl, Min = m.Min, Max = m.Max };
 
     public sealed class MeshLoadException(string message) : Exception(message);
 
@@ -714,12 +719,12 @@ internal static class SocpakExporter
             if (se >= 0) { try { bones = CryIvo.ParseSkeleton(p4k.Read(se)) ?? new(); } catch (InvalidDataException) { } }
         }
         var effMtl = parts[0].MtlOverride ?? materialPath;
-        var (mesh, mtl, nmc) = LoadSingle(ctx, parts[0].Path, effMtl, inner);
+        var (mesh, mtl, nmc, mtlPath) = LoadSingle(ctx, parts[0].Path, effMtl, inner);
         for (int i = 1; i < parts.Count; i++)
         {
             try
             {
-                var (extra, _, _) = LoadSingle(ctx, parts[i].Path, materialPath, inner);
+                var (extra, _, _, _) = LoadSingle(ctx, parts[i].Path, materialPath, inner);
                 if (parts[i].Bone is string bn && bones.FirstOrDefault(b => string.Equals(b.Name, bn, StringComparison.OrdinalIgnoreCase)) is { } bone)
                     CryIvo.TransformByBone(extra, bone);
                 mesh.MergeFrom(extra);
@@ -732,8 +737,8 @@ internal static class SocpakExporter
             if (MathF.Abs(mesh.ScalingMin[k] - mesh.ModelMin[k]) > 0.01f || MathF.Abs(mesh.ScalingMax[k] - mesh.ModelMax[k]) > 0.01f) needsBake = true;
         if (needsBake) CryIvo.BakeNmc(mesh, nmc);
 
-        // pack_mesh: 箱は全部の頂点、面は隠さない submesh だけ
-        var res = new SocpakScene.Mesh { Name = name, CgfPath = cgfPath, Positions = mesh.Positions };
+        // pack_mesh: 箱は全部の頂点、面は隠さない submesh だけ。UV・材質の番号・材質のパスは画像を貼るために残す (面の選び方は変えない)
+        var res = new SocpakScene.Mesh { Name = name, CgfPath = cgfPath, Positions = mesh.Positions, Uvs = mesh.Uvs != null && mesh.Uvs.Length == mesh.Positions.Length / 3 * 2 ? mesh.Uvs : null, Mtl = mtlPath ?? "" };
         float[] mn = [float.MaxValue, float.MaxValue, float.MaxValue], mx = [float.MinValue, float.MinValue, float.MinValue];
         for (int v = 0; v < mesh.VertexCount; v++)
             for (int k = 0; k < 3; k++) { var f = mesh.Positions[v * 3 + k]; mn[k] = RustF32.Min(mn[k], f); mx[k] = RustF32.Max(mx[k], f); }
@@ -746,12 +751,13 @@ internal static class SocpakExporter
             long st = sub.FirstIndex, cnt = sub.NumIndices;
             if (st + cnt > mesh.Indices.Length) throw new MeshLoadException("submesh の索引の範囲が外れています");
             res.Primitives.Add(mesh.Indices.AsSpan((int)st, (int)cnt).ToArray());
+            res.SubMaterials.Add((int)sub.MaterialId);
         }
         return res;
     }
 
-    // load_single_mesh (形・NMC・材質)
-    private static (CryMesh Mesh, CryMtl? Mtl, List<CryIvo.NmcNode>? Nmc) LoadSingle(Context ctx, string geometryPath, string materialPath, InnerFiles? inner = null)
+    // load_single_mesh (形・NMC・材質)。MtlPath: 読めた材質のファイルの Data.p4k の中のパス (無ければ null)
+    private static (CryMesh Mesh, CryMtl? Mtl, List<CryIvo.NmcNode>? Nmc, string? MtlPath) LoadSingle(Context ctx, string geometryPath, string materialPath, InnerFiles? inner = null)
     {
         var p4k = ctx.P4k;
         var geomP4k = DataCorePathToP4k(geometryPath);
@@ -770,15 +776,15 @@ internal static class SocpakExporter
         byte[]? meta = null;
         int me = p4k.Find(geomP4k);
         if (me >= 0) { try { meta = p4k.Read(me); } catch (InvalidDataException) { } }
-        var mtl = ResolveMaterial(p4k, materialPath, geomP4k, meta);
+        var mtl = ResolveMaterial(p4k, materialPath, geomP4k, meta, out var mtlPath);
         var nmc = meta != null ? CryIvo.ParseNmc(meta) : null;
         var mesh = CryIvo.ParseSkin(meshBytes);
-        return (mesh, mtl, nmc);
+        return (mesh, mtl, nmc, mtlPath);
     }
 
     // socpak の中の形: 対の .cgfm (_lod<N> があればそれ) があれば #ivo として、無ければ .cgf そのもの (CrCh なら CryCrChMesh、#ivo なら IvoSkin2) を読む。
     // 材質は p4k から (DataCore の材質のパス → だめなら .cgf の材質の名前。読み方は p4k の形と同じ)
-    private static (CryMesh Mesh, CryMtl? Mtl, List<CryIvo.NmcNode>? Nmc) LoadSingleInner(Context ctx, P4kArchive arch, string rel, string geomP4k, string materialPath, string p4kCompanion)
+    private static (CryMesh Mesh, CryMtl? Mtl, List<CryIvo.NmcNode>? Nmc, string? MtlPath) LoadSingleInner(Context ctx, P4kArchive arch, string rel, string geomP4k, string materialPath, string p4kCompanion)
     {
         var comp = rel + "m";
         if (ctx.Lod > 0)
@@ -792,16 +798,21 @@ internal static class SocpakExporter
         if (ge >= 0) { try { meta = arch.Read(ge); } catch (InvalidDataException) { } }
         int ce = arch.Find(comp);
         if (ce >= 0)
-            return (CryIvo.ParseSkin(arch.Read(ce)), ResolveMaterial(ctx.P4k, materialPath, geomP4k, meta), meta != null ? CryIvo.ParseNmc(meta) : null);
+        {
+            var mtl1 = ResolveMaterial(ctx.P4k, materialPath, geomP4k, meta, out var mp1);
+            return (CryIvo.ParseSkin(arch.Read(ce)), mtl1, meta != null ? CryIvo.ParseNmc(meta) : null, mp1);
+        }
         if (meta == null) throw new MeshLoadException($"file not found in P4k: {p4kCompanion}");
         if (CryCrChMesh.IsCrCh(meta))
         {
             var mesh = CryCrChMesh.Parse(meta);
-            var mtl = materialPath.Length > 0 ? TryLoadMtl(ctx.P4k, DataCorePathToP4k(materialPath)) : null;
-            if (mtl == null && CryCrChMesh.MtlName(meta) is string mn) mtl = TryLoadMtl(ctx.P4k, MtlPathFromName(mn, geomP4k));
-            return (mesh, mtl, null);
+            CryMtl? mtl = null; string? mp = null;
+            if (materialPath.Length > 0) { mp = DataCorePathToP4k(materialPath); mtl = TryLoadMtl(ctx.P4k, mp); if (mtl == null) mp = null; }
+            if (mtl == null && CryCrChMesh.MtlName(meta) is string mn) { mp = MtlPathFromName(mn, geomP4k); mtl = TryLoadMtl(ctx.P4k, mp); if (mtl == null) mp = null; }
+            return (mesh, mtl, null, mp);
         }
-        return (CryIvo.ParseSkin(meta), ResolveMaterial(ctx.P4k, materialPath, geomP4k, meta), CryIvo.ParseNmc(meta));
+        var mtl2 = ResolveMaterial(ctx.P4k, materialPath, geomP4k, meta, out var mp2);
+        return (CryIvo.ParseSkin(meta), mtl2, CryIvo.ParseNmc(meta), mp2);
     }
 
     // 材質の名前 → p4k のパス (resolve_mtl_p4k_path。「/」「\」があれば Data\ から、無ければ形と同じフォルダ)
@@ -812,10 +823,16 @@ internal static class SocpakExporter
         return $"{(i >= 0 ? geomP4k[..i] : geomP4k)}\\{mn}.mtl";
     }
 
-    // resolve_material: DataCore の材質のパス → だめなら .cgf の MtlName (パスに「/」「\」があれば Data\ から、無ければ .cgf と同じフォルダ)
-    private static CryMtl? ResolveMaterial(P4kArchive p4k, string materialPath, string geomP4k, byte[]? meta)
+    // resolve_material: DataCore の材質のパス → だめなら .cgf の MtlName (パスに「/」「\」があれば Data\ から、無ければ .cgf と同じフォルダ)。
+    // mtlPath: 読めた材質のファイルの p4k の中のパス (読めなければ null。画像を貼る側が .mtl を読み直すのに使う。選び方は変えない)
+    private static CryMtl? ResolveMaterial(P4kArchive p4k, string materialPath, string geomP4k, byte[]? meta, out string? mtlPath)
     {
-        if (materialPath.Length > 0 && TryLoadMtl(p4k, DataCorePathToP4k(materialPath)) is { } a) return a;
+        mtlPath = null;
+        if (materialPath.Length > 0)
+        {
+            var mp = DataCorePathToP4k(materialPath);
+            if (TryLoadMtl(p4k, mp) is { } a) { mtlPath = mp; return a; }
+        }
         if (meta == null || CryIvo.ExtractMtlName(meta) is not string mn) return null;
         string path;
         if (mn.Contains('/') || mn.Contains('\\')) path = $"Data\\{mn.Replace('/', '\\')}.mtl";
@@ -824,7 +841,9 @@ internal static class SocpakExporter
             int i = geomP4k.LastIndexOf('\\');
             path = $"{(i >= 0 ? geomP4k[..i] : geomP4k)}\\{mn}.mtl";
         }
-        return TryLoadMtl(p4k, path);
+        var r = TryLoadMtl(p4k, path);
+        if (r != null) mtlPath = path;
+        return r;
     }
 
     private static CryMtl? TryLoadMtl(P4kArchive p4k, string path)

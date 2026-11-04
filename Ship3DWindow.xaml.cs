@@ -40,8 +40,12 @@ public partial class Ship3DWindow : Window
         ex.StateChanged += OnStateChanged;
         ex.Exported += OnExported;
         ex.PropertyChanged += OnExportsPropertyChanged;
+        // ビューアの右上の閉じる (Ship3DWeb.CloseRequested): この窓の WebView2 なら窓を閉じる
+        Action<Microsoft.Web.WebView2.Wpf.WebView2> onClose = w => { if (ReferenceEquals(w, web3D)) Dispatcher.BeginInvoke(Close); };
+        Ship3DWeb.CloseRequested += onClose;
         Closed += (_, _) =>
         {
+            Ship3DWeb.CloseRequested -= onClose;
             ex.StateChanged -= OnStateChanged;
             ex.Exported -= OnExported;
             ex.PropertyChanged -= OnExportsPropertyChanged;
@@ -242,7 +246,7 @@ public partial class Ship3DWindow : Window
         var shortName = Ship3DExports.ShortName(record);
         Ship3DExports.Instance.AcquireView(shortName);
         _shownShort = shortName;
-        try { Ship3DWeb.Show(web3D, shortName, _name, glbPath); }
+        try { Ship3DWeb.Show(web3D, shortName, _name, glbPath, isItem: Ship3DExports.IsItemRecord(record)); }
         catch (Exception ex)
         {
             App.AppendStartupLog(App.Config.WorkingDirectory, $"[3D モデル] 別ウィンドウで表示できませんでした: {ex}");

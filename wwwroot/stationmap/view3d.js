@@ -22,6 +22,10 @@ if (APP) window.chrome.webview.addEventListener('message', e => {
   if (d.type === 'prewarmCancel') { prewarmStop(); return; }
   if (d.type === 'here') { onHere(d); return; }
   if (d.type === 'walkFill') { onWalkFill(d); return; }
+  if (d.type === 'notes') { onNotes(d); return; }
+  if (d.type === 'noteAdded') { onNoteAdded(d); return; }
+  if (d.type === 'exterior') { onExterior(d); return; }   // 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート。下の「外から見たときの印と見出し」)
+  if (d.type === 'noteError') { document.getElementById('msg').textContent = 'コメントの印を保存できませんでした: ' + (d.message || ''); return; }
   const w = regionWait.get(d.id); if (!w) return;
   if (d.type === 'regionProgress') showProgress(d.done, d.total);
   else if (d.type === 'regionReady') { regionWait.delete(d.id); w.ok(d); }
@@ -105,7 +109,7 @@ addEventListener('keydown', e => { if (document.getElementById('cbox').style.dis
 addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
 addEventListener('keydown', e => {
   if (document.getElementById('cbox').style.display === 'block') { if (e.key === 'Enter') { e.preventDefault(); closeComment(true); } else if (e.key === 'Escape') closeComment(false); return; }
-  if (walk && rec && e.key === 'Enter') { e.preventDefault(); keys.clear(); openComment(); return; }
+  if (walk && e.key === 'Enter') { e.preventDefault(); keys.clear(); openComment(); return; }   // 録画中でなくても (2026-11-05、利用者「enter で文字入れて印付けるのは、いつでもできて入力したら即反映してほしい」)
   if (!walk || e.repeat) return;
   if (e.target.tagName === 'INPUT' && /^(text|search|number)$/.test(e.target.type)) return;
   if (e.key === 'Shift') { run = !run; }
@@ -124,6 +128,7 @@ let lastT = performance.now();
 // ---- 歩くモード (試験の頁と同じ)
 // 歩く・走る速さ (2026-11-04、利用者の指示「走る速度も歩く速度も二倍で」: 1.4 → 2.8・5 → 10 m/秒)
 const STEP = 0.6, WALK = 2.8, RUN = 10.0, TURN = 1.6;
+const STEP_FLOOR_MIN = 0.35;   // これより高い段を上がるときだけ「手すりの高さ」の検査 (tallObjectAt) に掛ける。階段の段 (0.2〜0.3 m) は検査なしで通る (2026-11-05、利用者「高さの基準が低すぎたんじゃない？」で 0.25 → 0.35)
 // 姿勢: 体の高さと目の高さ (立つ・しゃがむ・寝そべる)。ゲームのデータでは確かめていない値
 const STANCE = { stand: { h: 1.8, eye: 1.7, sp: 1 }, crouch: { h: 1.2, eye: 1.05, sp: 0.5 }, prone: { h: 0.5, eye: 0.35, sp: 0.25 } };
 let stance = 'stand';
@@ -244,6 +249,9 @@ function blocked(x, y, z, nx, ny) {
   const dx = nx - x, dy = ny - y, d = Math.hypot(dx, dy); if (d < 1e-9) return false;
   const ex = nx + dx / d * BODY_R, ey = ny + dy / d * BODY_R, H = STANCE[stance].h;
   for (const h of [STEP + 0.05, (STEP + H) / 2, H - 0.1]) if (h > STEP && segHit(x, y, z + h, ex, ey, z + h)) return true;
+  // 進む先の、足元 (段の高さより上) から頭までの縦の線。横の線 3 本の間をすり抜ける細いバー (階段の手すりなど) に当てる
+  // (2026-11-05、利用者の報告「階段の手すりをすり抜けて落ちる」。親の決定)
+  if (H - 0.1 > STEP + 0.05 && segHit(ex, ey, z + STEP + 0.05, ex, ey, z + H - 0.1)) return true;
   return false;
 }
 function fits(x, y, z) { if (noclip) return true; const c = ceilAt(x, y, z + 0.05); return c === null || c - z >= STANCE[stance].h; }
@@ -427,8 +435,12 @@ function walkStep(dt) {
     const g = groundGap(nx, ny, wpos.z + STEP);
     const nz_ = air ? wpos.z : (g !== null && g >= wpos.z - STEP ? g : wpos.z);
     let tx = nx, ty = ny;
-    if (blocked(wpos.x, wpos.y, wpos.z, tx, ty)) { if (!blocked(wpos.x, wpos.y, wpos.z, nx, wpos.y)) ty = wpos.y; else if (!blocked(wpos.x, wpos.y, wpos.z, wpos.x, ny)) tx = wpos.x; else { tx = wpos.x; ty = wpos.y; } }
-    if ((tx !== wpos.x || ty !== wpos.y) && fits(tx, ty, nz_)) { const g3 = groundGap(tx, ty, wpos.z + STEP); wpos.x = tx; wpos.y = ty; if (!air && g3 !== null) { if (g3 < wpos.z - 0.05) air = true; else wpos.z = g3; } }
+    // 段を上がる (STEP_FLOOR_MIN より高い) ときは、上がる先が「手すりの高さ」の物 (tallObjectAt) でないときだけ
+    // (2026-11-05、利用者の報告「階段の手すりをすり抜けて落ちる。超えてるのかも」: 下り階段で手すりの上面が足元から 0.6 m 以内に入り、段として乗っていた。親の決定)
+    const stepUpBad = (x_, y_, g_) => !air && g_ !== null && g_ > wpos.z + STEP_FLOOR_MIN && tallObjectAt(x_, y_, wpos.z);
+    if (stepUpBad(nx, ny, g)) { tx = wpos.x; ty = wpos.y; }
+    else if (blocked(wpos.x, wpos.y, wpos.z, tx, ty)) { if (!blocked(wpos.x, wpos.y, wpos.z, nx, wpos.y)) ty = wpos.y; else if (!blocked(wpos.x, wpos.y, wpos.z, wpos.x, ny)) tx = wpos.x; else { tx = wpos.x; ty = wpos.y; } }
+    if ((tx !== wpos.x || ty !== wpos.y) && fits(tx, ty, nz_)) { const g3 = groundGap(tx, ty, wpos.z + STEP); if (!stepUpBad(tx, ty, g3)) { wpos.x = tx; wpos.y = ty; if (!air && g3 !== null) { if (g3 < wpos.z - 0.05) air = true; else wpos.z = g3; } } }
   }
   // 落ちる・跳ぶ
   const gnd = groundGap(wpos.x, wpos.y, wpos.z + 0.05);
@@ -548,7 +560,10 @@ function invStep(dt) {
 }
 
 let elevPinned = null, tClosed = null;
-const stopDist = (t, q) => { const c = cur.center; return Math.hypot(t[1][0] - c[0] - q.x, t[1][1] - c[1] - q.y, t[1][2] - c[2] - q.z); };
+// 乗り場との距離: xy で測り、高さの差が STOP_DZ m を超えるものは遠い扱い (2026-11-05、利用者の報告「シャトルの行き先が選べない」: Orison のスペースポートのシャトルの印が
+// 床より 1.9 m 下にあり、3 次元の距離では 2 m 以内に入れなかった。親の決定)
+const STOP_DZ = 3, TRAM_NEAR = 10;
+const stopDist = (t, q) => { const c = cur.center; if (Math.abs(t[1][2] - c[2] - q.z) > STOP_DZ) return Infinity; return Math.hypot(t[1][0] - c[0] - q.x, t[1][1] - c[1] - q.y); };
 function hideTbox(closeAt) { const b = document.getElementById('tbox'); if (closeAt) tClosed = closeAt; elevPinned = null; b.style.display = 'none'; b.dataset.key = ''; }
 function tboxRow(list, text, cls, fn) { const b = document.createElement('button'); b.textContent = text; if (cls) b.className = cls; b.onclick = fn; list.appendChild(b); }
 function showElev(at, pinned) {
@@ -556,10 +571,13 @@ function showElev(at, pinned) {
   const box = document.getElementById('tbox'), head = document.getElementById('tboxHead'), list = document.getElementById('tboxList');
   const q = at ? at : wpos, lim = at ? 5 : 2;
   const all = (cur.transit || []).filter(t => t[0].startsWith('elevator') || t[0] === 'tram');
-  if (!pinned && elevPinned) { if (stopDist(elevPinned, wpos) < 5) return; hideTbox(); }
-  if (!pinned && tClosed) { if (stopDist(tClosed, wpos) < 3) return; tClosed = null; }
-  let near = null, nd = lim;
-  for (const t of all) { const d = stopDist(t, q); if (d < nd) { nd = d; near = t; } }
+  // トラムの乗り場は、印が線路の側 (壁の向こう) にあることが多いので、エレベーターより広い範囲 (TRAM_NEAR m) で出す
+  // (2026-11-05、利用者「シャトルはエレベータと違い、判定の範囲を広げないと、壁の向こうに黄色の丸がある」。値は親の決定)
+  const limOf = t => t[0] === 'tram' ? TRAM_NEAR : lim;
+  if (!pinned && elevPinned) { if (stopDist(elevPinned, wpos) < (elevPinned[0] === 'tram' ? TRAM_NEAR + 1 : 5)) return; hideTbox(); }
+  if (!pinned && tClosed) { if (stopDist(tClosed, wpos) < (tClosed[0] === 'tram' ? TRAM_NEAR + 1 : 3)) return; tClosed = null; }
+  let near = null, nd = Infinity;
+  for (const t of all) { const d = stopDist(t, q); if (d < limOf(t) && d < nd) { nd = d; near = t; } }
   if (pinned) { elevPinned = near; tClosed = null; }
   if (!near) {
     if (!pinned) { if (box.style.display === 'block') hideTbox(); return; }
@@ -628,8 +646,11 @@ function tboxHead(list, text) { const d = document.createElement('div'); d.textC
 // 録画に「ここで移った」を入れる (再生で前の点からなめらかにつながず、その時刻に飛ぶ。点の 9 番目が 1)
 function recJump() { if (!rec) return; const ro = recOff(); rec.points.push([+rec.t.toFixed(2), +(wpos.x + ro[0]).toFixed(3), +(wpos.y + ro[1]).toFixed(3), +(wpos.z + ro[2]).toFixed(3), +wyaw.toFixed(4), +wpitch.toFixed(4), stance, noclip ? 1 : 0, 1]); recAcc = 0; }
 // エレベーター: 行き先の扉の向きで立つ所を決める (2026-11-04、利用者の指示「扉の向きで決められないの？ 元々ずっとそう言ってる」。
-// 同じ x・y の床はかごの床になるので探さない)。利用者の決定「2 行先の扉の床がある側で扉に背を向ける」: 行き先の乗り場に近いエレベーターの扉 (cur.elevDoors) のうち、
-// 扉の箱の薄い向きの両側 (箱の中心から、薄い向きに 箱の厚みの半分 + DOOR_STEP m) で、行き先の高さの床があり、乗り場から遠い側 (乗り場はかごの中) に立ち、扉に背を向ける。
+// 同じ x・y の床はかごの床になるので探さない)。利用者の決定「2 行先の扉の床がある側で扉に背を向ける」、
+// (2026-11-05、利用者の報告「カーゴセンターに出たところ、エレベータードアの裏に出現」・指示「指示はドアの向きを見て」) 降りる側は扉の部品の向きで決める:
+//   行き先の乗り場に近いエレベーターの扉 (cur.elevDoors。[名前, 箱の低い角, 高い角, 前の向き [fx, fy]]。前の向きは扉の部品の局所の +Y を場所の座標に回したもの。糸が作る) のうち、
+//   立つ所 = 扉の箱の中心 + 前の向き × (前の向きでの箱の厚みの半分 + DOOR_STEP m)。そこに行き先の高さの床があればそこに立ち、扉に背を向ける。
+//   前の向きの側に床が無ければ、反対側に床があればそこ (原文「床がある側」)。どちらにも無ければ次の扉へ。前の向きの無い扉 (xy の成分が無い) は見ない
 // 扉は、乗り場から xy で DOOR_NEAR m 以内・高さが乗り場の高さ −ELEV_BAND〜+3 m に掛かるものを、近い順に見る。どれにも床が無ければ、動かずに窓を閉じる (window.__elevHow = 'none')
 const ELEV_BAND = 1.5, DOOR_STEP = 0.6, DOOR_NEAR = 6;
 function elevMove(from, t) {
@@ -654,14 +675,14 @@ function elevPlace(t, xyAbs, yaw0) {
       .filter(o => o.dist <= DOOR_NEAR && o.d[2][2] >= tz - ELEV_BAND && o.d[1][2] <= tz + 3).sort((a, b) => a.dist - b.dist);
     let best = null;
     for (const o of doors) {
-      const ex = o.d[2][0] - o.d[1][0], ey = o.d[2][1] - o.d[1][1];
-      const [nx, ny, half] = ex < ey ? [1, 0, ex / 2] : [0, 1, ey / 2];
+      const f = o.d[3]; if (!f) continue;
+      // 前の向きでの箱の厚みの半分 (箱の半分の幅を前の向きに投影したもの。軸に沿った扉では薄い向きの幅の半分)
+      const half = (Math.abs(f[0]) * (o.d[2][0] - o.d[1][0]) + Math.abs(f[1]) * (o.d[2][1] - o.d[1][1])) / 2;
       let cand = null;
-      for (const sgn of [1, -1]) {
-        const px = o.mx + sgn * nx * (half + DOOR_STEP), py = o.my + sgn * ny * (half + DOOR_STEP);
+      for (const sgn of [1, -1]) {   // 前の向きの側 → 反対側
+        const px = o.mx + sgn * f[0] * (half + DOOR_STEP), py = o.my + sgn * f[1] * (half + DOOR_STEP);
         const gg = band(groundAt(px, py, tz + STEP)); if (gg === null) continue;
-        const far = Math.hypot(px - sx, py - sy);
-        if (!cand || far > cand.far) cand = { o, px, py, gg, far, yaw: Math.atan2(py - o.my, px - o.mx) };
+        cand = { o, px, py, gg, yaw: Math.atan2(py - o.my, px - o.mx) }; break;
       }
       if (cand) { best = cand; break; }
     }
@@ -730,8 +751,69 @@ let recAcc = 0, cPos = null, cMarks = [];
 function openComment() { cPos = null; document.getElementById('cpos').textContent = '(位置: 今の目線の高さ)'; const b = document.getElementById('cbox'); b.style.display = 'block'; const i = document.getElementById('ctext'); i.value = ''; i.focus(); }
 function closeComment(ok) {
   const b = document.getElementById('cbox'); const t = document.getElementById('ctext').value.trim(); b.style.display = 'none';
-  if (ok && t && rec) { const q = cPos || cam.position, ro = recOff(); rec.comments.push({ t: +rec.t.toFixed(2), pos: [+(q.x + ro[0]).toFixed(3), +(q.y + ro[1]).toFixed(3), +(q.z + ro[2]).toFixed(3)], text: t }); document.getElementById('recInfo').textContent = `録画中 ${rec.points.length} 点・コメント ${rec.comments.length}`; }
+  if (ok && t && cur) {
+    const q = cPos || cam.position;
+    if (rec) {
+      // 録画中は録画 (rec.comments) にも入れる (再生のときにその時刻で出す)。印は下の DB の印 1 つだけ出す (2 つ重ねない)
+      const ro = recOff(); const cm = { t: +rec.t.toFixed(2), pos: [+(q.x + ro[0]).toFixed(3), +(q.y + ro[1]).toFixed(3), +(q.z + ro[2]).toFixed(3)], text: t };
+      rec.comments.push(cm); document.getElementById('recInfo').textContent = `録画中 ${rec.points.length} 点・コメント ${rec.comments.length}`;
+    }
+    // 録画中でもなくても DB に入れ (親の決定)、入れた所にすぐ印を出す (2026-11-05、利用者「enter で文字入れて印付けるのは、いつでもできて入力したら即反映してほしい」「DB格納でいつでも」)
+    const c = cur.center; addNote([+(q.x + c[0]).toFixed(3), +(q.y + c[1]).toFixed(3), +(q.z + c[2]).toFixed(3)], t);
+  }
   cPos = null; cv.focus?.();
+}
+// ---- DB のコメントの印 (StationNotes。view3d_notes.db): 場所の座標 (絶対) と文。3D を開いたとき・地点を読み込み直したとき (show) に {type:'notesGet'} で全部もらって出し、
+//   入れたら {type:'noteAdd', pos, text, tmp} → {type:'noteAdded', id, tmp} で id が付く (返るまで待たずに印を出す)。札を押したら確認して {type:'noteDelete', id}。
+//   印は noteMarks (再生の cMarks とは別。showComments で消えない)。userData.note = { id, tmp, pos (絶対), text }
+let noteMarks = [], noteSeq = 0, notesReq = 0;
+function noteDraw(note) {
+  const c = cur.center;
+  const g = commentMark({ t: 0, pos: [note.pos[0] - c[0], note.pos[1] - c[1], note.pos[2] - c[2]], text: note.text }, [0, 0, 0], markOn('comment'), noteMarks);
+  g.userData.note = note; return g;
+}
+function addNote(pos, text) {
+  const note = { id: null, tmp: ++noteSeq, pos, text, deleted: false };
+  noteDraw(note);
+  if (APP) window.chrome.webview.postMessage({ type: 'noteAdd', pos, text, tmp: note.tmp });
+}
+const noteDispose = g => { root.remove(g); g.traverse(o => { o.geometry?.dispose(); o.material?.map?.dispose?.(); disposeMats(o); }); };
+function requestNotes() {
+  for (const g of noteMarks) noteDispose(g);
+  noteMarks = [];
+  if (APP) window.chrome.webview.postMessage({ type: 'notesGet', req: ++notesReq });
+}
+function onNotes(d) {
+  if (d.req !== notesReq || !cur || !Array.isArray(d.list)) return;   // 古い頼み (その後に読み込み直した) の返事は捨てる
+  for (const g of noteMarks) noteDispose(g);
+  noteMarks = [];
+  for (const n of d.list) if (Array.isArray(n.pos) && n.pos.length === 3) noteDraw({ id: n.id, tmp: 0, pos: n.pos, text: n.text || '', deleted: false });
+}
+function onNoteAdded(d) {
+  const g = noteMarks.find(m => m.userData.note && m.userData.note.tmp === d.tmp && d.tmp);
+  if (!g) return;
+  const note = g.userData.note; note.id = d.id;
+  if (note.deleted && APP) window.chrome.webview.postMessage({ type: 'noteDelete', id: note.id });   // id が付く前に消していた
+}
+function deleteNote(g) {
+  const note = g.userData.note; note.deleted = true;
+  noteDispose(g); noteMarks = noteMarks.filter(m => m !== g);
+  if (note.id != null && APP) window.chrome.webview.postMessage({ type: 'noteDelete', id: note.id });
+}
+// 札に距離を足す (2026-11-05、利用者「ショップ x2 / 260m みたいだと分かりやすい」): 端末・乗り口の札に、自分 (歩くモードなら立っている所、見るモードなら回転の中心) からの距離 (m) を最後の行に足し、
+// 0.5 秒ごとに描き直す。札は地点を作り直すたびに作り直す (show) ので、一覧は show で空にする
+const distLabels = []; let lastDistLabel = 0;
+function refreshDistLabels(force) {
+  const now = performance.now(); if (!force && now - lastDistLabel < 500) return; lastDistLabel = now;
+  const q = walk ? wpos : tgt;
+  for (const e of distLabels) {
+    const sp = e.sp; if (!sp.parent) continue;
+    const d = Math.hypot(sp.position.x - q.x, sp.position.y - q.y, sp.position.z - q.z); const dm = Math.round(d) + 'm';
+    if (e.last === dm) continue; e.last = dm;
+    const lines = e.lines.concat([dm]); const nsp = textSprite(lines);
+    sp.material.map?.dispose(); sp.material.map = nsp.material.map; sp.material.needsUpdate = true; nsp.material.dispose();
+    const asp = nsp.scale.x / nsp.scale.y, h = 0.04 * lines.length; sp.scale.set(h * asp, h, 1);
+  }
 }
 // 文字の札 (1 行の文字か、行の配列)
 function textSprite(text) {
@@ -742,17 +824,21 @@ function textSprite(text) {
   lines.forEach((l, i) => g.fillText(l, 12, 31 + 44 * i));
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false })); sp.scale.set(w / 44 * 0.5, 0.5 * lines.length, 1); sp.renderOrder = 20; return sp;
 }
+// コメントの印 (地点に玉、そこから上へ 1.5 m の引き出し線、その先に文)。co: 記録の中心 − 今の中心。list: 入れる一覧 (再生・録画は cMarks、DB の印は noteMarks)。
+// userData.shown = 出すべきか (再生の時刻で変わる)。実際の visible はそれと「表示」のチェック (comment) の両方 (applyMarkVis)
+function commentMark(cm, co, visible, list = cMarks) {
+  const g = new THREE.Group(); const p0 = new THREE.Vector3(cm.pos[0] + co[0], cm.pos[1] + co[1], cm.pos[2] + co[2]), p1 = p0.clone(); p1.z += 1.5;
+  const ball = new THREE.Mesh(new THREE.SphereGeometry(0.12), new THREE.MeshBasicMaterial({ color: 0xffee66, depthTest: false })); ball.position.copy(p0); ball.renderOrder = 20;
+  const lg = new THREE.BufferGeometry().setFromPoints([p0, p1]); const line = new THREE.Line(lg, new THREE.LineBasicMaterial({ color: 0xffee66, depthTest: false })); line.renderOrder = 20;
+  const sp = textSprite(cm.text); sp.position.copy(p1); sp.position.z += 0.3;
+  g.add(ball, line, sp); g.userData.shown = visible; g.visible = visible && markOn('comment'); g.userData.t = cm.t; g.userData.cat = 'comment'; g.userData.sp = sp; root.add(g); list.push(g);
+  return g;
+}
 function showComments(list) {
-  // 再生: コメントの地点に印 (玉)、そこから上へ 1.5 m の引き出し線、その先に文を浮かせる
+  // 再生: コメントの印は、その時刻になったら出す (playStep)
   for (const m of cMarks) root.remove(m); cMarks = [];
   const co = play && play.center ? [play.center[0] - cur.center[0], play.center[1] - cur.center[1], play.center[2] - cur.center[2]] : [0, 0, 0];
-  for (const cm of list) {
-    const g = new THREE.Group(); const p0 = new THREE.Vector3(cm.pos[0] + co[0], cm.pos[1] + co[1], cm.pos[2] + co[2]), p1 = p0.clone(); p1.z += 1.5;
-    const ball = new THREE.Mesh(new THREE.SphereGeometry(0.12), new THREE.MeshBasicMaterial({ color: 0xffee66, depthTest: false })); ball.position.copy(p0); ball.renderOrder = 20;
-    const lg = new THREE.BufferGeometry().setFromPoints([p0, p1]); const line = new THREE.Line(lg, new THREE.LineBasicMaterial({ color: 0xffee66, depthTest: false })); line.renderOrder = 20;
-    const sp = textSprite(cm.text); sp.position.copy(p1); sp.position.z += 0.3;
-    g.add(ball, line, sp); g.visible = false; g.userData.t = cm.t; root.add(g); cMarks.push(g);
-  }
+  for (const cm of list) commentMark(cm, co, false);
 }
 const recOff = () => rec ? [cur.center[0] - rec.center[0], cur.center[1] - rec.center[1], cur.center[2] - rec.center[2]] : [0, 0, 0];
 function recStep(dt) { if (!rec) return; recAcc += dt; rec.t += dt; const ro = recOff(); if (recAcc >= 0.1) { recAcc = 0; rec.points.push([+rec.t.toFixed(2), +(wpos.x + ro[0]).toFixed(3), +(wpos.y + ro[1]).toFixed(3), +(wpos.z + ro[2]).toFixed(3), +wyaw.toFixed(4), +wpitch.toFixed(4), stance, noclip ? 1 : 0]); document.getElementById('recInfo').textContent = `録画中 ${rec.points.length} 点`; } }
@@ -762,7 +848,7 @@ function playStep(dt) {
   const a = P[play.i], b = P[Math.min(play.i + 1, P.length - 1)], f = b[0] > a[0] ? Math.min(1, (play.t - a[0]) / (b[0] - a[0])) : 0;
   const po = play.center ? [play.center[0] - cur.center[0], play.center[1] - cur.center[1], play.center[2] - cur.center[2]] : [0, 0, 0];
   wpos.set(a[1] + (b[1] - a[1]) * f + po[0], a[2] + (b[2] - a[2]) * f + po[1], a[3] + (b[3] - a[3]) * f + po[2]); wyaw = a[4] + (b[4] - a[4]) * f; wpitch = a[5]; stance = a[6]; noclip = a[7] === 1; updWalkUi();
-  for (const m of cMarks) m.visible = play.t >= m.userData.t;
+  { const on = markOn('comment'); for (const m of cMarks) { const s = play.t >= m.userData.t; m.userData.shown = s; m.visible = s && on; } }
   walkCam(); document.getElementById('recInfo').textContent = `再生中 ${play.i + 1} / ${P.length}`;
   if (play.i >= P.length - 1) { play = null; document.getElementById('recInfo').textContent = '再生おわり'; }
 }
@@ -785,13 +871,22 @@ function keyMove() {
   upd();
 }
 const ray = new THREE.Raycaster();
+// 三角形の位置 b (buf の中の float の位置) の部品の添字 (b の入る種類の範囲 offs[k] から ioffs[k] を引く)。無ければ -1
+function partOfTri(p, b) {
+  for (const k of Object.keys(COL)) {
+    const [o, n] = p.offs[k]; if (b < o || b >= o + n) continue;
+    const io = p.ioffs[k]; return new Uint32Array(curBuf, io[0] * 4, io[1])[(b - o) / 9];
+  }
+  return -1;
+}
+// 部品 pi の判定の面 (判定の色ごとの三角形の数と高さ)。判定の三角形は cur.labs[k] (元の三角形の位置 b の並び) で持つ (位置の複製は無い)
 function partFloors(p, pi) {
   const all = new Float32Array(curBuf); const res = [];
   for (const k of Object.keys(OCOL)) {
-    const io = p.ioffs[k], o = p.offs[k]; if (!io || !io[1]) continue;
-    const ids = new Uint32Array(curBuf, io[0] * 4, io[1]); const hs = new Map(); let n = 0;
-    for (let t = 0; t < io[1]; t++) if (ids[t] === pi) {
-      n++; const z = (all[o[0] + t * 9 + 2] + all[o[0] + t * 9 + 5] + all[o[0] + t * 9 + 8]) / 3 + p.center[2];
+    const L = p.labs && p.labs[k]; if (!L || !L.length) continue;
+    const hs = new Map(); let n = 0;
+    for (let t = 0; t < L.length; t++) { const b = L[t]; if (partOfTri(p, b) !== pi) continue;
+      n++; const z = (all[b + 2] + all[b + 5] + all[b + 8]) / 3 + p.center[2];
       const key = z.toFixed(1); hs.set(key, (hs.get(key) || 0) + 1);
     }
     if (n) res.push(`${NAME[k]} ${n} 三角形・高さ (絶対 m: 三角形の数) ` + [...hs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([z, c]) => `${z}: ${c}`).join(', ') + (hs.size > 12 ? ` ほか ${hs.size - 12} の高さ` : ''));
@@ -804,16 +899,19 @@ function setCenter(pt) {
   el2 = Math.asin(Math.max(-1, Math.min(1, v.z / dist))); az = Math.atan2(v.y, v.x); upd();
 }
 window.__view = { hi: () => hiM ? hiM.type : null, cam, tgt: () => tgt, setCenter, pick: (x, y) => pick({ clientX: x, clientY: y }), state: () => ({ dist, az, el2 }), load: (c, r) => loadRegion(c, r), targets: () => VIEW?.targets };
-const SALES_R = 1.5;
+const SALES_R = 3;   // 端末の印からこの距離 (m) 以内を押したら販売品 (2026-11-05、利用者の報告「ショップのターミナル押すと売ってるものと値段が出るのは実装しなかったの？」: 1.5 m では端末の上の方を押すと外れた。親の決定)
 function requestSales(t) {
   window.__salesAsked = { guid: t.shopGuid, entity: t.shop };
   if (APP) window.chrome.webview.postMessage({ type: 'sales', guid: t.shopGuid, entity: t.shop });
   else if (qs.get('api')) fetch(qs.get('api') + 'sales?guid=' + encodeURIComponent(t.shopGuid) + '&entity=' + encodeURIComponent(t.shop)).then(x => x.json()).then(showSales).catch(e => showSales({ title: '販売品', shops: [{ name: t.shop, note: e.message }] }));
 }
 // 販売品の枠 (アプリの地図の［MAP］の販売品の枠と同じ中身: {title, shops: [{name, note} | {name, tables: [{cols, rows, left}]}]})。✕ か Esc で閉じる
+// 枠の上でホイールを回したら枠の中がスクロールし、画面の拡大縮小 (canvas の wheel) には取られないようにする (2026-11-05、利用者の指示「ホイールスクロール」)。枠は overflow:auto と高さの上限 (view3d.html の #sbox)
+document.getElementById('sbox').addEventListener('wheel', e => { e.stopPropagation(); }, { passive: true });
 function showSales(d) {
   const box = document.getElementById('sbox'); box.innerHTML = ''; window.__sales = d;
-  const h = document.createElement('div'); h.style.cssText = 'display:flex;justify-content:space-between;font-weight:bold;margin-bottom:6px';
+  // 見出し (題と ✕) は、中をスクロールしても上に残す (2026-11-05、利用者「スクロールすると閉じるのバッテンが押せなくなるのは使いにくい」)
+  const h = document.createElement('div'); h.style.cssText = 'display:flex;justify-content:space-between;font-weight:bold;margin-bottom:6px;position:sticky;top:0;background:rgba(0,0,0,.92);padding:4px 0;z-index:1';
   const ti = document.createElement('span'); ti.textContent = d.title || '販売品'; const x = document.createElement('button'); x.textContent = '✕'; x.style.cssText = 'width:auto;display:inline;border:1px solid #666'; x.onclick = () => { box.style.display = 'none'; };
   h.appendChild(ti); h.appendChild(x); box.appendChild(h);
   for (const sh of d.shops || []) {
@@ -838,11 +936,21 @@ function pick(e) {
   const hit = ray.intersectObjects(ms, false).find(h => visZ(h.point.z));
   if (hit) { hit.kind = hit.object.userData.k; hit.tri = hit.object.userData.t0 + hit.faceIndex; }
   const box = document.getElementById('pick');
+  // DB のコメントの印の札 (文) を押したら、確認して消す (親の決定: 消せないと増える一方のため)。札は形より手前 (depthTest なし) に描いているので、形に当たっていても札を先に見る。
+  // コメントの欄を開いている間は見ない (押した所に付ける方を優先)。形に当たらなくても (空中の札) 効く
+  if (document.getElementById('cbox').style.display !== 'block') {
+    const sps = noteMarks.filter(g => g.visible).map(g => g.userData.sp); const nh = sps.length ? ray.intersectObjects(sps, false)[0] : null;
+    if (nh && (!hit || nh.distance <= hit.distance + 1.5)) { const g = nh.object.parent; const note = g.userData.note; if (window.confirm(`このコメントを消しますか？\n「${note.text}」`)) deleteNote(g); return; }
+  }
   if (!hit) { box.style.display = 'none'; return; }
   if (document.getElementById('cbox').style.display === 'block') { cPos = hit.point.clone(); document.getElementById('cpos').textContent = `(位置: 押した所 ${cPos.x.toFixed(1)}, ${cPos.y.toFixed(1)}, ${cPos.z.toFixed(1)})`; document.getElementById('ctext').focus(); return; }
   // 店の端末 (station.json の端末のうち、店 (shopGuid) の結び付いたもの) から 1.5 m 以内を押したら、その店の販売品を出す
   // (2026-11-04、利用者の指示「押したら売ってるリストと値段を出してほしい」。端末と店の結び付きは地図のデータ (端末の shop・shopEntity) のまま)
-  { const c = cur.center; let tn = null, td = SALES_R; for (const t of cur.targets || []) { if (!t.kind.startsWith('terminal_') || !t.shopGuid) continue; const d = Math.hypot(t.pos[0] - c[0] - hit.point.x, t.pos[1] - c[1] - hit.point.y, t.pos[2] - c[2] - hit.point.z); if (d < td) { td = d; tn = t; } } if (tn) { requestSales(tn); return; } }
+  { const c = cur.center; let tn = null, td = SALES_R, tAny = null, tdAny = SALES_R;
+    for (const t of cur.targets || []) { if (!t.kind.startsWith('terminal_')) continue; const d = Math.hypot(t.pos[0] - c[0] - hit.point.x, t.pos[1] - c[1] - hit.point.y, t.pos[2] - c[2] - hit.point.z); if (d < tdAny) { tdAny = d; tAny = t; } if (t.shopGuid && d < td) { td = d; tn = t; } }
+    if (tn) { requestSales(tn); return; }
+    // 店の結び付いていない端末を押したときは、そう出す (何も出ないと押せていないのか分からない)
+    if (tAny) { showSales({ title: '販売品', shops: [{ name: tAny.label || tAny.kind, note: 'この端末に結び付いた店が地図のデータにありません' }] }); return; } }
   if (!walk) setCenter(hit.point);
   else { const k0 = hit.kind; const io0 = cur.ioffs[k0]; if (io0) { const id0 = new Uint32Array(curBuf, io0[0] * 4, io0[1])[hit.tri]; const w_ = cur.parts[id0][1].split('_'); if (w_.includes('elevator') && w_.includes('panel')) showElev(hit.point, true); }
     // トラム: 乗り場 (地図のデータの tram) から 5 m 以内のどの面を押しても、その駅の一覧を出す (トラムのパネルの部品の名前は確かめていないので、名前では決めない)
@@ -876,8 +984,11 @@ async function loadGeo(gi) {
 // 地点: 中心 c (場所の座標) のまわり ±r m の立方体。立方体に掛かる区画の部品を全部描く (試験の頁と同じ)
 let loading = false;
 // keep: 近づいて読み込み直すとき (2026-11-04、利用者の指示「近づいたら書かないと」)。見ている所・歩いている所・選んだフロアをそのままにする
+// アプリのログに 1 行残す (2026-11-05、利用者の報告「何度も作画中を繰り返してる」の原因を追うため。呼び元の関数名も付ける)
+function logApp(message) { if (APP) try { window.chrome.webview.postMessage({ type: 'log', message }); } catch (_) { } }
 async function loadRegion(c, r, keep, small) {
   if (loading) return; loading = true; prewarmStop();
+  logApp(`loadRegion c=${c.map(v => v.toFixed(1)).join(',')} r=${r} keep=${!!keep} small=${!!small} cur=${cur ? cur.center.map(v => v.toFixed(1)).join(',') + ' r=' + cur.r : '-'} wpos=${walk ? [wpos.x, wpos.y, wpos.z].map(v => v.toFixed(1)).join(',') : '-'} from=${((new Error().stack || '').split('\n')[2] || '').trim()}`);
   document.getElementById('prog').classList.toggle('small', !!small);
   const msg = document.getElementById('msg'); msg.textContent = ''; showProgress(0, 0);
   try {
@@ -908,7 +1019,7 @@ async function loadRegion(c, r, keep, small) {
     ph.scene = (performance.now() - tp) / 1000;
     hideProgress();
     window.__lastRegion.total = (performance.now() - t0) / 1000;
-  } catch (e) { hideProgress(); removeOutline(); if (!keep) msg.textContent = '読み込めませんでした: ' + e.message; report('loadRegion', e); }
+  } catch (e) { hideProgress(); removeOutline(); msg.textContent = '読み込めませんでした: ' + e.message; report('loadRegion', e); lastFail = { c: c.slice(), r, t: performance.now() }; }   // keep の読み込み直しでも隠さず出す (2026-11-05、利用者の報告「何度も作画中を繰り返してる」: 失敗が見えず原因が追えなかった)
   finally {
     loading = false;
     if (pendingGo) { const [pt, pb] = pendingGo; pendingGo = null; setTimeout(() => goTarget(pt, pb), 0); }
@@ -966,7 +1077,7 @@ function drawOutline(bx, c) {
 }
 // 解析の結果から、地点の表 (cur) を作る (前の buildCur の後ろの半分。中身は同じ)
 function makeCur(c, r, res) {
-  const { offs, ioffs, loffs, parts, ladders, elevDoors, stairs, fz, fa } = res;
+  const { offs, ioffs, labs, uoffs, toffs, parts, ladders, elevDoors, stairs, fz, fa } = res;
   window.__lightParts = new Set(res.lightParts);
   const near = q => Math.abs(q[0] - c[0]) <= r && Math.abs(q[1] - c[1]) <= r && Math.abs(q[2] - c[2]) <= r;
   // 乗り場: 立方体の中のものと、それと同じ路線のもの (試験の頁の transit と同じ)
@@ -979,6 +1090,9 @@ function makeCur(c, r, res) {
   const pidx = new Map(res.pidx);
   // 地点の立方体の中の店のもの (同じ名前の店がほかの所にもあるので位置で選ぶ。位置の無い前のデータは名前で)
   const entrances = REG.entrances.filter(e => e.pos ? near(e.pos) : shopNames.has(e.shop)).map(e => ({ shop: e.shop, pos: e.pos, floor: e.floor, h: e.h, list: e.list.map(o => [pidx.has(o[0] + ':' + o[1]) ? pidx.get(o[0] + ':' + o[1]) : -1, o[2], o[0], o[3], o[4], o[5], o[6], o[7], o[8], o[9].map((v, a) => v - c[a]), o[10].map((v, a) => v - c[a]), o[11]]) }));
+  // 店のカウンターの箱 (region.json の counters: 店の名前 → [[下, 上], …]。中心からの相対に直す。前のデータに無ければ空)
+  const counters = {};
+  for (const [nm, lst] of Object.entries(REG.counters || {})) counters[nm] = lst.map(b => [b[0].map((v, a) => v - c[a]), b[1].map((v, a) => v - c[a])]);
   const flist = floorList(fz, fa, transit, floorsOld);
   // 階段の行き先 (2026-11-04、利用者の決定「作り直す」。2D の地図の階段の一覧の代わり): 読み込んだ区画の階段の部品ごとに、下の端 (箱の低い所) を行き先にし、
   // 名前は「下の端の階 → 上の端の階」。行き先の一覧 (VIEW.targets) に足す (同じ位置 (0.1 m) のものは足さない。区画を読み込むたびに増える)
@@ -990,7 +1104,7 @@ function makeCur(c, r, res) {
     VIEW.targets.push({ kind: 'stair', label: '階段', name: nm, ja: `${flAt(lo[2])} → ${flAt(hi[2])}`, pos, top: [pos[0], pos[1], hi[2] + c[2]] });
   }
   if (stairs && stairs.length) setTimeout(renderTargets, 0);
-  return { center: c, r, offs, ioffs, loffs, parts, ladders, elevDoors: elevDoors || [], transit, targets, entrances, flist, guide: guideText(targets, entrances, flist), shops: VIEW.targets.filter(t => ['shop', 'admin', 'pharmacy'].includes(t.kind) && near(t.pos)), station: VIEW.station, label: `${VIEW.station} (${c.map(v => v.toFixed(0)).join(', ')})` };
+  return { center: c, r, offs, ioffs, labs: labs || {}, uoffs, toffs, textures: REG && REG.textures || [], parts, ladders, elevDoors: elevDoors || [], transit, targets, entrances, counters, flist, guide: guideText(targets, entrances, flist), shops: VIEW.targets.filter(t => ['shop', 'admin', 'pharmacy'].includes(t.kind) && near(t.pos)), station: VIEW.station, label: `${VIEW.station} (${c.map(v => v.toFixed(0)).join(', ')})` };
 }
 // フロア (利用者の「フロアについては 2M 程度で切ればいい」「床の高さをリスト化してエレベーターのボタンに合わせて名前を付ける」):
 // 判定 2 の床の三角形の高さを低い順に並べ、フロアのいちばん低い高さから 2.0 m を超えたら次のフロアにする。
@@ -1045,40 +1159,71 @@ const CHUNK = 250_000;
 // 1 コマに足す形の上限 (ms。担当が決めた値)。形を作るのと、GPU へ送るのは次の描画なので、1 コマに足すかたまりも 2 つまで
 const FRAME_BUDGET = 8, FRAME_CHUNKS = 2;
 const nextFrame = () => new Promise(res => requestAnimationFrame(() => res()));
+// ===== ゲームの画像 (テクスチャ) (2026-11-05、利用者の指示「引いたときは色はビットマップ貼り付けにしてほしい」「端末は元々も色を貼ってほしい」) =====
+// region.json の textures ([{url, w, h, repeat:[u, v]}]) の画像を TextureLoader で読み、同じ url の画像は 1 つの Texture を共有 (繰り返しの違う材質は別の項目 = 別の url+repeat の鍵)。
+// UV は glTF と同じ向き (上下を返さない。前のステーションの 3D の viewer.html と同じ flipY = false)。別の場所に替わったとき (keep でない) に全部捨てる
+const GRAY = 0x888888;   // 画像の無い面の色 (2026-11-05、利用者の指示「デバッグモードとして階段や床で色分けしたりするのはもうやめていい」: 種類ごとの色分けはしない)
+const texLoader = new THREE.TextureLoader(); const texCache = new Map();
+function texOf(t) {
+  const key = t.url + '|' + (t.repeat || [1, 1]).join(',');
+  let tx = texCache.get(key);
+  if (!tx) {
+    tx = texLoader.load(t.url); tx.colorSpace = THREE.SRGBColorSpace; tx.wrapS = tx.wrapT = THREE.RepeatWrapping; tx.anisotropy = 4; tx.flipY = false;
+    const rp = t.repeat || [1, 1]; tx.repeat.set(rp[0], rp[1]);
+    texCache.set(key, tx);
+  }
+  return tx;
+}
+function disposeTextures() { for (const tx of texCache.values()) tx.dispose(); texCache.clear(); }
+const disposeMats = o => { const m = o.material; if (!m) return; (Array.isArray(m) ? m : [m]).forEach(x => x?.dispose?.()); for (const x of o.userData?.mats || []) x.dispose?.(); o.userData?.plain?.dispose?.(); };
 // 地点の形を作る。近づいて読み込み直すとき (keep) は、今の形を出したまま、新しい形を新しい中心の座標で横に足していき、全部できたら入れ替える
-// (見ている所・歩いている所は、入れ替えるときに新しい中心の座標に移す)。面は flatShading (三角形の向きの明るさ。前の computeVertexNormals と同じ見え方で、法線の配列を作らない)
+// (見ている所・歩いている所は、入れ替えるときに新しい中心の座標に移す)。面は flatShading (三角形の向きの明るさ。前の computeVertexNormals と同じ見え方で、法線の配列を作らない)。
+// 判定の色の半透明の重ね (OCOLK) と輪郭の線は描かない (2026-11-05、利用者の指示「色分けはもうやめていい」。データは歩くモードの床の判定に使うので worker と保存には残す)。
+// 画像: COLK のかたまりの中は画像の番号の順 (worker が並べる) なので、同じ番号の続く区間を geometry.addGroup にし、材質の配列 (0 = 灰色、1〜 = 画像ごとの MeshLambertMaterial({map})) で描く。
+// 「テクスチャ」のチェックが OFF なら灰色の 1 つの材質 (userData.plain) に替える (applyVis)
 async function buildScene(p, res, keep, t0) {
   const buf = res.buf, all = new Float32Array(buf);
   const prevCenter = cur ? cur.center.slice() : null;
   const off = keep && prevCenter ? [p.center[0] - prevCenter[0], p.center[1] - prevCenter[1], p.center[2] - prevCenter[2]] : [0, 0, 0];
-  if (!keep) { scene.remove(root); root.traverse(o => { o.geometry?.dispose(); o.material?.dispose?.(); }); root = new THREE.Group(); scene.add(root); for (const k of Object.keys(groups)) groups[k] = null; }
+  if (!keep) { scene.remove(root); root.traverse(o => { o.geometry?.dispose(); disposeMats(o); }); disposeTextures(); root = new THREE.Group(); scene.add(root); for (const k of Object.keys(groups)) groups[k] = null; }
   const nroot = new THREE.Group(); nroot.position.set(off[0], off[1], off[2]); scene.add(nroot);
   const ngroups = {};
   const jobs = [];
+  const texOn = document.getElementById('texOn').checked;
+  const TEXS = p.textures || [];
+  // UV・画像の番号は buf とは別の ArrayBuffer (res.uvbuf・res.texbuf。UV が無ければ null)
+  const uvAll = res.uvbuf ? new Float32Array(res.uvbuf) : null, texAll = res.texbuf ? new Int32Array(res.texbuf) : null;
   for (const k of Object.keys(COL)) {
     const [o, n] = p.offs[k]; ngroups[k] = null; if (!n) continue; ngroups[k] = [];
     const wall = k === 'wall';
+    const uo = uvAll && p.uoffs && p.uoffs[k] && p.uoffs[k][1] ? p.uoffs[k][0] : -1, to = texAll && p.toffs && p.toffs[k] && p.toffs[k][1] ? p.toffs[k][0] : -1;
     for (let a = 0; a < n / 9; a += CHUNK) jobs.push(() => {
-      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(all.subarray(o + a * 9, o + Math.min(n / 9, a + CHUNK) * 9), 3));
-      const me = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: COL[k], side: THREE.DoubleSide, flatShading: true, transparent: wall, opacity: wall ? 0.25 : 1, depthWrite: !wall, clippingPlanes: [clip, clipLo] }));
-      me.renderOrder = wall ? 1 : 0; me.userData = { k, t0: a }; ngroups[k].push(me); nroot.add(me);
+      const cnt = Math.min(n / 9, a + CHUNK) - a;
+      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(all.subarray(o + a * 9, o + (a + cnt) * 9), 3));
+      const matOpts = { side: THREE.DoubleSide, flatShading: true, transparent: wall, opacity: wall ? 0.25 : 1, depthWrite: !wall, clippingPlanes: [clip, clipLo] };
+      const plain = new THREE.MeshLambertMaterial({ color: GRAY, ...matOpts });
+      let mats = null;
+      if (uo >= 0 && to >= 0 && TEXS.length) {
+        const T = texAll.subarray(to + a, to + a + cnt);
+        // 画像の番号の続く区間 (worker が番号の順に並べている)。画像のある区間が 1 つでもあれば uv とグループを付ける
+        const runs = []; let s = 0;
+        while (s < cnt) { let e = s + 1; const id = T[s]; while (e < cnt && T[e] === id) e++; runs.push([s, e, id]); s = e; }
+        if (runs.some(([, , id]) => id >= 0 && TEXS[id] && TEXS[id].url)) {
+          g.setAttribute('uv', new THREE.BufferAttribute(uvAll.subarray(uo + a * 6, uo + (a + cnt) * 6), 2));
+          mats = [plain]; const mi = new Map();
+          for (const [s0, e0, id] of runs) {
+            let m = 0;
+            // 色合い (textures の tint = 材質の層 1 の TintColor。無ければ白): hardsurface/layerblend 系は灰色の下地の画像に層の色を掛けて色を出すので map × color (2026-11-05、利用者の報告「かなり灰色になった」)
+            if (id >= 0 && TEXS[id] && TEXS[id].url) { m = mi.get(id); if (m === undefined) { const tn = TEXS[id].tint || [1, 1, 1]; m = mats.length; mats.push(new THREE.MeshLambertMaterial({ map: texOf(TEXS[id]), color: new THREE.Color(tn[0], tn[1], tn[2]), ...matOpts })); mi.set(id, m); } }
+            g.addGroup(s0 * 3, (e0 - s0) * 3, m);
+          }
+        }
+      }
+      const me = new THREE.Mesh(g, texOn && mats ? mats : plain);
+      me.renderOrder = wall ? 1 : 0; me.userData = { k, t0: a, plain, mats }; ngroups[k].push(me); nroot.add(me);
     });
   }
-  for (const k of Object.keys(OCOL)) {
-    const [o, n] = p.offs[k]; ngroups[k] = null; if (!n) continue; ngroups[k] = [];
-    for (let a = 0; a < n / 9; a += CHUNK) jobs.push(() => {
-      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(all.subarray(o + a * 9, o + Math.min(n / 9, a + CHUNK) * 9), 3));
-      const me = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: OCOL[k], side: THREE.DoubleSide, transparent: true, opacity: 0.8, clippingPlanes: [clip, clipLo], polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 }));
-      me.renderOrder = 3; me.userData = { k, t0: a }; ngroups[k].push(me); nroot.add(me);
-    });
-    // 融合した形の輪郭 (1 辺を共有し同じ平面に乗る三角形どうしを融合した形の、1 つの三角形にしか使われない辺)。最初のかたまりの子にして、種類の表示と一緒に消す
-    const [lo_, ln_] = p.loffs[k];
-    for (let a = 0; a < ln_ / 6; a += CHUNK * 2) jobs.push(() => {
-      const lg = new THREE.BufferGeometry(); lg.setAttribute('position', new THREE.BufferAttribute(all.subarray(lo_ + a * 6, lo_ + Math.min(ln_ / 6, a + CHUNK * 2) * 6), 3));
-      const ls = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7, clippingPlanes: [clip, clipLo] }));
-      ls.renderOrder = 4; ngroups[k][0].add(ls);
-    });
-  }
+  for (const k of Object.keys(OCOL)) ngroups[k] = null;   // 判定の色の重ね・輪郭は描かない (判定の三角形の位置は cur.labs[k] に残る)
   // 少しずつ足す (1 コマに FRAME_BUDGET ms・FRAME_CHUNKS 個まで)。見ている所に近いかたまりから、という並べ替えはしていない (種類の順)
   let done = 0;
   while (done < jobs.length) {
@@ -1090,7 +1235,7 @@ async function buildScene(p, res, keep, t0) {
   // 入れ替え
   window.__stage = 'swap'; removeOutline();
   if (keep) {
-    scene.remove(root); root.traverse(o => { o.geometry?.dispose(); o.material?.dispose?.(); });
+    scene.remove(root); root.traverse(o => { o.geometry?.dispose(); disposeMats(o); });
     const d = new THREE.Vector3(-off[0], -off[1], -off[2]); tgt.add(d); wpos.add(d); cam.position.add(d);
   }
   nroot.position.set(0, 0, 0); root = nroot;
@@ -1100,12 +1245,14 @@ async function buildScene(p, res, keep, t0) {
   coarse = res.coarse; cellReset();
   // 細かい形で補った面 (extra): keep なら中心の差 off で座標を直して新しい root に描き直す。別の場所に替わった (keep でない) なら捨てる
   extraRelocate(off, !!keep);
+  // コメントの印は DB から show で出し直す (requestNotes。前の root と一緒に消えている)
   window.__stage = 'show'; show(t0, keep);
 }
 // 地点の印・札・一覧などを作る (形は buildScene が作った後)
 function show(t0, keep) {
   const p = cur;
-  hiM = null; ghostG = null; cMarks = []; if (!keep) selFloor = null;
+  hiM = null; ghostG = null; cMarks = []; noteMarks = []; if (!keep) selFloor = null; distLabels.length = 0;
+  requestNotes();   // DB のコメントの印をもらって出す (返事 onNotes で描く)
   document.querySelectorAll('#shopforms button').forEach(b => b.classList.remove('on')); document.getElementById('pick').style.display = 'none';
   const c = p.center;
   shpG = new THREE.Group(); root.add(shpG);
@@ -1113,17 +1260,32 @@ function show(t0, keep) {
   for (const s of p.shops) {
     const q = s.pos, ok = s.ok;
     const x = q[0] - c[0], y = q[1] - c[1], z = q[2] - c[2];
-    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 4), new THREE.MeshBasicMaterial({ color: 0xffffff }));
-    pole.rotation.x = Math.PI / 2; pole.position.set(x, y, z + 2); pole.renderOrder = 6; shpG.add(pole);
-    const b = new THREE.Mesh(new THREE.SphereGeometry(0.4), new THREE.MeshBasicMaterial({ color: ok === true ? 0x33ff66 : ok === false ? 0xff3333 : 0xaaaaaa }));
-    b.position.set(x, y, z); b.renderOrder = 7; shpG.add(b);
+    // 白い柱は出さない (2026-11-05、利用者「白い縦線は要らない」)。店の玉の色は、入口の判定 (ok) による緑・赤の出し分けをやめて 1 色 (利用者「デバッグ的なのはもう表示しなくていい」)
+    const b = new THREE.Mesh(new THREE.SphereGeometry(0.4), new THREE.MeshBasicMaterial({ color: 0xff3333 }));
+    b.position.set(x, y, z); b.renderOrder = 7; b.userData.cat = 'shop'; shpG.add(b);
+  }
+  // 店の名前の札 (2026-11-05、利用者「こういう端末がないところもショップとしてキャプションは欲しい」): 端末の札と同じく、水平 6 m・高さ 3 m 以内の店は 1 枚にまとめ、店の名前を 1 行ずつ。玉の 1.5 m 上
+  {
+    const shops = p.shops || []; const usedS = new Set();
+    for (let i = 0; i < shops.length; i++) {
+      if (usedS.has(i)) continue; const grp = [i]; usedS.add(i);
+      for (let g = 0; g < grp.length; g++) for (let j = 0; j < shops.length; j++) {
+        if (usedS.has(j)) continue; const a = shops[grp[g]].pos, b = shops[j].pos;
+        if (Math.hypot(a[0] - b[0], a[1] - b[1]) <= 6 && Math.abs(a[2] - b[2]) <= 3) { usedS.add(j); grp.push(j); } }
+      const names = new Map(); for (const k of grp) { const nm = shops[k].ja || shops[k].name || 'ショップ'; names.set(nm, (names.get(nm) || 0) + 1); }   // 店名 (アプリの名前、無ければ Entity 名。利用者「店名でもいい」)
+      const lines = [...names.entries()].map(([nm, n]) => nm + (n > 1 ? ` ×${n}` : ''));
+      const q = [0, 1].map(a => grp.reduce((s, k) => s + shops[k].pos[a], 0) / grp.length).concat([Math.max(...grp.map(k => shops[k].pos[2]))]);
+      const sp = textSprite(lines); sp.material.sizeAttenuation = false; const asp = sp.scale.x / sp.scale.y; const h = 0.04 * lines.length; sp.scale.set(h * asp, h, 1);
+      sp.center.set(0.5, 0); sp.position.set(q[0] - c[0], q[1] - c[1], q[2] - c[2] + 1.5); sp.userData.cat = 'shop'; shpG.add(sp);
+      distLabels.push({ sp, lines });
+    }
   }
   // 開いたときは切らない (2026-11-04、利用者の指摘「crusader の本社の建物がない」: 前は「この高さより上を消す」の初めの値 25 m で、中心から 25 m より上が消えていた)
   if (keep) { applyFloor(); applyVis(); if (walk) walkCam(); else upd(); }
   else { document.getElementById('cut').value = 25; applyFloor(); applyVis(); tgt.set(0, 0, 0); dist = p.r * 1.6; upd(); }
   document.getElementById('info').textContent = `${p.station}\n中心 (${c.map(v => v.toFixed(1)).join(', ')})、中心から ±${p.r} m の立方体\n部品 ${p.parts.length}\n三角形: ` +
     Object.keys(COL).filter(k => p.offs[k][1]).map(k => `${NAME[k]} ${p.offs[k][1] / 9}`).join(' / ') +
-    `\n重ねた面の三角形: ` + Object.keys(OCOL).map(k => `${NAME[k]} ${p.offs[k][1] / 9}`).join(' / ') +
+    `\n重ねた面の三角形: ` + Object.keys(OCOL).map(k => `${NAME[k]} ${p.labs && p.labs[k] ? p.labs[k].length : 0}`).join(' / ') +
     `\n読み込み ${((performance.now() - (t0 || performance.now())) / 1000).toFixed(1)} 秒・${(curBuf.byteLength / 1048576).toFixed(0)} MB` +
     (REG.missing.length ? `\n形の出なかった socpak (この地点): ${REG.missing.length}` : '') +
     (window.__lastRegion?.app?.extractSeconds != null ? `\n時間: 選んでから描き終わるまで ${(((performance.now() - (t0 || performance.now())) / 1000)).toFixed(1)} 秒 = 区画の用意 ${window.__lastRegion.wait.toFixed(1)} 秒 (取り出し ${window.__lastRegion.app.extractSeconds.toFixed(1)} 秒・計算 ${window.__lastRegion.app.computeSeconds.toFixed(1)} 秒。どちらも同時に動かした分の足し合わせ) + ビューアの読み込みと描く用意 ${(((performance.now() - (t0 || performance.now())) / 1000) - window.__lastRegion.wait).toFixed(1)} 秒` : '');
@@ -1140,9 +1302,10 @@ function show(t0, keep) {
   const TCOL = { shop: 0xff3333, admin: 0xff66cc, pharmacy: 0x33ff99, elevator: 0xffdd00, tram: 0xffdd00, hangar_lobby: 0xffdd00, stair: 0x3399ff };
   for (const tg of (p.targets || [])) {
     if (tg.kind === 'shop') continue;   // 店は白い柱と玉
+    if (tg.kind === 'stair') continue;  // 階段の玉は描かない (2026-11-05、利用者の報告「青の丸が意味不明」: 札が無く、壁越しに大きな丸だけが見えていた。行き先の一覧には残る。親の決定)
     const col = TCOL[tg.kind] ?? (tg.kind.startsWith('terminal_') ? 0xff9933 : 0xffffff); const q = tg.pos;
     const b = new THREE.Mesh(new THREE.SphereGeometry(0.3), new THREE.MeshBasicMaterial({ color: col, depthTest: false }));
-    b.position.set(q[0] - p.center[0], q[1] - p.center[1], q[2] - p.center[2]); b.renderOrder = 7; shpG.add(b);
+    b.position.set(q[0] - p.center[0], q[1] - p.center[1], q[2] - p.center[2]); b.renderOrder = 7; b.userData.cat = markCatOf(tg.kind); shpG.add(b);
   }
   // 端末の名前 (2026-11-04、利用者の指示「ターミナルには何のターミナルか画面に書くといい」): 端末の玉の上に、画面での大きさが変わらない文字の札で出す。
   // 重なりを減らすため、水平に 6 m 以内・高さの差 3 m 以内でつながる端末は、名前が違っても 1 つの札にまとめ、1 行に 1 つの名前と数 (「名前 ×数」) を書く
@@ -1154,12 +1317,19 @@ function show(t0, keep) {
     for (let g = 0; g < grp.length; g++) for (let j = 0; j < terms.length; j++) {
       if (used.has(j)) continue; const a = terms[grp[g]].pos, b = terms[j].pos;
       if (Math.hypot(a[0] - b[0], a[1] - b[1]) <= 6 && Math.abs(a[2] - b[2]) <= 3) { used.add(j); grp.push(j); } }
-    const names = new Map(); for (const k of grp) { const nm = terms[k].text || terms[k].label; names.set(nm, (names.get(nm) || 0) + 1); }
+    // 店の端末は「店名（種類）」(行き先の一覧と同じ表記。2026-11-05、利用者「他も店名で括弧つけて個人装備とか書いてあると使いやすい」)。店の無い端末は端末の種類
+    const shopNameOf = t => { if (!t.shop) return null; const s = (p.shops || []).find(x => x.name === t.shop); return s ? (s.ja || s.name) : null; };
+    // 長い文 (クエストの扉・パネルの Entity 名など) は、3D の札では「: 」の前の種類だけにする (2026-11-05、利用者「文字が長すぎて見にくい」。名前は行き先の一覧と押したときの枠に残る)
+    const shortText = s => s.length > 16 && s.includes(': ') ? s.slice(0, s.indexOf(': ')) : s;
+    const names = new Map(); for (const k of grp) { const nm = shopNameOf(terms[k]) || shortText(terms[k].text || terms[k].label); names.set(nm, (names.get(nm) || 0) + 1); }
     const lines = [...names.entries()].map(([nm, c]) => nm + (c > 1 ? ` ×${c}` : ''));
     const q = [0, 1].map(a => grp.reduce((s, k) => s + terms[k].pos[a], 0) / grp.length).concat([Math.max(...grp.map(k => terms[k].pos[2]))]);
     const sp = textSprite(lines);
     sp.material.sizeAttenuation = false; const asp = sp.scale.x / sp.scale.y; const h = 0.04 * lines.length; sp.scale.set(h * asp, h, 1);
-    sp.center.set(0.5, 0); sp.position.set(q[0] - p.center[0], q[1] - p.center[1], q[2] - p.center[2] + 0.8); shpG.add(sp);
+    sp.center.set(0.5, 0); sp.position.set(q[0] - p.center[0], q[1] - p.center[1], q[2] - p.center[2] + 0.8);
+    sp.userData.cat = grp.every(k => markCatOf(terms[k].kind) === 'quest') ? 'quest' : 'terminal';   // まとめた札: 全部クエストのものなら「クエストの扉・パネル」、1 つでも端末があれば「端末」
+    shpG.add(sp);
+    distLabels.push({ sp, lines });
     window.__termLabels.push(lines.join(' / '));
   }
   // エレベーターの乗り口の名前 (2026-11-04、利用者の指摘「エレベーターがたくさん並んでる。何のエレベーターかわからない」):
@@ -1178,15 +1348,14 @@ function show(t0, keep) {
       const text = (st[i][0] === 'tram' ? 'トラム: ' : 'エレベーター: ') + st[i][4] + (grp.length > 1 ? ` ×${grp.length}` : '');
       const q = [0, 1].map(a => grp.reduce((s, k) => s + st[k][1][a], 0) / grp.length).concat([Math.max(...grp.map(k => st[k][1][2]))]);
       const sp = textSprite(text); sp.material.sizeAttenuation = false; const asp = sp.scale.x / sp.scale.y; sp.scale.set(0.04 * asp, 0.04, 1);
-      sp.center.set(0.5, 0); sp.position.set(q[0] - cc[0], q[1] - cc[1], q[2] - cc[2] + 2.4); shpG.add(sp);
+      sp.center.set(0.5, 0); sp.position.set(q[0] - cc[0], q[1] - cc[1], q[2] - cc[2] + 2.4); sp.userData.cat = 'transit'; shpG.add(sp);
+      distLabels.push({ sp, lines: [text] });
       window.__elevLabels.push(text);
     }
   }
-  // 店の入口を探した直線 (緑 = 障害物なし・入口、赤 = 当たった)
-  for (const en of (p.entrances || [])) for (const o of en.list) {
-    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute([...o[10], ...o[9]], 3));
-    const l = new THREE.Line(g, new THREE.LineBasicMaterial({ color: o[5] ? 0x33ff33 : 0xff3333, depthTest: false })); l.renderOrder = 8; shpG.add(l);
-  }
+  refreshDistLabels(true);
+  applyMarkVis();   // 「表示」のチェック (店・端末・エレベーター・トラム・クエスト・コメント) を、作り直した印と札に効かせる
+  // 店の入口を探した直線 (緑・赤) は出さない (2026-11-05、利用者「デバッグモードとして…色分けしたりするのはもうやめていい」。データは cur.entrances に残す)
   const sf = document.getElementById('shopforms'); sf.innerHTML = '';
   const addH = t => { const h = document.createElement('div'); h.style.marginTop = '4px'; h.textContent = t; sf.appendChild(h); };
   const addB = (pi, t) => { const b = document.createElement('button'); b.textContent = t; b.onclick = () => { if (pi >= 0) focusPart(p, pi, b); }; sf.appendChild(b); };
@@ -1223,20 +1392,43 @@ function applyFloor() {
   const z0 = selFloor.lo - cur.center[2] - 0.1;
   clip.constant = z0 + 0.1 + H; clipLo.constant = -z0; document.getElementById('cutv').textContent = (z0 + 0.1 + H).toFixed(1);
   ghostG = new THREE.Group();
+  // 薄い写しは灰色 (材質が画像ごとの配列のこともあるので、材質の色は見ない。判定の色の重ね (OCOL) の groups は描いていないので無い)
   for (const k of [...Object.keys(COL), ...Object.keys(OCOL)]) for (const g of groups[k] || []) {
     if (!g.visible) continue;
-    const m = new THREE.Mesh(g.geometry, new THREE.MeshBasicMaterial({ color: g.material.color, transparent: true, opacity: A, depthWrite: false, side: THREE.DoubleSide, clippingPlanes: [clip] }));
+    const m = new THREE.Mesh(g.geometry, new THREE.MeshBasicMaterial({ color: GRAY, transparent: true, opacity: A, depthWrite: false, side: THREE.DoubleSide, clippingPlanes: [clip] }));
     m.renderOrder = -1; ghostG.add(m);
   }
   root.add(ghostG);
 }
 function applyVis() {
   document.querySelectorAll('[data-k]').forEach(cb => { for (const m of groups[cb.dataset.k] || []) m.visible = cb.checked; });
+  // 「テクスチャ」: ON なら画像の材質の配列、OFF なら灰色の 1 つの材質 (形のグループはそのまま。1 つの材質ならグループ全部に同じ材質で描かれる)
+  const texOn = document.getElementById('texOn').checked;
+  for (const k of Object.keys(COL)) for (const m of groups[k] || []) { const want = texOn && m.userData.mats ? m.userData.mats : m.userData.plain; if (want && m.material !== want) m.material = want; }
   if (shpG) shpG.visible = document.getElementById('shp').checked;
   // 店の印 (柱と玉) は、部品の中・後ろにあっても見えるよう、いつも手前に描く
   shpG?.traverse(o => { if (o.material) { o.material.depthTest = false; o.material.needsUpdate = true; } });
 }
 document.querySelectorAll('.lg input').forEach(i => i.addEventListener('change', applyVis));
+// 「表示」のチェック (2026-11-05、利用者「チェックボックスで表示するものを選べるように」): 店 (shop)・端末 (terminal)・エレベーター・トラム (transit)・クエストの扉・パネル (quest)・コメント (comment)。
+// 印 (玉) と札に userData.cat を付けておき、作り直さずに visible だけ切り替える。状態は localStorage (view3d.marks) に覚える。既定は全部 ON
+const MARK_CATS = ['shop', 'terminal', 'transit', 'quest', 'comment'];
+function markCatOf(kind) {
+  if (kind === 'terminal_questdoor' || kind === 'terminal_questitem' || kind === 'terminal_questpanel') return 'quest';   // StationView3D.cs の EntityKinds ("terminal_" + questdoor/questitem/questpanel)
+  if (kind.startsWith('terminal_')) return 'terminal';
+  if (kind === 'elevator' || kind === 'tram' || kind === 'hangar_lobby') return 'transit';
+  if (kind === 'shop' || kind === 'admin' || kind === 'pharmacy') return 'shop';
+  return undefined;   // そのほか (白い玉) はいつも出す
+}
+function markOn(cat) { const cb = document.querySelector(`.mk[data-cat="${cat}"]`); return !cb || cb.checked; }
+function applyMarkVis() {
+  const on = {}; for (const c of MARK_CATS) on[c] = markOn(c);
+  shpG?.traverse(o => { const c = o.userData.cat; if (c && c in on) o.visible = on[c]; });
+  for (const g of [...cMarks, ...noteMarks]) g.visible = on.comment && g.userData.shown !== false;
+  try { localStorage.setItem('view3d.marks', JSON.stringify(on)); } catch (_) { }
+}
+try { const s = JSON.parse(localStorage.getItem('view3d.marks') || '{}'); document.querySelectorAll('.mk').forEach(cb => { if (typeof s[cb.dataset.cat] === 'boolean') cb.checked = s[cb.dataset.cat]; }); } catch (_) { }
+document.querySelectorAll('.mk').forEach(cb => cb.addEventListener('change', applyMarkVis));
 ['cutH', 'ghostA'].forEach(id => document.getElementById(id).addEventListener('input', applyFloor));
 const ORBIT_D = 10;
 document.getElementById('walkBtn').onclick = () => {
@@ -1287,6 +1479,7 @@ const cut = document.getElementById('cut'); cut.addEventListener('input', () => 
 //   4. どれも無ければ、丸の地点の真下の床 (無ければ丸の地点) の目の高さ。
 //   1〜3 は、立つ所の目の高さ (床 + 1.7 m) から行き先 (端末・入口の点・丸の地点) へ直線を引き、壁・扉 (すり抜けるドアを含む全部の部品) に当たらないものだけを選ぶ
 //   (行き先の手前 0.3 m まで。壁・扉の向こうから始めないため)。
+//   店 (shop・admin・pharmacy) は上の 2・3 を使わず、端末の前 → カウンターの前 (standAtCounter) → 店の点そのもの (placeStart の中の説明。2026-11-05、利用者の指示)
 // 決めたものは window.__startHow に書く (確かめ用)
 function doorHit(ax, ay, az, bx, by, bz) {
   const [o, n] = cur.offs.door || [0, 0]; if (!n) return false; const F = new Float32Array(curBuf);
@@ -1329,6 +1522,19 @@ function onFloor(x, y, g) {
   if (xl) for (let q = 0; q < xl.length; q += 2) { const z = triZ(extra.list[xl[q]].tris, xl[q + 1], x, y); if (z !== null && Math.abs(z - g) <= 0.02 && visZ(z)) return true; }
   return false;
 }
+// 段を上がる先が「手すりの高さ」の物か (2026-11-05、利用者「高さで区別が正しい」「手すりの高さは通れない。段差は通れる」。種類 (床・坂・階段) は見ない):
+//   足元 (z) のまわり 9 点 (中心と GAP_R の 8 方向) のうち、上がる先の面 (z + STEP 以下でいちばん高い面 top) の真下に面 (below。足元から STEP 下まで) があり、
+//   top − below が STEP を超えるものがあれば、その面は床に立つ背の高い物 (手すりの上面・壁の上) なので乗れない。
+//   下り階段の脇の手すりは、上面が足元から 0.5 m でも、その下の段との差が 1 m なので乗れない。階段の段は真下が数 m 下の床 (探す範囲の外) なので上がれる。箱 (0.5 m) は差が STEP 以下なので乗れる
+function tallObjectAt(x, y, z) {
+  for (let k = -1; k < 8; k++) {
+    const a = k * Math.PI / 4, px = k < 0 ? x : x + GAP_R * Math.cos(a), py = k < 0 ? y : y + GAP_R * Math.sin(a);
+    const top = groundAt(px, py, z + STEP); if (top === null || top <= z + STEP_FLOOR_MIN) continue;
+    const below = groundAt(px, py, top - 0.05);
+    if (below !== null && below >= z - STEP && top - below > STEP) return true;
+  }
+  return false;
+}
 // 足元の面の部品の名前 (確かめ用)
 function groundPart(x, y, zmax) {
   const g = groundAt(x, y, zmax); if (g === null) return null; const F = new Float32Array(curBuf);
@@ -1346,13 +1552,23 @@ function placeStart(t) {
   buildGrid(); buildWall(); buildCeil();
   const done = (how, x, y, g, extra) => { window.__startHow = Object.assign({ target: t.name, how, start: [x + c[0], y + c[1], g + c[2]].map(v => +v.toFixed(2)), floor: groundPart(x, y, g + 0.05) }, extra || {}); };
   let term = t.kind.startsWith('terminal_') ? t : null;
-  if (!term && ['shop', 'admin', 'pharmacy'].includes(t.kind)) {
+  const isShop = ['shop', 'admin', 'pharmacy'].includes(t.kind);
+  // 店 (2026-11-05、利用者の指示「KEI-TO 端末前だとよかった。店の壁の裏。そもそも端末ない場所もカウンターあればカウンター なければ点の位置でいいのにわざわざずらしておかしい」):
+  //   1. その店に結び付いた端末 (地図の JSON の端末の shop が店の名前、30 m 以内。近い順) があれば、端末の前 (standBefore)
+  //   2. 端末が無ければ (端末の前が 1 つも成り立たないときも)、カウンターがあればカウンターの前 (standAtCounter。店と同じ階のものだけ)
+  //   3. どちらも無ければ店の点 (SCShop の pos) そのもの (真下の床の目の高さ。xy はずらさない)
+  //   入口の外側に立つ段と、店の中心から 2〜4 m の 8 方向にずらす段は店では使わない (コードは残す。店以外の行き先 (エレベーター・トラム・階段など) はこれまでのまま)
+  if (!term && isShop) {
     const d3 = x => Math.hypot(x.pos[0] - t.pos[0], x.pos[1] - t.pos[1], x.pos[2] - t.pos[2]);
     const cands = VIEW.targets.filter(x => x.kind.startsWith('terminal_') && x.shop === t.name && d3(x) <= 30).sort((a, b) => d3(a) - d3(b));
     for (const x of cands) { const r = standBefore(x); if (r) { done('端末の前', r[0], r[1], r[2], { terminal: x.name }); return; } }
+    const r = standAtCounter(t); if (r) { done('カウンターの前', r[0], r[1], r[2], { counter: r[3] }); return; }
+    const g = groundAt(q[0], q[1], q[2] + 0.5), z = (g ?? q[2]) + 1.7;
+    tgt.set(q[0], q[1], z); dist = 4; el2 = 0.3; upd();
+    done('店の点', q[0], q[1], z - 1.7); return;
   }
   if (term) { const r = standBefore(term); if (r) { done('端末の前', r[0], r[1], r[2], { terminal: term.name }); return; } }
-  if (['shop', 'admin', 'pharmacy'].includes(t.kind)) {
+  if (isShop) {
     const en = (cur.entrances || []).filter(e => e.shop === t.name).sort((a, b) => Math.hypot(...a.pos.map((v, i) => v - t.pos[i])) - Math.hypot(...b.pos.map((v, i) => v - t.pos[i])))[0];
     for (const o of (en ? en.list : []).filter(o => o[5])) {
       const b = o[9], a = o[10];   // 入口の点 (開口部の箱の、店の中心に近い所) と、店の中心 (どちらも直線の高さ。中心からの相対)
@@ -1370,6 +1586,77 @@ function placeStart(t) {
   const g = groundAt(q[0], q[1], q[2] + 0.5), z = (g ?? q[2]) + 1.7;
   tgt.set(q[0], q[1], z); dist = 4; el2 = 0.3; upd();
   done('丸の地点の目の高さ', q[0], q[1], z - 1.7);
+}
+// カウンターの前に立つ所 (2026-11-05、利用者の指示「行先でショップ選んだ時に何か所か店の裏のドアの向こうに出現 本来カウンターの前にすべき」「床のある側に」):
+// その店のカウンターの箱 (region.json の counters。店の中心から箱まで COUNTER_DIST m 以内で、店の印の COUNTER_BELOW m 下〜COUNTER_ABOVE m 上に掛かる = 店と同じ階のもの) を近い順に見て、
+// 箱の xy の 4 辺それぞれの外側 COUNTER_OUT m の点を候補にする。高さは箱の上面から下に床を探す (groundAt)。
+// 候補が成り立つ条件: 床がある・床が店の印の COUNTER_BELOW m 下〜COUNTER_ABOVE m 上 (丸の地点のそばに立つ決まりと同じ)・判定の床の上 (onFloor)・その店のどのカウンターの箱の中でもない・
+//   目の高さから「カウンターの近い面の上の縁」(箱の中で立つ点にいちばん近い xy、高さは箱の上面 + 0.05 m) への見通し (clearSight)。
+//   (2026-11-05、利用者の報告「行先で店の裏」の原因: 前は的が箱の中心だったので、見通しの線が必ずカウンター自身の面に当たり、どの辺も成り立たず、
+//    端末・入口・丸の地点の順の決め方に落ちていた (Orison Whammers: 16 箱 × 4 辺が全部落ちた)。また 10 m の距離だけで集めた箱に上の階の別の店のカウンターが入り、
+//    そこが成り立つと上の階に立っていた (Orison Kel-To → 真上の FTL の counter の部品、店の z + 4.1 m))
+// 成り立つ辺が複数あれば、客側を選ぶ:
+//   1. その辺の外側 (立つ点より先の半平面) に、その店のほかのカウンターの箱 (立つ点から xy で COUNTER_SIDE_R m 以内) が少ない辺 (counterBehind)。
+//      厨房・事務側は調理台・バックカウンター・U 字の向かいのカウンターで囲まれ、客側にはその店のカウンターが無い
+//      (Seraphim HotDogBar: 厨房側にバーカウンター 2、客側 0。Cargo Office: U 字の内側に向かいのカウンター、外側 0。Orison Whammers: L 字の内側に調理台 3 以上、外側 0)
+//   2. 同じなら、辺の外向きに歩ける距離 (counterOpen。0.5 m ずつ最大 COUNTER_OPEN m。足元から体の高さの 3 本の線 (歩くモードの blocked と同じ高さ) が壁・物に当たらず、
+//      床が続き、その店のカウンターの箱に入らない所まで) が長い辺 (Seraphim Armor: カウンター 1 つ。客側 8 m、ほかの 3 辺は壁で 0〜0.5 m)
+//   3. それも同じなら店の印から遠い辺
+//   (歩ける距離だけ・歩いて行ける床の広さでは客側が決まらなかった: HotDogBar の厨房は奥の廊下につながって 8 m 歩け、客側はフードコートのテーブルで 6.5 m)
+// 向きはカウンターの中心を見る。どのカウンターでも成り立たなければ null。見つかれば [x, y, 床, 説明]
+const COUNTER_DIST = 10, COUNTER_OUT = 0.8, COUNTER_OPEN = 8, COUNTER_BELOW = 2.5, COUNTER_ABOVE = 0.5, COUNTER_SIDE_R = 4;
+// (x, y) の床 g が、その店のカウンターの箱 b の中か (xy が箱の中で、g が箱の下 0.5 m 〜 上)
+const inCounterBox = (b, x, y, g) => b[0][0] <= x && x <= b[1][0] && b[0][1] <= y && y <= b[1][1] && b[0][2] - 0.5 <= g && g <= b[1][2];
+// (x0, y0, 床 g) から (x1, y1) へ 1 歩歩けるか: 歩く先に床 (g の STEP 下〜STEP 上) があり、カウンターの箱に入らず、足元から体の高さの 3 本の線が壁・物に当たらない。歩けるなら歩く先の床、歩けなければ null
+function counterStep(x0, y0, g, x1, y1, boxes) {
+  const g1 = groundAt(x1, y1, g + STEP); if (g1 === null || g1 < g - STEP) return null;
+  if (boxes.some(b => inCounterBox(b, x1, y1, g1))) return null;
+  const H = STANCE.stand.h;
+  for (const h of [STEP + 0.05, (STEP + H) / 2, H - 0.1]) if (segHit(x0, y0, g + h, x1, y1, g + h)) return null;
+  return g1;
+}
+// 辺の外向き (nx, ny) に歩ける距離 (m。0.5 m ずつ、最大 COUNTER_OPEN)
+function counterOpen(x, y, g, nx, ny, boxes) {
+  let gz = g;
+  for (let s = 0; s < COUNTER_OPEN; s += 0.5) {
+    const g1 = counterStep(x + nx * s, y + ny * s, gz, x + nx * (s + 0.5), y + ny * (s + 0.5), boxes); if (g1 === null) return s; gz = g1;
+  }
+  return COUNTER_OPEN;
+}
+// 立つ点 (x, y) の辺の外側 (箱の一部が立つ点より先 (nx, ny) にはみ出す) にある、その店のほかのカウンターの箱 (bi 以外) のうち、立つ点から xy で COUNTER_SIDE_R m 以内の数
+function counterBehind(x, y, nx, ny, boxes, bi) {
+  let n = 0;
+  for (let k = 0; k < boxes.length; k++) {
+    if (k === bi) continue; const [lo, hi] = boxes[k];
+    const beyond = nx > 0 ? hi[0] > x : nx < 0 ? lo[0] < x : ny > 0 ? hi[1] > y : lo[1] < y; if (!beyond) continue;
+    if (Math.hypot(Math.max(lo[0] - x, x - hi[0], 0), Math.max(lo[1] - y, y - hi[1], 0)) <= COUNTER_SIDE_R) n++;
+  }
+  return n;
+}
+function standAtCounter(t) {
+  const c = cur.center, q = [t.pos[0] - c[0], t.pos[1] - c[1], t.pos[2] - c[2]];
+  const boxDist = ([lo, hi]) => Math.hypot(...[0, 1, 2].map(a => Math.max(lo[a] - q[a], q[a] - hi[a], 0)));
+  const boxes = ((cur.counters || {})[t.name] || []).filter(b => boxDist(b) <= COUNTER_DIST && b[1][2] >= q[2] - COUNTER_BELOW && b[0][2] <= q[2] + COUNTER_ABOVE).sort((a, b) => boxDist(a) - boxDist(b));
+  for (let bi = 0; bi < boxes.length; bi++) {
+    const [lo, hi] = boxes[bi], cx = (lo[0] + hi[0]) / 2, cy = (lo[1] + hi[1]) / 2;
+    const sides = [[hi[0] + COUNTER_OUT, cy, 1, 0], [lo[0] - COUNTER_OUT, cy, -1, 0], [cx, hi[1] + COUNTER_OUT, 0, 1], [cx, lo[1] - COUNTER_OUT, 0, -1]];
+    const cands = [];
+    for (const [x, y, nx, ny] of sides) {
+      const g = groundAt(x, y, hi[2]);
+      if (g === null || g < q[2] - COUNTER_BELOW || g > q[2] + COUNTER_ABOVE || !onFloor(x, y, g)) continue;
+      if (boxes.some(b => inCounterBox(b, x, y, g))) continue;
+      // 的: カウンターの近い面の上の縁 (箱の中で立つ点にいちばん近い xy、箱の上面 + 0.05 m)。箱の中心を的にすると線がカウンター自身に当たる
+      const tx = Math.min(Math.max(x, lo[0]), hi[0]), ty = Math.min(Math.max(y, lo[1]), hi[1]);
+      if (!clearSight(x, y, g + 1.7, tx, ty, hi[2] + 0.05)) continue;
+      cands.push({ x, y, g, nx, ny, behind: counterBehind(x, y, nx, ny, boxes, bi), open: counterOpen(x, y, g, nx, ny, boxes), far: Math.hypot(x - q[0], y - q[1]) });
+    }
+    if (!cands.length) continue;
+    cands.sort((a, b) => (a.behind - b.behind) || (b.open - a.open) || (b.far - a.far));
+    const best = cands[0];
+    look(best.x, best.y, best.g, cx, cy);
+    return [best.x, best.y, best.g, { index: bi, box: [lo.map((v, a) => +(v + c[a]).toFixed(2)), hi.map((v, a) => +(v + c[a]).toFixed(2))], side: [best.nx, best.ny], behind: best.behind, open: best.open, sides: cands.map(k => [k.nx, k.ny, k.behind, k.open]) }];
+  }
+  return null;
 }
 // 立つ所 (x, y, 床 g) を中心に、(tx, ty) の方を向いて少し上から見下ろす (カメラは立つ所の後ろ)
 function look(x, y, g, tx, ty) { tgt.set(x, y, g + 1.7); az = Math.atan2(y - ty, x - tx); dist = 4; el2 = 0.45; upd(); }
@@ -1434,16 +1721,564 @@ function renderTargets() {
 }
 document.getElementById('tfilter').addEventListener('input', renderTargets);
 document.getElementById('reloadHere').onclick = () => { if (!cur) return; const c = cur.center; const q = walk ? wpos : tgt; loadRegion([q.x + c[0], q.y + c[1], q.z + c[2]], regionR()); };
-let lastNear = 0;
+let lastNear = 0, lastFail = null; const FAIL_HOLD_MS = 30000;
 function nearCheck() {
   const now = performance.now(); if (now - lastNear < 1000 || loading || !cur) return; lastNear = now;
   const q = walk ? wpos : tgt, r = cur.r;
+  // 歩くモードでないときは、カメラが読み込んだ範囲より近く (距離が半径未満) にあるときだけ読み直す。引いて全体を見ている間に、回転の中心が動くたびに読み直して
+  // ラベル・引き出し線が消え続けていた (2026-11-05、利用者の報告「何度も作画中を繰り返してる」「外部パッドなどの引き出し線とキャプションがなくなってる」。親の決定)
+  if (!walk && dist >= r) return;
+  // 読み直しが失敗した直後 (FAIL_HOLD_MS) は、同じ半径では読み直さない (失敗 → 1 秒後にまた読み直す、の繰り返しを止める。2026-11-05、親の決定)
+  if (lastFail && lastFail.r === regionR() && performance.now() - lastFail.t < FAIL_HOLD_MS) return;
   if (Math.abs(q.x) > r / 2 || Math.abs(q.y) > r / 2 || Math.abs(q.z) > r / 2) loadRegion([q.x + cur.center[0], q.y + cur.center[1], q.z + cur.center[2]], regionR(), true);
+}
+// ===== 外から見たときの印と見出し (着陸パッド・ハンガー・ドッキングポート) =====
+// (2026-11-05、利用者の指示「Seraphim なんか引いて行って外部視点になったときパッドなんかは引き出し線とか前にさんざんやったのを表示するように」「一度作ってんだから、今回入れてよ。外部になったときだけ出して」)
+// v2.5.3 の旧方式のステーションの 3D (wwwroot/station3d/viewer.html) の印・見出し・引き出し線の置き方を、そのまま移したもの (置き方の決まり・定数・色・丸の大きさ・線の太さは旧方式のまま)。
+// 印の元: station.json を読んだ後にアプリへ {type:'exteriorGet'} で頼み、{type:'exterior', pads:[{pos,key,text}], hangars:[{pos,size}], docks:[{pos,key,text}]} で返る
+// (StationView3D.ExteriorMarks。pos は場所の座標 (z 上)。text は鍵のゲームの訳。旧方式の scene.json の markers と URL の labels に当たる)。
+// 出すのは外部視点のときだけ: 歩くモードでなく、回転の中心からの距離 dist が読み込んだ地点の半径 cur.r 以上 (nearCheck の「引いて全体を見ている」判定 !walk && dist >= r と同じ)。
+// 中に戻ったら (dist < cur.r)・歩くモードにしたら消す。マイハンガーの中 (SITE) はステーションではないので出さない。
+// 旧方式の「初めの位置」(goHome) は無いので、丸の大きさの基準 (homeRadius) は「今の向きで全部の印が画面の真ん中 HOME_FILL に入るいちばん近い距離」(旧方式の fitRadius と同じ求め方) にする。
+// 旧方式の「ハンガーの印を屋根の扉の中心へ動かす」(roofDoors) は、ステーション全体の形を読まない今の方式では行わない。
+let extTick = () => { }, onExterior = () => { }, requestExterior = () => { };
+{
+  const svg = document.getElementById('extLines');
+  const capsEl = document.getElementById('extCaps');
+  const size = () => ({ w: Math.max(1, el.clientWidth), h: Math.max(1, el.clientHeight) });
+  const KINDS = {
+    pad: { color: '#ffcc33', chk: 'chkExtPad', count: 'nExtPad' },
+    freight: { color: '#6fdc8c', chk: null, count: null },
+    hangar: { color: '#6cb6ff', chk: 'chkExtHangar', count: 'nExtHangar' },
+    dock: { color: '#ff8ad8', chk: 'chkExtDock', count: 'nExtDock' },
+  };
+  let marks = [];   // { kind, pos (場所の座標の Vector3), label ("" なら見出しなし) }
+  let center = new THREE.Vector3();   // ステーションの中心 (見出しを左右上下に振り分ける基準。寄せる箱 (station.json の center と印の位置を囲む箱) の中心)
+  let stationRadius = 1000;
+  let dirty = true;   // 見出しを置き直すか (カメラ・大きさ・表示する印が変わったとき)
+  const SIZE_WORD = { S: 'S', M: 'M', L: 'L', XL: 'XL' };
+  const toV = p => new THREE.Vector3(p[0], p[1], p[2]);
+  // 印 (idx) を、間が join (m) 以内でつながるもの (つながりをたどる。same が true の組どうしだけ) の集まりに分け、cluster に集まりの番号を入れる
+  function joinClusters(list, idx, join, same) {
+    let nextCluster = 0;
+    for (const i of idx) {
+      if (list[i].cluster >= 0) continue;
+      const id = nextCluster++;
+      const stack = [i];
+      list[i].cluster = id;
+      while (stack.length > 0) {
+        const a = list[stack.pop()];
+        for (const j of idx)
+          if (list[j].cluster < 0 && same(a, list[j]) && list[j].pos.distanceTo(a.pos) <= join) { list[j].cluster = id; stack.push(j); }
+      }
+    }
+  }
+  function buildMarks(m) {
+    const list = [];
+    // (2026-11-02、利用者の指示「着陸できるなら、エレベーターで底に戻るためにその番号が大事。Pad01 などのように短くする方がいい」「padであることと、その数値が重要」)
+    // パッドの見出しは「Pad01」の形 (番号は鍵 @ui_interactor_pad_NN・@landing_pad_NN の NN)。番号の取れない鍵はゲームの訳のまま。
+    for (const p of m?.pads ?? []) {
+      const num = /pad_(\d+)$/i.exec(p.key ?? '')?.[1];
+      const label = num ? `Pad${num}` : p.key ? (p.text || p.key.replace(/^@/, '')) : '';
+      list.push({ kind: 'pad', pos: toV(p.pos), label, padNo: num ?? null });
+    }
+    // (2026-11-02、利用者の指示「ハンガーの入り口がどこにあるかが重要で、XL L M S などの大きさが必要」「番号は必要ない」)
+    // ハンガーの見出しは「ハンガー L」の形 (大きさは size: S・M・L・XL)。近い同じ大きさのハンガーをまとめても「×N」は付けない (線はまとめた全部の印に引く)
+    for (const h of m?.hangars ?? [])
+      list.push({ kind: 'hangar', pos: toV(h.pos), label: SIZE_WORD[h.size] ? `ハンガー ${h.size}` : 'ハンガー', hangarSize: SIZE_WORD[h.size] ? h.size : null, cluster: -1 });
+    // (2026-11-02、利用者の指示「ハンガーも大きさでまとめて近いものは一緒でいい」) 同じ大きさのハンガーで、間が HANGAR_JOIN_M 以内でつながるものを初めから 1 つの見出しにする
+    joinClusters(list, list.map((x, i) => i).filter(i => list[i].kind === 'hangar'), HANGAR_JOIN_M, (a, b) => a.label === b.label);
+    const freightIdx = [];
+    for (const f of m?.freight ?? []) {
+      freightIdx.push(list.length);
+      list.push({ kind: 'freight', pos: toV(f.pos), label: f.text || 'Freight Elevator', cluster: -1 });
+    }
+    joinClusters(list, freightIdx, FREIGHT_JOIN_M, () => true);
+    // (2026-11-02、利用者の指示「外部のドッキングポートは番号が大事。指定されるが、ハンガーエレベーターで移動して戻るとき、ドッキングポート01 のように番号で表示されるため」
+    //  「保安ドックはまとめてでいい」「PAD 外部ポートは番号が大事。まとめ禁止」)
+    // 外部のドッキングポートの見出しは「ドッキングポート01」の形 (番号は鍵 @dockingport_NN・@ui_interactor_dockingport_NN の NN)。1 つずつ出し、まとめない。
+    // 保安ドックのポート (鍵 @ui_interactor_secdock_a_dockingport など。ゲームの訳「セカンダリ・ポート-A」) は、末尾の「-A」などを除いた 1 つの見出しにまとめる
+    for (const d of m?.docks ?? []) {
+      const num = /dockingport_(\d+)$/i.exec(d.key ?? '')?.[1];
+      const sec = /secdock_[a-z]+_dockingport$/i.test(d.key ?? '');
+      const text = d.key ? (d.text || d.key.replace(/^@/, '')) : '';
+      const label = num ? `ドッキングポート${num}` : sec ? text.replace(/[-－‐]\s*[A-Za-z]$/, '') : text;
+      list.push({ kind: 'dock', pos: toV(d.pos), label, dockNo: num ?? null, secdock: sec, cluster: sec ? 'sec' : -1 });
+    }
+    for (const [k, d] of Object.entries(KINDS)) {
+      if (!d.chk) continue;
+      const n = list.filter(x => x.kind === k).length;
+      document.getElementById(d.count).textContent = `(${n})`;
+      document.getElementById(d.chk).disabled = n === 0;
+    }
+    return list;
+  }
+  for (const d of Object.values(KINDS)) if (d.chk) document.getElementById(d.chk).addEventListener('change', () => { dirty = true; });
+  const kindOn = k => { const d = KINDS[k]; return !d.chk || document.getElementById(d.chk).checked; };
+
+  const MERGE_PX = 28;     // 同じ見出しの印をまとめる画面上の距離
+  const FREIGHT_JOIN_M = 800;
+  // 同じ大きさのハンガーを初めから 1 つの見出しにする間 (m)。旧方式で写しで数えて決めた値 (Checkmate・HUR-L1・GrimHEX は大きさごとに 1 つになり、JP の離れたハンガーは別に出る)
+  const HANGAR_JOIN_M = 600;
+  const MARGIN = 8;        // 画面の端からの余白
+  const LABEL_OFFSET = 14; // 印から見出しまでの初めの間
+  const LABEL_GAP = 6;     // 見出しの枠をほかの見出しの枠・結ぶ線から離す距離 (利用者の目安 4〜8 px / 6 px)
+  // 引き出し線の太さ (px)。利用者の指示「引き出し線がわかりにくい。太くしたら合格」「引き出し線は全てで同じく太く」で、どの種類も同じ 3
+  const LINE_W = 3;
+  const LABEL_STEP = 4;    // 重なるとき外へ逃がす 1 段
+  const LABEL_STEPS = 75;  // 逃がす最大の段 (300 px)
+  // 印の点の半径 (px)。利用者の指示「色関係なく丸を小さい方に統一しろ。拡大したときにそれなりに大きくすればいい」: どの印も 2.5 × DOT_SCALE = 6.25 にそろえ、
+  // 基準の距離 (homeRadius) より近づいたときは、近づいた割合だけ大きくする (DOT_ZOOM_MAX 倍まで)
+  const DOT_SCALE = 2.5;
+  const DOT_ZOOM_MAX = 2;
+  let dotZoom = 1;
+  const dotRadius = m => 2.5 * DOT_SCALE * dotZoom;
+  const DOT_R = 4;         // 見出しで隠さない印の点の半径 (見出しの置き方で見る。点の半径に、この値との大きいほうを使う)
+  const HOME_FILL = 0.75;  // 基準の距離: 印が画面の真ん中 HOME_FILL の範囲に入るいちばん近い距離 (旧方式の初めの位置の fitRadius)
+  const capPool = [];
+  const widthCache = new Map();
+  function capEl(i) {
+    while (capPool.length <= i) { const d = document.createElement('div'); d.className = 'xcap'; capsEl.appendChild(d); capPool.push(d); }
+    return capPool[i];
+  }
+  const escapeHtml = t => t.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  // パッドの見出しの中身: まとめたパッドの見出しを、番号の順に「・」でつなぐ (同じ見出しが k 個なら「 ×k」)
+  function padPieces(g) {
+    const cnt = new Map();
+    for (const p of g.pts) cnt.set(p.m.label, (cnt.get(p.m.label) ?? 0) + 1);
+    const no = new Map(g.pts.map(p => [p.m.label, p.m.padNo]));
+    return [...cnt.keys()].sort((a, b) => (no.get(a) ?? '~' + a).localeCompare(no.get(b) ?? '~' + b)).map(l => ({ label: l, no: no.get(l), k: cnt.get(l) }));
+  }
+  function capHtml(g) {
+    const more = g.pts.length > 1 && g.kind !== 'hangar' ? ` ×${g.pts.length}` : '';
+    const size = g.pts[0].m.hangarSize;
+    if (g.kind === 'pad')
+      return padPieces(g).map(x => (x.no ? `<span class="padw">Pad</span><span class="padn">${escapeHtml(x.no)}</span>` : escapeHtml(x.label)) + (x.k > 1 ? ` ×${x.k}` : '')).join('・');
+    if (size) return `<span class="hw">ハンガー</span><span class="hs">${escapeHtml(size)}</span>`;
+    if (g.kind === 'dock' && g.pts[0].m.dockNo) return `<span class="dkw">ドッキングポート</span><span class="dkn">${escapeHtml(g.pts[0].m.dockNo)}</span>`;
+    return escapeHtml(g.label + more);
+  }
+  function measure(text, html) {
+    let w = widthCache.get(text);
+    if (w === undefined) {
+      const d = capEl(0);
+      d.style.display = ''; d.style.left = '-9999px'; d.innerHTML = html;
+      w = d.offsetWidth;
+      widthCache.set(text, w);
+    }
+    return w;
+  }
+  // 見出しの枠の高さ (px): 行の高さ 32 + 上下の余白 1 × 2 + 枠の線 1 × 2
+  const CAP_H = 36;
+  // 外へ (o) と左右 (上下。l) を合わせて逃がす候補 (近い順。どの向きでも空かないときに使う)
+  const SPREAD = [];
+  for (let o = 0; o <= 240; o += 12) for (let l = -360; l <= 360; l += 12) SPREAD.push({ o, l, d: Math.hypot(o, l) });
+  SPREAD.sort((a, b) => a.d - b.d);
+  // 前に置いた見出しの所 (鍵 → 辺・印からのずれ)。回転・拡大縮小で置き直すとき、空いていれば先に使う (ちらつかないように)
+  const prevPlace = new Map();
+
+  // ===== 見出しの置き方 (旧方式のまま) =====
+  // 必ず守る条件 (利用者の指摘「とにかく引き出し線がクロスしない、隠れないことが大事」): (1) 引き出し線どうしが交差しない、(2) 引き出し線が自分以外の見出しの枠を通らない、
+  // (3) 見出しどうしが重ならない (隙間 LABEL_GAP 以上)。ほかの印の点も見出しで隠さない。
+  // 置けない見出しは、ハンガーなら同じ大きさでまとめる距離を HANGAR_MERGE_PX の順に広げ、パッド・ドッキングポートはまとめない。それでも置けない見出しは画面の中を全部探し (GRID_STEP)、
+  // 置けなかった見出しを先に置く置き直し (PLACE_RETRIES)、近くの見出しを動かす置き換え (REPAIR) をし、最後まで置けない見出しは出さない (点は出す)
+  const HANGAR_MERGE_PX = [MERGE_PX, 80, 160, 320, Infinity];
+  const GRID_STEP = 16, PLACE_RETRIES = 4, RETRY_BUDGET_MS = 400, REPAIR_NEAR = 6, REPAIR_BUDGET_MS = 600;
+
+  function segCross(a, b) {
+    const d = (p0, p1, q0, q1, r0, r1) => (q0 - p0) * (r1 - p1) - (q1 - p1) * (r0 - p0);
+    const d1 = d(b[0], b[1], b[2], b[3], a[0], a[1]), d2 = d(b[0], b[1], b[2], b[3], a[2], a[3]);
+    const d3 = d(a[0], a[1], a[2], a[3], b[0], b[1]), d4 = d(a[0], a[1], a[2], a[3], b[2], b[3]);
+    return d1 * d2 < 0 && d3 * d4 < 0;
+  }
+  function segBox(s, r) {
+    const [x1, y1, x2, y2] = s;
+    if (Math.max(x1, x2) < r.x0 || Math.min(x1, x2) > r.x1 || Math.max(y1, y2) < r.y0 || Math.min(y1, y2) > r.y1) return false;
+    const inside = (x, y) => x > r.x0 && x < r.x1 && y > r.y0 && y < r.y1;
+    if (inside(x1, y1) || inside(x2, y2)) return true;
+    return segCross(s, [r.x0, r.y0, r.x1, r.y0]) || segCross(s, [r.x1, r.y0, r.x1, r.y1]) || segCross(s, [r.x1, r.y1, r.x0, r.y1]) || segCross(s, [r.x0, r.y1, r.x0, r.y0]);
+  }
+  const grow = (r, k) => ({ x0: r.x0 - k, y0: r.y0 - k, x1: r.x1 + k, y1: r.y1 + k });
+  const boxHit = (a, b) => a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0;
+  const nearOnBox = (r, x, y) => [THREE.MathUtils.clamp(x, r.x0, r.x1), THREE.MathUtils.clamp(y, r.y0, r.y1)];
+  function shorten(s, k) {
+    const dx = s[2] - s[0], dy = s[3] - s[1], l = Math.hypot(dx, dy);
+    if (l <= k) return null;
+    return [s[0], s[1], s[2] - dx / l * k, s[3] - dy / l * k];
+  }
+  // 見出しの線 (印から見出しへ)。mode 'direct' は印それぞれから見出しの枠のいちばん近い点へ、'trunk' は見出しから集まりの真ん中へ 1 本と、真ん中から印へ枝
+  function labelSegs(g, box, mode) {
+    if (mode === 'direct' || g.pts.length === 1) return g.pts.map(p => { const [lx, ly] = nearOnBox(box, p.x, p.y); return [p.x, p.y, lx, ly]; });
+    const [lx, ly] = nearOnBox(box, g.ax, g.ay);
+    return [[g.ax, g.ay, lx, ly, 'trunk'], ...g.pts.map(p => [p.x, p.y, g.ax, g.ay, 'branch'])];
+  }
+  // 見出しをまとめる (pad: まとめない、freight: 場所の集まり (cluster) ごと、hangar: 同じ大きさで HANGAR_JOIN_M 以内の集まり (split にある集まりは除く) と、画面上 hangarPx 以内のつながり)
+  function makeGroups(shown, hangarPx, split) {
+    const groups = [];
+    for (const s of shown) {
+      if (!s.m.label) continue;
+      let g;
+      if (s.m.kind === 'freight') g = groups.find(g => g.kind === 'freight' && g.cluster === s.m.cluster);
+      else {
+        const px = s.m.kind === 'hangar' ? hangarPx : MERGE_PX;
+        // パッドはまとめない (利用者の指摘「PAD を纏めていいと誰が言った？ PAD は番号の位置が大事だと言ったよな？」)
+        if (s.m.kind === 'pad') g = null;
+        // 外部のドッキングポートもまとめない。保安ドックのポートだけ 1 つにまとめる (利用者の指示「保安ドックはまとめてでいい」)
+        else if (s.m.kind === 'dock') g = s.m.secdock ? groups.find(g => g.kind === 'dock' && g.cluster === 'sec') : null;
+        else g = groups.find(g => g.label === s.m.label && g.kind === s.m.kind && (s.m.kind === 'hangar' && !split.has(s.m.cluster) && g.pts.some(p => p.m.cluster === s.m.cluster) || g.pts.some(p => Math.hypot(p.x - s.x, p.y - s.y) <= px)));
+      }
+      if (g) g.pts.push(s); else groups.push({ label: s.m.label, kind: s.m.kind, cluster: s.m.cluster, pts: [s] });
+    }
+    for (let changed = true; changed;) {
+      changed = false;
+      for (let i = 0; i < groups.length && !changed; i++)
+        for (let j = i + 1; j < groups.length && !changed; j++) {
+          const a = groups[i], b = groups[j];
+          const lim = a.kind === 'hangar' && b.kind === 'hangar' && a.label === b.label ? hangarPx : -1;
+          if (lim < 0) continue;
+          if (a.pts.some(p => b.pts.some(q => Math.hypot(p.x - q.x, p.y - q.y) <= lim))) { a.pts.push(...b.pts); groups.splice(j, 1); changed = true; }
+        }
+    }
+    for (const g of groups) {
+      g.ax = g.pts.reduce((a, p) => a + p.x, 0) / g.pts.length;
+      g.ay = g.pts.reduce((a, p) => a + p.y, 0) / g.pts.length;
+      g.text = g.kind === 'pad' ? padPieces(g).map(x => x.label + (x.k > 1 ? ` ×${x.k}` : '')).join('・') : g.pts.length > 1 && g.kind !== 'hangar' ? `${g.label} ×${g.pts.length}` : g.label;
+      g.html = capHtml(g);
+      g.w = measure(g.text, g.html);
+    }
+    return groups;
+  }
+  // 置く。戻り値は置けなかった見出し (g.hidden)。置いた見出しには g.box・g.segs・g.x・g.y が入る。
+  function placeGroups(groups, shown, ctx, opt = {}) {
+    const { W, cx, cy, TOP, BOTTOM } = ctx;
+    const boxes = [];
+    const segs = [];
+    const dots = shown.map(s => { const r = Math.max(DOT_R, dotRadius(s.m) + 0.5); return { s, r: { x0: s.x - r, y0: s.y - r, x1: s.x + r, y1: s.y + r } }; });
+    const clampX = (x, w) => THREE.MathUtils.clamp(x, MARGIN, W - MARGIN - w);
+    const clampY = y => THREE.MathUtils.clamp(y, TOP, Math.max(TOP, BOTTOM - CAP_H));
+    const strict = !!opt.strict;
+    const tryAt = (g, x, y, own) => {
+      const box = { x0: x, y0: y, x1: x + g.w, y1: y + CAP_H };
+      const wide = grow(box, LABEL_GAP);
+      for (const b of boxes) if (boxHit(wide, b)) return null;
+      for (const d of dots) if (boxHit(box, d.r)) return null;
+      for (const s of segs) if (segBox(s, wide)) return null;
+      for (const mode of g.pts.length > 1 ? ['direct', 'trunk'] : ['direct']) {
+        const mine = labelSegs(g, box, mode);
+        let bad = false;
+        for (const s of mine) {
+          if (boxes.some(b => segBox(s, b))) { bad = true; break; }
+          if (s[4] !== 'branch') { const sh = shorten(s, 1.5); if (sh && segBox(sh, box)) { bad = true; break; } }
+          if (s[4] === 'branch' && segBox(s, box)) { bad = true; break; }
+          if (segs.some(t => segCross(s, t))) { bad = true; break; }
+          if (strict && dots.some(d => !own.has(d.s) && segBox(s, d.r))) { bad = true; break; }
+        }
+        if (!bad) for (let i = 0; i < mine.length && !bad; i++) for (let j = i + 1; j < mine.length; j++) if (segCross(mine[i], mine[j])) { bad = true; break; }
+        if (!bad) return { box, mine };
+      }
+      return null;
+    };
+    const KIND_ORDER = { pad: 0, dock: 0, freight: 1, hangar: 2 };
+    const base = groups.slice().sort((a, b) => (KIND_ORDER[a.kind] - KIND_ORDER[b.kind]) || (Math.hypot(a.ax - cx, a.ay - cy) - Math.hypot(b.ax - cx, b.ay - cy)));
+    const seen = new Map();
+    for (const g of base) {
+      const n = (seen.get(g.kind + g.text) ?? 0) + 1;
+      seen.set(g.kind + g.text, n);
+      g.key = `${g.kind}|${g.text}|${n}`;
+    }
+    const first = opt.first ?? new Set();
+    const order = [...base.filter(g => first.has(g.key)), ...base.filter(g => !first.has(g.key))];
+    const findSpot = (g, wide) => {
+      const dx = g.ax - cx, dy = g.ay - cy;
+      const horiz = Math.abs(dx / W) >= Math.abs(dy / ctx.H);
+      g.side = horiz ? (dx < 0 ? 'left' : 'right') : (dy < 0 ? 'top' : 'bottom');
+      const len = Math.hypot(dx, dy);
+      const sx = g.side === 'right' ? 1 : g.side === 'left' ? -1 : 0, sy = g.side === 'bottom' ? 1 : g.side === 'top' ? -1 : 0;
+      const ux = len > 1 ? dx / len : sx, uy = len > 1 ? dy / len : sy;
+      const bx = g.side === 'right' ? g.ax + LABEL_OFFSET : g.side === 'left' ? g.ax - LABEL_OFFSET - g.w : g.ax - g.w / 2;
+      const by = g.side === 'bottom' ? g.ay + LABEL_OFFSET : g.side === 'top' ? g.ay - LABEL_OFFSET - CAP_H : g.ay - CAP_H / 2;
+      const own = new Set(g.pts);
+      const at = (ex, ey, d) => ({ x: clampX(bx + ex * d, g.w), y: clampY(by + ey * d) });
+      const vertical = !horiz;
+      const radial = [[ux, uy], [sx, sy]];
+      const sideways = vertical ? [[1, 0], [-1, 0]] : [[0, 1], [0, -1]];
+      const tiers = vertical ? [sideways, radial] : [radial, sideways];
+      let got = null;
+      const prev = prevPlace.get(g.key);
+      if (prev && prev.side === g.side) {
+        const x = clampX(g.ax + prev.ox, g.w), y = clampY(g.ay + prev.oy);
+        if (Math.hypot(x - bx, y - by) <= LABEL_STEP * LABEL_STEPS) { const r = tryAt(g, x, y, own); if (r) got = { x, y, ...r }; }
+      }
+      if (!got) {
+        for (const tier of tiers) {
+          const found = [];
+          for (const [ex, ey] of tier)
+            for (let k = 0; k <= LABEL_STEPS; k++) {
+              const p = at(ex, ey, k * LABEL_STEP);
+              const r = tryAt(g, p.x, p.y, own);
+              if (r) { found.push({ ...p, ...r }); break; }
+            }
+          if (found.length > 0) { got = found.reduce((a, b) => Math.hypot(a.x - bx, a.y - by) <= Math.hypot(b.x - bx, b.y - by) ? a : b); break; }
+        }
+      }
+      if (!got)
+        for (const c of SPREAD) {
+          const p = { x: clampX(bx + sx * c.o + (vertical ? c.l : 0), g.w), y: clampY(by + sy * c.o + (vertical ? 0 : c.l)) };
+          const r = tryAt(g, p.x, p.y, own);
+          if (r) { got = { ...p, ...r }; break; }
+        }
+      if (!got && wide) {
+        const cand = [];
+        const x1 = W - MARGIN - g.w, y1 = Math.max(TOP, BOTTOM - CAP_H);
+        for (let y = TOP; y <= y1; y += GRID_STEP) for (let x = MARGIN; x <= x1; x += GRID_STEP) cand.push({ x, y, d: Math.hypot(x - bx, y - by) });
+        cand.sort((a, b) => a.d - b.d);
+        for (const p of cand) { const r = tryAt(g, p.x, p.y, own); if (r) { got = { x: p.x, y: p.y, ...r }; break; } }
+      }
+      return got;
+    };
+    const commit = (g, got) => {
+      g.hidden = false;
+      g.x = got.x; g.y = got.y; g.box = got.box; g.segs = got.mine;
+      got.box.owner = g; boxes.push(got.box);
+      for (const s of got.mine) { s.owner = g; segs.push(s); }
+    };
+    const unplace = gs => {
+      const set = new Set(gs);
+      for (let i = boxes.length - 1; i >= 0; i--) if (set.has(boxes[i].owner)) boxes.splice(i, 1);
+      for (let i = segs.length - 1; i >= 0; i--) if (set.has(segs[i].owner)) segs.splice(i, 1);
+      for (const g of gs) g.hidden = true;
+    };
+    const failed = [];
+    for (const g of order) {
+      const got = findSpot(g, opt.wide);
+      if (!got) { g.hidden = true; failed.push(g); continue; }
+      commit(g, got);
+    }
+    // 置き換え: 置けなかった見出しごとに、近くに置いた見出しを REPAIR_NEAR 個まで見て、その 1 つ・2 つをいったん外し、置けなかった見出しを先に置いてから、外した見出しを置き直す
+    if (opt.repair && failed.length > 0) {
+      const t0 = performance.now();
+      for (let pass = 0, again = true; again && failed.length > 0; pass++) {
+        again = false;
+        for (const h of failed.slice()) {
+          if (performance.now() - t0 > REPAIR_BUDGET_MS) break;
+          const near = order.filter(g => !g.hidden)
+            .map(g => ({ g, d: Math.hypot((g.box.x0 + g.box.x1) / 2 - h.ax, (g.box.y0 + g.box.y1) / 2 - h.ay) }))
+            .sort((a, b) => a.d - b.d).slice(0, REPAIR_NEAR).map(x => x.g);
+          const sets = near.map(g => [g]);
+          for (let a = 0; a < near.length; a++) for (let b = a + 1; b < near.length; b++) sets.push([near[a], near[b]], [near[b], near[a]]);
+          let done = false;
+          for (const rm of sets) {
+            if (performance.now() - t0 > REPAIR_BUDGET_MS) break;
+            const saved = rm.map(g => ({ g, got: { x: g.x, y: g.y, box: g.box, mine: g.segs } }));
+            unplace(rm);
+            const gh = findSpot(h, false);
+            if (gh) {
+              commit(h, gh);
+              const back = [];
+              for (const g of rm) { const r = findSpot(g, true); if (!r) break; commit(g, r); back.push(g); }
+              if (back.length === rm.length) { done = true; break; }
+              unplace([h, ...back]);
+            }
+            for (const { g, got } of saved) commit(g, got);
+          }
+          if (done) { failed.splice(failed.indexOf(h), 1); again = true; }
+        }
+      }
+    }
+    for (const g of order) if (!g.hidden) prevPlace.set(g.key, { side: g.side, ox: g.x - g.ax, oy: g.y - g.ay });
+    return failed;
+  }
+  // 守る条件の違反を数える (確かめ用。document.body.dataset.extViolations に入れる)
+  function countViolations(groups, shown, dotOrder) {
+    const shownG = groups.filter(g => !g.hidden);
+    let cross = 0, hidden = 0, overlap = 0;
+    const all = [];
+    shownG.forEach((g, gi) => g.segs.forEach(s => all.push({ s, gi })));
+    for (let i = 0; i < all.length; i++)
+      for (let j = i + 1; j < all.length; j++) if (segCross(all[i].s, all[j].s)) cross++;
+    for (const { s, gi } of all)
+      shownG.forEach((g, k) => {
+        if (k !== gi) { if (segBox(s, g.box)) hidden++; }
+        else if (s[4] === 'branch') { if (segBox(s, g.box)) hidden++; }
+        else { const sh = shorten(s, 1.5); if (sh && segBox(sh, g.box)) hidden++; }
+      });
+    for (let i = 0; i < shownG.length; i++)
+      for (let j = i + 1; j < shownG.length; j++) if (boxHit(grow(shownG[i].box, LABEL_GAP - 0.01), shownG[j].box)) overlap++;
+    let dotHidden = 0;
+    for (const s of shown) {
+      const r = dotRadius(s.m);
+      const d = { x0: s.x - r, y0: s.y - r, x1: s.x + r, y1: s.y + r };
+      for (const g of shownG) if (boxHit(g.box, d)) dotHidden++;
+    }
+    let lineOverDot = 0;
+    shownG.forEach(g => {
+      const own = new Set(g.pts);
+      for (const sg of g.segs) for (const s of shown) {
+        if (own.has(s)) continue;
+        const r = dotRadius(s.m);
+        if (segBox(sg, { x0: s.x - r, y0: s.y - r, x1: s.x + r, y1: s.y + r })) lineOverDot++;
+      }
+    });
+    let dotUnderDot = 0;
+    for (let i = 0; i < dotOrder.length; i++) {
+      const a = dotOrder[i], ra = dotRadius(a.m);
+      for (let j = i + 1; j < dotOrder.length; j++) {
+        const b = dotOrder[j], rb = dotRadius(b.m);
+        if (Math.hypot(a.x - b.x, a.y - b.y) + ra <= rb) { dotUnderDot++; break; }
+      }
+    }
+    return { cross, hidden, overlap, dotHidden, lineOverDot, dotUnderDot, notShown: groups.length - shownG.length };
+  }
+  // 基準の距離 (旧方式の初めの位置の fitRadius): 今の向きで、全部の印とステーションの中心が画面の真ん中 HOME_FILL の範囲に入るいちばん近い距離。入らなければ 0
+  function homeRadius(pts) {
+    const c2 = cam.clone();
+    const dir = new THREE.Vector3().subVectors(cam.position, tgt);
+    if (dir.lengthSq() < 1e-12) return 0;
+    dir.normalize();
+    const v = new THREE.Vector3();
+    const fits = r => {
+      c2.position.copy(tgt).addScaledVector(dir, r); c2.lookAt(tgt); c2.updateMatrixWorld(true);
+      return pts.every(c => { v.copy(c).project(c2); return v.z < 1 && Math.abs(v.x) <= HOME_FILL && Math.abs(v.y) <= HOME_FILL; });
+    };
+    let lo = 1, hi = Math.max(stationRadius * 8, 100);
+    if (!fits(hi)) return 0;
+    for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (fits(mid)) hi = mid; else lo = mid; }
+    return hi;
+  }
+  // full: 全部の見出しを出すための仕上げの置き直し (GRID_STEP・PLACE_RETRIES) までするか。重いので、カメラが動いている間は false (止まって SETTLE_MS たったら true でもう 1 回)
+  function layout(full = true) {
+    const tLayout = performance.now();
+    const { w: W, h: H } = size();
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const TOP = MARGIN, BOTTOM = H - MARGIN;
+    const cc = toV(cur.center);
+    // 画面上の位置 (カメラの後ろ・画面の外の印は出さない)。印の位置は場所の座標なので、地点の中心を引いて描く座標にする
+    const shown = [];
+    const v = new THREE.Vector3();
+    const scenePts = [];
+    for (const m of marks) scenePts.push(m.pos.clone().sub(cc));
+    scenePts.push(center.clone().sub(cc));
+    const home = homeRadius(scenePts);
+    dotZoom = home > 0 ? THREE.MathUtils.clamp(home / dist, 1, DOT_ZOOM_MAX) : 1;
+    marks.forEach((m, i) => {
+      if (!kindOn(m.kind)) return;
+      v.copy(scenePts[i]).project(cam);
+      if (v.z > 1 || v.z < -1) return;
+      const x = (v.x + 1) / 2 * W, y = (1 - v.y) / 2 * H;
+      if (x < 0 || x > W || y < 0 || y > H) return;
+      shown.push({ m, x, y });
+    });
+    v.copy(center).sub(cc).project(cam);
+    const ctx = { W, H, TOP, BOTTOM, cx: THREE.MathUtils.clamp((v.x + 1) / 2 * W, 0, W), cy: THREE.MathUtils.clamp((1 - v.y) / 2 * H, 0, H) };
+    const split = new Set();
+    let hangI = 0, retries = 0, groups = [];
+    let lastOpt = {};
+    const place = (opt = {}) => { lastOpt = opt; groups = makeGroups(shown, HANGAR_MERGE_PX[hangI], split); return placeGroups(groups, shown, ctx, opt); };
+    for (;;) {
+      const failed = place().filter(g => g.kind === 'hangar');
+      const more = failed.flatMap(g => g.pts.map(p => p.m.cluster)).filter(c => !split.has(c));
+      if (more.length === 0) break;
+      for (const c of more) split.add(c);
+    }
+    const widen = f => {
+      let changed = false;
+      if (f.some(g => g.kind === 'hangar') && hangI < HANGAR_MERGE_PX.length - 1) { hangI++; changed = true; }
+      return changed;
+    };
+    for (let f = place(); f.length > 0 && widen(f);) f = place();
+    if (full) {
+      const tFull = performance.now();
+      for (;;) {
+        const first = new Set();
+        let best = null, f = [];
+        for (let t = 0; t <= PLACE_RETRIES; t++) {
+          if (t > 0 && performance.now() - tFull > RETRY_BUDGET_MS) break;
+          f = place({ first, wide: true });
+          retries = t;
+          if (!best || f.length < best.f.length) best = { f, first: new Set(first) };
+          if (f.length === 0) break;
+          const before = first.size;
+          for (const g of f) first.add(g.key);
+          if (first.size === before) break;
+        }
+        if (best.f.length === 0) { if (f.length > 0) place({ first: best.first, wide: true }); break; }
+        if (!widen(best.f)) { place({ first: best.first, wide: true }); break; }
+      }
+    }
+    if (full) {
+      const base = lastOpt;
+      place({ ...base, repair: true });
+      const keepGroups = groups, nHid = groups.filter(g => g.hidden).length;
+      const keepPrev = new Map(prevPlace);
+      place({ ...base, strict: true, repair: true });
+      if (groups.filter(g => g.hidden).length > nHid) { groups = keepGroups; prevPlace.clear(); for (const [k, v] of keepPrev) prevPlace.set(k, v); }
+    }
+    const usedPx = HANGAR_MERGE_PX[hangI];
+    for (const k of [...prevPlace.keys()]) if (!groups.some(g => g.key === k && !g.hidden)) prevPlace.delete(k);
+    // 描く: 点 → 線 → 見出し (出さない見出しは点だけ)。線は点の上に描く
+    let html = '';
+    const dotR = s => dotRadius(s.m);
+    const dotOrder = shown.slice();
+    for (const s of dotOrder) html += `<circle cx="${s.x.toFixed(1)}" cy="${s.y.toFixed(1)}" r="${dotR(s)}" fill="${KINDS[s.m.kind].color}" stroke="#000" stroke-width="0.8"/>`;
+    for (const g of groups) {
+      if (g.hidden) continue;
+      const col = KINDS[g.kind].color;
+      for (const s of g.segs)
+        html += `<line x1="${s[0].toFixed(1)}" y1="${s[1].toFixed(1)}" x2="${s[2].toFixed(1)}" y2="${s[3].toFixed(1)}" stroke="${col}" stroke-width="${LINE_W}"/>`;
+    }
+    svg.innerHTML = html;
+    let ci = 0;
+    for (const g of groups) {
+      if (g.hidden) continue;
+      const d = capEl(ci++);
+      d.style.display = '';
+      d.innerHTML = g.html;
+      d.style.left = `${Math.round(g.x)}px`;
+      d.style.top = `${Math.round(g.y)}px`;
+      d.style.borderColor = KINDS[g.kind].color;
+    }
+    for (let i = ci; i < capPool.length; i++) capPool[i].style.display = 'none';
+    const vio = countViolations(groups, shown, dotOrder);
+    const ms = performance.now() - tLayout;
+    lastLayoutMs = ms;
+    document.body.dataset.extViolations = `交差 ${vio.cross}・線が枠に隠れる ${vio.hidden}・見出しの重なり ${vio.overlap}・点が隠れる ${vio.dotHidden}・線がほかの点の上を通る ${vio.lineOverDot}・点が点に隠れる ${vio.dotUnderDot}・出さない見出し ${vio.notShown}/${groups.length}・ハンガーをまとめた距離 ${usedPx === Infinity ? '全部' : usedPx + 'px'}・一緒にしなかったハンガーの集まり ${split.size}・置き直し ${retries} 回・${ms.toFixed(1)} ms`;
+    document.body.dataset.extNotShown = groups.filter(g => g.hidden).map(g => g.text).join(', ');
+  }
+  function clear() {
+    svg.innerHTML = '';
+    for (const d of capPool) d.style.display = 'none';
+  }
+  // 置き直しの間引き (旧方式の frame と同じ): 動いている間は軽い置き方 (full=false)、止まって SETTLE_MS たったら仕上げの置き方 (full=true) をもう 1 回
+  let lastLayoutAt = 0, lastLayoutMs = 0;
+  const LAYOUT_SLOW_MS = 40, LAYOUT_THROTTLE_MS = 200, SETTLE_MS = 250;
+  let lastDirtyAt = 0, needFull = false, wasOn = false, lastSig = '';
+  requestExterior = () => { marks = []; clear(); if (APP) window.chrome.webview.postMessage({ type: 'exteriorGet' }); };
+  onExterior = d => {
+    marks = buildMarks(d);
+    // 寄せる箱: station.json の center (区画を置いた所の真ん中) と印の位置を囲む箱。その中心を振り分けの基準にし、半径を基準の距離の探し方の上限に使う
+    const box = new THREE.Box3();
+    if (Array.isArray(VIEW?.center) && VIEW.center.length === 3) box.expandByPoint(toV(VIEW.center));
+    for (const m of marks) box.expandByPoint(m.pos);
+    if (box.isEmpty()) box.set(new THREE.Vector3(-100, -100, -100), new THREE.Vector3(100, 100, 100));
+    center = box.getCenter(new THREE.Vector3());
+    stationRadius = Math.max(box.getBoundingSphere(new THREE.Sphere()).radius, 10);
+    dirty = true;
+  };
+  extTick = now => {
+    const on = !!cur && !walk && !SITE && dist >= cur.r && marks.length > 0;
+    if (!on) { if (wasOn) { clear(); wasOn = false; needFull = false; } return; }
+    const { w, h } = size();
+    const sig = [cam.position.x, cam.position.y, cam.position.z, cam.quaternion.x, cam.quaternion.y, cam.quaternion.z, cam.quaternion.w, w, h, cur.center.join()].map(x => typeof x === 'number' ? x.toFixed(4) : x).join(',');
+    if (!wasOn || sig !== lastSig) { dirty = true; lastSig = sig; }
+    wasOn = true;
+    if (dirty && now - lastLayoutAt >= (lastLayoutMs > LAYOUT_SLOW_MS ? LAYOUT_THROTTLE_MS : 0)) { dirty = false; layout(false); lastLayoutAt = performance.now(); lastDirtyAt = now; needFull = true; }
+    else if (!dirty && needFull && now - lastDirtyAt >= SETTLE_MS) { needFull = false; layout(true); lastLayoutAt = performance.now(); }
+  };
 }
 // 確かめ用: いちばん長い 1 コマ (ms。window.__frameMax = 0 で計り直す) と、読み込みの段ごとの時間 (window.__phase)
 // window.__frames: 長いコマの上位 8 件 [コマの間 ms, そのうち描画 (R.render) ms, その間の段 (window.__stage)]
 let lastFrame = performance.now(), lastRender = 0; window.__frameMax = 0; window.__frames = []; window.__stage = '';
-(function loop() { requestAnimationFrame(loop); { const nowF = performance.now(), gap = nowF - lastFrame; window.__frameMax = Math.max(window.__frameMax, gap); if (gap > 50) { const f = window.__frames; f.push([+gap.toFixed(0), +lastRender.toFixed(0), window.__stage]); f.sort((a, b) => b[0] - a[0]); f.length = Math.min(f.length, 8); } lastFrame = nowF; } try { nearCheck(); } catch (e) { window.__err = String(e && e.stack || e); } try { walkCheckTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { keyMove(); } catch (e) { window.__err = String(e && e.stack || e); } const tr = performance.now(); R.render(scene, cam); lastRender = performance.now() - tr; window.__stage = loading ? window.__stage : ''; })();
+(function loop() { requestAnimationFrame(loop); { const nowF = performance.now(), gap = nowF - lastFrame; window.__frameMax = Math.max(window.__frameMax, gap); if (gap > 50) { const f = window.__frames; f.push([+gap.toFixed(0), +lastRender.toFixed(0), window.__stage]); f.sort((a, b) => b[0] - a[0]); f.length = Math.min(f.length, 8); } lastFrame = nowF; } try { nearCheck(); } catch (e) { window.__err = String(e && e.stack || e); } try { refreshDistLabels(); } catch (e) { window.__err = String(e && e.stack || e); } try { walkCheckTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { keyMove(); } catch (e) { window.__err = String(e && e.stack || e); } const tr = performance.now(); R.render(scene, cam); lastRender = performance.now() - tr; try { extTick(performance.now()); } catch (e) { window.__err = String(e && e.stack || e); } window.__stage = loading ? window.__stage : ''; })();
 // ===== 始め =====
 (async () => {
   try {
@@ -1452,6 +2287,7 @@ let lastFrame = performance.now(), lastRender = 0; window.__frameMax = 0; window
     if (VIEW.format !== 'scjt-view3d-1') throw new Error('形の違うデータ: ' + VIEW.format);
     document.getElementById('title').textContent = qs.get('title') || VIEW.station;
     renderTargets();
+    requestExterior();   // 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート) をアプリに頼む (返事 {type:'exterior'} → onExterior)
     // 最初の地点: 店があればいちばん上の店、無ければ一覧の最初、何も無ければ最初のインスタンスの箱の中心
     // 最初の行き先: ?goto=<名前の一部> があればそれ。無ければハンガーロビーの艦隊マネージャーの端末の前 (2026-11-04、利用者の指示「初期位置は hanger lobby 船舶マネージャーターミナル前がいい」):
     //   艦隊マネージャーの端末 (種類 fleet) のうち、hangar_lobby の乗り口 (エレベーターの行き先に hangar) にいちばん近いもの。hangar_lobby が無ければ一覧のいちばん上の艦隊マネージャー。

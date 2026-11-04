@@ -2,7 +2,11 @@
 // view3d.js の buildCur・当たり判定の升目を作る所を、ここへ移した (計算の中身は同じ)。
 // 受け取る: { type:'build', id, base (地点の置き場の URL), region (region.json), c (中心), r, keys: { col, ocol, labk }, names (色の種類の名前) }
 // 返す: { type:'progress', id, done, total } (読んだ区画の数)、{ type:'boxes', id, boxes } (外形: 描く部品の箱の線。中心からの相対、Float32Array)、
-//       { type:'done', id, buf, offs, ioffs, loffs, parts, ladders, elevDoors, stairs, fz, fa, pidx, lightParts, coarse, times }、{ type:'error', id, message }
+//       { type:'done', id, buf, uvbuf, texbuf, offs, ioffs, labs, uoffs, toffs, parts, ladders, elevDoors, stairs, fz, fa, pidx, lightParts, coarse, times }、{ type:'error', id, message }
+//       (buf = COLK の三角形の位置 (9 float) と ioffs (三角形 → 部品の番号) だけ。labs[k] = 判定の色 k (floor2・slope2・tube2・counter2) の三角形の、buf の中の位置 b の並び (Uint32Array、昇順)。
+//        判定の色の三角形の位置の複製と輪郭線は持たない (2026-11-05、親の決定。描いていない))
+//       (uvbuf・texbuf = COLK の種類ごとの UV (三角形の角ごと float32 x6) と画像の番号 (三角形ごと int32。region.json の textures の番号。-1 = 無し) の別の ArrayBuffer (UV が無ければ null)。
+//        uoffs[k]・toffs[k] = [その中の位置 (要素), 長さ]。COLK の中は画像の番号の順)
 //       (coarse = 当たり判定の荒い区切り { all, fl, bigAll, bigFl }。升は画面の側が引いたときに作る)
 'use strict';
 const geoCache = new Map();
@@ -301,8 +305,8 @@ self.onmessage = async e => {
     const bx = new Float32Array(boxes); self.postMessage({ type: 'boxes', id, boxes: bx }, [bx.buffer]);
     lap('read');
     // ===== buildCur (view3d.js と同じ) =====
-    const parts = [], baseN = {}, overN = {}, lineN = {};
-    for (const k of COLK) baseN[k] = 0; for (const k of OCOLK) { overN[k] = 0; lineN[k] = 0; }
+    const parts = [], baseN = {}, overN = {};
+    for (const k of COLK) baseN[k] = 0; for (const k of OCOLK) overN[k] = 0;
     const fz = [], fa = [];
     const isLight = p => p[0].split('_').includes('light');
     const catOf = p => isLight(p) ? 'excluded' : p[1] === 'other' && p[0].split('_').some(w => w === 'door' || w === 'doors') ? 'door' : p[1];
@@ -336,8 +340,14 @@ self.onmessage = async e => {
     // (2026-11-04、利用者の決定「上場の高さが床とほぼ同じ物体は除去しない」) 名前に light のある部品でも、アプリの判定で色の付いたもの
     // (上面の高さがまわりの床とほぼ同じで、除外の決まりを当てずに判定したもの) は、色を使い、ほかの部品と同じに扱う (lightEx は除外のままの部品)
     const lightEx = new Set();
+    // 画像 (2026-11-05、利用者の指示「引いたときは色はビットマップ貼り付けにしてほしい」): 区画のファイルの parts の 11 番目 (UV の位置。点ごとの float32 x2) と
+    // 12 番目 (画像の番号の位置。三角形ごとの int32。region.json の textures の番号。-1 = 無し)。COLK の種類ごとに、三角形を画像の番号の順 (-1 が先) に並べて詰め、
+    // ioffs も同じ並びで作る (押した部品の引き当て = 三角形の番号 → ioffs は崩れない)。uoffs[k] = [UV の位置, 三角形の数 × 6]、toffs[k] = [画像の番号の位置, 三角形の数] (int32)。
+    // 判定の色 (OCOLK)・輪郭・当たり判定の荒い区切りは今のまま (三角形の位置 b で引くので、COLK の中の並びが変わっても結果は同じ)
+    const texCnt = {}; for (const k of COLK) texCnt[k] = new Map();
     for (const s of sel) {
       const [inst, g, pi, P, I, ii, A] = s; const p = g.parts[pi]; baseN[catOf(p)] += p[5];
+      { const tc = texCnt[catOf(p)]; if (p[11] >= 0) { const T = new Int32Array(g.buf, g.base + p[11], p[5]); for (let t = 0; t < p[5]; t++) tc.set(T[t], (tc.get(T[t]) || 0) + 1); } else tc.set(-1, (tc.get(-1) || 0) + p[5]); }
       let lab = new Uint8Array(g.buf, g.base + ii[1] + g.triStart[pi], p[5]);
       if (isLight(p) && !lab.some(v => v)) { lab = new Uint8Array(p[5]); lightEx.add(s); }
       if (upVols.length && FLOOR2 > 0 && !lightEx.has(s)) {
@@ -357,17 +367,26 @@ self.onmessage = async e => {
       s.push(lab);
       if (isLight(p)) lightParts.add(p[0]);
       for (let t = 0; t < p[5]; t++) if (lab[t]) overN[LABK[lab[t]]]++;
-      if (!lightEx.has(s)) for (const [lk, qs_] of Object.entries(lineIndex(g, ii))) lineN[lk] += (qs_.get(pi) || []).length;
     }
-    let pos = 0; const offs = {}, ioffs = {}, loffs = {};
+    // buf は COLK の三角形の位置 (9 float) と ioffs (部品の番号) だけ。判定の色 (OCOLK) は三角形の位置の複製を持たず、元の三角形の位置 b の並び labs[k] (Uint32Array。b の昇順) で持つ
+    // (2026-11-05、親の決定: Orison ±150 m で buf が 1.92 GB と postMessage の上限 2 GB に迫ったため。輪郭線 (loffs) も描いていないので作らない)
+    let pos = 0; const offs = {}, ioffs = {}, uoffs = {}, toffs = {};
     for (const k of COLK) { offs[k] = [pos, baseN[k] * 9]; pos += baseN[k] * 9; }
     for (const k of COLK) { ioffs[k] = [pos, baseN[k]]; pos += baseN[k]; }
-    for (const k of OCOLK) { offs[k] = [pos, overN[k] * 9]; pos += overN[k] * 9; }
-    for (const k of OCOLK) { ioffs[k] = [pos, overN[k]]; pos += overN[k]; }
-    for (const k of OCOLK) { loffs[k] = [pos, lineN[k] * 6]; pos += lineN[k] * 6; }
+    const labs = {}, wlab = {};
+    for (const k of OCOLK) { labs[k] = new Uint32Array(overN[k]); wlab[k] = 0; }
+    // UV・画像の番号の列は buf とは別の ArrayBuffer (uvbuf・texbuf。buf は位置・ioffs・OCOLK・輪郭だけで、前と同じ中身)。1 つの ArrayBuffer が 2 GB (postMessage の上限) を超えないため。
+    // どの部品にも UV が無い (画像なしの設定) なら作らない (null。長さ 0)
+    const anyUv = sel.some(s => s[1].parts[s[2]][10] >= 0);
+    let upos = 0, tpos = 0;
+    for (const k of COLK) { uoffs[k] = [upos, anyUv ? baseN[k] * 6 : 0]; upos += uoffs[k][1]; }
+    for (const k of COLK) { toffs[k] = [tpos, anyUv ? baseN[k] : 0]; tpos += toffs[k][1]; }
     const buf = new ArrayBuffer(pos * 4); const F = new Float32Array(buf), U = new Uint32Array(buf);
-    const wp = {}, wi = {}, wl = {};
-    for (const k of Object.keys(offs)) { wp[k] = offs[k][0]; wi[k] = ioffs[k][0]; } for (const k of Object.keys(loffs)) wl[k] = loffs[k][0];
+    const uvbuf = anyUv ? new ArrayBuffer(upos * 4) : null, texbuf = anyUv ? new ArrayBuffer(tpos * 4) : null;
+    const FU = uvbuf ? new Float32Array(uvbuf) : null, S = texbuf ? new Int32Array(texbuf) : null;
+    // COLK の中の書く位置は画像の番号ごと (番号の昇順。-1 が先): 三角形の通し番号 q → 位置 offs + q*9・ioffs + q・uoffs + q*6・toffs + q
+    const wq = {};
+    for (const k of COLK) { const m = new Map(); let q = 0; for (const id of [...texCnt[k].keys()].sort((a, b) => a - b)) { m.set(id, q); q += texCnt[k].get(id); } wq[k] = m; }
     const pbox = [];
     for (const s of sel) {
       const [inst, g, pi, P, I, ii, A, lab] = s; const p = g.parts[pi]; const id_ = parts.length;
@@ -375,15 +394,18 @@ self.onmessage = async e => {
       const bl = [Infinity, Infinity, Infinity], bh = [-Infinity, -Infinity, -Infinity];
       const cnt = {};
       const k = catOf(p);
+      const UV = p[10] >= 0 ? new Float32Array(g.buf, g.base + p[10], p[3] * 2) : null, TX = p[11] >= 0 ? new Int32Array(g.buf, g.base + p[11], p[5]) : null;
+      const qk = wq[k], ob = offs[k][0], ib = ioffs[k][0], ub = uoffs[k][0], tb = toffs[k][0];
       for (let t = 0; t < p[5]; t++) {
         const vs = [I[t * 3] * 3, I[t * 3 + 1] * 3, I[t * 3 + 2] * 3];
-        let o = wp[k];
+        const tid = TX ? TX[t] : -1; const q = qk.get(tid); qk.set(tid, q + 1);
+        let o = ob + q * 9;
         for (const v of vs) for (let a = 0; a < 3; a++) { F[o++] = W[v + a] - c[a]; if (W[v + a] < bl[a]) bl[a] = W[v + a]; if (W[v + a] > bh[a]) bh[a] = W[v + a]; }
-        wp[k] = o; U[wi[k]++] = id_;
+        U[ib + q] = id_;
+        if (anyUv) { S[tb + q] = tid; if (UV) { let u = ub + q * 6; for (const v of vs) { const vi = v / 3 * 2; FU[u++] = UV[vi]; FU[u++] = UV[vi + 1]; } } }
         if (lab[t]) {
-          const lk = LABK[lab[t]]; cnt[lk] = (cnt[lk] || 0) + 1; let o2 = wp[lk];
-          for (const v of vs) for (let a = 0; a < 3; a++) F[o2++] = W[v + a] - c[a];
-          wp[lk] = o2; U[wi[lk]++] = id_;
+          const lk = LABK[lab[t]]; cnt[lk] = (cnt[lk] || 0) + 1;
+          labs[lk][wlab[lk]++] = ob + q * 9;
           if (lk === 'floor2') {
             let inreg = true; for (let a = 0; a < 3 && inreg; a++) { const mn = Math.min(W[vs[0] + a], W[vs[1] + a], W[vs[2] + a]), mx = Math.max(W[vs[0] + a], W[vs[1] + a], W[vs[2] + a]); if (!(mn <= hi[a] && mx >= lo[a])) inreg = false; }
             if (inreg) {
@@ -394,25 +416,29 @@ self.onmessage = async e => {
           }
         }
       }
-      if (!lightEx.has(s)) for (const [lk, l] of Object.entries(ii[2])) {
-        const tr = new Uint32Array(g.buf, g.base + l[0], l[1] * 3);
-        for (const q of (lineIndex(g, ii)[lk].get(pi) || [])) for (const v of [tr[q * 3 + 1] * 3, tr[q * 3 + 2] * 3]) for (let a = 0; a < 3; a++) F[wl[lk]++] = W[v + a] - c[a];
-      }
       const sp = (inst[5] || '').split('/').pop();
       parts.push([inst[0], p[0], k, Object.entries(cnt).map(([kk, n]) => `${names[kk]} ${n}`).join(', ') || '歩ける面に色なし', sp, '']);
-      pbox.push([bl, bh, p[0].split('_')]);
+      // 4 番目: エレベーターの扉の前 (ロビー側) の向き (場所の座標の xy、正規化)。区画のファイルの parts の 10 番目 (socpak の枠の向き) をインスタンスの行列 A で回したもの。無い・xy の成分が無ければ null。
+      // 5 番目: エレベーターの扉か (parts の 10 番目があるか。扉の見分け (名前の語に elevator と door/doors、または door/doors があり部品の種類に "/elev/") はアプリの BuildGeo が行う。
+      //   部品の種類 (CgfPath) は区画のファイルに無いので、糸では見分けない。2026-11-05、親の決定)
+      let fwd = null; const isElevDoor = !!p[9];
+      if (p[9]) { const [vx, vy, vz] = p[9]; const fx = A[0] * vx + A[1] * vy + A[2] * vz, fy = A[4] * vx + A[5] * vy + A[6] * vz, l = Math.hypot(fx, fy); if (l > 1e-6) fwd = [+(fx / l).toFixed(4), +(fy / l).toFixed(4)]; }
+      pbox.push([bl, bh, p[0].split('_'), fwd, isElevDoor]);
     }
     const ladders = [];
     pbox.forEach(([bl, bh, w], i) => { if (w.includes('ladder')) ladders.push([parts[i][1], parts[i][0], bl.map((v, a) => +(v - c[a]).toFixed(3)), bh.map((v, a) => +(v - c[a]).toFixed(3))]); });
-    // エレベーターの扉 (部品の名前の語に elevator と door のあるもの) の箱 [名前, 箱の低い角, 高い角] (中心からの相対)。エレベーターで移った先の立つ所に使う (view3d.js の elevMove)
+    // エレベーターの扉 (アプリの BuildGeo が見分けて parts の 10 番目を付けたもの。pbox の 5 番目) の箱と前の向き [名前, 箱の低い角, 高い角, [fx, fy] | null] (箱は中心からの相対。向きは場所の座標の xy、正規化)。
+    // エレベーターで移った先の立つ所に使う (view3d.js の elevPlace。2026-11-05、利用者の指示「指示はドアの向きを見て」)
     const elevDoors = [];
-    pbox.forEach(([bl, bh, w], i) => { if (w.includes('elevator') && (w.includes('door') || w.includes('doors'))) elevDoors.push([parts[i][1], bl.map((v, a) => +(v - c[a]).toFixed(3)), bh.map((v, a) => +(v - c[a]).toFixed(3))]); });
+    pbox.forEach(([bl, bh, w, fwd, isElevDoor], i) => { if (isElevDoor) elevDoors.push([parts[i][1], bl.map((v, a) => +(v - c[a]).toFixed(3)), bh.map((v, a) => +(v - c[a]).toFixed(3)), fwd]); });
     // 階段の部品 (名前の語に stair・stairs があり、手すり・柱・飾りの語の無いもの。アプリの StationFloorBuilder.IsStairMesh と同じ決まり) の箱 [名前, 低い角, 高い角] (中心からの相対)。
     // 行き先の一覧の「階段」に使う (2026-11-04、利用者の決定「作り直す」)
     const STAIR_NOT = new Set(['rail', 'railing', 'decal', 'wall', 'structure', 'strut', 'divider', 'platform', 'cap', 'capplate', 'addon', 'sign', 'cover']);
     const stairs = [];
     pbox.forEach(([bl, bh, w], i) => { if (w.some(x => x === 'stair' || x === 'stairs') && !w.some(x => STAIR_NOT.has(x)) && bh[2] - bl[2] >= 0.5) stairs.push([parts[i][1], bl.map((v, a) => +(v - c[a]).toFixed(3)), bh.map((v, a) => +(v - c[a]).toFixed(3))]); });
     const pidx = sel.map((s, i) => [s[0][0] + ':' + s[2], i]);
+    // 判定の三角形の位置を b の昇順に (COLK の中は画像の番号の順なので、部品の順 = b の順ではない。画像なしなら部品の順 = b の順で、並べ替えても同じ)
+    for (const k of OCOLK) labs[k].sort();
     geoCache.clear();
     lap('buildCur');
     // ===== 当たり判定の荒い区切り (coarse) =====
@@ -420,21 +446,19 @@ self.onmessage = async e => {
     // 以前はここで 1 m (頭の上は 2 m) の升目 f・c・w・fl を全部作って渡していた (Seraphim ±30 m で約 4 GB・約 124 秒)。
     // 今は 16 m の箱 (鍵 = floor(x/16) × 100003 + floor(y/16)。中心からの相対) ごとに、箱に掛かる三角形の位置 b を並べた一覧だけを作る。
     // 升そのものは、画面の側 (view3d.js の cellGet) が升を引いたときに、その升の入る箱の一覧から以前の升目と同じ条件で選んで作る (中身・並びは以前の升目と同じ)。
-    //   all: COLK の全三角形 (f・c・w の元。ドアも入れる。ドアを除くのは画面の側)、fl: OCOLK の floor2・tube2 の三角形 (判定の床の元)。
+    //   all: COLK の全三角形 (f・c・w の元。ドアも入れる。ドアを除くのは画面の側)、fl: 判定が floor2・tube2 の三角形 (判定の床の元。labs の b の並び。元の三角形 (COLK) の位置)。
     //   big: 16 m の箱で 64 箱を超える大きな三角形 (親の決定) は、箱の一覧に入れず別の並び (bigAll・bigFl) に入れる。升を作るときは箱の一覧と big の両方を見る
     //   (ここで三角形を落とすことはしない。以前の升目の上限 (1 m の升で 4096・2 m で 1024) は画面の側が升を作るときに同じ条件で掛ける)。
-    // 形: tableLayout と同じ (並べた鍵 keys・始まり starts・中身 items)。2 回走査 (数える → 詰める)。中身の並びは三角形の位置 b の昇順 (COLK の順・三角形の順 = b の順)
+    // 形: tableLayout と同じ (並べた鍵 keys・始まり starts・中身 items)。2 回走査 (数える → 詰める)。中身の並びは三角形の位置 b の昇順 (all は COLK の順・三角形の順 = b の順。fl は floor2 の b の昇順、続けて tube2 の b の昇順)
     const BOX = 16, BIG_BOXES = 64;
     const csweep = (add, big, only) => {
-      const ranges = only === 0 ? COLK.map(k => offs[k]) : ['floor2', 'tube2'].map(k => offs[k] || [0, 0]);
-      for (const [o, n] of ranges) {
-        for (let t = 0; t < n / 9; t++) {
-          const b = o + t * 9;
-          const I0 = Math.floor(Math.min(F[b], F[b + 3], F[b + 6]) / BOX), I1 = Math.floor(Math.max(F[b], F[b + 3], F[b + 6]) / BOX), J0 = Math.floor(Math.min(F[b + 1], F[b + 4], F[b + 7]) / BOX), J1 = Math.floor(Math.max(F[b + 1], F[b + 4], F[b + 7]) / BOX);
-          if ((I1 - I0 + 1) * (J1 - J0 + 1) > BIG_BOXES) { big(b); continue; }
-          for (let I = I0; I <= I1; I++) for (let J = J0; J <= J1; J++) add(I * 100003 + J, b);
-        }
-      }
+      const one = b => {
+        const I0 = Math.floor(Math.min(F[b], F[b + 3], F[b + 6]) / BOX), I1 = Math.floor(Math.max(F[b], F[b + 3], F[b + 6]) / BOX), J0 = Math.floor(Math.min(F[b + 1], F[b + 4], F[b + 7]) / BOX), J1 = Math.floor(Math.max(F[b + 1], F[b + 4], F[b + 7]) / BOX);
+        if ((I1 - I0 + 1) * (J1 - J0 + 1) > BIG_BOXES) { big(b); return; }
+        for (let I = I0; I <= I1; I++) for (let J = J0; J <= J1; J++) add(I * 100003 + J, b);
+      };
+      if (only === 0) { for (const k of COLK) { const [o, n] = offs[k]; for (let t = 0; t < n / 9; t++) one(o + t * 9); } }
+      else for (const k of ['floor2', 'tube2']) { const L = labs[k]; if (L) for (let i = 0; i < L.length; i++) one(L[i]); }
     };
     const coarseOf = gi => {
       const T = makeTable(); const bigs = [];
@@ -448,9 +472,11 @@ self.onmessage = async e => {
     const coarse = { all: ca.grid, fl: cf.grid, bigAll: ca.big, bigFl: cf.big };
     lap('coarse');
     const tr = [buf];
+    if (uvbuf) tr.push(uvbuf, texbuf);
+    for (const k of OCOLK) tr.push(labs[k].buffer);
     for (const g of [coarse.all, coarse.fl]) tr.push(g.keys.buffer, g.starts.buffer, g.items.buffer);
     tr.push(coarse.bigAll.buffer, coarse.bigFl.buffer);
-    const out = { type: 'done', id, buf, offs, ioffs, loffs, parts, ladders, elevDoors, stairs, fz, fa, pidx, lightParts: [...lightParts], coarse, times };
+    const out = { type: 'done', id, buf, uvbuf, texbuf, offs, ioffs, labs, uoffs, toffs, parts, ladders, elevDoors, stairs, fz, fa, pidx, lightParts: [...lightParts], coarse, times };
     // 保存する (転送すると中身が消えるので、先に書く)。保存した中身は times を除いた知らせ。書いた時間は times.cacheSave
     let wused = null;
     if (wkey) { const t1 = performance.now(); const { times: _t, id: _i, ...stored } = out; wused = await WC.save(wkey, wkey, { type: 'done', ...stored }, wc); times.cacheSave = (performance.now() - t1) / 1000; }

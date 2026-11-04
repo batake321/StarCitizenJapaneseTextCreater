@@ -6,6 +6,9 @@
 <!-- 船の 3D 表示 (Ship3DWeb が WebView2 で開く)。
      three.js 0.186.1 (同梱。wwwroot\three) で、StarBreaker が書き出した GLB (キャッシュのフォルダ) を出す。
      開き方: https://scjt-viewer.example/ship3d/viewer.html?glb=<GLB の URL>&title=<船の名前>
+       &item=1: 船でない品 (武器・装備など)。［船外］［船内］のボタンと「船内の位置」の欄を出さない (2026-11-05、利用者の指示「船内船外はおかしい」)
+       &thumb=1: 小さな絵 (［詳細］の見出しの右。DetailPanel.RenderThumbAsync)。画面の部品を出さず、192×192 の透明な背景で船外の初めの向きから 1 コマ描き、
+         chrome.webview.postMessage({type:'thumb', png:<PNG の data URL>}) で返す
      GLB の座標 (実物で確かめたもの。t_ORIG_600i.glb / t_ORIG_X1.glb): いちばん上のノード CryEngine_Z_up が Z 上向きを Y 上向きに直していて、
        上 = +Y、前 = -Z (600i の hardpoint_seat_pilot が z = -45 で船の範囲 -66.7〜60.2 の前寄り。操縦席のノードの +Y 軸 (CryEngine の前) も -Z を向く)、
        左 = -X (hardpoint_seat_bridge_left が x = -1.41、_right が +1.41)。 -->
@@ -28,6 +31,10 @@
   #msg { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.7); padding: 12px 18px; border-radius: 6px; max-width: 80%; white-space: pre-wrap; }
   #msg.hidden { display: none; }
   #msg.error { color: #ff9a9a; }
+  .hidden { display: none !important; }
+  /* 右上の閉じる (2026-11-05、利用者「閉じるボタンが欲しい右上の赤い x で」): 押すとアプリに {type:'close'} を送る (詳細の欄は［表に戻る］と同じ、別ウィンドウは閉じる) */
+  #btnClose { position: absolute; right: 8px; top: 8px; width: 28px; height: 28px; padding: 0; line-height: 26px; text-align: center; font-size: 16px; font-weight: bold; color: #fff; background: #c62828; border: 1px solid #e57373; border-radius: 4px; }
+  #btnClose:hover { background: #e53935; }
 </style>
 <script type="importmap">
 { "imports": { "three": "../three/build/three.module.js" } }
@@ -42,6 +49,7 @@
       <button id="btnInside" title="船の中を見ます (Home で操縦席)">船内</button>
       <span id="title"></span>
     </div>
+    <button id="btnClose" title="閉じる">✕</button>
     <div id="help">左ドラッグ: 回転 (船外は船のまわり / 船内は見回す)　右ドラッグ: 平行移動　ホイール: 拡大縮小 (船内は前後)<br>
       W/A/S/D: 前後左右　↑/↓: 上下　Insert/Delete: 拡大/縮小　Home: 初めの位置</div>
     <div id="msg">読み込みを始めています...</div>
@@ -57,12 +65,25 @@ import { GLTFLoader } from '../three/examples/jsm/loaders/GLTFLoader.js';
 
 const params = new URLSearchParams(location.search);
 const glbUrl = params.get('glb') || '';
+// 右上の閉じる。小さな絵を描くとき (thumb) は出さない
+{
+  const bc = document.getElementById('btnClose');
+  if (params.get('thumb') === '1') bc.classList.add('hidden');
+  bc.addEventListener('click', () => { try { window.chrome?.webview?.postMessage({ type: 'close' }); } catch { } });
+}
 const title = params.get('title') || '';
 document.getElementById('title').textContent = title;
 document.title = title ? `3D 表示 - ${title}` : '3D 表示';
+// 船でない品 (?item=1): ［船外］［船内］と「船内の位置」の欄は出さない。小さな絵 (?thumb=1): 画面の部品を全部出さない
+const isItem = params.get('item') === '1';
+const isThumb = params.get('thumb') === '1';
+const THUMB_SIZE = 192;
+if (isItem) for (const id of ['btnOutside', 'btnInside', 'side']) document.getElementById(id).classList.add('hidden');
+if (isThumb) for (const id of ['top', 'help', 'side', 'msg']) document.getElementById(id).classList.add('hidden');
 
 const msgEl = document.getElementById('msg');
 function showMessage(text, isError) {
+  if (isThumb) return;
   msgEl.textContent = text;
   msgEl.classList.toggle('hidden', !text);
   msgEl.classList.toggle('error', !!isError);
@@ -91,14 +112,16 @@ const canvas = document.getElementById('canvas');
 let renderer;
 try {
   // 船の外 (数百 m) から船内 (数 cm) まで出すので、深度は対数にする
-  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+  // 小さな絵は背景を透明にする (詳細のページの白い背景に置く)
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true, alpha: isThumb });
 } catch (e) {
   reportError(`3D の描画 (WebGL) を使えません: ${e.message}`);
   throw e;
 }
-renderer.setPixelRatio(window.devicePixelRatio || 1);
+renderer.setPixelRatio(isThumb ? 1 : (window.devicePixelRatio || 1));
+if (isThumb) renderer.setClearColor(0x000000, 0);
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x1b1e24);
+scene.background = isThumb ? null : new THREE.Color(0x1b1e24);
 const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 10000);
 scene.add(camera);
 
@@ -113,6 +136,13 @@ camLight.visible = false;
 camera.add(camLight);
 
 function resize() {
+  // 小さな絵は決まった大きさ (隠した WebView2 で開くので、枠の大きさには頼らない)
+  if (isThumb) {
+    renderer.setSize(THUMB_SIZE, THUMB_SIZE, false);
+    camera.aspect = 1;
+    camera.updateProjectionMatrix();
+    return;
+  }
   const view = document.getElementById('view');
   const w = Math.max(1, view.clientWidth), h = Math.max(1, view.clientHeight);
   renderer.setSize(w, h, false);
@@ -561,6 +591,18 @@ function frame(now) {
 }
 requestAnimationFrame(frame);
 
+// ===== 小さな絵 (?thumb=1) =====
+// 船外の初めの位置 (goOutsideHome。左斜め前方の上から) で 1 コマ描き、PNG の data URL をアプリに返す。描いた直後に toDataURL で取る (描画バッファは次の描画まで残る)
+function renderThumb() {
+  try {
+    renderer.render(scene, camera);
+    const png = canvas.toDataURL('image/png');
+    window.chrome?.webview?.postMessage({ type: 'thumb', png });
+  } catch (e) {
+    reportError(`小さな絵を描けませんでした: ${e.message}`);
+  }
+}
+
 // ===== 読み込み =====
 if (!glbUrl) {
   reportError('表示する GLB が指定されていません。');
@@ -579,6 +621,22 @@ if (!glbUrl) {
     const demos = [];
     root.traverse(o => { if (/demo/i.test(o.name || '')) demos.push(o); });
     for (const o of demos) o.removeFromParent();
+    // 画像 (テクスチャ) の無い白い材質は灰色 (#888888) で描く (2026-11-05、利用者の指示「bitmap がないのか真っ白だが見えにくい。色がないのは灰色で」)。
+    // 画像のある面・白でない色の面・ガラス (transmission) は変えない。ライトの当たり方も変えない。
+    // GLTFLoader は baseColorFactor を material.color (線形)、baseColorTexture を material.map に入れる。白は r・g・b が 0.9 以上
+    const seenMats = new Set();
+    root.traverse(o => {
+      if (!o.isMesh) return;
+      for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+        if (!m || seenMats.has(m)) continue;
+        seenMats.add(m);
+        // 自己発光 (emissiveFactor) が入っているのに発光用の画像 (emissiveMap) が無い材質は、白い光を全面に足して真っ白になる
+        // (2026-11-05、利用者の報告: Cryo-Star SL のクーラー。GLB の材質 13 のうち 11 が emissive 1,1,1 で発光の画像なし)。発光の画像が無ければ発光を 0 にする
+        if (m.emissive && !m.emissiveMap) m.emissive.setHex(0x000000);
+        if (m.map || !m.color || (m.transmission ?? 0) > 0) continue;
+        if (m.color.r >= 0.9 && m.color.g >= 0.9 && m.color.b >= 0.9) m.color.setHex(0x888888);
+      }
+    });
     scene.add(root);
     model = root;
 
@@ -595,6 +653,7 @@ if (!glbUrl) {
     requestRoomNames(places);
     goOutsideHome();
     showMessage('');
+    if (isThumb) { renderThumb(); return; }
     canvas.focus();
   }, xhr => {
     if (xhr.total > 0) {

@@ -163,19 +163,22 @@ public sealed class StationView3DView : Grid
                 var ini = Path.Combine(Path.GetDirectoryName(stamp.Path) ?? "", "data", "Localization", "japanese_(japan)", "global.ini");
                 var loc = new StationView3D.Loc(ini, Path.Combine(DetailPanel.WorkDir(), "translations.db"));
                 _loc = loc;
-                var s = new StationView3D.Session(layout, "", loc, terminalLabel: StationTerminalKinds.Label, shopLabel: _shopLabel);
+                var s = new StationView3D.Session(layout, "", loc, terminalLabel: StationTerminalKinds.Label, shopLabel: _shopLabel, texUrlBase: TexUrlBase);
                 var stationJson = s.StationJson();
                 File.WriteAllBytes(Path.Combine(_tempDir, "station.json"), stationJson);
-                // 保存の鍵 (Data.p4k の印と区画の置き方の一覧の版・作った時刻)・先読みの行き先
+                // 保存の鍵 (Data.p4k の印と区画の置き方の一覧の版・作った時刻・ゲームの画像の上限 (px。変えると画像の有無・細かさが変わるので別の鍵))・先読みの行き先
                 _p4kKey = stamp.Key;
-                _layoutId = (StationView3D.LayoutDbMeta(StationView3DLayout.DbPath, "format") ?? "") + "|" + (StationView3D.LayoutDbMeta(StationView3DLayout.DbPath, "built_utc") ?? "");
+                _layoutId = (StationView3D.LayoutDbMeta(StationView3DLayout.DbPath, "format") ?? "") + "|" + (StationView3D.LayoutDbMeta(StationView3DLayout.DbPath, "built_utc") ?? "") + "|tex" + TexMaxPx.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 _targets = TargetsOf(stationJson);
                 var cache = StationView3DCache.Current;
                 cache.SweepStale(_p4kKey, _layoutId);
                 return s;
             }, ct);
+            // 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート。StationView3D.ExteriorMarks)。裏で作り、ビューアの {type:'exteriorGet'} に {type:'exterior', …} で返す (OnMessage)
+            if (_stationLayout is { } lay && _loc is { } lc) _exterior = Task.Run(() => StationView3D.ExteriorMarks(stamp.Path, lay, lc, ct), ct);
             _extract = StationView3D.OwnExtractor(stamp.Path,
-                m => App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」 {m}"));
+                m => App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」 {m}"),
+                texMaxPx: TexMaxPx, texFolder: Path.Combine(Ship3DExports.Folder, StationView3DTextures.FolderName));
             await Ship3DWeb.InitAsync(_web);
         }
         catch (OperationCanceledException) { return; }
@@ -194,6 +197,10 @@ public sealed class StationView3DView : Grid
         Overlay("");
         core.Navigate($"https://{Ship3DWeb.ViewerHost}/stationmap/view3d.html?data={Uri.EscapeDataString(UrlOf(_tempDir))}&title={Uri.EscapeDataString(_title)}&app=1" + (InTab ? "&tab=1" : "") + (_focusShop is { Length: > 0 } fs ? $"&goto={Uri.EscapeDataString(fs)}" : ""));
     }
+
+    // ゲームの画像 (テクスチャ) の長い辺の上限 (px。設定「ステーションのテクスチャ (px)」。0 なら画像なし) と、ビューアが PNG を読む URL の頭 (2026-11-05)
+    private static int TexMaxPx => Math.Max(0, App.Config.Station3DTextureMaxPx);
+    private static string TexUrlBase => $"https://{Ship3DExports.CacheHost}/{StationView3DTextures.FolderName}/";
 
     // 置き場 (Ship3DExports.Folder) の下のフォルダの URL (最後に /)
     private static string UrlOf(string dir)
@@ -215,6 +222,14 @@ public sealed class StationView3DView : Grid
             using var doc = JsonDocument.Parse(e.WebMessageAsJson);
             var r = doc.RootElement;
             var type = r.TryGetProperty("type", out var t) ? t.GetString() : null;
+            // ビューアの失敗 (view3d.js の report: loadRegion・worker・promise など) は今まで捨てていて、読み込みが繰り返す等の原因が追えなかった (2026-11-05、利用者の報告「何度も作画中を繰り返してる」)。ログに残す
+            if (type == "log") { App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーション 3D] {(r.TryGetProperty("message", out var lm) ? lm.GetString() : "")}"); return; }
+            if (type == "error")
+            {
+                var src = r.TryGetProperty("source", out var es) ? es.GetString() : ""; var emsg = r.TryGetProperty("message", out var em) ? em.GetString() : "";
+                App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーション 3D] ビューアの失敗 {src}: {emsg}");
+                return;
+            }
             if (type == "regionLoaded" && r.TryGetProperty("id", out var lid))
             {
                 // ビューアが読み終えた地点の置き場を手放す (保存したものは印を外すだけで残す。保存しなかったものは消す)
@@ -252,9 +267,27 @@ public sealed class StationView3DView : Grid
                 await OpenHangarAsync(r.TryGetProperty("size", out var zv) ? zv.GetString() ?? "" : "");
                 return;
             }
+            // 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート): ビューアが station.json を読んだ後に頼む。StartAsync で裏に作り始めたものを待って返す
+            if (type == "exteriorGet")
+            {
+                if (_exterior is not { } ext) return;
+                try { var o = await ext; if (!_closed) Post(o); }
+                catch (OperationCanceledException) { }
+                catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」の外から見たときの印 (着陸パッド・ハンガー・ドッキングポート) を作れませんでした: {ex}"); }
+                return;
+            }
             if (type == "walkCheck")
             {
                 await WalkCheckAsync(r);
+                return;
+            }
+            // コメントの印 (StationNotes。2026-11-05、利用者「enter で文字入れて印付けるのは、いつでもできて入力したら即反映」「DB格納でいつでも」):
+            //   {type:'notesGet', req} → {type:'notes', req, list:[{id,pos,text}]} (この場所の全部。pos は場所の座標)
+            //   {type:'noteAdd', pos, text, tmp} → DB に入れて {type:'noteAdded', id, pos, text, tmp} (tmp はビューアが印を結び付けるための番号。そのまま返す)
+            //   {type:'noteDelete', id} → DB から消す。失敗は {type:'noteError', message} とログ
+            if (type is "notesGet" or "noteAdd" or "noteDelete")
+            {
+                await NoteMessageAsync(type, r);
                 return;
             }
             if (type != "region" || _session == null || _extract == null) return;
@@ -365,6 +398,44 @@ public sealed class StationView3DView : Grid
         catch (OperationCanceledException) { }
         catch (Exception ex) { Log($"失敗しました: {ex}"); }
         finally { _walkGate.Release(); }
+    }
+
+    // コメントの印の知らせ (上の OnMessage の説明)。DB の読み書きは裏 (Task.Run)。マイハンガーの中でも record は同じ (座標は場所の座標。親の決定)
+    private async Task NoteMessageAsync(string type, JsonElement r)
+    {
+        var record = _record;
+        try
+        {
+            if (type == "notesGet")
+            {
+                var req = r.TryGetProperty("req", out var rq) && rq.ValueKind == JsonValueKind.Number ? rq.GetInt64() : 0;
+                var list = await Task.Run(() => StationNotes.Read(record));
+                if (_closed) return;
+                Post(new { type = "notes", req, list = list.Select(n => new { id = n.Id, pos = n.Pos, text = n.Text }).ToList() });
+            }
+            else if (type == "noteAdd")
+            {
+                if (!r.TryGetProperty("pos", out var pv) || pv.ValueKind != JsonValueKind.Array || pv.GetArrayLength() != 3) return;
+                var pos = pv.EnumerateArray().Select(x => x.GetDouble()).ToArray();
+                var text = r.TryGetProperty("text", out var tv) ? tv.GetString() ?? "" : "";
+                if (text.Length == 0) return;
+                var tmp = r.TryGetProperty("tmp", out var mv) && mv.ValueKind == JsonValueKind.Number ? mv.GetInt64() : 0;
+                var id = await Task.Run(() => StationNotes.Add(record, pos, text));
+                if (_closed) return;
+                Post(new { type = "noteAdded", id, pos, text, tmp });
+            }
+            else if (type == "noteDelete")
+            {
+                if (!r.TryGetProperty("id", out var iv) || iv.ValueKind != JsonValueKind.Number) return;
+                var id = iv.GetInt64();
+                await Task.Run(() => StationNotes.Delete(id));
+            }
+        }
+        catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」のコメントの印 ({type}) を扱えませんでした: {ex.Message}");
+            if (!_closed) Post(new { type = "noteError", message = ex.Message });
+        }
     }
 
     // ===== 保存したものの手放し・先読み (上の説明) =====
@@ -549,7 +620,7 @@ public sealed class StationView3DView : Grid
             {
                 var hrec = StationHangars.RecordOf(choice.Socpak);
                 var loc = _loc; var ct = _cts.Token;
-                hs = await Task.Run(() => new StationView3D.Session(LayoutFor(hrec, stamp, ct), "", loc, terminalLabel: StationTerminalKinds.Label), ct);
+                hs = await Task.Run(() => new StationView3D.Session(LayoutFor(hrec, stamp, ct), "", loc, terminalLabel: StationTerminalKinds.Label, texUrlBase: TexUrlBase), ct);
                 Directory.CreateDirectory(dir);
                 await File.WriteAllBytesAsync(Path.Combine(dir, "station.json"), hs.StationJson(), _cts.Token);
                 _hangarSessions[site] = hs;
@@ -651,6 +722,8 @@ public sealed class StationView3DView : Grid
         catch (Microsoft.Data.Sqlite.SqliteException) { return null; }
     }
     private StationView3D.Layout? _stationLayout;
+    // 外から見たときの印 (StationView3D.ExteriorMarks の結果。StartAsync で裏に作り始め、ビューアの exteriorGet で返す)
+    private Task<object>? _exterior;
 
     // 区画の置き方の一覧と場所の中身 (view3d_layout.db。StationView3DLayout が裏で一括に作る)。裏の糸から呼ぶ。
     // DB がまだ今の Data.p4k の印でなければ (裏で作っている途中・まだ始まっていない)、裏の一括を始めて (動いていればそれに合流して) 終わるまで待つ。

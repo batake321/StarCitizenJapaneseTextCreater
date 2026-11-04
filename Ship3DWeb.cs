@@ -16,6 +16,9 @@ internal static class Ship3DWeb
 {
     public const string ViewerHost = "scjt-viewer.example";
 
+    // ビューアの右上の閉じるが押された (どの WebView2 か)。詳細の欄は［表に戻る］と同じ、別ウィンドウは閉じる
+    public static event Action<WebView2>? CloseRequested;
+
     // WebView2 を用意する (一度だけ)。使えなければ例外
     public static async Task InitAsync(WebView2 web)
     {
@@ -48,6 +51,7 @@ internal static class Ship3DWeb
             {
                 using var doc = JsonDocument.Parse(e.WebMessageAsJson);
                 var type = doc.RootElement.TryGetProperty("type", out var t) ? t.GetString() : null;
+                if (type == "close") { CloseRequested?.Invoke(web); return; }   // ビューアの右上の閉じる (2026-11-05、利用者の指示)
                 if (type == "error" && doc.RootElement.TryGetProperty("message", out var m))
                 {
                     // ステーションの 3D のビューア (wwwroot\station3d) は source に "station3d" を付けて送る。ログの頭をそれに合わせる
@@ -76,9 +80,24 @@ internal static class Ship3DWeb
 
     // その船の GLB をビューアで開く (キャッシュのフォルダは開くたびに割り当て直す。設定で置き場所を変えたときのため)。
     // glbPath: 置き場所の中の別のファイル (保存しない設定で直接読んだものは作業用のフォルダにある。Ship3DExports.GetViewPathAsync)。null なら <短い名前>.glb
-    public static void Show(WebView2 web, string shortName, string title, string? glbPath = null)
+    // isItem: 船でない品 (武器・装備など。Ship3DExports.IsItemRecord) なら true。ビューアは ?item=1 で［船外］［船内］のボタンと「船内の位置」の欄を出さない (2026-11-05、利用者の指示「船内船外はおかしい」)
+    public static void Show(WebView2 web, string shortName, string title, string? glbPath = null, bool isItem = false)
     {
         var core = web.CoreWebView2 ?? throw new InvalidOperationException("WebView2 が用意できていません");
+        core.Navigate(ViewerUrl(core, shortName, glbPath, title) + (isItem ? "&item=1" : ""));
+    }
+
+    // 船でない品の 3D の小さな絵を描く (DetailPanel.RenderThumbAsync。隠した WebView2 で開く)。ビューアは ?thumb=1 で 1 コマ描いて
+    // chrome.webview.postMessage({type:'thumb', png:<PNG の data URL>}) を返す (失敗は {type:'error'})
+    public static void ShowThumb(WebView2 web, string shortName, string? glbPath = null)
+    {
+        var core = web.CoreWebView2 ?? throw new InvalidOperationException("WebView2 が用意できていません");
+        core.Navigate(ViewerUrl(core, shortName, glbPath, "") + "&item=1&thumb=1");
+    }
+
+    // ビューアの URL (キャッシュのフォルダを仮想ホストに割り当て直してから)。glbPath が null なら <短い名前>.glb
+    private static string ViewerUrl(CoreWebView2 core, string shortName, string? glbPath, string title)
+    {
         var folder = Ship3DExports.Folder;
         try { core.ClearVirtualHostNameToFolderMapping(Ship3DExports.CacheHost); } catch { }
         core.SetVirtualHostNameToFolderMapping(Ship3DExports.CacheHost, folder, CoreWebView2HostResourceAccessKind.Allow);
@@ -89,8 +108,7 @@ internal static class Ship3DWeb
         if (rel.StartsWith("../", StringComparison.Ordinal) || Path.IsPathRooted(rel)) throw new InvalidOperationException($"3D モデルが置き場所の外にあります: {file}");
         // ?v= は書き出し直したときに前の GLB を使わないため (ファイルの更新日時)
         var glb = $"https://{Ship3DExports.CacheHost}/{string.Join('/', rel.Split('/').Select(Uri.EscapeDataString))}?v={ticks}";
-        var url = $"https://{ViewerHost}/ship3d/viewer.html?glb={Uri.EscapeDataString(glb)}&title={Uri.EscapeDataString(title)}";
-        core.Navigate(url);
+        return $"https://{ViewerHost}/ship3d/viewer.html?glb={Uri.EscapeDataString(glb)}&title={Uri.EscapeDataString(title)}";
     }
 
     // 表示をやめる (読み込んだ GLB の分のメモリを放す)

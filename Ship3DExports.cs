@@ -101,8 +101,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
     public static string Folder => string.IsNullOrWhiteSpace(App.Config.Ship3DFolder) ? DefaultFolder : App.Config.Ship3DFolder.Trim();
     // 作業用 (書きかけの一時ファイル) のフォルダ。置き場所に利用者の既存のフォルダを選ばれても重ならないよう、アプリ固有の名前にする
     internal static string WorkFolder => Path.Combine(Folder, "_scjt_ship3d_work");
-    // 作業用のフォルダにアプリが作る一時ファイルの名前の形 (<短い名前>_<GUID 32 桁>.glb / .json / .hierarchy.json)。起動時の掃除はこの形のファイルだけ消す
-    private static readonly Regex WorkFileRegex = new(@"^.+_[0-9a-f]{32}\.(glb|json|hierarchy\.json)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // 作業用のフォルダにアプリが作る一時ファイルの名前の形 (<短い名前>_<GUID 32 桁>.glb / .json / .hierarchy.json / .png (品の 3D の小さな絵。ThumbPath))。起動時の掃除はこの形のファイルだけ消す
+    private static readonly Regex WorkFileRegex = new(@"^.+_[0-9a-f]{32}\.(glb|json|hierarchy\.json|png)$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     internal static string NewWorkFile(string shortName, string ext) => Path.Combine(WorkFolder, $"{shortName}_{Guid.NewGuid():N}{ext}");
 
     // フォルダのドライブの容量 (全体・残り。バイト)。調べられなければ null
@@ -158,6 +158,10 @@ public sealed class Ship3DExports : INotifyPropertyChanged
 
     public static string GlbPath(string shortName) => Path.Combine(Folder, shortName + ".glb");
     private static string SidecarPath(string shortName) => Path.Combine(Folder, shortName + ".json");
+    // 船でない品の 3D の小さな絵 (［詳細］の見出しの右。DetailPanel.ShowItemThumbAsync): GLB の横に同じ名前の .png (保存しない設定では作業用のフォルダの一時の GLB の横)。
+    // GLB を消すとき・置き換えるときに一緒に消す。容量の上限 (CachedFiles は *.glb) には数えない
+    internal static string ThumbPath(string glbPath) => Path.ChangeExtension(glbPath, ".png");
+    private static void DeleteThumb(string glbPath) { try { File.Delete(ThumbPath(glbPath)); } catch { } }
 
     // 前の起動で途中で終わった書き出しの一時ファイルを消す (動いている書き出しが無いとき)。
     // フォルダごとは消さず、アプリが作る一時ファイルの名前の形 (WorkFileRegex) に合うファイルだけ消す
@@ -394,6 +398,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         if (ReadOurSidecar(shortName) == null) return;
         try { File.Delete(GlbPath(shortName)); } catch (Exception ex) { Log($"{shortName}.glb を消せませんでした: {ex.Message}"); return; }
         try { File.Delete(SidecarPath(shortName)); } catch (Exception ex) { Log($"{shortName}.json を消せませんでした: {ex.Message}"); }
+        DeleteThumb(GlbPath(shortName));
     }
 
     // 後で消すことにした船を、表示・書き出しが無くなっていれば消す
@@ -427,21 +432,24 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         if (_views.ContainsKey(shortName) || _byShort.ContainsKey(shortName)) return;
         if (!_viewFiles.Remove(shortName, out var path)) return;
         try { File.Delete(path); } catch (Exception ex) { Log($"表示の間だけ置いた {Path.GetFileName(path)} を消せませんでした: {ex.Message}"); }
+        DeleteThumb(path);
     }
 
     // 表示に使う GLB (置き場所の中のパス)。取り込み済みならそれ (Data.p4k が変わっていれば照合してから)、無ければ Data.p4k から直接読む
     // (確認の窓は出さない。CPU 使用率・同時数の上限は書き出しと同じく待つ。保存するかは設定)。読めなければ null (知らせは出し済み)
-    public async Task<string?> GetViewPathAsync(string record, string name, Window? owner)
+    // quiet: 失敗の知らせの窓を出さない (ログと LastQuietError だけ)
+    public async Task<string?> GetViewPathAsync(string record, string name, Window? owner, bool quiet = false)
     {
+        if (quiet) LastQuietError = null;
         var shortName = ShortName(record);
         if (_viewFiles.TryGetValue(shortName, out var vf) && File.Exists(vf)) return vf;
         if (await GetCachedPathAsync(record) is { } cached) return cached;
         if (StateOf(record) == Ship3DCacheState.NoGame)
         {
-            ShowError(owner, "ゲームの Data.p4k が見つかりません。設定タブのゲームのフォルダとチャンネルを確かめてください。");
+            ShowError(owner, "ゲームの Data.p4k が見つかりません。設定タブのゲームのフォルダとチャンネルを確かめてください。", quiet: quiet);
             return null;
         }
-        return await ImportAsync(record, name, owner, confirm: false, save: !App.Config.Ship3DNoSave);
+        return await ImportAsync(record, name, owner, confirm: false, save: !App.Config.Ship3DNoSave, quiet: quiet);
     }
 
     // ===== 船以外の品 (武器・装備・船の部品など。2026-11-04、利用者の要望「武器の3D出ないけど？」) =====
@@ -482,6 +490,9 @@ public sealed class Ship3DExports : INotifyPropertyChanged
 
     // ===== 知らせ =====
 
+    // quiet で抑えた最後の失敗の文 (GetViewPathAsync(quiet: true) が null を返したとき、呼んだ側が txtShip3D などに出す)。quiet の呼び出しの初めに消す
+    public static string? LastQuietError { get; private set; }
+
     private string _notice = "";
     // 進み具合の欄の下に出す最後の知らせ (容量で消した・照合で消した等)。次の書き出しが加わるまで出しておく
     public string Notice { get => _notice; private set { _notice = value; Changed(nameof(Notice)); Changed(nameof(HasNotice)); Changed(nameof(ShowPanel)); } }
@@ -498,9 +509,11 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         ex is InvalidOperationException or IOException ? $"{ex.GetType().FullName}: {ex.Message}" : ex.ToString();
 
     // logMsg: ログに残す文言が窓と違うとき (まとめて取り込むの窓はボタンの名前で出し、ログは前の文言のまま)
-    private static void ShowError(Window? owner, string msg, string? logMsg = null)
+    // quiet: 知らせの窓を出さず、ログと LastQuietError (呼んだ側が文に出す) だけにする (［詳細］の品の絵のための自動の取り込み。2026-11-05、親の決定)
+    private static void ShowError(Window? owner, string msg, string? logMsg = null, bool quiet = false)
     {
         Log(logMsg ?? msg);
+        if (quiet) { LastQuietError = msg; return; }
         if (owner != null && owner.IsLoaded) MessageBox.Show(owner, msg, "3D 表示", MessageBoxButton.OK, MessageBoxImage.Warning);
         else MessageBox.Show(msg, "3D 表示", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
@@ -791,13 +804,14 @@ public sealed class Ship3DExports : INotifyPropertyChanged
     // すでに最新のキャッシュがあればそのパス (Data.p4k が変わっていれば先に照合する)。同じ船の書き出しが動いていれば合流する。
     // 取り消し・失敗・ゲームが見つからないときは null (知らせは出し済み)
     // confirm: 予想を出して確かめるか (表示からの直接の読み込みでは出さない)。save: 取り込み (置き場所に保存) にするか (false なら表示の間だけ作業用のフォルダに置く)
-    public async Task<string?> ImportAsync(string record, string name, Window? owner, bool confirm = true, bool save = true)
+    // quiet: 失敗の知らせの窓を出さない (ログと LastQuietError だけ。［詳細］の品の絵のための自動の取り込み)
+    public async Task<string?> ImportAsync(string record, string name, Window? owner, bool confirm = true, bool save = true, bool quiet = false)
     {
         var shortName = ShortName(record);
         var stamp = CurrentStamp();
         if (stamp == null)
         {
-            ShowError(owner, "ゲームの Data.p4k が見つかりません。設定タブのゲームのフォルダとチャンネルを確かめてください。");
+            ShowError(owner, "ゲームの Data.p4k が見つかりません。設定タブのゲームのフォルダとチャンネルを確かめてください。", quiet: quiet);
             return null;
         }
         if (_byShort.TryGetValue(shortName, out var running) && running.Task != null)
@@ -816,12 +830,12 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         // 表示からの直接の読み込みは、CPU 使用率が高ければ下がるまで待つ (待ち行列 Pump の決まり)
         if (_cpuHigh && confirm)
         {
-            ShowError(owner, $"CPU 使用率が {_cpuPercent:F0}% と高いため、書き出しを始めません。90% 未満に下がってからもう一度押してください。");
+            ShowError(owner, $"CPU 使用率が {_cpuPercent:F0}% と高いため、書き出しを始めません。90% 未満に下がってからもう一度押してください。", quiet: quiet);
             return null;
         }
         if (save && HasForeignFile(shortName))
         {
-            ShowError(owner, $"置き場所に同じ名前のファイル ({shortName}.glb / {shortName}.json) があり、このアプリが書いたものではないので書き出しません。置き場所を変えるか、そのファイルを移してください。");
+            ShowError(owner, $"置き場所に同じ名前のファイル ({shortName}.glb / {shortName}.json) があり、このアプリが書いたものではないので書き出しません。置き場所を変えるか、そのファイルを移してください。", quiet: quiet);
             return null;
         }
         // 照合の間に別の［読み込み］が始めていれば合流する
@@ -842,7 +856,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             catch (Exception ex)
             {
                 Log($"「{name}」({shortName}) の形の有無を調べられませんでした: {Describe(ex)}");
-                ShowError(owner, $"「{name}」の 3D モデルを調べられませんでした: {ex.Message}");
+                ShowError(owner, $"「{name}」の 3D モデルを調べられませんでした: {ex.Message}", quiet: quiet);
                 return null;
             }
             if (!has)
@@ -856,11 +870,11 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         var job = new Ship3DJob(record, shortName, string.IsNullOrWhiteSpace(name) ? shortName : name, batch: null) { ViewOnly = !save, Kind = isItem ? Ship3DJobKind.Item : Ship3DJobKind.Ship };
         LogJob(job, $"取り込みを始めます (単体{(confirm ? "" : "、表示から直接")}{(save ? "" : "、保存しない")}、record {record}、Data.p4k {stamp.Path})");
         AddJob(job);
-        job.Task = RunSingleAsync(job, stamp, owner, confirm);
+        job.Task = RunSingleAsync(job, stamp, owner, confirm, quiet);
         return await job.Task;
     }
 
-    private async Task<string?> RunSingleAsync(Ship3DJob job, P4kStamp stamp, Window? owner, bool confirm = true)
+    private async Task<string?> RunSingleAsync(Ship3DJob job, P4kStamp stamp, Window? owner, bool confirm = true, bool quiet = false)
     {
         var total = Stopwatch.StartNew();   // ログ用: 取り込み全体の経過
         try
@@ -906,7 +920,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         {
             job.SetPhase(Ship3DJobPhase.Failed, "");
             LogJob(job, $"失敗しました (段階: {job.LogStage}、経過 {total.Elapsed.TotalSeconds:F1} 秒): {Describe(ex)}");
-            ShowError(owner, $"「{job.Name}」({job.Short}) の 3D モデルを書き出せませんでした: {ex.Message}");
+            ShowError(owner, $"「{job.Name}」({job.Short}) の 3D モデルを書き出せませんでした: {ex.Message}", quiet: quiet);
             return null;
         }
         finally { RemoveJob(job); }
@@ -1146,7 +1160,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             {
                 // 保存しない: 一時ファイルのまま表示に使う (表示をやめたら消す。DeleteViewFileIfIdle)
                 keepTmp = true;
-                if (_viewFiles.Remove(job.Short, out var old)) { try { File.Delete(old); } catch { } }
+                if (_viewFiles.Remove(job.Short, out var old)) { try { File.Delete(old); } catch { } DeleteThumb(old); }
                 _viewFiles[job.Short] = tmp;
                 Log($"「{job.Name}」({job.Short}) を直接読みました (保存しない設定のため、表示の間だけ置きます): {job.Watch.Elapsed.TotalSeconds:F1} 秒、{FormatBytes(res.GlbBytes)}");
                 job.SetPhase(Ship3DJobPhase.Done, "");
@@ -1254,6 +1268,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 var length = f.Length;
                 f.Delete();
                 try { File.Delete(SidecarPath(shortName)); } catch { }
+                DeleteThumb(f.FullName);
                 total -= length;
                 deleted.Add(shortName);
             }

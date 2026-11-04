@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
@@ -215,6 +216,9 @@ public partial class DetailPanel : UserControl
                 if (e.IsUserInitiated) e.Cancel = true;
             };
             core.NewWindowRequested += (_, e) => e.Handled = true;
+            // 船でない品の 3D の小さな絵: ページからの知らせ (絵を押した) と、ページを出し直したときの差し込み直し (ShowItemThumbAsync)
+            core.WebMessageReceived += OnDetailWebMessage;
+            core.NavigationCompleted += (_, _) => _ = InjectThumbAsync();
             webDetail.DefaultBackgroundColor = System.Drawing.Color.White;
             _webReady = true;
             if (_pendingHtml != null) { core.NavigateToString(_pendingHtml); _pendingHtml = null; }
@@ -923,7 +927,12 @@ public partial class DetailPanel : UserControl
         // 船・車両 (NOITEM_Vehicle) なら［3D 表示］［別ウィンドウ］を出す
         if (itemType.StartsWith("NOITEM_Vehicle", StringComparison.OrdinalIgnoreCase)) SetShip3DTarget(record, ShipNameFor(record));
         // 武器・装備・船の部品などの品 (EntityClassDefinition の品目) でも出す (2026-11-04、利用者の要望「武器の3D出ないけど？」)。形が無い品は押すと「形がありません」と出る
-        else if (!isTreeRecord && itemType.Length > 0 && record.StartsWith("EntityClassDefinition.", StringComparison.OrdinalIgnoreCase)) SetShip3DTarget(record, ShipNameFor(record));
+        else if (!isTreeRecord && itemType.Length > 0 && record.StartsWith("EntityClassDefinition.", StringComparison.OrdinalIgnoreCase))
+        {
+            SetShip3DTarget(record, ShipNameFor(record));
+            // (2026-11-05、利用者の指示「右側にアイコン上に斜め 3D を出し、クリックすると出る」) 船でない品は、見出しの右に 3D の小さな絵を出す (船は今のまま)
+            _ = ShowItemThumbAsync(record, ShipNameFor(record));
+        }
         // ステーション・都市・前哨基地・小惑星 (星図の Manmade 系・LandingZone・Outpost 系・Asteroid 系。IsStationPlace) なら［読み込み］［地図表示］［別ウィンドウ］を出す
         if (isTreeRecord && tree != null && tree.NodesByRecord.TryGetValue(record, out var place) && IsStationPlace(place)) SetStationTarget(place, tree);
         // 店で、店のある場所 (かその上) が地図の一覧に出る場所 (StationMapPlaceOf) なら［マップに表示］を出す
@@ -970,6 +979,7 @@ public partial class DetailPanel : UserControl
             // 書き出し中の進み具合の文 (1 秒ごとに全体の文が変わるときに出し直す)
             Ship3DExports.Instance.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(Ship3DExports.OverallText)) UpdateShip3DButtons(); };
         }
+        if (!string.Equals(record, _ship3DRecord, StringComparison.OrdinalIgnoreCase)) _thumbError = null;
         _ship3DRecord = record;
         _ship3DName = name;
         if (record == null)
@@ -1000,6 +1010,8 @@ public partial class DetailPanel : UserControl
         btnShip3DImport.IsEnabled = !noShape && !Ship3DExports.NoSave && (state == Ship3DCacheState.None && job == null && !ex.CpuHigh || ex.IsRefreshWaiting(_ship3DRecord));
         txtShip3D.Text = noShape && state == Ship3DCacheState.None ? "3D モデル: この品には形がありません (形のデータが無い品です)"
             : job != null ? $"3D モデル: 書き出し中 {job.Text}"
+            // 品の絵のための自動の取り込みの失敗 (知らせの窓は出さず、ここの文とログだけ。ShowItemThumbAsync)
+            : state == Ship3DCacheState.None && _thumbError is { } te && string.Equals(te.Record, _ship3DRecord, StringComparison.OrdinalIgnoreCase) ? $"3D モデル: 取り込めませんでした: {te.Message}"
             : state switch
             {
                 Ship3DCacheState.Fresh => "3D モデル: キャッシュあり",
@@ -1019,12 +1031,13 @@ public partial class DetailPanel : UserControl
     // 表示に使う GLB のパス (2026-11-04、利用者の決定「取り込み済みなら取り込みデータ、取り込みしてなければ直接」):
     // 取り込み済みならそれ (Data.p4k が変わっていれば照合してから)、無ければゲームデータから直接読む (確認の窓は出さない。進み具合は進み具合の欄に出る)。
     // 読めなければ null (知らせは Ship3DExports が出す)
-    private async Task<string?> ViewPathAsync(string record, string name)
+    // quiet: 失敗の知らせの窓を出さない (品の絵のための自動の取り込み。ログと Ship3DExports.LastQuietError だけ)
+    private async Task<string?> ViewPathAsync(string record, string name, bool quiet = false)
     {
         var ex = Ship3DExports.Instance;
         var state = ex.StateOf(record);
         if (state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying) txtShip3D.Text = "3D モデル: 照合中 (パッチで Data.p4k が変わったので元データを確かめています)";
-        var path = await ex.GetViewPathAsync(record, name, Window.GetWindow(this));
+        var path = await ex.GetViewPathAsync(record, name, Window.GetWindow(this), quiet);
         UpdateShip3DButtons();
         return path;
     }
@@ -1059,6 +1072,148 @@ public partial class DetailPanel : UserControl
         await ShowShip3DAsync(record, name, path);
     }
 
+    // ===== 船でない品の 3D の小さな絵 (2026-11-05、利用者の指示「R97 Shotgun（個人武器）の右側にアイコン上に斜め 3D を出し、クリックすると出るのが良いかも」) =====
+    // 品の詳細を開いたとき、見出し (h2) の右に、その品の 3D を斜め (ビューアの船外の初めの向き) から描いた PNG (192×192。表示は高さ 96 px) を出す。
+    // 絵を押すと［3D 表示］と同じく下の欄に 3D を出す (ページの chrome.webview.postMessage {type:'ship3d'} → OnDetailWebMessage)。
+    //   絵の元の GLB: ［3D 表示］と同じ流れ (ViewPathAsync → GetViewPathAsync): キャッシュがあればそれ、無ければ取り込みを裏で自動で始める (確認の窓は出さない。
+    //     進み具合は［読み込み］と同じく txtShip3D の「書き出し中」)。「3D モデルを保存しない」なら作業用のフォルダに直接読む。形が無い品は null (絵は出さない。文は「形がありません」)。
+    //     ゲームの Data.p4k が見つからないとき (NoGame) は始めない (GetViewPathAsync が知らせの窓を出すため。文は txtShip3D に出ている)
+    //   絵のファイル: GLB の横に同じ名前の .png (Ship3DExports.ThumbPath。保存しない設定では作業用のフォルダの一時の GLB の横。表示をやめたら GLB と一緒に消える)。
+    //     .png が GLB より新しければそれを使い、無い・古ければ、隠した WebView2 (webThumb) でビューアを ?thumb=1 で開いて 1 コマ描き、PNG (data URL) を受け取って書く。
+    //     保存しない設定で一時の GLB が消えた後も同じ品をまた開いたときに取り直さないよう、描いた絵はこの画面が生きている間は覚えておく (_thumbMemory)
+    private readonly Dictionary<string, byte[]> _thumbMemory = new(StringComparer.OrdinalIgnoreCase);
+    // 今の詳細に出す絵 (record と data URL)。詳細のページを出し直したとき (UEX の値段で作り直すとき) にもう一度差し込む
+    private (string Record, string DataUrl)? _thumb;
+    // 絵のための自動の取り込みの失敗 (record と文)。知らせの窓は出さず txtShip3D の文 (UpdateShip3DButtons) とログだけにする (2026-11-05、親の決定)。
+    // 利用者が［読み込み］［3D 表示］を押したときの失敗は今までどおり窓を出す
+    private (string Record, string Message)? _thumbError;
+    private Task? _webThumbInit;
+    private bool _webThumbHooked;
+    private TaskCompletionSource<string?>? _thumbTcs;
+    private readonly SemaphoreSlim _thumbGate = new(1, 1);
+    private const int ThumbRenderTimeoutMs = 120_000;
+
+    private async Task ShowItemThumbAsync(string record, string name)
+    {
+        var ex = Ship3DExports.Instance;
+        // 詳細の WebView2 が使えない (文字の欄で出している) ときは絵を置く所が無いので描かない
+        if (_webFailed || ex.StateOf(record) == Ship3DCacheState.NoGame) return;
+        var shortName = Ship3DExports.ShortName(record);
+        if (_thumbError is { } old && string.Equals(old.Record, record, StringComparison.OrdinalIgnoreCase)) _thumbError = null;
+        byte[]? png = null;
+        if (_thumbMemory.TryGetValue(shortName, out var remembered) && ex.StateOf(record) == Ship3DCacheState.None && Ship3DExports.NoSave) png = remembered;
+        if (png == null)
+        {
+            var path = await ViewPathAsync(record, name, quiet: true);
+            if (path == null)
+            {
+                // 失敗の文 (quiet で窓を出さなかったもの) を txtShip3D に出す。形が無い品は LastQuietError が無く「形がありません」の文のまま
+                if (Ship3DExports.LastQuietError is { } msg && string.Equals(record, _ship3DRecord, StringComparison.OrdinalIgnoreCase))
+                {
+                    _thumbError = (record, msg);
+                    UpdateShip3DButtons();
+                }
+                return;
+            }
+            if (!string.Equals(record, _ship3DRecord, StringComparison.OrdinalIgnoreCase)) return;
+            var thumbPath = Ship3DExports.ThumbPath(path);
+            try
+            {
+                if (File.Exists(thumbPath) && File.GetLastWriteTimeUtc(thumbPath) >= File.GetLastWriteTimeUtc(path)) png = await File.ReadAllBytesAsync(thumbPath);
+            }
+            catch (Exception e) { AppendAppLog($"[3D モデル] 絵 {Path.GetFileName(thumbPath)} を読めませんでした: {e.Message}"); }
+            if (png == null)
+            {
+                // 描いている間はその GLB を「表示中」にして消されないようにする (保存しない設定の一時ファイルも)
+                ex.AcquireView(shortName);
+                try { png = await RenderThumbAsync(shortName, path); }
+                finally { ex.ReleaseView(shortName); }
+                if (png == null) return;
+                try { await File.WriteAllBytesAsync(thumbPath, png); }
+                catch (Exception e) { AppendAppLog($"[3D モデル] 絵 {Path.GetFileName(thumbPath)} を書けませんでした: {e.Message}"); }
+            }
+            _thumbMemory[shortName] = png;
+        }
+        if (!string.Equals(record, _ship3DRecord, StringComparison.OrdinalIgnoreCase)) return;
+        _thumb = (record, "data:image/png;base64," + Convert.ToBase64String(png));
+        await InjectThumbAsync();
+    }
+
+    // 隠した WebView2 (webThumb) でビューアを ?thumb=1 で開き、描いた PNG を受け取る。描けなければ null (理由はログ)。1 つずつ描く
+    private async Task<byte[]?> RenderThumbAsync(string shortName, string glbPath)
+    {
+        await _thumbGate.WaitAsync();
+        try
+        {
+            try { await (_webThumbInit ??= Ship3DWeb.InitAsync(webThumb)); }
+            catch (Exception e)
+            {
+                _webThumbInit = null;
+                AppendAppLog($"[3D モデル] 絵を描く WebView2 の初期化に失敗しました: {e.GetType().FullName} (HResult 0x{e.HResult:X8}): {e}");
+                return null;
+            }
+            if (!_webThumbHooked)
+            {
+                _webThumbHooked = true;
+                webThumb.CoreWebView2.WebMessageReceived += (_, e) =>
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(e.WebMessageAsJson);
+                        var type = doc.RootElement.TryGetProperty("type", out var t) ? t.GetString() : null;
+                        if (type == "thumb" && doc.RootElement.TryGetProperty("png", out var p) && p.ValueKind == JsonValueKind.String) _thumbTcs?.TrySetResult(p.GetString());
+                        else if (type == "error") _thumbTcs?.TrySetResult(null);
+                    }
+                    catch (Exception ex) { AppendAppLog($"[3D モデル] 絵の知らせを扱えませんでした: {ex.Message}"); _thumbTcs?.TrySetResult(null); }
+                };
+            }
+            var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _thumbTcs = tcs;
+            try
+            {
+                Ship3DWeb.ShowThumb(webThumb, shortName, glbPath);
+                var done = await Task.WhenAny(tcs.Task, Task.Delay(ThumbRenderTimeoutMs));
+                if (done != tcs.Task) { AppendAppLog($"[3D モデル] 「{shortName}」の絵が {ThumbRenderTimeoutMs / 1000} 秒たっても描けなかったのでやめました"); return null; }
+                var dataUrl = tcs.Task.Result;
+                const string prefix = "data:image/png;base64,";
+                if (dataUrl == null || !dataUrl.StartsWith(prefix, StringComparison.Ordinal)) return null;
+                return Convert.FromBase64String(dataUrl[prefix.Length..]);
+            }
+            catch (Exception e)
+            {
+                AppendAppLog($"[3D モデル] 「{shortName}」の絵を描けませんでした: {e}");
+                return null;
+            }
+            finally
+            {
+                _thumbTcs = null;
+                Ship3DWeb.Blank(webThumb);   // 読み込んだ GLB の分のメモリを放す
+            }
+        }
+        finally { _thumbGate.Release(); }
+    }
+
+    // 今の詳細のページの見出し (h2) の右に絵を差し込む (ページを作り直さない)。絵が今の詳細のものでなければ何もしない
+    private async Task InjectThumbAsync()
+    {
+        if (_thumb is not { } th || !_webReady || !string.Equals(th.Record, _detailRecord, StringComparison.OrdinalIgnoreCase)) return;
+        try { await webDetail.CoreWebView2.ExecuteScriptAsync(DetailHtml.ThumbScript(th.DataUrl)); }
+        catch (Exception ex) { AppendAppLog($"[3D モデル] 絵を差し込めませんでした: {ex.Message}"); }
+    }
+
+    // 詳細のページからの知らせ: 絵を押した ({type:'ship3d'}) →［3D 表示］と同じ
+    private void OnDetailWebMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(e.WebMessageAsJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return;
+            var type = doc.RootElement.TryGetProperty("type", out var t) ? t.GetString() : null;
+            if (type == "ship3d") BtnShip3D_Click(this, new RoutedEventArgs());
+        }
+        catch (Exception ex) { AppendAppLog($"[詳細] ページからの知らせを扱えませんでした: {ex.Message}"); }
+    }
+
     // ［別ウィンドウ］: 別のウィンドウ (モードレス) に出す (読み込みは窓の側でする。取り込み済みならそれ、無ければゲームデータから直接読む)
     private void BtnShip3DWindow_Click(object sender, RoutedEventArgs e)
     {
@@ -1085,8 +1240,16 @@ public partial class DetailPanel : UserControl
     private void BtnShip3DBack_Click(object sender, RoutedEventArgs e) => HideShip3D();
 
     // 下の欄に 3D を出す (詳細の表の WebView2 は隠すだけで、中身はそのまま)
+    // ビューアの右上の閉じる (Ship3DWeb.CloseRequested): この欄の WebView2 なら［表に戻る］と同じ
+    private bool _closeHooked;
+    private void HookShip3DClose()
+    {
+        if (_closeHooked) return; _closeHooked = true;
+        Ship3DWeb.CloseRequested += w => { if (ReferenceEquals(w, web3D)) Dispatcher.BeginInvoke(HideShip3D); };
+    }
     private async Task ShowShip3DAsync(string record, string name, string? glbPath = null)
     {
+        HookShip3DClose();
         try { await (_web3DInit ??= Ship3DWeb.InitAsync(web3D)); }
         catch (Exception ex)
         {
@@ -1101,7 +1264,7 @@ public partial class DetailPanel : UserControl
         if (_ship3DShown != null) Ship3DExports.Instance.ReleaseView(_ship3DShown);
         Ship3DExports.Instance.AcquireView(shortName);
         _ship3DShown = shortName;
-        try { Ship3DWeb.Show(web3D, shortName, name, glbPath); }
+        try { Ship3DWeb.Show(web3D, shortName, name, glbPath, isItem: Ship3DExports.IsItemRecord(record)); }
         catch (Exception ex)
         {
             AppendAppLog($"[3D モデル] 表示できませんでした: {ex}");
@@ -1291,6 +1454,25 @@ internal static class DetailHtml
             a.className = 'amen'; a.title = name; img.src = s.getAttribute('data-icon'); img.alt = name;
             a.appendChild(img); s.parentNode.replaceChild(a, s);
           });
+        })();
+        """;
+
+    // 船でない品の 3D の小さな絵 (PNG の data URL) を、見出し (最初の h2) の右に差し込むスクリプト (DetailPanel.InjectThumbAsync。ページを作り直さずに走らせる)。
+    // 押すと chrome.webview.postMessage({type:'ship3d'}) でアプリに知らせる (DetailPanel.OnDetailWebMessage →［3D 表示］と同じ)。すでにあれば置き換える。
+    // data URL は JSON の文字列にして入れる (' や \ を含まない英数字と +/=;:, だけだが、念のため)
+    public static string ThumbScript(string dataUrl) => $$"""
+        (function () {
+          var h = document.querySelector('h2');
+          if (!h) return;
+          var old = document.getElementById('thumb3d');
+          if (old) old.parentNode.removeChild(old);
+          var img = document.createElement('img');
+          img.id = 'thumb3d';
+          img.src = {{System.Text.Json.JsonSerializer.Serialize(dataUrl)}};
+          img.alt = '3D';
+          img.title = '3D 表示 (押すと下の欄にこの品の 3D を出します)';
+          img.addEventListener('click', function () { try { window.chrome.webview.postMessage({ type: 'ship3d' }); } catch (e) { } });
+          h.appendChild(img);   // 見出しの文字のすぐ右 (2026-11-05、利用者「絵が遠すぎる。武器名のすぐ右がいい」)
         })();
         """;
 
@@ -1534,7 +1716,7 @@ internal static class DetailHtml
     // body は自分で作った HTML (名前などは打ち消し済み)。extraCss はページに足す CSS (マップタブの並べ方など)。スクリプトは MapScript だけ
     public static string Page(string body, string extraCss = "") => $$"""
         <!DOCTYPE html><html><head><meta charset="utf-8">
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src https://{{AmenityIcons.Host}}">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src https://{{AmenityIcons.Host}} data:">
         <style>
         body { font-family: 'Yu Gothic UI','Meiryo','Segoe UI',sans-serif; font-size: 13px; color: #212121; background: #FFFFFF;
                margin: 8px 10px; line-height: 1.5; word-wrap: break-word; }
@@ -1602,6 +1784,7 @@ internal static class DetailHtml
         a[href^="scjt://detail/ShopMap%3A"]:hover { background: #E3F2FD; }
         .map g.amenrow circle { fill: #37474F; stroke: none; }
         .map g.amenrow { pointer-events: visible; }
+        #thumb3d { display: inline-block; vertical-align: middle; height: 96px; margin: 0 0 0 16px; cursor: pointer; }
         {{extraCss}}
         </style></head><body>{{body}}<script>{{MapScript}}</script></body></html>
         """;

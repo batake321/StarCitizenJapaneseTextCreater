@@ -13,9 +13,10 @@ body{margin:0;display:flex;height:100vh;font:13px "Yu Gothic UI","Segoe UI",sans
 #pick{position:absolute;left:8px;bottom:8px;right:8px;max-height:30%;overflow:auto;background:rgba(0,0,0,.75);color:#fff;font-size:12px;white-space:pre-wrap;padding:6px;display:none}
 #msg{position:absolute;left:50%;top:45%;transform:translate(-50%,-50%);font-size:15px;color:#ddd;pointer-events:none}
 /* 取り出し中の表示 (画面の中央。文字 32px・バー 480×18) */
-#prog{position:absolute;left:50%;top:45%;transform:translate(-50%,-50%);display:none;background:rgba(0,0,0,.8);border:1px solid #888;padding:18px 26px;pointer-events:none;z-index:5}
-#progText{font-size:32px;font-weight:bold;color:#fff;text-align:center;margin-bottom:12px}
-#progOuter{width:480px;height:18px;background:#333;border:1px solid #777}
+/* (2026-11-05、利用者の指示「右下に表示されることがあるが、ここに取り込みや作画中は同じように出してほしい」) 取り出し中・作画中は、どの場合も右下の小さな形 */
+#prog{position:absolute;left:auto;right:12px;bottom:12px;top:auto;transform:none;display:none;background:rgba(0,0,0,.8);border:1px solid #888;padding:6px 10px;pointer-events:none;z-index:5}
+#progText{font-size:14px;font-weight:bold;color:#fff;text-align:center;margin-bottom:4px}
+#progOuter{width:200px;height:8px;background:#333;border:1px solid #777}
 #progBar{height:100%;width:0;background:#4a8;transition:width .2s}
 /* 残りを裏で読み込むときは右下に小さく (文字 14px・バー 200×8) */
 #prog.small{left:auto;top:auto;right:12px;bottom:12px;transform:none;padding:6px 10px}
@@ -24,6 +25,19 @@ body{margin:0;display:flex;height:100vh;font:13px "Yu Gothic UI","Segoe UI",sans
 .lg span{display:inline-block;width:10px;height:10px;margin-right:4px}
 label{display:block}
 h4{margin:10px 0 4px}
+/* 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート) の見出しと引き出し線 (v2.5.3 の旧方式 wwwroot/station3d/viewer.html の .cap・#lines の移植。view3d.js の「外から見たときの印と見出し」) */
+#extOverlay{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:3}
+#extLines{position:absolute;left:0;top:0;width:100%;height:100%}
+/* パッドの見出し (Pad01 の形): 「Pad」は小さめの淡い灰色、番号は大きめの太字でパッドの印と同じ黄色 (利用者の指示「数字は大きめにして色を変えてわかるように」) */
+.xcap .padw{font-size:22px;color:#c8d0dc}
+.xcap .padn{font-size:30px;font-weight:bold;color:#ffcc33;margin-left:1px}
+/* ハンガーの見出し (ハンガー L): 大きさの文字はパッドの番号と同じ大きさの太字で、ハンガーの印と同じ青 (利用者の指示「XL L M S などの大きさが必要」) */
+.xcap .hw{font-size:22px;color:#c8d0dc}
+.xcap .hs{font-size:30px;font-weight:bold;color:#6cb6ff;margin-left:3px}
+.xcap .dkw{font-size:22px;color:#c8d0dc}
+.xcap .dkn{font-size:30px;font-weight:bold;color:#ff8ad8;margin-left:1px}
+.xcap{position:absolute;padding:1px 6px;border-radius:3px;white-space:nowrap;font-size:24px;line-height:32px;color:#fff;background:rgba(24,30,42,0.88);border:1px solid;box-sizing:border-box;font-family:"Yu Gothic UI","Segoe UI",sans-serif}
+.sw{display:inline-block;width:10px;height:10px;border-radius:50%;margin:0 3px 0 2px;vertical-align:middle}
 </style>
 <script type="importmap">{"imports":{"three":"../three/build/three.module.js"}}</script>
 </head><body>
@@ -33,6 +47,8 @@ h4{margin:10px 0 4px}
 <input type="text" id="tfilter" placeholder="名前・種類の一部で絞り込み">
 <div id="tlist" style="max-height:220px;overflow:auto"></div>
 <div style="margin-top:4px">読み込む範囲: 中心から ± <input type="number" id="regionR" value="150" step="10" min="10" style="width:60px"> m の立方体 <button id="reloadHere" style="display:inline;width:auto">今の中心で読み込み直す</button></div>
+<div style="margin-top:6px"><b>表示</b>: <label style="display:inline"><input type="checkbox" class="mk" data-cat="shop" checked>店</label> <label style="display:inline"><input type="checkbox" class="mk" data-cat="terminal" checked>端末</label> <label style="display:inline"><input type="checkbox" class="mk" data-cat="transit" checked>エレベーター・トラム</label> <label style="display:inline"><input type="checkbox" class="mk" data-cat="quest" checked>クエストの扉・パネル</label> <label style="display:inline"><input type="checkbox" class="mk" data-cat="comment" checked>コメント</label></div>
+<div style="margin-top:4px"><b>外から見たとき</b> (引いて全体を見ているときだけ): <label style="display:inline"><input type="checkbox" id="chkExtPad" checked><span class="sw" style="background:#ffcc33"></span>着陸パッド <span id="nExtPad"></span></label> <label style="display:inline"><input type="checkbox" id="chkExtHangar" checked><span class="sw" style="background:#6cb6ff"></span>ハンガー <span id="nExtHangar"></span></label> <label style="display:inline"><input type="checkbox" id="chkExtDock" checked><span class="sw" style="background:#ff8ad8"></span>ドッキングポート <span id="nExtDock"></span></label></div>
 <h4>歩くモード</h4><div><button id="walkBtn">歩くモード: OFF</button> <button id="hereBtn" style="display:inline;width:auto">現在位置</button> <span id="walkInfo"></span><div id="elevBtns"></div><div><button id="runBtn" style="display:inline;width:auto">走る: OFF</button> <button id="stBtn" style="display:inline;width:auto">姿勢: 立つ</button> <button id="ncBtn" style="display:inline;width:auto">すり抜け: OFF</button></div>
 <div><button id="recBtn">録画を始める</button> <button id="saveBtn">保存</button> <label style="display:inline">読み込み <input type="file" id="loadF" accept=".json"></label> <span id="recInfo"></span></div><div style="font-size:12px">W・S 前後 / A・D 左右 / Q・E 向き / ドラッグで向き / Shift 走る ON・OFF / スペース ジャンプ (前 0.7 m に 2.52 m までの段があれば、よじ登る) / C しゃがむ / Ctrl 寝そべる / N すり抜け ON・OFF (床の判定だけ残す。録画にも入る) / はしご: そばで W / 録画中に Enter でコメント (欄を開いたまま形を押すとその所に付く。押さなければ今の目線の高さ)。立つ 1.8 m (目 1.7)・しゃがむ 1.2 m (目 1.05・速さ半分)・寝そべる 0.5 m (目 0.35・速さ 1/4)。体の高さより低い所は通れない。上り下りできる段 0.6 m、歩く 2.8 m/秒・走る 10 m/秒、ジャンプ 4.43 m/秒 (高さ 1.0 m)。ドアはすり抜け (壁で止まることもしない)。エレベーターの 2 m 以内でボタンが出る</div></div>
 <h4>文字の道案内</h4><div id="guide" style="white-space:pre-wrap;font-size:12px"></div>
@@ -48,11 +64,12 @@ h4{margin:10px 0 4px}
 <label><input type="checkbox" data-k="counterpart" checked><span style="background:#6b4423"></span>カウンターの部品 (名前に counter)</label>
 <label><input type="checkbox" data-k="excluded" checked><span style="background:#444"></span>除外 (light_attachment。床・階段・坂・壁のどれにもしない)</label>
 <label><input type="checkbox" id="shp" checked>玉 (案内するもの)</label>
+<label><input type="checkbox" id="texOn" checked>テクスチャ (ゲームの画像を貼る。切ると灰色の単色)</label>
 <div>この高さより上を消す (中心から): <input type="range" id="cut" min="-25" max="25" step="0.25" value="25" style="width:150px"> <span id="cutv">25</span> m</div>
 </div>
 <div style="margin-top:6px"><b>線と玉</b>: 白い柱と灰の玉 = 店 (今の地図で乗り場から行ける店は緑・行けない店は赤)・桃の玉 = admin・緑の小さい玉 = 薬局・橙の玉 = 端末・黄の玉 = エレベーター・トラムの乗り口 (hangar_lobby を含む)・青の玉 = 階段の下の端・緑の線 = 店の入口を探した直線で、障害物に当たらなかったもの (入口)・赤の線 = 店の入口を探した直線で、障害物に当たったもの・水色の線 = 強調した部品の縁取り・白い線 = まとめた形の輪郭</div>
 <div>左ドラッグ: 回す・傾ける / 右ドラッグ (Shift+左): 動かす / ホイール: 近づく・遠ざかる (中心の 2 m より近くは見ている向きへ進む) / キー W・S 見ている向きへ前後・A・D 左右・Q・E 上下 (Shift で速く) / 形を押す: そこを回る中心にして部品の名前と判定</div>
 <div id="info"></div></div>
-<div id="view"><div id="msg"></div><div id="prog"><div id="progText"></div><div id="progOuter"><div id="progBar"></div></div></div><div id="pick"></div><div id="tbox" style="position:absolute;right:24px;top:80px;width:340px;display:none;background:#1b1f24;border:2px solid #9ab;padding:8px;z-index:5"><div id="tboxHead" style="font-weight:bold;margin-bottom:6px"></div><div id="tboxList" style="height:300px;overflow-y:auto;border:1px solid #567;background:#11151a"></div><div style="font-size:12px;color:#aaa;margin-top:4px">選ぶと移ります。Esc で閉じます</div></div><div id="sbox" style="position:absolute;left:50%;top:60px;transform:translateX(-50%);width:min(760px,90%);max-height:80%;overflow:auto;display:none;background:#1b1f24;border:2px solid #9ab;padding:8px;z-index:6"></div><div id="cbox" style="position:absolute;left:50%;top:40%;transform:translateX(-50%);display:none;background:#222;padding:8px;border:1px solid #888">コメント (Enter で決める・Esc でやめる。欄を開いたまま形を押すと、その所に付ける): <br><input id="ctext" style="width:420px"> <span id="cpos"></span></div></div>
+<div id="view"><div id="extOverlay"><svg id="extLines"></svg><div id="extCaps"></div></div><div id="msg"></div><div id="prog"><div id="progText"></div><div id="progOuter"><div id="progBar"></div></div></div><div id="pick"></div><div id="tbox" style="position:absolute;right:24px;top:80px;width:340px;display:none;background:#1b1f24;border:2px solid #9ab;padding:8px;z-index:5"><div id="tboxHead" style="font-weight:bold;margin-bottom:6px"></div><div id="tboxList" style="height:300px;overflow-y:auto;border:1px solid #567;background:#11151a"></div><div style="font-size:12px;color:#aaa;margin-top:4px">選ぶと移ります。Esc で閉じます</div></div><div id="sbox" style="position:absolute;left:50%;top:60px;transform:translateX(-50%);width:min(760px,90%);max-height:calc(100% - 80px);overflow:auto;display:none;background:#1b1f24;border:2px solid #9ab;padding:8px;z-index:6"></div><div id="cbox" style="position:absolute;left:50%;top:40%;transform:translateX(-50%);display:none;background:#222;padding:8px;border:1px solid #888">コメント (Enter で決める・Esc でやめる。欄を開いたまま形を押すと、その所に付ける): <br><input id="ctext" style="width:420px"> <span id="cpos"></span></div></div>
 <script type="module" src="view3d.js"></script>
 </body></html>

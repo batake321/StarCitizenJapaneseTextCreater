@@ -98,6 +98,8 @@ public class AppConfig
     // ステーションの 3D (新しい方式) の、地点ごとの取り出し結果の保存 (StationView3DCache) の上限 (GB)。負なら未設定で、初期値 = 置き場所のドライブの残りの 1/3、ただし最大 10 GB。
     // 0 なら保存しない (先読みもしない)
     public double Station3DCacheMaxGB { get; set; } = -1;
+    // ステーションの 3D (新しい方式) に貼るゲームの画像 (テクスチャ) の長い辺の上限 (px。既定 512。0 なら画像を貼らない = 単色) (2026-11-05)
+    public int Station3DTextureMaxPx { get; set; } = StationView3DTextures.DefaultMaxPx;
 
     // 自動更新: 起動したときと毎日 AutoUpdateTime (HH:mm) に、新しい版を確かめる (AppUpdater)
     public bool AutoUpdateEnabled { get; set; } = true;

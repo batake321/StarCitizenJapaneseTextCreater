@@ -19,7 +19,7 @@ internal sealed class StationView3DCache
 {
     // 保存の形の版。保存する中身が変わる変更 (BuildGeo・ComputeInst・WriteSocpakFile・融合・床の補い・region.json の項目) を入れたときは、ここを上げる
     // (Version には、ほかにモジュールの MVID も入るので、ビルドし直したときは必ず別の鍵になる)
-    public const string FormatVersion = "region-cache-1";
+    public const string FormatVersion = "region-cache-5";   // 2: 区画のファイルの parts にエレベーターの扉の前の向きを足した (2026-11-05)。3: region.json に店のカウンターの箱 counters を足した (2026-11-05)。4: parts に UV・画像の番号、region.json に textures を足した (2026-11-05)。5: counters を店と同じ階の箱だけにした (2026-11-05)
     public const string FolderName = "stations3d_cache";
     private const string MetaName = "cache.json";
     // 保存する前に、保存先のドライブに残しておく空き (これを割るなら保存しない)

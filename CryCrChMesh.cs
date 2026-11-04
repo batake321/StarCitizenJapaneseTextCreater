@@ -109,6 +109,19 @@ internal static class CryCrChMesh
                     float center = (mx[k] + mn[k]) / 2.0f;
                     pos[v * 3 + k] = snorm * half + center;
                 }
+            // UV (T2S): 要素の 12〜15 バイト目の half × 2 (8〜11 バイト目は C4B の色)。
+            // 実データ (orison_comm_000 の mergedmeshes の CompoundRenderNode_*.cgf) で、12〜15 バイト目を half で読むと値が 0〜数倍の範囲に収まり、
+            // 8〜11 バイト目は 0〜255 の色の値 (half で読むと範囲が外れる) であることを確かめた (2026-11-05。scratchpad の tex\s の uvcheck)
+            if (size >= 16)
+            {
+                var uv = new float[nVerts * 2];
+                for (int v = 0; v < nVerts; v++)
+                {
+                    uv[v * 2] = (float)BitConverter.UInt16BitsToHalf(BinaryPrimitives.ReadUInt16LittleEndian(data[(v * size + 12)..]));
+                    uv[v * 2 + 1] = (float)BitConverter.UInt16BitsToHalf(BinaryPrimitives.ReadUInt16LittleEndian(data[(v * size + 14)..]));
+                }
+                mesh.Uvs = uv;
+            }
         }
         else if (streams[StreamPositions] != 0)
         {
