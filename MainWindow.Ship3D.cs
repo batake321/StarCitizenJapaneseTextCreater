@@ -20,6 +20,8 @@ public partial class MainWindow
         txtShip3DFolder.Text = Ship3DExports.Folder;
         txtShip3DMaxMB.Text = Ship3DExports.MaxMb.ToString();
         chkShip3DNoSave.IsChecked = App.Config.Ship3DNoSave;
+        txtStation3DCacheMaxGB.Text = Station3DCacheMaxGbText();
+        UpdateStation3DCacheUsageText();
         UpdateShip3DDriveText();
         UpdateShip3DUsageText();
         // 「全部取り込み済み」の数え直しは、知らせが短い間に続けて来たら 1 回にまとめる (最後の知らせから 300 ms 後に、UI スレッドの外で数える)
@@ -141,7 +143,7 @@ public partial class MainWindow
         if (txtShip3DUsage == null) return;
         // 船の使用量 (2026-11-04、ステーションの 2D の地図・古い方式のステーションの 3D を消したので船だけ)
         var files = Ship3DExports.CachedFiles();
-        txtShip3DUsage.Text = $"今の使用量: {Ship3DExports.FormatBytes(files.Sum(f => f.Length))} ({files.Count} 隻)";
+        txtShip3DUsage.Text = $"今の使用量: {Ship3DExports.FormatBytes(files.Sum(f => f.Length))} ({files.Count} 件)";
     }
 
     // ［マップをまとめて取り込む］は、船の［船舶・車両をまとめて取り込む］と同じく、CPU 使用率が 90% 以上のときと、ステーションのまとめて取り込むが動いている間と、
@@ -206,6 +208,46 @@ public partial class MainWindow
             : allDone ? "船舶・車両は今のパッチでは全部取り込み済み" : "";
     }
 
+    // ===== ステーションの 3D の取り出し結果の保存 (StationView3DCache) の上限 (GB) =====
+    // (2026-11-04、利用者の指示「先読み、キャッシュ化 HDD 容量設定が空いていればファイル保存など早く動かす仕組みを入れて」)
+    private static string Station3DCacheMaxGbText() => (StationView3DCache.MaxBytesSetting / (double)(1L << 30)).ToString("0.##", System.Globalization.CultureInfo.CurrentCulture);
+
+    private void UpdateStation3DCacheUsageText()
+    {
+        if (txtStation3DCacheUsage == null) return;
+        var cache = StationView3DCache.Current;
+        _ = Task.Run(() => cache.UsedBytes()).ContinueWith(t =>
+        {
+            if (t.IsCompletedSuccessfully) txtStation3DCacheUsage.Text = $"今の使用量: {Ship3DExports.FormatBytes(t.Result)}";
+        }, TaskScheduler.FromCurrentSynchronizationContext());
+    }
+
+    // 「設定を保存」から: 0 以上の数 (GB) で、置き場所のドライブの残り容量より小さい値だけ保存する (そうでなければ保存せずに知らせ、前の値のまま)。
+    // 上限が下がったら、すぐに古いものから消す (0 なら全部。使われている最中のものは残る)
+    private void SaveStation3DCacheSettings()
+    {
+        var text = txtStation3DCacheMaxGB.Text.Trim();
+        var d = Ship3DExports.DriveOf(Ship3DFolderFromBox());
+        var ok = double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.CurrentCulture, out var gb)
+                 || double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out gb);
+        if (!ok || gb < 0 || double.IsNaN(gb) || double.IsInfinity(gb))
+        {
+            MessageBox.Show(this, $"ステーションの 3D の保存の上限「{text}」は数 (GB。0 以上。0 なら保存しない) ではないので保存しません。前の値 ({Station3DCacheMaxGbText()} GB) のままです。",
+                "3D モデル", MessageBoxButton.OK, MessageBoxImage.Warning);
+            txtStation3DCacheMaxGB.Text = Station3DCacheMaxGbText();
+        }
+        else if (d is { } x && gb * (1L << 30) >= x.Free)
+        {
+            MessageBox.Show(this, $"ステーションの 3D の保存の上限 {gb:0.##} GB は、置き場所のドライブ {x.Root} の残り容量 ({x.Free / (double)(1L << 30):0.##} GB) 以上なので保存しません。" +
+                $"前の値 ({Station3DCacheMaxGbText()} GB) のままです。", "3D モデル", MessageBoxButton.OK, MessageBoxImage.Warning);
+            txtStation3DCacheMaxGB.Text = Station3DCacheMaxGbText();
+        }
+        else App.Config.Station3DCacheMaxGB = gb;
+        StationView3DCache.NotifySettingsChanged();
+        var cache = StationView3DCache.Current;
+        _ = Task.Run(() => { cache.Evict(); }).ContinueWith(_ => UpdateStation3DCacheUsageText(), TaskScheduler.FromCurrentSynchronizationContext());
+    }
+
     // 欄のフォルダ (空なら既定)
     private string Ship3DFolderFromBox()
     {
@@ -253,6 +295,7 @@ public partial class MainWindow
         }
         else App.Config.Ship3DMaxMB = maxMb;
         App.Config.Ship3DNoSave = chkShip3DNoSave.IsChecked == true;
+        SaveStation3DCacheSettings();
         UpdateShip3DDriveText();
         UpdateShip3DBatchButton();
         UpdateShip3DUsageText();

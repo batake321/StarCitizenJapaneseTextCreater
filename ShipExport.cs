@@ -128,9 +128,9 @@ internal static partial class ShipExport
         try { return db.QueryFirstString(cp, r); }
         catch (Exception e) when (e is DataCoreDb.QueryException or InvalidDataException or IndexOutOfRangeException or ArgumentOutOfRangeException) { return null; }
     }
-    internal static List<DcValue>? TryValues(DataCoreDb db, DataCoreDb.CompiledPath cp, DataCoreDb.Record r, bool noRefs)
+    internal static List<DcValue>? TryValues(DataCoreDb db, DataCoreDb.CompiledPath cp, DataCoreDb.Record r, bool noRefs, HashSet<string>? keep = null)
     {
-        try { return db.QueryValues(cp, r, noRefs); }
+        try { return db.QueryValues(cp, r, noRefs, keep); }
         catch (Exception e) when (e is DataCoreDb.QueryException or InvalidDataException or IndexOutOfRangeException or ArgumentOutOfRangeException) { return null; }
     }
     private static byte? TryByte(DataCoreDb db, DataCoreDb.CompiledPath cp, DataCoreDb.Record r)
@@ -253,12 +253,19 @@ internal static partial class ShipExport
 
     private sealed record PortInfo(string? Bone, bool NoRotation, float[] Pos, float[] Rot, string Tags);
 
+    // PortInfoMap が読む欄の名前。ほかの欄は値の木に入れない (References を開くと木が爆発する record がある: BMBRCK_S03_AEGS_Retaliator_Front は
+    // 他の欄まで開くと作業セット 39 GB・308 秒。読む欄の値は変わらない)
+    private static readonly HashSet<string> PortInfoFields = new(StringComparer.Ordinal)
+    {
+        "Ports", "Name", "AttachmentImplementation", "Helper", "constraintParams", "noRotation", "Offset", "Position", "Rotation", "x", "y", "z", "PortTags",
+    };
+
     private static Dictionary<string, PortInfo> PortInfoMap(DataCoreDb db, DataCoreDb.Record record)
     {
         var map = new Dictionary<string, PortInfo>(StringComparer.Ordinal);
         var cp = TryCompile(db, record.StructIndex, "Components[SItemPortContainerComponentParams]", DataCoreDb.AnyLeaf);
         if (cp == null) return map;
-        if (TryValues(db, cp, record, false) is not { } comps) return map;
+        if (TryValues(db, cp, record, false, PortInfoFields) is not { } comps) return map;
         foreach (var comp in comps)
         {
             if (DcValue.ArrField(comp, "Ports") is not { } ports) continue;

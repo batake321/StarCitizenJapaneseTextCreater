@@ -18,7 +18,10 @@ if (APP) window.chrome.webview.addEventListener('message', e => {
   // マイハンガーの用意ができた・できなかった ({type:'hangarReady', site, data, title, how}・{type:'hangarError', message})、販売品 ({type:'sales', title, shops})
   if (d.type === 'hangarReady' || d.type === 'hangarError') { const hw = hangarWait; hangarWait = null; if (hw) { if (d.type === 'hangarReady') hw.ok(d); else hw.ng(new Error(d.message)); } return; }
   if (d.type === 'sales') { showSales(d); return; }
+  if (d.type === 'prewarm') { prewarmStart(d); return; }
+  if (d.type === 'prewarmCancel') { prewarmStop(); return; }
   if (d.type === 'here') { onHere(d); return; }
+  if (d.type === 'walkFill') { onWalkFill(d); return; }
   const w = regionWait.get(d.id); if (!w) return;
   if (d.type === 'regionProgress') showProgress(d.done, d.total);
   else if (d.type === 'regionReady') { regionWait.delete(d.id); w.ok(d); }
@@ -81,9 +84,12 @@ cv.addEventListener('pointermove', e => {
   }
   upd();
 });
+const LEAVE_DIST = 10000;   // ［マップ］タブの中で、中心からこれ (m) より遠ざかると星系図に戻る
 cv.addEventListener('wheel', e => {
   e.preventDefault();
   const nd = dist * Math.exp(e.deltaY * 0.001);
+  // ［マップ］タブの中 (?tab=1) では、遠ざかり切ったら星系図に戻る (アプリへ知らせる)
+  if (APP && qs.get('tab') === '1' && !walk && e.deltaY > 0 && nd > LEAVE_DIST) { window.chrome.webview.postMessage({ type: 'leave' }); return; }
   if (e.deltaY < 0 && nd < 2) {
     // 中心の 2 m より近くへは、中心を見ている向きへ進める (カメラも同じだけ進む)
     const step = Math.max(0.2, dist) * (1 - Math.exp(e.deltaY * 0.001));
@@ -123,46 +129,112 @@ const STANCE = { stand: { h: 1.8, eye: 1.7, sp: 1 }, crouch: { h: 1.2, eye: 1.05
 let stance = 'stand';
 // ジャンプ: 上向きの速さ 4.43 m/秒 (重力 9.81 m/秒² で高さ 1.0 m)。よじ登り: 正方形のコンテナの高さ 1 個分 (container_dry_1_025x0375x025_a・storage_container_1_025x05x025_a の高さ 2.52 m) まで
 const JUMP_V = 4.43, GRAV = 9.81, CLIMB = 2.52, LADDER_V = 1.5;
-let vz = 0, air = false, onLadder = null, cgrid = null;
+let vz = 0, air = false, onLadder = null;
 let rec = null, play = null, noclip = false;
-let walk = false, run = false, wyaw = 0, wpitch = 0, wpos = new THREE.Vector3(), fgrid = null;
-// 当たり判定の升目 (足元 fgrid・頭の上 cgrid・横 wgrid・判定の床 flgrid) は、解析の糸 (view3d-worker.js) が作って渡す
-// (2026-11-04、利用者の指摘「移動して読み込む時止まる」: 画面の糸で作ると数秒止まっていた。中身は前の buildGrid・buildCeil・buildWall・buildFloorGrid と同じ)。
-// 形: 並べた鍵 (i × 100003 + j)・始まり・中身 (三角形の位置)。引くのは二分探し
-function gridGet(g, key) {
+let walk = false, run = false, wyaw = 0, wpitch = 0, wpos = new THREE.Vector3();
+// ===== 当たり判定の升 (引いたときだけ作る) =====
+// (2026-11-05、利用者の指示「当たり判定も範囲を決めればメモリ節約になるんじゃない？」「物理的にいけないところを省いて、直線で」)
+// 以前は解析の糸 (view3d-worker.js) が 1 m (頭の上は 2 m) の升目 f・c・w・fl を全部作って渡していた (Seraphim ±30 m で約 4 GB)。
+// 今は解析の糸が渡すのは荒い区切り coarse (16 m の箱ごとの三角形の位置 b の一覧 all・fl と、64 箱を超える大きな三角形の並び bigAll・bigFl) だけ。
+// 升は cellGet(kind, i, j) で初めて引いたときに、その升の入る 16 m の箱の一覧と big から、以前の升目と同じ条件で三角形を選んで作り、cells に持つ (2 回目からは cells から返す)。
+//   f (足元): 上向き (cz > 0)・1 m の升・升の数 ≤ 4096。ドアも入れる
+//   c (頭の上): 下向き (cz < 0)・2 m の升 (floor(x/2))・升の数 ≤ 1024。ドア (名前に door・doors があり elevator の無い部品) は入れない
+//   w (横): ドア以外の全部・1 m の升・升の数 ≤ 4096
+//   fl (判定の床): floor2・tube2 の三角形・1 m の升・升の数 ≤ 4096
+// 升の中身の並びは三角形の位置 b の昇順 (以前の升目と同じ)。作った升は捨てない (親の決定。読み込み直しで中心が変わるときは全部捨てる: 鍵がずれるため)
+// 形 (coarse.all・coarse.fl): 並べた鍵 (I × 100003 + J)・始まり・中身 (三角形の位置)。引くのは二分探し
+// ----- CELLS_BEGIN (この印の間は試しの道具が切り出して使う。cur・curBuf・COL・coarse だけを使う) -----
+let coarse = null;
+// a: 歩くモードの「粗い形に物体が無い升」を探す用 (ドアも含む全部の三角形。1 m。利用者の指示「床でなく物体で」)
+const cells = { f: new Map(), c: new Map(), w: new Map(), fl: new Map(), a: new Map() };
+const CELL_BOX = 16;
+// ドアの部品か (worker の以前の isDoor と同じ決まり)。cur.parts の添字ごと。地点を替えたら作り直す
+let doorParts = null;
+function cellReset() { for (const m of Object.values(cells)) m.clear(); doorParts = null; }
+function boxGet(g, key) {
   if (!g) return null; const K = g.keys; let lo = 0, hi = K.length - 1;
   while (lo <= hi) { const m = (lo + hi) >> 1, v = K[m]; if (v === key) return g.items.subarray(g.starts[m], g.starts[m + 1]); if (v < key) lo = m + 1; else hi = m - 1; }
   return null;
 }
+// 三角形の位置 b の部品がドアか (b の入る種類の範囲 cur.offs[k] から、三角形の番号 → 部品の添字 (cur.ioffs[k]) を引く)
+function triIsDoor(b) {
+  if (!doorParts) doorParts = cur.parts.map(q => { const w = q[1].split('_'); return w.some(x => x === 'door' || x === 'doors') && !w.includes('elevator'); });
+  for (const k of Object.keys(COL)) {
+    const [o, n] = cur.offs[k]; if (b < o || b >= o + n) continue;
+    const io = cur.ioffs[k]; return doorParts[new Uint32Array(curBuf, io[0] * 4, io[1])[(b - o) / 9]];
+  }
+  return false;
+}
+// 升 (kind, i, j) に入る三角形か (以前の worker の sweep と同じ条件)
+function triInCell(F, kind, b, i, j) {
+  const x0 = Math.min(F[b], F[b + 3], F[b + 6]), x1 = Math.max(F[b], F[b + 3], F[b + 6]), y0 = Math.min(F[b + 1], F[b + 4], F[b + 7]), y1 = Math.max(F[b + 1], F[b + 4], F[b + 7]);
+  if (kind === 'c') {
+    const cz = (F[b + 3] - F[b]) * (F[b + 7] - F[b + 1]) - (F[b + 4] - F[b + 1]) * (F[b + 6] - F[b]); if (!(cz < 0)) return false;
+    if (triIsDoor(b)) return false;
+    const a0 = Math.floor(x0 / 2), a1 = Math.floor(x1 / 2), c0 = Math.floor(y0 / 2), c1 = Math.floor(y1 / 2);
+    return (a1 - a0 + 1) * (c1 - c0 + 1) <= 1024 && a0 <= i && i <= a1 && c0 <= j && j <= c1;
+  }
+  const i0 = Math.floor(x0), i1 = Math.floor(x1), j0 = Math.floor(y0), j1 = Math.floor(y1);
+  if ((i1 - i0 + 1) * (j1 - j0 + 1) > 4096 || i < i0 || i > i1 || j < j0 || j > j1) return false;
+  if (kind === 'f') return (F[b + 3] - F[b]) * (F[b + 7] - F[b + 1]) - (F[b + 4] - F[b + 1]) * (F[b + 6] - F[b]) > 0;
+  if (kind === 'w') return !triIsDoor(b);
+  return true;   // fl・a
+}
+// 升 (kind, i, j。c は 2 m の升の番号、ほかは 1 m) の三角形の位置の並び (b の昇順)。無ければ null。初めて引いたときに作って cells に持つ
+function cellGet(kind, i, j) {
+  if (!coarse) return null;
+  const M = cells[kind], key = i * 100003 + j; const got = M.get(key); if (got !== undefined) return got;
+  const F = new Float32Array(curBuf);
+  const s = kind === 'c' ? 2 : 1;   // 升の 1 辺 (m)。2 m の升 [2i, 2i+2) も 1 つの 16 m の箱に収まる (16 は 2 の倍数)
+  const box = boxGet(kind === 'fl' ? coarse.fl : coarse.all, Math.floor(i * s / CELL_BOX) * 100003 + Math.floor(j * s / CELL_BOX)) || [];
+  const big = kind === 'fl' ? coarse.bigFl : coarse.bigAll;
+  // 箱の一覧と big はどちらも b の昇順なので、小さい方から順に取って昇順にそろえる
+  const out = []; let p = 0, q = 0;
+  while (p < box.length || q < big.length) {
+    const b = q >= big.length || (p < box.length && box[p] < big[q]) ? box[p++] : big[q++];
+    if (triInCell(F, kind, b, i, j)) out.push(b);
+  }
+  const res = out.length ? Uint32Array.from(out) : null; M.set(key, res); return res;
+}
+// ----- CELLS_END -----
 function buildGrid() { }
 function buildCeil() { }
 function ceilAt(x, y, zmin) {
   // (x, y) の真上で、zmin より高い下向きの面のいちばん低い所
-  const all = new Float32Array(curBuf); const l = gridGet(cgrid, Math.floor(x / 2) * 100003 + Math.floor(y / 2)); if (!l) return null; let best = null;
-  for (const b of l) {
+  const all = new Float32Array(curBuf); const l = cellGet('c', Math.floor(x / 2), Math.floor(y / 2)); let best = null;
+  if (l) for (const b of l) {
     const ax = all[b], ay = all[b + 1], az_ = all[b + 2], bx = all[b + 3], by = all[b + 4], bz = all[b + 5], cx = all[b + 6], cy = all[b + 7], cz = all[b + 8];
     const v0x = bx - ax, v0y = by - ay, v1x = cx - ax, v1y = cy - ay, den = v0x * v1y - v1x * v0y; if (Math.abs(den) < 1e-12) continue;
     const wx = x - ax, wy = y - ay, s_ = (wx * v1y - v1x * wy) / den, t_ = (v0x * wy - wx * v0y) / den;
     if (s_ < 0 || t_ < 0 || s_ + t_ > 1) continue;
     const z = az_ + s_ * (bz - az_) + t_ * (cz - az_); if (!visZ(z)) continue; if (z > zmin && (best === null || z < best)) best = z;
   }
+  // 細かい形で補った面 (extra) の下向きの面も見る (選び方は同じ)
+  const xl = extraCells(extra.c, x, y);
+  if (xl) for (let q = 0; q < xl.length; q += 2) { const z = triZ(extra.list[xl[q]].tris, xl[q + 1], x, y); if (z === null || !visZ(z)) continue; if (z > zmin && (best === null || z < best)) best = z; }
   return best;
 }
 // 横の当たり (利用者の「本来物質があれば当たり判定してほしい」): ドア (名前に door・doors) を除く全部の三角形を 1 m の升目に入れ、
 // 動く向きへ、足から STEP より上・体の高さまでの 3 つの高さで、動く距離 + 体の半径 0.25 m の線を引き、三角形に当たったら動かない
-const BODY_R = 0.25; let wgrid = null;
+const BODY_R = 0.25;
 function buildWall() { }
 function segHit(ax, ay, az, bx, by, bz) {
   const all = new Float32Array(curBuf); const dx = bx - ax, dy = by - ay, dz = bz - az; const seen = new Set();
   for (const [cx, cy] of [[ax, ay], [bx, by]]) {
-    const l = gridGet(wgrid, Math.floor(cx) * 100003 + Math.floor(cy)); if (!l) continue;
-    for (const b of l) {
+    const l = cellGet('w', Math.floor(cx), Math.floor(cy));
+    if (l) for (const b of l) {
       if (seen.has(b)) continue; seen.add(b);
       const e1x = all[b + 3] - all[b], e1y = all[b + 4] - all[b + 1], e1z = all[b + 5] - all[b + 2], e2x = all[b + 6] - all[b], e2y = all[b + 7] - all[b + 1], e2z = all[b + 8] - all[b + 2];
       const px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x, det = e1x * px + e1y * py + e1z * pz; if (Math.abs(det) < 1e-12) continue;
       const inv = 1 / det, tx = ax - all[b], ty = ay - all[b + 1], tz = az - all[b + 2]; const u = (tx * px + ty * py + tz * pz) * inv; if (u < 0 || u > 1) continue;
       const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x; const v = (dx * qx + dy * qy + dz * qz) * inv; if (v < 0 || u + v > 1) continue;
       const t = (e2x * qx + e2y * qy + e2z * qz) * inv; if (t > 0 && t < 1 && visZ(az + dz * t)) return true;
+    }
+    // 細かい形で補った面 (extra) の三角形 (全部) にも当たるか
+    const xl = extraCells(extra.w, cx, cy);
+    if (xl) for (let q = 0; q < xl.length; q += 2) {
+      const xk = -((xl[q] + 1) * 1e9 + xl[q + 1]); if (seen.has(xk)) continue; seen.add(xk);   // 升目の b (正) と重ならない鍵 (負)
+      const t = triSeg(extra.list[xl[q]].tris, xl[q + 1], ax, ay, az, dx, dy, dz); if (t !== null && visZ(az + dz * t)) return true;
     }
   }
   return false;
@@ -177,34 +249,141 @@ function blocked(x, y, z, nx, ny) {
 function fits(x, y, z) { if (noclip) return true; const c = ceilAt(x, y, z + 0.05); return c === null || c - z >= STANCE[stance].h; }
 function groundAt(x, y, zmax) {
   // (x, y) の真下で、zmax より低い歩く面のいちばん高い所
-  const all = new Float32Array(curBuf); const l = gridGet(fgrid, Math.floor(x) * 100003 + Math.floor(y)); if (!l) return null; let best = null;
-  for (const b of l) {
+  const all = new Float32Array(curBuf); const l = cellGet('f', Math.floor(x), Math.floor(y)); let best = null;
+  if (l) for (const b of l) {
     const ax = all[b], ay = all[b + 1], az_ = all[b + 2], bx = all[b + 3], by = all[b + 4], bz = all[b + 5], cx = all[b + 6], cy = all[b + 7], cz = all[b + 8];
     const v0x = bx - ax, v0y = by - ay, v1x = cx - ax, v1y = cy - ay, den = v0x * v1y - v1x * v0y; if (Math.abs(den) < 1e-12) continue;
     const wx = x - ax, wy = y - ay, s_ = (wx * v1y - v1x * wy) / den, t_ = (v0x * wy - wx * v0y) / den;
     if (s_ < 0 || t_ < 0 || s_ + t_ > 1) continue;
     const z = az_ + s_ * (bz - az_) + t_ * (cz - az_); if (!visZ(z)) continue; if (z <= zmax && (best === null || z > best)) best = z;
   }
+  // 細かい形で補った面 (extra) の上向きの面も見る (選び方は同じ: いちばん高い)
+  const xl = extraCells(extra.f, x, y);
+  if (xl) for (let q = 0; q < xl.length; q += 2) { const z = triZ(extra.list[xl[q]].tris, xl[q + 1], x, y); if (z === null || !visZ(z)) continue; if (z <= zmax && (best === null || z > best)) best = z; }
   return best;
 }
 // 落ちる下限 (2026-11-04、利用者の指示「一番低い床より下には下がらないように落下する」「周囲1mとかでいいんじゃない」):
 // 今の位置の真下と、まわり 0.5 m・1 m の各 8 点 (計 17 点) で、その点を含む歩く面のうち、いちばん低いものの高さ。どの点にも面が無ければ null
 const FALL_R = 1.0;
 function lowAt(x, y) {
-  const all = new Float32Array(curBuf); const l = gridGet(fgrid, Math.floor(x) * 100003 + Math.floor(y)); if (!l) return null; let best = null;
-  for (const b of l) {
+  const all = new Float32Array(curBuf); const l = cellGet('f', Math.floor(x), Math.floor(y)); let best = null;
+  if (l) for (const b of l) {
     const ax = all[b], ay = all[b + 1], az_ = all[b + 2], bx = all[b + 3], by = all[b + 4], bz = all[b + 5], cx = all[b + 6], cy = all[b + 7], cz = all[b + 8];
     const v0x = bx - ax, v0y = by - ay, v1x = cx - ax, v1y = cy - ay, den = v0x * v1y - v1x * v0y; if (Math.abs(den) < 1e-12) continue;
     const wx = x - ax, wy = y - ay, s_ = (wx * v1y - v1x * wy) / den, t_ = (v0x * wy - wx * v0y) / den;
     if (s_ < 0 || t_ < 0 || s_ + t_ > 1) continue;
     const z = az_ + s_ * (bz - az_) + t_ * (cz - az_); if (!visZ(z)) continue; if (best === null || z < best) best = z;
   }
+  // 細かい形で補った面 (extra) の上向きの面も見る (選び方は同じ: いちばん低い)
+  const xl = extraCells(extra.f, x, y);
+  if (xl) for (let q = 0; q < xl.length; q += 2) { const z = triZ(extra.list[xl[q]].tris, xl[q + 1], x, y); if (z === null || !visZ(z)) continue; if (best === null || z < best) best = z; }
   return best;
 }
 function lowestNear(x, y) {
   let best = lowAt(x, y);
   for (const r of [FALL_R / 2, FALL_R]) for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4; const g = lowAt(x + r * Math.cos(a), y + r * Math.sin(a)); if (g !== null && (best === null || g < best)) best = g; }
   return best;
+}
+// ===== 細かい形で補った面 (extra) と、粗い形に物体の無い升の知らせ (walkCheck) =====
+// (2026-11-05、利用者の指示「歩くモードで近く 5 m 以内の部品を裏で先に細かい形で調べる 見つけたら DB に入れる」「z +/- 50 cm とか」「荒いのと細かいのの差だけをチェックすれば 10m でも実用的にできないかな？」
+// 「そのエリアに荒いので部品がない場合、細かいのでチェック」「床でなく物体で」「床代わりの何かに対応できる。照明とかパネルとかチューブとか」)
+// 歩くモード中 1 秒ごと (nearCheck と同じ間引き) に、現在位置 wpos のまわり xy 半径 WALK_R m の 1 m の升 (当たり判定の升目と同じ升。鍵 i × 100003 + j) のうち、
+// 粗い形の三角形 (横の当たりの升 cellGet('w', …): ドア以外の全部) の z の範囲が足元 ±WALK_ZTOL m に 1 つも掛からない「物体の無い升」を、アプリに知らせる
+// ({type:'walkCheck', pos (足元。場所の座標), zTol, cells: [[升の中心 x, y], …] (場所の座標), site})。同じ升は 1 回の 3D の中で二度送らない (送った升を持つ。親の決定)。1 回に最大 WALK_MAX_CELLS 升 (親の決定。近い順)。
+// アプリが細かい形 (LOD0) で見つけた三角形 ({type:'walkFill', center, items:[{inst, name, tris}]}。tris は center からの相対) を extra に入れ、描き (部品の色の Mesh を root に足す。groups には入れない)、当たり判定に足す。
+// 升 (cellGet の f・c・w・fl) は粗い形の三角形 (curBuf) から作るものなので、extra は別の表 (三角形の並び Float32Array と、1 m の升ごとの添字の Map) に持ち、
+// ceilAt・segHit・groundAt・lowAt・onFloor で升目の結果に加えて見る (選び方は各関数の今の決まりのまま)。
+//   f (足元): 上向き (cz > 0)、c (頭の上): 下向き、w (横): 全部、fl (判定の床): 傾きが 46° 以内の上向き (親の決定。名前の除外と 1 m 未満の除外は掛けない)
+const WALK_R = 10, WALK_ZTOL = 0.5, WALK_MAX_CELLS = 400, FL_COS = Math.cos(46 * Math.PI / 180);
+const extra = { list: [], f: new Map(), c: new Map(), w: new Map(), fl: new Map(), sent: [], sentKeys: new Set() };
+window.__extra = extra;
+const ekey = (i, j) => i * 100003 + j;
+// 送った升の鍵: (升の i, j, 足元の z を 1 m で切った数)。別の階 (高さ) に移ったら同じ xy の升も送り直す (親の決定)
+const sentKey = (cx, cy, foot) => `${Math.floor(cx)},${Math.floor(cy)},${Math.floor(foot)}`;
+function extraCells(m, x, y) { return m.size ? (m.get(ekey(Math.floor(x), Math.floor(y))) || null) : null; }
+function extraPush(m, key, li, b) { let l = m.get(key); if (!l) m.set(key, l = []); l.push(li, b); }
+// (x, y) の真上・真下で三角形 (F の b から 9 つ) に当たる高さ (groundAt と同じ計算)。当たらなければ null
+function triZ(F, b, x, y) {
+  const ax = F[b], ay = F[b + 1], az_ = F[b + 2], v0x = F[b + 3] - ax, v0y = F[b + 4] - ay, v1x = F[b + 6] - ax, v1y = F[b + 7] - ay, den = v0x * v1y - v1x * v0y; if (Math.abs(den) < 1e-12) return null;
+  const wx = x - ax, wy = y - ay, s_ = (wx * v1y - v1x * wy) / den, t_ = (v0x * wy - wx * v0y) / den; if (s_ < 0 || t_ < 0 || s_ + t_ > 1) return null;
+  return az_ + s_ * (F[b + 5] - az_) + t_ * (F[b + 8] - az_);
+}
+// 線 (a から d だけ進む) が三角形に当たる所の t (0 < t < 1)。当たらなければ null (segHit と同じ計算)
+function triSeg(F, b, ax, ay, az, dx, dy, dz) {
+  const e1x = F[b + 3] - F[b], e1y = F[b + 4] - F[b + 1], e1z = F[b + 5] - F[b + 2], e2x = F[b + 6] - F[b], e2y = F[b + 7] - F[b + 1], e2z = F[b + 8] - F[b + 2];
+  const px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x, det = e1x * px + e1y * py + e1z * pz; if (Math.abs(det) < 1e-12) return null;
+  const inv_ = 1 / det, tx = ax - F[b], ty = ay - F[b + 1], tz = az - F[b + 2]; const u = (tx * px + ty * py + tz * pz) * inv_; if (u < 0 || u > 1) return null;
+  const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x; const v = (dx * qx + dy * qy + dz * qz) * inv_; if (v < 0 || u + v > 1) return null;
+  const t = (e2x * qx + e2y * qy + e2z * qz) * inv_; return t > 0 && t < 1 ? t : null;
+}
+// extra の li 番目の三角形を升ごとの表に入れる (升の数の上限 4096 は worker の sweep と同じ)
+function extraIndex(li) {
+  const F = extra.list[li].tris;
+  for (let b = 0; b + 9 <= F.length; b += 9) {
+    const x0 = Math.min(F[b], F[b + 3], F[b + 6]), x1 = Math.max(F[b], F[b + 3], F[b + 6]), y0 = Math.min(F[b + 1], F[b + 4], F[b + 7]), y1 = Math.max(F[b + 1], F[b + 4], F[b + 7]);
+    const ux = F[b + 3] - F[b], uy = F[b + 4] - F[b + 1], uz = F[b + 5] - F[b + 2], vx = F[b + 6] - F[b], vy = F[b + 7] - F[b + 1], vz = F[b + 8] - F[b + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, cz = ux * vy - uy * vx, ln = Math.hypot(nx, ny, cz);
+    const i0 = Math.floor(x0), i1 = Math.floor(x1), j0 = Math.floor(y0), j1 = Math.floor(y1);
+    if ((i1 - i0 + 1) * (j1 - j0 + 1) > 4096) continue;
+    const fl = cz > 0 && ln > 0 && cz / ln >= FL_COS;
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+      const k = ekey(i, j);
+      if (cz > 0) extraPush(extra.f, k, li, b);
+      if (cz < 0) extraPush(extra.c, k, li, b);
+      extraPush(extra.w, k, li, b);
+      if (fl) extraPush(extra.fl, k, li, b);
+    }
+  }
+}
+// 描く: 部品の色 (COL.other) の Mesh (buildScene の部品と同じ作り: flatShading・両面・切る面)。root に足す。groups には入れない (pick は cur.ioffs の添字で引くため)
+function extraDraw(li) {
+  const e = extra.list[li];
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(e.tris, 3));
+  const me = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: COL.other, side: THREE.DoubleSide, flatShading: true, clippingPlanes: [clip, clipLo] }));
+  me.renderOrder = 0; me.userData = { k: 'extra', li }; e.mesh = me; root.add(me);
+}
+function extraAdd(tris) { const li = extra.list.length; extra.list.push({ tris, mesh: null }); extraIndex(li); extraDraw(li); }
+// 読み込み直し (buildScene の入れ替えの後): keep なら、中心の差 off (新しい中心 − 前の中心) で座標を直し (新しい相対 = 前の相対 − off)、新しい root に描き直し、送った升も直す。keep でなければ捨てる
+function extraRelocate(off, keep) {
+  for (const m of [extra.f, extra.c, extra.w, extra.fl]) m.clear();
+  if (!keep) { extra.list = []; extra.sent = []; extra.sentKeys.clear(); return; }
+  for (const e of extra.list) { const F = e.tris; for (let i = 0; i + 3 <= F.length; i += 3) { F[i] -= off[0]; F[i + 1] -= off[1]; F[i + 2] -= off[2]; } e.mesh = null; }
+  for (let li = 0; li < extra.list.length; li++) { extraIndex(li); extraDraw(li); }
+  extra.sentKeys.clear();
+  for (const s of extra.sent) { s[0] -= off[0]; s[1] -= off[1]; s[2] -= off[2]; extra.sentKeys.add(sentKey(s[0], s[1], s[2])); }
+}
+// アプリからの補いの面を受ける。tris は d.center からの相対なので、今の中心との差で直す
+function onWalkFill(d) {
+  if (!cur || !Array.isArray(d.items) || !d.items.length) return;
+  const c = cur.center, dc = Array.isArray(d.center) ? [d.center[0] - c[0], d.center[1] - c[1], d.center[2] - c[2]] : [0, 0, 0];
+  let n = 0; for (const it of d.items) n += (it.tris || []).length;
+  n -= n % 9; if (!n) return;
+  const F = new Float32Array(n); let o = 0;
+  for (const it of d.items) { const T = it.tris || []; for (let i = 0; i + 3 <= T.length && o < n; i += 3) { F[o++] = T[i] + dc[0]; F[o++] = T[i + 1] + dc[1]; F[o++] = T[i + 2] + dc[2]; } }
+  extraAdd(F);
+  window.__walkFill = { tris: (window.__walkFill?.tris || 0) + n / 9, items: (window.__walkFill?.items || 0) + d.items.length, last: d.items.map(it => [it.inst, it.name, (it.tris || []).length / 9]) };
+}
+// 1 秒ごとに、物体の無い升を探してアプリに送る
+let lastWalkCheck = 0;
+function walkCheckTick() {
+  if (!APP || !walk || !cur || loading || !coarse) return;
+  const now = performance.now(); if (now - lastWalkCheck < 1000) return; lastWalkCheck = now;
+  const F = new Float32Array(curBuf); const foot = wpos.z, z0 = foot - WALK_ZTOL, z1 = foot + WALK_ZTOL;
+  const out = [];
+  for (let i = Math.floor(wpos.x - WALK_R); i <= Math.floor(wpos.x + WALK_R); i++) for (let j = Math.floor(wpos.y - WALK_R); j <= Math.floor(wpos.y + WALK_R); j++) {
+    const cx = i + 0.5, cy = j + 0.5, d = Math.hypot(cx - wpos.x, cy - wpos.y); if (d > WALK_R) continue;
+    const key = ekey(i, j); if (extra.sentKeys.has(sentKey(cx, cy, foot))) continue;
+    let empty = true;
+    const l = cellGet('a', i, j);   // ドアも物体なので含めて見る (w はドアを除く)
+    if (l) for (const b of l) { if (Math.max(F[b + 2], F[b + 5], F[b + 8]) >= z0 && Math.min(F[b + 2], F[b + 5], F[b + 8]) <= z1) { empty = false; break; } }
+    if (empty) out.push([cx, cy, d]);
+  }
+  if (!out.length) return;
+  out.sort((a, b) => a[2] - b[2]);
+  const send = out.slice(0, WALK_MAX_CELLS), c = cur.center;
+  for (const s of send) { extra.sent.push([s[0], s[1], foot]); extra.sentKeys.add(sentKey(s[0], s[1], foot)); }
+  window.__walkCheck = { sent: (window.__walkCheck?.sent || 0) + send.length, last: send.length, pending: out.length - send.length };
+  window.chrome.webview.postMessage({ type: 'walkCheck', pos: [wpos.x + c[0], wpos.y + c[1], foot + c[2]], zTol: WALK_ZTOL, cells: send.map(s => [s[0] + c[0], s[1] + c[1]]), site: SITE });
 }
 function updWalkUi() {
   const sn = { stand: '立つ', crouch: 'しゃがむ', prone: '寝そべる' }[stance];
@@ -399,7 +578,7 @@ function showElev(at, pinned) {
     // 同じ路線の乗り場を高さ (1 m 単位) でまとめる。高さごとに、今の乗り場に xy でいちばん近い乗り場 (同じエレベーター) を使う
     const byZ = new Map();
     for (const t of all.filter(t => t[0].startsWith('elevator') && t[3] === near[3])) {
-      const k2 = Math.abs(t[1][2] - near[1][2]) <= 1 ? 'cur' : t[1][2].toFixed(0); const d = Math.hypot(t[1][0] - near[1][0], t[1][1] - near[1][1]);
+      const k2 = Math.abs(t[1][2] - near[1][2]) <= 1 && t[5] === near[5] ? 'cur' : t[5] + '|' + t[1][2].toFixed(0); const d = Math.hypot(t[1][0] - near[1][0], t[1][1] - near[1][1]);
       const prev = byZ.get(k2); if (!prev || d < prev[1]) byZ.set(k2, [k2 === 'cur' ? near : t, d]);
     }
     const rows = [...byZ.values()].map(v => v[0]);
@@ -448,9 +627,8 @@ function elevOrder(rows, near) {
 function tboxHead(list, text) { const d = document.createElement('div'); d.textContent = text; d.style.cssText = 'padding:4px 8px;background:#2a3038;color:#9cf;font-size:12px'; list.appendChild(d); }
 // 録画に「ここで移った」を入れる (再生で前の点からなめらかにつながず、その時刻に飛ぶ。点の 9 番目が 1)
 function recJump() { if (!rec) return; const ro = recOff(); rec.points.push([+rec.t.toFixed(2), +(wpos.x + ro[0]).toFixed(3), +(wpos.y + ro[1]).toFixed(3), +(wpos.z + ro[2]).toFixed(3), +wyaw.toFixed(4), +wpitch.toFixed(4), stance, noclip ? 1 : 0, 1]); recAcc = 0; }
-// エレベーター: 同じ x・y のまま、行き先の高さの床へ。向きは反対。
-// 行き先の床: (x, y) の真下で、行き先の乗り場の高さ + STEP 以下のいちばん高い歩ける面のうち、乗り場の高さ − ELEV_BAND m 以上のもの (幅は担当が決めた値)。
-// 同じ x・y に行き先の床が無いとき (利用者の決定「2 行先の扉の床がある側で扉に背を向ける」): 行き先の乗り場に近いエレベーターの扉 (cur.elevDoors) のうち、
+// エレベーター: 行き先の扉の向きで立つ所を決める (2026-11-04、利用者の指示「扉の向きで決められないの？ 元々ずっとそう言ってる」。
+// 同じ x・y の床はかごの床になるので探さない)。利用者の決定「2 行先の扉の床がある側で扉に背を向ける」: 行き先の乗り場に近いエレベーターの扉 (cur.elevDoors) のうち、
 // 扉の箱の薄い向きの両側 (箱の中心から、薄い向きに 箱の厚みの半分 + DOOR_STEP m) で、行き先の高さの床があり、乗り場から遠い側 (乗り場はかごの中) に立ち、扉に背を向ける。
 // 扉は、乗り場から xy で DOOR_NEAR m 以内・高さが乗り場の高さ −ELEV_BAND〜+3 m に掛かるものを、近い順に見る。どれにも床が無ければ、動かずに窓を閉じる (window.__elevHow = 'none')
 const ELEV_BAND = 1.5, DOOR_STEP = 0.6, DOOR_NEAR = 6;
@@ -468,11 +646,10 @@ function elevMove(from, t) {
 }
 // 立つ所を決める (行き先のまわりは読み込んである)。xyAbs: 乗る前の x・y (絶対)、yaw0: 乗る前の向き
 function elevPlace(t, xyAbs, yaw0) {
-  const c = cur.center, tz = t[1][2] - c[2], sx = t[1][0] - c[0], sy = t[1][1] - c[1], px0 = xyAbs[0] - c[0], py0 = xyAbs[1] - c[1];
+  const c = cur.center, tz = t[1][2] - c[2], sx = t[1][0] - c[0], sy = t[1][1] - c[1];
   const band = g => g !== null && g >= tz - ELEV_BAND ? g : null;
-  const g = band(groundAt(px0, py0, tz + STEP));
-  if (g !== null) { wpos.set(px0, py0, g); wyaw = yaw0 + Math.PI; window.__elevHow = 'same-xy'; }
-  else {
+  // (2026-11-04、利用者の指示「扉の向きで決められないの？ 元々ずっとそう言ってる」) 同じ x・y の床は探さない (かごの床に立ってしまう)。最初から扉の向きで決める
+  {
     const doors = (cur.elevDoors || []).map(d => { const mx = (d[1][0] + d[2][0]) / 2, my = (d[1][1] + d[2][1]) / 2; return { d, mx, my, dist: Math.hypot(mx - sx, my - sy) }; })
       .filter(o => o.dist <= DOOR_NEAR && o.d[2][2] >= tz - ELEV_BAND && o.d[1][2] <= tz + 3).sort((a, b) => a.dist - b.dist);
     let best = null;
@@ -700,7 +877,7 @@ async function loadGeo(gi) {
 let loading = false;
 // keep: 近づいて読み込み直すとき (2026-11-04、利用者の指示「近づいたら書かないと」)。見ている所・歩いている所・選んだフロアをそのままにする
 async function loadRegion(c, r, keep, small) {
-  if (loading) return; loading = true;
+  if (loading) return; loading = true; prewarmStop();
   document.getElementById('prog').classList.toggle('small', !!small);
   const msg = document.getElementById('msg'); msg.textContent = ''; showProgress(0, 0);
   try {
@@ -715,7 +892,12 @@ async function loadRegion(c, r, keep, small) {
     window.__lastRegion = { app: rq, wait: (tReady - t0) / 1000 };
     const ph = window.__phase = { region: (tReady - t0) / 1000 }; let tp = performance.now();
     window.__stage = 'worker';
-    const res = await workerBuild(new URL(REGBASE, location.href).href, REG, c, r, (d, n) => showProgress(d, n, '作画中'), bx => drawOutline(bx, c));
+    // 解析の結果の保存 (WC。view3d-worker.js): アプリが鍵・容量・ディスクの空きを渡す。鍵が無ければ保存しない。容量 0 なら今ある保存を消す
+    const wcache = rq.wkey ? { key: rq.wkey, budget: rq.wbudget, free: rq.wfree } : null;
+    if (!wcache && rq.wbudget === 0) worker.postMessage({ type: 'wstat', id: 0, budget: 0 });
+    prewarmStop();
+    const res = await workerBuild(new URL(REGBASE, location.href).href, REG, c, r, (d, n) => showProgress(d, n, '作画中'), bx => drawOutline(bx, c), wcache);
+    if (APP && res.wcache && typeof res.wcache.used === 'number') window.chrome.webview.postMessage({ type: 'wcacheUsed', bytes: res.wcache.used });
     ph.worker = res.times; ph.workerAll = (performance.now() - tp) / 1000; tp = performance.now();
     // 区画のファイルはもう要らない。アプリに置き場を消してもらう
     if (APP && rq.id) window.chrome.webview.postMessage({ type: 'regionLoaded', id: rq.id });
@@ -736,16 +918,41 @@ async function loadRegion(c, r, keep, small) {
 const worker = new Worker(new URL('./view3d-worker.js', import.meta.url));
 let workerSeq = 0; const workerWait = new Map();
 worker.onmessage = e => {
-  const d = e.data, w = workerWait.get(d.id); if (!w) return;
+  const d = e.data;
+  if (d.type === 'wstat') { if (APP && typeof d.used === 'number') window.chrome.webview.postMessage({ type: 'wcacheUsed', bytes: d.used }); return; }
+  const w = workerWait.get(d.id); if (!w) return;
   if (d.type === 'progress') w.progress(d.done, d.total);
   else if (d.type === 'boxes') w.boxes(d.boxes);
   else if (d.type === 'done') { workerWait.delete(d.id); w.ok(d); }
   else if (d.type === 'error') { workerWait.delete(d.id); w.ng(new Error(d.message)); }
 };
-worker.onerror = e => report('worker', e.message);
-function workerBuild(base, region, c, r, progress, boxes) {
+// 解析の糸の中で拾われない失敗 (メモリ不足など) があったら、待っているものを失敗にする (「作画中」のまま止まらないように)
+worker.onerror = e => {
+  report('worker', e.message);
+  for (const w of workerWait.values()) w.ng(new Error('解析の途中で止まりました' + (e.message ? ': ' + e.message : '')));
+  workerWait.clear();
+};
+function workerBuild(base, region, c, r, progress, boxes, wcache) {
   const id = ++workerSeq;
-  return new Promise((ok, ng) => { workerWait.set(id, { ok, ng, progress, boxes }); worker.postMessage({ type: 'build', id, base, region, c, r, keys: { col: Object.keys(COL), ocol: Object.keys(OCOL), labk: LABK }, names: NAME }); });
+  return new Promise((ok, ng) => { workerWait.set(id, { ok, ng, progress, boxes }); worker.postMessage({ type: 'build', id, base, region, c, r, keys: { col: Object.keys(COL), ocol: Object.keys(OCOL), labk: LABK }, names: NAME, wcache }); });
+}
+// 先読み (アプリが地点を保存した後、メモリに余裕があるときだけ頼んでくる): 画面の糸とは別の糸で解析して保存だけする (結果は返さない)。
+// 利用者が地点を頼んだら、すぐ止める (糸を捨てる = メモリを返す)
+var pw = null;
+function prewarmStop() { if (pw) { try { pw.w.terminate(); } catch (_) { } pw = null; } }
+async function prewarmStart(d) {
+  prewarmStop();
+  const reply = used => { if (APP) window.chrome.webview.postMessage({ type: 'prewarmDone', pid: d.pid, used }); };
+  if (loading) { reply(null); return; }
+  try {
+    const region = await (await fetch(d.base + 'region.json')).json();
+    if (loading) { reply(null); return; }
+    const w = new Worker(new URL('./view3d-worker.js', import.meta.url)); const me = pw = { w };
+    const fin = used => { if (pw === me) pw = null; try { w.terminate(); } catch (_) { } reply(used); };
+    w.onmessage = e => { const m = e.data; if (m.type === 'done' || m.type === 'error') fin(m.wcache && typeof m.wcache.used === 'number' ? m.wcache.used : null); };
+    w.onerror = () => fin(null);
+    w.postMessage({ type: 'build', id: 1, base: new URL(d.base, location.href).href, region, c: d.c, r: d.r, keys: { col: Object.keys(COL), ocol: Object.keys(OCOL), labk: LABK }, names: NAME, prewarm: true, wcache: { key: d.key, budget: d.budget, free: d.free } });
+  } catch (_) { reply(null); }
 }
 // 外形 (部品の箱の線): 細かい形の前に先に出す (2026-11-04、利用者の案「外形だけ先に書くとか」)。新しい地点の中心 c の座標で、今の中心からずらして置く
 let outlineG = null;
@@ -889,7 +1096,10 @@ async function buildScene(p, res, keep, t0) {
   nroot.position.set(0, 0, 0); root = nroot;
   for (const k of new Set([...Object.keys(groups), ...Object.keys(ngroups)])) groups[k] = ngroups[k] ?? null;
   cur = p; curBuf = buf;
-  fgrid = res.grids.f; cgrid = res.grids.c; wgrid = res.grids.w; flgrid = res.grids.fl;
+  // 当たり判定: 荒い区切り coarse を受け取り、作ってあった升は全部捨てる (keep でも中心が変わり、升の鍵がずれるため)
+  coarse = res.coarse; cellReset();
+  // 細かい形で補った面 (extra): keep なら中心の差 off で座標を直して新しい root に描き直す。別の場所に替わった (keep でない) なら捨てる
+  extraRelocate(off, !!keep);
   window.__stage = 'show'; show(t0, keep);
 }
 // 地点の印・札・一覧などを作る (形は buildScene が作った後)
@@ -1106,15 +1316,17 @@ function segHitLong(ax, ay, az, bx, by, bz) {
   return false;
 }
 // 判定の床 (床・筒の底の色の三角形) の上か (2026-11-04、利用者の指示「床のある側に」): (x, y) を含む床の色の三角形で、高さが g から 2 cm 以内のものがあるか
-let flgrid = null;
 function buildFloorGrid() { }
 function onFloor(x, y, g) {
-  const F = new Float32Array(curBuf); const l = gridGet(flgrid, Math.floor(x) * 100003 + Math.floor(y)); if (!l) return false;
-  for (const b of l) {
+  const F = new Float32Array(curBuf); const l = cellGet('fl', Math.floor(x), Math.floor(y));
+  if (l) for (const b of l) {
     const v0x = F[b + 3] - F[b], v0y = F[b + 4] - F[b + 1], v1x = F[b + 6] - F[b], v1y = F[b + 7] - F[b + 1], den = v0x * v1y - v1x * v0y; if (Math.abs(den) < 1e-12) continue;
     const wx = x - F[b], wy = y - F[b + 1], s_ = (wx * v1y - v1x * wy) / den, t_ = (v0x * wy - wx * v0y) / den; if (s_ < 0 || t_ < 0 || s_ + t_ > 1) continue;
     const z = F[b + 2] + s_ * (F[b + 5] - F[b + 2]) + t_ * (F[b + 8] - F[b + 2]); if (Math.abs(z - g) <= 0.02 && visZ(z)) return true;
   }
+  // 細かい形で補った面 (extra) の判定の床 (傾き 46° 以内の上向きの面) も見る
+  const xl = extraCells(extra.fl, x, y);
+  if (xl) for (let q = 0; q < xl.length; q += 2) { const z = triZ(extra.list[xl[q]].tris, xl[q + 1], x, y); if (z !== null && Math.abs(z - g) <= 0.02 && visZ(z)) return true; }
   return false;
 }
 // 足元の面の部品の名前 (確かめ用)
@@ -1231,7 +1443,7 @@ function nearCheck() {
 // 確かめ用: いちばん長い 1 コマ (ms。window.__frameMax = 0 で計り直す) と、読み込みの段ごとの時間 (window.__phase)
 // window.__frames: 長いコマの上位 8 件 [コマの間 ms, そのうち描画 (R.render) ms, その間の段 (window.__stage)]
 let lastFrame = performance.now(), lastRender = 0; window.__frameMax = 0; window.__frames = []; window.__stage = '';
-(function loop() { requestAnimationFrame(loop); { const nowF = performance.now(), gap = nowF - lastFrame; window.__frameMax = Math.max(window.__frameMax, gap); if (gap > 50) { const f = window.__frames; f.push([+gap.toFixed(0), +lastRender.toFixed(0), window.__stage]); f.sort((a, b) => b[0] - a[0]); f.length = Math.min(f.length, 8); } lastFrame = nowF; } try { nearCheck(); } catch (e) { window.__err = String(e && e.stack || e); } try { keyMove(); } catch (e) { window.__err = String(e && e.stack || e); } const tr = performance.now(); R.render(scene, cam); lastRender = performance.now() - tr; window.__stage = loading ? window.__stage : ''; })();
+(function loop() { requestAnimationFrame(loop); { const nowF = performance.now(), gap = nowF - lastFrame; window.__frameMax = Math.max(window.__frameMax, gap); if (gap > 50) { const f = window.__frames; f.push([+gap.toFixed(0), +lastRender.toFixed(0), window.__stage]); f.sort((a, b) => b[0] - a[0]); f.length = Math.min(f.length, 8); } lastFrame = nowF; } try { nearCheck(); } catch (e) { window.__err = String(e && e.stack || e); } try { walkCheckTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { keyMove(); } catch (e) { window.__err = String(e && e.stack || e); } const tr = performance.now(); R.render(scene, cam); lastRender = performance.now() - tr; window.__stage = loading ? window.__stage : ''; })();
 // ===== 始め =====
 (async () => {
   try {

@@ -20,7 +20,7 @@ namespace StarCitizenJapaneseTextCreater;
 // 別ウィンドウ (StationView3DWindow) の両方で同じものを使う
 public sealed class StationView3DWindow : Window
 {
-    public StationView3DView View { get; }
+    public StationView3DView View { get; private set; }
     public StationView3DWindow(string record, string name, Func<string, string, string>? shopLabel = null, Func<string, string, object?>? shopSales = null, string? focusShop = null)
     {
         View = new StationView3DView(record, name, shopLabel, shopSales, focusShop);
@@ -29,6 +29,18 @@ public sealed class StationView3DWindow : Window
         Content = View;
         Closed += (_, _) => View.Close3D();
     }
+
+    // (2026-11-04、利用者の指示「別ウィンドウひらいてたらそっちに」) 開いている窓に、別の場所 (か店の行き先) を出し直す: 今の 3D を閉じて新しい 3D に替え、窓を前に出す
+    public void ShowPlace(string record, string name, Func<string, string, string>? shopLabel, Func<string, string, object?>? shopSales, string? focusShop)
+    {
+        var old = View;
+        View = new StationView3DView(record, name, shopLabel, shopSales, focusShop);
+        Title = $"ステーションの 3D (新しい方式) - {View.PlaceTitle}";
+        Content = View;
+        old.Close3D();
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+    }
 }
 
 public sealed class StationView3DView : Grid
@@ -36,6 +48,9 @@ public sealed class StationView3DView : Grid
     // 場所の名前 (窓の題・［マップ］タブの帯に出す)
     public string PlaceTitle => _title;
     public string Record => _record;
+    // ［マップ］タブの中に出している 3D か (ビューアに ?tab=1 を渡す。遠ざかり切ったら {type:'leave'} が来て LeaveRequested を起こす)
+    public bool InTab { get; init; }
+    public event Action? LeaveRequested;
     private readonly string _record, _shortName, _title;
     private readonly WebView2 _web = new();
     private readonly TextBlock _overlay = new() { Foreground = Brushes.White, FontSize = 28, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(16), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
@@ -48,6 +63,29 @@ public sealed class StationView3DView : Grid
     private StationView3D.Extractor? _extract;
     private string _tempDir = "";
     private bool _ownInUse;
+
+    // ===== 地点の取り出し結果の保存 (StationView3DCache) と先読み =====
+    // (2026-11-04、利用者の指示「先読み、キャッシュ化 HDD 容量設定が空いていればファイル保存など早く動かす仕組みを入れて」)
+    //   地点 (site・中心・半径) ごとの結果フォルダを、Data.p4k の印・区画の置き方の一覧の版が同じ間は保存して使い回す。ビューアに渡している間は
+    //   lease (保存したもの = 消されないように印を付けたもの / 保存しなかったもの = 一時フォルダで、読み終えたら消す) を持つ。
+    //   先読み: ビューアが何も頼まずに PrefetchIdleSeconds 秒たったら、今の場所のまわりの行き先 (station.json の targets) を近い順に、
+    //   ビューアが使っている半径で裏で取り出して保存する (1 本ずつ・保存の上限を超えない・空きメモリが足りなければしない・ビューアが頼んだら止める)
+    private string _p4kKey = "", _layoutId = "";
+    private sealed record Lease(string? CacheKey, string? TempDir);
+    private readonly Dictionary<int, Lease> _leases = new();
+    private bool _viewerBusy;
+    private double[]? _lastCenter;
+    private readonly SortedSet<double> _radii = new();
+    private List<(string Kind, string Name, double[] Pos)> _targets = new();
+    private System.Threading.Timer? _idleTimer;
+    private CancellationTokenSource? _prefetchCts;
+    private Task? _prefetchTask;
+    private int _prefetchBuilt;
+    private const int PrefetchIdleSeconds = 20, PrefetchMaxBuilds = 12, PrefetchMaxCenters = 5;
+    private const long PrefetchMinFreeMemory = 8L << 30, PrefetchEstimateBytes = 300L << 20;
+    private const long PrewarmMinFreeMemory = 16L << 30, PrewarmMinBudget = 4L << 30;
+    private const int PrewarmMaxCenters = 2;
+    private const double PrefetchSeparation = 30;
     private readonly Func<string, string, string>? _shopLabel;
     private readonly Func<string, string, object?>? _shopSales;
 
@@ -56,6 +94,7 @@ public sealed class StationView3DView : Grid
     private readonly string? _focusShop;
     public StationView3DView(string record, string name, Func<string, string, string>? shopLabel = null, Func<string, string, object?>? shopSales = null, string? focusShop = null)
     {
+        Interlocked.Increment(ref s_open);
         _record = record; _shopLabel = shopLabel; _shopSales = shopSales; _focusShop = focusShop;
         _shortName = StationPlaces.ShortName(record);
         _title = string.IsNullOrWhiteSpace(name) ? _shortName : name;
@@ -63,20 +102,41 @@ public sealed class StationView3DView : Grid
         Children.Add(_web);
         Children.Add(_overlay);
         // 初めて画面に出たときに始める (［マップ］タブで隠してから出し直しても、始めるのは 1 回)
-        Loaded += async (_, _) => { if (_started) return; _started = true; await StartAsync(); };
+        Loaded += async (_, _) => { if (_started || _closed) return; _started = true; await StartAsync(); };
     }
     private bool _started;
     private bool _closed;
 
-    // 閉じる (窓を閉じた・［マップ］タブでほかの場所に替えた): 取り出しを止め、WebView2 を捨て、一時の置き場を消す
+    // 開いているステーションの 3D の数 (作ってから Close3D するまで)。0 になったら部品の形の置き場も捨てる
+    private static int s_open;
+
+    // 閉じる (窓を閉じた・［マップ］タブでほかの場所に替えた・星系図に戻った): 取り出しを止め、WebView2 を捨て、一時の置き場を消す。
+    // (2026-11-04、利用者の指示「３D 表示後のメモリ後始末」) 区画の結果・使い回しの置き場 (Session) を手放し、3D がどこにも開いていなければ
+    // 部品の形の置き場 (SocpakExporter) も捨てて GC で返す
     public void Close3D()
     {
         if (_closed) return;
         _closed = true;
         _cts.Cancel();
         _regionCts?.Cancel();
+        _idleTimer?.Dispose(); _idleTimer = null;
+        _prefetchCts?.Cancel();
+        ReleaseLeases();
         try { _web.Dispose(); } catch { }
         DeleteTemp();
+        _session = null;
+        _hangarSessions.Clear();
+        _extract = null;
+        _loc = null;
+        if (Interlocked.Decrement(ref s_open) <= 0)
+        {
+            s_open = 0;
+            SocpakExporter.ReleaseShared();
+        }
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect();
     }
 
     private void Overlay(string text)
@@ -104,7 +164,14 @@ public sealed class StationView3DView : Grid
                 var loc = new StationView3D.Loc(ini, Path.Combine(DetailPanel.WorkDir(), "translations.db"));
                 _loc = loc;
                 var s = new StationView3D.Session(layout, "", loc, terminalLabel: StationTerminalKinds.Label, shopLabel: _shopLabel);
-                File.WriteAllBytes(Path.Combine(_tempDir, "station.json"), s.StationJson());
+                var stationJson = s.StationJson();
+                File.WriteAllBytes(Path.Combine(_tempDir, "station.json"), stationJson);
+                // 保存の鍵 (Data.p4k の印と区画の置き方の一覧の版・作った時刻)・先読みの行き先
+                _p4kKey = stamp.Key;
+                _layoutId = (StationView3D.LayoutDbMeta(StationView3DLayout.DbPath, "format") ?? "") + "|" + (StationView3D.LayoutDbMeta(StationView3DLayout.DbPath, "built_utc") ?? "");
+                _targets = TargetsOf(stationJson);
+                var cache = StationView3DCache.Current;
+                cache.SweepStale(_p4kKey, _layoutId);
                 return s;
             }, ct);
             _extract = StationView3D.OwnExtractor(stamp.Path,
@@ -125,7 +192,7 @@ public sealed class StationView3DView : Grid
         try { core.ClearVirtualHostNameToFolderMapping(Ship3DExports.CacheHost); } catch { }
         core.SetVirtualHostNameToFolderMapping(Ship3DExports.CacheHost, folder, CoreWebView2HostResourceAccessKind.Allow);
         Overlay("");
-        core.Navigate($"https://{Ship3DWeb.ViewerHost}/stationmap/view3d.html?data={Uri.EscapeDataString(UrlOf(_tempDir))}&title={Uri.EscapeDataString(_title)}&app=1" + (_focusShop is { Length: > 0 } fs ? $"&goto={Uri.EscapeDataString(fs)}" : ""));
+        core.Navigate($"https://{Ship3DWeb.ViewerHost}/stationmap/view3d.html?data={Uri.EscapeDataString(UrlOf(_tempDir))}&title={Uri.EscapeDataString(_title)}&app=1" + (InTab ? "&tab=1" : "") + (_focusShop is { Length: > 0 } fs ? $"&goto={Uri.EscapeDataString(fs)}" : ""));
     }
 
     // 置き場 (Ship3DExports.Folder) の下のフォルダの URL (最後に /)
@@ -150,11 +217,17 @@ public sealed class StationView3DView : Grid
             var type = r.TryGetProperty("type", out var t) ? t.GetString() : null;
             if (type == "regionLoaded" && r.TryGetProperty("id", out var lid))
             {
-                // ビューアが読み終えた地点の置き場を消す
-                var d = Path.Combine(_tempDir, $"r{lid.GetInt32()}");
+                // ビューアが読み終えた地点の置き場を手放す (保存したものは印を外すだけで残す。保存しなかったものは消す)
+                var lidv = lid.GetInt32();
+                var d = Path.Combine(_tempDir, $"r{lidv}");
                 try { if (Directory.Exists(d)) Directory.Delete(d, true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+                ReleaseLease(lidv);
+                _viewerBusy = false;
+                ScheduleIdle();
                 return;
             }
+            if (type == "wcacheUsed" && r.TryGetProperty("bytes", out var wb) && wb.TryGetInt64(out var wbytes)) { StationView3DCache.WorkerBytes = wbytes; return; }
+            if (type == "prewarmDone") { _prewarmTcs?.TrySetResult(true); return; }
             if (type == "sales")
             {
                 // 店の端末を押したとき (2026-11-04、利用者の指示「押したら売ってるリストと値段を出してほしい」): 端末の店 (地図の JSON の端末の shop・shopEntity) の販売品
@@ -162,6 +235,11 @@ public sealed class StationView3DView : Grid
                 var en = r.TryGetProperty("entity", out var ev) ? ev.GetString() ?? "" : "";
                 var msg = _shopSales?.Invoke(g, en);
                 Post(msg ?? new { type = "sales", title = "販売品", shops = new List<object> { new { name = en, note = "販売データが紐づいていません。" } } });
+                return;
+            }
+            if (type == "leave")
+            {
+                if (InTab) LeaveRequested?.Invoke();
                 return;
             }
             if (type == "here")
@@ -172,6 +250,11 @@ public sealed class StationView3DView : Grid
             if (type == "hangar")
             {
                 await OpenHangarAsync(r.TryGetProperty("size", out var zv) ? zv.GetString() ?? "" : "");
+                return;
+            }
+            if (type == "walkCheck")
+            {
+                await WalkCheckAsync(r);
                 return;
             }
             if (type != "region" || _session == null || _extract == null) return;
@@ -186,22 +269,262 @@ public sealed class StationView3DView : Grid
             _regionCts = cts;
             var dir = Path.Combine(_tempDir, $"r{id}");
             var progress = new Progress<(int Done, int Total)>(p => Post(new { type = "regionProgress", id, done = p.Done, total = p.Total }));
+            // ビューアが頼んだので、先読みは止める。前の地点の手放していない置き場 (読み込みに失敗して regionLoaded が来なかったもの) も手放す
+            _viewerBusy = true; _lastCenter = c; _radii.Add(rad); _walkCenters[site] = c;
+            _idleTimer?.Dispose(); _idleTimer = null;
+            await StopPrefetchAsync();
+            ReleaseLeases();
             try
             {
                 var session = siteSession; var extract = _extract;
-                var st = await Task.Run(() => session.BuildRegionAsync(c, rad, dir, extract, AcquireAsync, progress, cts.Token), cts.Token);
-                Post(new { type = "regionReady", id, @base = UrlOf(dir), extractSeconds = st.ExportSeconds, computeSeconds = st.ComputeSeconds, seconds = st.BuildSeconds, socpaks = st.Socpaks, missing = st.Missing });
+                var cache = StationView3DCache.Current;
+                var siteKey = site.Length == 0 ? _record : site;
+                var key = cache.Enabled ? StationView3DCache.KeyOf(siteKey, _p4kKey, _layoutId, c, rad) : "";
+                // 保存したものがあれば、それをそのままビューアに渡す (取り出し・計算をしない)
+                if (key.Length > 0 && cache.TryGet(key, siteKey, _p4kKey, _layoutId, c, rad) is { } hit)
+                {
+                    _leases[id] = new Lease(key, null);
+                    Post(WithWorkerCache(new { type = "regionReady", id, @base = UrlOf(hit.Dir), extractSeconds = 0.0, computeSeconds = 0.0, seconds = 0.0, socpaks = hit.Socpaks, missing = hit.Missing, cached = true }, cache, key));
+                    return;
+                }
+                // 保存できそうなら、保存先の書きかけの場所に作る (できたら名前を替えて保存にする。ビューアはそのまま読む)
+                var stage = key.Length > 0 && cache.CanStore(PrefetchEstimateBytes) ? cache.BeginStage(key) : null;
+                var st = await Task.Run(() => session.BuildRegionAsync(c, rad, stage ?? dir, extract, AcquireAsync, progress, cts.Token), cts.Token);
+                var served = stage ?? dir; var stored = false;
+                if (stage != null)
+                {
+                    if (cache.Commit(stage, key, siteKey, _p4kKey, _layoutId, c, rad, st.Socpaks, st.Missing) is { } saved) { served = saved.Dir; _leases[id] = new Lease(key, null); stored = true; }
+                    else _leases[id] = new Lease(null, stage);   // 保存できなかった (上限・空き): 読み終えたら消す
+                }
+                Post(WithWorkerCache(new { type = "regionReady", id, @base = UrlOf(served), extractSeconds = st.ExportSeconds, computeSeconds = st.ComputeSeconds, seconds = st.BuildSeconds, socpaks = st.Socpaks, missing = st.Missing }, cache, stored ? key : ""));
             }
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
                 App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」の地点を作れませんでした: {ex}");
                 Post(new { type = "regionError", id, message = ex.Message });
+                _viewerBusy = false; ScheduleIdle();
             }
         }
         catch (Exception ex)
         {
             App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] ビューアからの知らせを扱えませんでした: {ex.Message}");
+        }
+    }
+
+    // ===== 歩くモードの裏の補い (2026-11-05、利用者の指示「歩くモードで近く 5 m 以内の部品を裏で先に細かい形で調べる 見つけたら DB に入れる」
+    // 「そのエリアに荒いので部品がない場合、細かいのでチェック」「床でなく物体で」) =====
+    // ビューアが 1 秒ごとに知らせる、粗い形に物体の無い升 ({type:'walkCheck', pos, zTol, cells, site}。場所の座標) を、裏 (Task.Run) で細かい形で調べる (Session.WalkCheck)。
+    // 見つかった三角形は view3d_fill_walk.db に入れ (StationFill.WriteWalk)、ビューアに {type:'walkFill', center, items:[{inst, name, tris}]} で返す
+    // (tris は地点の中心 center からの相対。center は、その site で最後に BuildRegionAsync に渡した中心)。同時に 1 本だけ (順に待つ)。失敗はログに残して続ける
+    private readonly SemaphoreSlim _walkGate = new(1, 1);
+    private readonly Dictionary<string, double[]> _walkCenters = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, StationView3D.Session.WalkFillState> _walkStates = new(StringComparer.Ordinal);
+    private async Task WalkCheckAsync(JsonElement r)
+    {
+        if (_closed || Ship3DExports.CurrentStamp() is not { } stamp) return;
+        var site = r.TryGetProperty("site", out var sv) ? sv.GetString() ?? "" : "";
+        var session = site.Length == 0 ? _session : _hangarSessions.GetValueOrDefault(site);
+        if (session == null || !_walkCenters.TryGetValue(site, out var center)) return;
+        if (!r.TryGetProperty("pos", out var pv) || pv.ValueKind != JsonValueKind.Array || pv.GetArrayLength() != 3 || !r.TryGetProperty("cells", out var cv) || cv.ValueKind != JsonValueKind.Array) return;
+        var pos = pv.EnumerateArray().Select(x => x.GetDouble()).ToArray();
+        var zTol = r.TryGetProperty("zTol", out var zv) && zv.ValueKind == JsonValueKind.Number ? zv.GetDouble() : 0.5;
+        var cells = cv.EnumerateArray().Where(c => c.ValueKind == JsonValueKind.Array && c.GetArrayLength() >= 2).Select(c => c.EnumerateArray().Select(x => x.GetDouble()).ToArray()).ToList();
+        if (cells.Count == 0) return;
+        if (!_walkStates.TryGetValue(site, out var state)) _walkStates[site] = state = new StationView3D.Session.WalkFillState();
+        var ct = _cts.Token; var title = _title; var p4kPath = stamp.Path;
+        void Log(string m) => App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{title}」の歩くモードの補い: {m}");
+        try { await _walkGate.WaitAsync(ct); } catch (OperationCanceledException) { return; }
+        try
+        {
+            var items = await Task.Run(() =>
+            {
+                var found = session.WalkCheck(p4kPath, pos, zTol, cells, state, Log, ct);
+                foreach (var it in found)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    try { StationFill.WriteWalk(StationFill.WalkDbPath, it.Kind, it.Sig, it.LocalTris); }
+                    catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or IOException or UnauthorizedAccessException or InvalidDataException) { Log($"DB に入れられませんでした ({it.Kind}): {ex.Message}"); }
+                }
+                return found;
+            }, ct);
+            if (_closed || items.Count == 0) return;
+            Post(new
+            {
+                type = "walkFill",
+                center,
+                items = items.Select(it =>
+                {
+                    var t = new float[it.WorldTris.Length];
+                    for (int i = 0; i < t.Length; i++) t[i] = (float)(it.WorldTris[i] - center[i % 3]);
+                    return new { inst = it.Inst, name = it.Name, tris = t };
+                }).ToList(),
+            });
+            Log($"細かい形で {items.Count} 部品・{items.Sum(i => i.WorldTris.Length / 9)} 三角形を補いました (升 {cells.Count}・高さ {pos[2]:F2} ±{zTol:F2} m): " + string.Join(", ", items.Take(8).Select(i => $"{i.Name} (inst {i.Inst})")) + (items.Count > 8 ? " ほか" : ""));
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Log($"失敗しました: {ex}"); }
+        finally { _walkGate.Release(); }
+    }
+
+    // ===== 保存したものの手放し・先読み (上の説明) =====
+    private void ReleaseLease(int id)
+    {
+        if (!_leases.Remove(id, out var l)) return;
+        if (l.CacheKey != null) StationView3DCache.Current.Release(l.CacheKey);
+        else if (l.TempDir != null) StationView3DCache.TryDelete(l.TempDir);
+    }
+    private void ReleaseLeases() { foreach (var id in _leases.Keys.ToList()) ReleaseLease(id); }
+
+    // station.json の targets のうち、位置のあるもの (種類・名前・位置)
+    private static List<(string Kind, string Name, double[] Pos)> TargetsOf(byte[] stationJson)
+    {
+        var res = new List<(string, string, double[])>();
+        try
+        {
+            using var doc = JsonDocument.Parse(stationJson);
+            if (!doc.RootElement.TryGetProperty("targets", out var ts) || ts.ValueKind != JsonValueKind.Array) return res;
+            foreach (var t in ts.EnumerateArray())
+            {
+                if (!t.TryGetProperty("pos", out var p) || p.ValueKind != JsonValueKind.Array || p.GetArrayLength() != 3) continue;
+                var pos = p.EnumerateArray().Select(x => x.GetDouble()).ToArray();
+                res.Add((t.TryGetProperty("kind", out var k) ? k.GetString() ?? "" : "", t.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "", pos));
+            }
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException) { }
+        return res;
+    }
+
+    // ビューアが何も頼まずに PrefetchIdleSeconds 秒たったら、先読みを始める
+    private void ScheduleIdle()
+    {
+        _idleTimer?.Dispose(); _idleTimer = null;
+        if (_closed || _viewerBusy || _prefetchBuilt >= PrefetchMaxBuilds || !StationView3DCache.Current.Enabled) return;
+        _idleTimer = new System.Threading.Timer(_ => Dispatcher.BeginInvoke(StartPrefetch), null, TimeSpan.FromSeconds(PrefetchIdleSeconds), Timeout.InfiniteTimeSpan);
+    }
+
+    // 地点の知らせ (regionReady) に、解析の結果の保存 (ビューアの WC) の鍵・使ってよい大きさ・ドライブの空きを足す。
+    // 鍵は地点の保存の鍵 (地点が保存されたときだけ。保存されていない地点は解析の結果も保存しない)。大きさ 0 = 保存しない設定 (ビューアは今ある保存を消す)
+    private static object WithWorkerCache(object msg, StationView3DCache cache, string key)
+    {
+        var budget = cache.WorkerBudget();
+        var free = StationView3DCache.WorkerFreeBytes();
+        var o = System.Text.Json.JsonSerializer.SerializeToNode(msg)!.AsObject();
+        o["wkey"] = key.Length > 0 && budget > 0 ? key : null;
+        o["wbudget"] = budget;
+        o["wfree"] = free;
+        return o;
+    }
+
+    private TaskCompletionSource<bool>? _prewarmTcs;
+
+    private async Task StopPrefetchAsync()
+    {
+        if (_prewarmTcs != null) { _prewarmTcs.TrySetCanceled(); Post(new { type = "prewarmCancel" }); }
+        _prefetchCts?.Cancel();
+        var t = _prefetchTask;
+        if (t != null) { try { await t; } catch (OperationCanceledException) { } catch (Exception) { } }
+        _prefetchTask = null;
+    }
+
+    private void StartPrefetch()
+    {
+        if (_closed || _viewerBusy || _prefetchTask != null || _session == null || _extract == null || _lastCenter == null || _radii.Count == 0) return;
+        if (_prefetchBuilt >= PrefetchMaxBuilds || !StationView3DCache.Current.Enabled) return;
+        var center = _lastCenter; var radii = _radii.ToList(); var session = _session; var extract = _extract;
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+        _prefetchCts = cts;
+        // ビューアが頼んだ site "" (ステーション本体) の行き先だけ。ハンガーの中は先読みしない
+        _prefetchTask = Task.Run(() => PrefetchAsync(session, extract, center, radii, cts.Token));
+    }
+
+    // 解析の結果 (ビューアの WC) の先読み: ビューアに別の糸で解析して保存だけしてもらう。
+    // 解析は 1 地点で数 GB のメモリを使う (Seraphim で 5.5 GB ほど) ので、空き物理メモリが PrewarmMinFreeMemory 以上のとき、
+    // 解析の結果に使ってよい大きさが PrewarmMinBudget 以上で、ドライブの空きがその分あるときだけ頼む。ビューアが地点を頼んだら止める
+    private async Task PrewarmAsync(StationView3DCache cache, string dir, string key, double[] c, double r, CancellationToken ct)
+    {
+        if (!cache.Enabled || _closed) return;
+        var budget = cache.WorkerBudget();
+        if (budget < PrewarmMinBudget) return;
+        var free = StationView3DCache.WorkerFreeBytes();
+        if (free is long f && f - PrewarmMinBudget < StationView3DCache.FreeReserveBytes) return;
+        if (Ship3DExports.CpuHighNow) return;
+        if (Ship3DExports.AvailablePhysicalMemory() is not long mem || mem < PrewarmMinFreeMemory) return;
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await Dispatcher.InvokeAsync(() =>
+        {
+            if (_closed || _viewerBusy) { tcs.TrySetResult(false); return; }
+            _prewarmTcs = tcs;
+            Post(new { type = "prewarm", pid = 1, @base = UrlOf(dir), key, c, r, budget, free });
+        });
+        try
+        {
+            using var reg = ct.Register(() => tcs.TrySetCanceled());
+            await tcs.Task.WaitAsync(TimeSpan.FromMinutes(20), ct);
+        }
+        finally { await Dispatcher.InvokeAsync(() => { if (ReferenceEquals(_prewarmTcs, tcs)) _prewarmTcs = null; }); }
+    }
+
+    // 近い行き先から順に、ビューアが使った半径 (小さい方から) で作って保存する。1 本ずつ。次の場合は止める:
+    //   ビューアが頼んだ (取り消し)・CPU 使用率が 90% 以上・空きメモリが PrefetchMinFreeMemory 未満・保存の上限を超えそう (古いものを消してまで先読みしない)・空きが足りない
+    private async Task PrefetchAsync(StationView3D.Session session, StationView3D.Extractor extract, double[] from, List<double> radii, CancellationToken ct)
+    {
+        var cache = StationView3DCache.Current;
+        try
+        {
+            // 行き先: 今の中心から近い順。同じ所 (PrefetchSeparation m 以内) は 1 つにまとめる。今の中心のまわりは、ビューアが読んだので除く
+            var chosen = new List<double[]> { from };
+            var plan = new List<double[]>();
+            double Dist(double[] a, double[] b) => Math.Sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+            foreach (var t in _targets.OrderBy(t => Dist(t.Pos, from)))
+            {
+                if (chosen.Any(c => Dist(c, t.Pos) <= PrefetchSeparation)) continue;
+                chosen.Add(t.Pos); plan.Add(t.Pos);
+                if (plan.Count >= PrefetchMaxCenters) break;
+            }
+            int prewarmed = 0;
+            foreach (var r in radii)
+            {
+                foreach (var c in plan)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (_prefetchBuilt >= PrefetchMaxBuilds || !cache.Enabled) return;
+                    // CPU が高い間は待つ (ゲームを動かしているとき)。長く続くなら諦める
+                    for (int w = 0; Ship3DExports.CpuHighNow; w++) { if (w >= 12) return; await Task.Delay(5000, ct); }
+                    if (Ship3DExports.AvailablePhysicalMemory() is long free && free < PrefetchMinFreeMemory) return;
+                    var key = StationView3DCache.KeyOf(_record, _p4kKey, _layoutId, c, r);
+                    var hit = cache.TryGet(key, _record, _p4kKey, _layoutId, c, r);
+                    if (hit == null)
+                    {
+                        // 古いものを消してまで先読みしない
+                        if (!cache.CanStore(PrefetchEstimateBytes) || cache.UsedBytes() + PrefetchEstimateBytes > StationView3DCache.MaxBytesSetting) return;
+                        var stage = cache.BeginStage(key);
+                        var st = await session.BuildRegionAsync(c, r, stage, extract, AcquireAsync, null, ct);
+                        ct.ThrowIfCancellationRequested();
+                        hit = cache.Commit(stage, key, _record, _p4kKey, _layoutId, c, r, st.Socpaks, st.Missing);
+                        if (hit == null) StationView3DCache.TryDelete(stage);
+                        Interlocked.Increment(ref _prefetchBuilt);
+                        App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」を先読みして保存しました: 中心 {string.Join(",", c.Select(v => v.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)))} ±{r} m ({st.BuildSeconds:F1} 秒)");
+                    }
+                    if (hit == null) continue;
+                    try
+                    {
+                        // 解析の結果 (worker) の先読み: いちばん小さい半径の、近い PrewarmMaxCenters か所だけ。メモリに余裕があるときだけ (PrewarmAsync)
+                        if (r == radii[0] && prewarmed < PrewarmMaxCenters) { prewarmed++; await PrewarmAsync(cache, hit.Dir, key, c, r, ct); }
+                    }
+                    finally { cache.Release(key); }
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」の先読みを止めました: {ex.Message}");
+        }
+        finally
+        {
+            // 取り消しで書きかけが残っていれば BuildRegionAsync が消している。止めた後、ビューアが静かなままなら次の機会にまた始める
+            try { await Dispatcher.InvokeAsync(() => { _prefetchTask = null; }); } catch (Exception) { }   // 窓を閉じた後は Dispatcher が止まっている
         }
     }
 
@@ -593,7 +916,8 @@ internal static class StationView3DLayout
                 // メモリは BuildLayoutDb の門 (StationView3D.LayoutMemGate) で 4 GB 以下に抑える (親の決定)。1 か所を始める前に、CPU 使用率が 90% 以上なら下がるまで待つ
                 var par = Math.Min(LayoutParallelMax, Ship3DExports.MaxParallelExports().Limit);
                 var res = StationView3D.BuildLayoutDb(DbPath, key, index, roots, (d, n) => { Volatile.Write(ref _done, d); Volatile.Write(ref _total, n); }, ct, par,
-                    c => { while (Ship3DExports.CpuHighNow) Task.Delay(1000, c).Wait(c); }, f => JobProgress(job, f));
+                    c => { while (Ship3DExports.CpuHighNow) Task.Delay(1000, c).Wait(c); }, f => JobProgress(job, f),
+                    fillLog: m => App.AppendStartupLog(App.Config.WorkingDirectory, $"[床の補い] {m}"));
                 Log($"並べた数 {par}");
                 Log($"一括で作りました: 場所 {res.Places}・置かれた所 {res.Instances}・socpak {res.Socpaks}・{res.Bytes / 1024} KB・{res.Seconds:F1} 秒" +
                     (res.Failed.Count > 0 ? $"。作れなかった場所 {res.Failed.Count}: {string.Join(" / ", res.Failed)}" : ""));

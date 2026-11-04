@@ -60,6 +60,7 @@ internal sealed class P4kArchive : IDisposable
     private int[] _dirOff = [];
     private ushort[] _dirLen = [];
     private long[] _offset = [], _csize = [], _usize = [];
+    private uint[] _crc = [];   // 項目の CRC32 (中央ディレクトリの値。部品の形が変わったかの印 StationFill.KindSig に使う)
     private ushort[] _method = [];
     private bool[] _encrypted = [];
 
@@ -193,7 +194,7 @@ internal sealed class P4kArchive : IDisposable
         var dirNames = new MemoryStream();
         var dirOff = new List<int>(); var dirLen = new List<ushort>();
         var nameTmp = new byte[65536];
-        _offset = new long[n]; _csize = new long[n]; _usize = new long[n];
+        _offset = new long[n]; _csize = new long[n]; _usize = new long[n]; _crc = new uint[n];
         _method = new ushort[n]; _encrypted = new bool[n];
         var names = new MemoryStream((int)Math.Min(int.MaxValue, Math.Max(16, cdSize / 4)));
 
@@ -222,6 +223,7 @@ internal sealed class P4kArchive : IDisposable
             var h = buf.AsSpan(p, 46);
             if (BinaryPrimitives.ReadUInt32LittleEndian(h) != 0x02014B50) throw new InvalidDataException($"ZIP の中央ディレクトリの {k + 1} 件目の印が違います");
             ushort method = BinaryPrimitives.ReadUInt16LittleEndian(h[10..]);
+            _crc[k] = BinaryPrimitives.ReadUInt32LittleEndian(h[16..]);
             uint cs32 = BinaryPrimitives.ReadUInt32LittleEndian(h[20..]), us32 = BinaryPrimitives.ReadUInt32LittleEndian(h[24..]);
             int nl = BinaryPrimitives.ReadUInt16LittleEndian(h[28..]), xl = BinaryPrimitives.ReadUInt16LittleEndian(h[30..]), cl = BinaryPrimitives.ReadUInt16LittleEndian(h[32..]);
             ushort diskStart = BinaryPrimitives.ReadUInt16LittleEndian(h[34..]);
@@ -364,6 +366,7 @@ internal sealed class P4kArchive : IDisposable
     public string FileName(int i) => Encoding.Latin1.GetString(FileBytes(i));
     public long CompressedSize(int i) => _csize[i];
     public long UncompressedSize(int i) => _usize[i];
+    public uint Crc(int i) => _crc[i];
     public int Method(int i) => _method[i];
     public bool IsEncrypted(int i) => _encrypted[i];
     public long HeaderOffset(int i) => _offset[i];

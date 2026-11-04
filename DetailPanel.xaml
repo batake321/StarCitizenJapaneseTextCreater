@@ -46,19 +46,19 @@
 
         <GridSplitter x:Name="splitList" Grid.Row="3" Height="5" HorizontalAlignment="Stretch" Background="#E0E0E0" Margin="0,4"/>
 
-        <!-- 船の 3D 表示 (船・車両 (NOITEM_Vehicle) の詳細を出しているときだけ出す)。［読み込み］でゲームデータから取り込み (Ship3DExports)、
+        <!-- 船・品の 3D 表示 (船・車両 (NOITEM_Vehicle) と、武器・装備・船の部品などの品の詳細を出しているときだけ出す。形の無い品は押すと「形がありません」と出る)。［読み込み］でゲームデータから取り込み (Ship3DExports)、
              ［3D 表示］は下の欄で、［別ウィンドウ］は Ship3DWindow で出す (表示のボタンでは書き出さない)。3D を出している間は［表に戻る］で詳細の表に戻る -->
         <StackPanel x:Name="pnlShip3D" Grid.Row="4" Margin="0,0,0,4" Visibility="Collapsed">
             <TextBlock Text="3D モデル表示" FontWeight="Bold" Margin="0,0,0,3"/>
             <StackPanel Orientation="Horizontal">
             <Button x:Name="btnShip3DImport" Content="読み込み" Padding="10,2" Margin="0,0,6,0" Click="BtnShip3DImport_Click"
-                    ToolTip="この船の 3D モデルをゲームデータ (選択中のチャンネルの Data.p4k) から取り込みます。最新のキャッシュがあるとき・書き出し中は使えません"/>
+                    ToolTip="この船・品の 3D モデルをゲームデータ (選択中のチャンネルの Data.p4k) から取り込みます。最新のキャッシュがあるとき・書き出し中は使えません"/>
             <Button x:Name="btnShip3D" Content="3D 表示" Padding="10,2" Click="BtnShip3D_Click"
-                    ToolTip="この船の 3D モデルを下の欄に出します (取り込み済みの船だけ)"/>
+                    ToolTip="この船・品の 3D モデルを下の欄に出します (取り込み済みならそれ、無ければゲームデータから直接読みます)"/>
             <Button x:Name="btnShip3DWindow" Content="別ウィンドウ" Padding="10,2" Margin="6,0,0,0" Click="BtnShip3DWindow_Click"
-                    ToolTip="この船の 3D モデルを別のウィンドウに出します (取り込み済みの船だけ。ウィンドウの上でほかの船に切り替えられます)"/>
+                    ToolTip="この船・品の 3D モデルを別のウィンドウに出します (取り込み済みならそれ、無ければゲームデータから直接読みます。船のときは、ウィンドウの上でほかの船に切り替えられます)"/>
             <Button x:Name="btnShip3DBack" Content="表に戻る" Padding="10,2" Margin="6,0,0,0" Click="BtnShip3DBack_Click" Visibility="Collapsed"
-                    ToolTip="3D 表示をやめて、詳細の表に戻ります"/>
+                    ToolTip="下の 3D 表示を閉じます"/>
             <TextBlock x:Name="txtShip3D" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
             </StackPanel>
         </StackPanel>
@@ -85,8 +85,13 @@
              3D 表示はその上に別の WebView2 (web3D) で出す (詳細の WebView2 とは別) -->
         <Border Grid.Row="6" BorderBrush="#CCC" BorderThickness="1">
             <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" MinHeight="40"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
                 <wv2:WebView2 x:Name="webDetail"/>
-                <wv2:WebView2 x:Name="web3D" Visibility="Collapsed"/>
+                <!-- 3D は詳細の下に出す (マウスのドラッグで回す・ホイールで拡大縮小。ビューアの操作) -->
+                <wv2:WebView2 x:Name="web3D" Grid.Row="1" Height="340" Visibility="Collapsed"/>
                 <TextBox x:Name="txtDetail" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, Yu Gothic UI" FontSize="13"
                          VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Padding="6"
                          Visibility="Collapsed"/>

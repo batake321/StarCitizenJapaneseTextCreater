@@ -1172,39 +1172,54 @@ public partial class MapPanel : UserControl
     // ［詳細］の店の［MAP］(DetailPanel): その店のある場所の 3D の窓を開き、その店を行き先にする
     public static void ShowShopInMapTab(string recordName, string name, ShopTreeShop shop) => OpenPlace(recordName, name, shop.EntityName);
 
-    // 3D の窓を開く。店の名前・販売品は［詳細］と同じ ShopTree で引く (作れなければ無しで開く)
-    // (2026-11-04、利用者の指示「map に出し、別ウィンドウボタンで。」) ［マップ］タブに切り替えて、その場所の 3D をタブの中 (pnlPlace) に出す。
-    // ［マップ］タブがまだ無い (作る前) ときだけ、別ウィンドウで開く
+    // 場所の 3D を出す。店の名前・販売品は［詳細］と同じ ShopTree で引く (作れなければ無しで出す)
+    // (2026-11-04、利用者の指示「別ウィンドウひらいてたらそっちに…そうでなければ map に出して」) 入口は StationView3DShops.Show と同じ決まり:
+    //   別ウィンドウが開いていればそこに出す。無ければ［マップ］タブに切り替えて、その場所の 3D をタブの中 (pnlPlace) に出す
     private static void OpenPlace(string recordName, string name, string? focusShop)
     {
-        var p = s_instance;
-        if (p == null) { StationView3DShops.Open(recordName, name, null, focusShop, Application.Current?.MainWindow); return; }
-        p.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () =>
-        {
-            for (DependencyObject? d = p; d != null; d = LogicalTreeHelper.GetParent(d))
-                if (d is TabItem tab) { tab.IsSelected = true; break; }
-            _ = p.ShowPlace3DAsync(recordName, name, focusShop);
-        });
+        if (!ShowPlaceInTab(recordName, name, null, focusShop))
+            StationView3DShops.Open(recordName, name, null, focusShop, Application.Current?.MainWindow);
     }
 
-    // タブの中の 3D (StationView3DView)。同じ場所で店の指定が無ければ、出していたものをそのまま出す (星系図との行き来で読み直さない)
+    // StationView3DShops.Show から。［マップ］タブがあれば、開いている別ウィンドウか［マップ］タブに出して true。［マップ］タブがまだ無い (作る前) ときは、
+    // 別ウィンドウが開いていればそこに出して true、無ければ false (呼んだ側が別ウィンドウで開く)
+    internal static bool ShowPlaceInTab(string recordName, string name, ShopTree? tree, string? focusShop)
+    {
+        var p = s_instance;
+        if (p == null) return StationView3DShops.ShowInOpenWindow(recordName, name, tree, focusShop);
+        p.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => _ = p.RoutePlaceAsync(recordName, name, tree, focusShop));
+        return true;
+    }
+
+    private async Task RoutePlaceAsync(string recordName, string name, ShopTree? tree, string? focusShop)
+    {
+        tree ??= _tree;
+        if (tree == null)
+        {
+            try { tree = await GetTreeAsync(); }
+            catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 「{name}」の 3D に渡す店の表を作れませんでした: {ex.Message}"); }
+        }
+        if (StationView3DShops.ShowInOpenWindow(recordName, name, tree, focusShop)) return;
+        for (DependencyObject? d = this; d != null; d = LogicalTreeHelper.GetParent(d))
+            if (d is TabItem tab) { tab.IsSelected = true; break; }
+        ShowPlace3D(recordName, name, tree, focusShop);
+    }
+
+    // タブの中の 3D (StationView3DView)。同じ場所で店の指定が無ければ、出していたものをそのまま出す (星系図に戻ると閉じるので、次は読み直す)
     private StationView3DView? _place3D;
     private string _place3DName = "";
     private ShopTree? _place3DTree;
-    private async Task ShowPlace3DAsync(string recordName, string name, string? focusShop)
+    private void ShowPlace3D(string recordName, string name, ShopTree? tree, string? focusShop)
     {
         if (_place3D == null || _place3D.Record != recordName || focusShop != null)
         {
-            var tree = _tree;
-            if (tree == null)
-            {
-                try { tree = await GetTreeAsync(); }
-                catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 「{name}」の 3D に渡す店の表を作れませんでした: {ex.Message}"); }
-            }
             _place3D?.Close3D();
             Func<string, string, string>? label = tree == null ? null : (g, e) => StationView3DShops.ShopLabel(tree, recordName, g, e);
             Func<string, string, object?>? sales = tree == null ? null : (g, e) => StationView3DShops.Sales(tree, recordName, g, e);
-            _place3D = new StationView3DView(recordName, name, label, sales, focusShop);
+            var view = new StationView3DView(recordName, name, label, sales, focusShop) { InTab = true };
+            // 3D から遠ざかり切ったら (ビューアの {type:'leave'}) 星系図に戻る。戻る前に別の場所に替わっていたら何もしない
+            view.LeaveRequested += () => Dispatcher.BeginInvoke(() => { if (ReferenceEquals(_place3D, view)) BackToStarMap(); });
+            _place3D = view;
             _place3DName = name;
             _place3DTree = tree;
             placeHost.Content = _place3D;
@@ -1214,18 +1229,31 @@ public partial class MapPanel : UserControl
         pnlPlace.Visibility = Visibility.Visible;
     }
 
-    // ［星系図に戻る］: 3D を隠して星系図を出す (3D は捨てない)
-    private void BtnPlaceBack_Click(object sender, RoutedEventArgs e)
+    // 星系図を出す。［星系図に戻る］・3D から遠ざかり切ったとき。
+    // (2026-11-04、利用者の指示「星系に切り替えたときも3D のメモリ後始末」) タブの中の 3D は隠さずに閉じて、メモリを返す
+    private void BackToStarMap()
     {
+        if (_place3D is { } v)
+        {
+            _place3D = null;
+            placeHost.Content = null;
+            v.Close3D();
+        }
         pnlPlace.Visibility = Visibility.Collapsed;
         webMap.Visibility = Visibility.Visible;
     }
+    private void BtnPlaceBack_Click(object sender, RoutedEventArgs e) => BackToStarMap();
 
-    // ［別ウィンドウ］: 同じ場所の 3D を別のウィンドウで開く (タブの中の 3D はそのまま)
+    // ［別ウィンドウ］: 同じ場所の 3D を別のウィンドウで開く。3D を 2 つ持たないよう、タブの中の 3D は閉じて星系図に戻す
     private void BtnPlaceWindow_Click(object sender, RoutedEventArgs e)
     {
         if (_place3D is not { } v) return;
-        StationView3DShops.Open(v.Record, _place3DName, _place3DTree, null, Window.GetWindow(this));
+        var record = v.Record; var name = _place3DName; var tree = _place3DTree;
+        _place3D = null;
+        placeHost.Content = null;
+        v.Close3D();
+        BackToStarMap();
+        StationView3DShops.Open(record, name, tree, null, Window.GetWindow(this));
     }
 
     // 星系図の印・ラベルを押した (scjt://detail/… のリンク)。地図のある場所なら、その場所の 3D の窓を開く (2026-11-01、利用者の決定「A 情報ボタンを付ける　押すと詳細に。」)。

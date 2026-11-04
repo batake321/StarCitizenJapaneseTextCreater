@@ -91,14 +91,40 @@ internal static class StationView3DShops
         return new { name, tables };
     }
 
-    // 3D の窓を開く (［マップ］タブの星系図の印・［詳細］の［地図表示］［MAP］・契約の行き先から)。tree があれば店の名前・販売品を渡す。
+    // いま開いている別ウィンドウ (1 つだけ。閉じたら null)
+    private static StationView3DWindow? s_window;
+
+    // 場所の 3D を開く入口 (全部ここを通る。2026-11-04、利用者の指示「別ウィンドウひらいてたらそっちに、…そうでなければ map に出して」):
+    //   別ウィンドウが開いていれば、そのウィンドウにその場所 (と店の行き先) を出して前に出す。
+    //   開いていなければ、［マップ］タブに切り替えてタブの中に出す (MapPanel.ShowPlaceInTab)。［マップ］タブが無いときだけ別ウィンドウで開く。
+    // tree があれば店の名前・販売品を渡す (無ければ［マップ］タブが作る)。focusShop: 行き先にする店 (Entity 名)
+    public static void Show(string record, string name, ShopTree? tree, string? focusShop = null, Window? owner = null)
+    {
+        if (MapPanel.ShowPlaceInTab(record, name, tree, focusShop)) return;
+        Open(record, name, tree, focusShop, owner);
+    }
+
+    // 開いている別ウィンドウに出す。開いていなければ false
+    public static bool ShowInOpenWindow(string record, string name, ShopTree? tree, string? focusShop)
+    {
+        if (s_window is not { } win) return false;
+        Func<string, string, string>? label = tree == null ? null : (g, e) => ShopLabel(tree, record, g, e);
+        Func<string, string, object?>? sales = tree == null ? null : (g, e) => Sales(tree, record, g, e);
+        win.ShowPlace(record, name, label, sales, focusShop);
+        return true;
+    }
+
+    // 別ウィンドウで開く (［マップ］タブの［別ウィンドウ］から。開いている別ウィンドウがあればそこに出す)。tree があれば店の名前・販売品を渡す。
     // focusShop: 開いたときに行き先にする店 (Entity 名)。無ければ窓の決まり (艦隊マネージャーの端末の前など)
     public static StationView3DWindow Open(string record, string name, ShopTree? tree, string? focusShop = null, Window? owner = null)
     {
+        if (ShowInOpenWindow(record, name, tree, focusShop)) return s_window!;
         Func<string, string, string>? label = tree == null ? null : (g, e) => ShopLabel(tree, record, g, e);
         Func<string, string, object?>? sales = tree == null ? null : (g, e) => Sales(tree, record, g, e);
         var win = new StationView3DWindow(record, name, label, sales, focusShop);
         if (owner != null && owner.IsLoaded) win.Owner = owner;
+        s_window = win;
+        win.Closed += (_, _) => { if (ReferenceEquals(s_window, win)) s_window = null; };
         win.Show();
         return win;
     }

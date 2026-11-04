@@ -2534,6 +2534,7 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="140"/>
@@ -2558,7 +2559,15 @@
                                               ToolTip="入れると、船の 3D を見るたびにゲームデータ (Data.p4k) から直接読み、置き場所には保存しません (表示をやめたら消します)。［船舶・車両をまとめて取り込む］は使えなくなります。切ると (既定)、読んだものを置き場所に保存し、次からはそれを使います。「設定を保存」で有効になります"/>
                                 </StackPanel>
 
-                                <StackPanel Grid.Row="3" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="0,6,0,4">
+                                <!-- ステーションの 3D の地点ごとの取り出し結果の保存 (StationView3DCache): 上限 (GB)。0 なら保存しない・先読みしない -->
+                                <TextBlock Text="ステーション (GB):" Grid.Row="3" VerticalAlignment="Center" Margin="0,4"/>
+                                <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,4">
+                                    <TextBox x:Name="txtStation3DCacheMaxGB" Width="90" VerticalAlignment="Center"
+                                             ToolTip="ステーションの 3D で、見た場所 (行き先のまわり) の取り出し結果 (置き場所の stations3d_cache フォルダ) と、その解析の結果 (描く形・当たり判定の升目。3D の画面の WebView2 の保存領域 = 作業ディレクトリの webview2_ship3d の中。Seraphim で 1 か所 5 GB ほど) を保存して、次に同じ所を開くときの時間を縮める上限 (GB。両方の合計)。上限を 0 にすると、次に 3D を開いたとき解析の結果の保存も消します。0 なら保存しません (先読みもしません)。超えたら、最後に使ったのが古いものから消します。ディスクの空きが約 3 GB を割るときは保存しません。パッチで Data.p4k が変わったとき・区画の置き方の一覧が変わったとき・このプログラムを更新したときは、古いものは使わず消します。先読みは、操作が 20 秒止まったときに、近くの行き先を裏で取り出して保存します (保存の上限の中だけ・空きメモリが約 8 GB 以上のときだけ)。「設定を保存」で有効になります"/>
+                                    <TextBlock x:Name="txtStation3DCacheUsage" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
+                                </StackPanel>
+
+                                <StackPanel Grid.Row="4" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="0,6,0,4">
                                     <!-- 今の Data.p4k で全部取り込み済みのときも使えなくする (MainWindow.Ship3D.cs。理由はボタンの ToolTip に出すので、使えないときも出す) -->
                                     <Button x:Name="btnShip3DBatch" Content="船舶・車両をまとめて取り込む" Click="Ship3DBatch_Click" Padding="14,6" ToolTipService.ShowOnDisabled="True"
                                             ToolTip="保有している船 (所持船と Hangar 同期の船) を先に、その後に［詳細］の船の一覧の残りを、ゲームデータから書き出してキャッシュに入れます。始める前に隻数・予想時間・予想サイズを出します"/>
@@ -2569,9 +2578,9 @@
                                 </StackPanel>
 
                                 <!-- 書き出しの進み具合 (［詳細］タブと同じ中身) -->
-                                <local:Ship3DProgressPanel Grid.Row="4" Grid.ColumnSpan="3" Margin="0,4"/>
+                                <local:Ship3DProgressPanel Grid.Row="5" Grid.ColumnSpan="3" Margin="0,4"/>
 
-                                <TextBlock Grid.Row="5" Grid.ColumnSpan="3" TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontSize="12"
+                                <TextBlock Grid.Row="6" Grid.ColumnSpan="3" TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontSize="12"
                                            Text="［詳細］タブで船を出しているときの［3D 表示］［別ウィンドウ］は、取り込み済みの船はその 3D モデルを、取り込んでいない船は選択中のチャンネルのゲームデータ (Data.p4k) から直接読んで出します (テクスチャ付き・船内込み)。「3D モデルを保存しない」を入れていなければ、読んだものを置いておきます。ゲームデータが変わると読み直します。［船舶・車両をまとめて取り込む］は、予想サイズの合計が最大容量を超える手前で止めます (古いものを消して入れ替えません)。CPU 使用率が 90% 以上のときは書き出しを始めません。ステーション・都市の 3D (新しい方式) は、区画の置き方の一覧 (stations フォルダの view3d_layout.db) だけを置き、形は開いたときにゲームデータから見る所の分だけ取り出して描きます。"/>
                             </Grid>
                         </GroupBox>

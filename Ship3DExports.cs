@@ -444,6 +444,39 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         return await ImportAsync(record, name, owner, confirm: false, save: !App.Config.Ship3DNoSave);
     }
 
+    // ===== 船以外の品 (武器・装備・船の部品など。2026-11-04、利用者の要望「武器の3D出ないけど？」) =====
+    // 書き出し・保存・照合・表示は船と同じ流れ (record の短い名前でキャッシュ。ShipExport.Export は船以外の entity も同じに書く)。
+    // 違うのは、書き出す前に形があるか調べること (形が無ければ書き出さない。NoShape が true になる) と、ジョブの種類 (Item)
+
+    private static readonly Dictionary<string, bool> _isItem = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _noShape = new(StringComparer.OrdinalIgnoreCase);
+
+    // record が船・車両 (NOITEM_Vehicle) でなければ true (保存データの item_type で決める。引けなければ船として扱う)
+    internal static bool IsItemRecord(string record)
+    {
+        lock (_isItem)
+        {
+            if (_isItem.TryGetValue(record, out var v)) return v;
+        }
+        var isItem = false;
+        try
+        {
+            var db = DetailPanel.DbPath();
+            if (File.Exists(db))
+            {
+                using var q = GameDataQueryService.OpenReadOnly(db);
+                var t = q.ItemTypeOf(record);
+                isItem = t.Length > 0 && !t.StartsWith("NOITEM_Vehicle", StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        catch (Exception ex) { Log($"{record} の種類を調べられませんでした (船として扱います): {ex.Message}"); return false; }
+        lock (_isItem) _isItem[record] = isItem;
+        return isItem;
+    }
+
+    // 直前に調べて「形が無い」とした品か (表示の側が「形がありません」と出すのに使う)
+    public bool NoShape(string record) => _noShape.Contains(ShortName(record));
+
     // 保存しない設定か (［まとめて取り込む］［読み込み］を使えなくする)
     public static bool NoSave => App.Config.Ship3DNoSave;
 
@@ -800,7 +833,27 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             try { return await running.Task; }
             catch { return null; }
         }
-        var job = new Ship3DJob(record, shortName, string.IsNullOrWhiteSpace(name) ? shortName : name, batch: null) { ViewOnly = !save };
+        var isItem = IsItemRecord(record);
+        if (isItem)
+        {
+            // 形が無い品 (データだけの品) は書き出さない (Data.p4k に形のファイルが無いと Export は失敗する)
+            bool has;
+            try { has = await Task.Run(() => ShipExport.HasShape(P4kArchive.Shared(stamp.Path), DataCoreShared.Get(null, stamp.Path), shortName)); }
+            catch (Exception ex)
+            {
+                Log($"「{name}」({shortName}) の形の有無を調べられませんでした: {Describe(ex)}");
+                ShowError(owner, $"「{name}」の 3D モデルを調べられませんでした: {ex.Message}");
+                return null;
+            }
+            if (!has)
+            {
+                _noShape.Add(shortName);
+                Log($"「{name}」({shortName}) には形のデータが無いので、3D モデルは書き出しません");
+                return null;
+            }
+            _noShape.Remove(shortName);
+        }
+        var job = new Ship3DJob(record, shortName, string.IsNullOrWhiteSpace(name) ? shortName : name, batch: null) { ViewOnly = !save, Kind = isItem ? Ship3DJobKind.Item : Ship3DJobKind.Ship };
         LogJob(job, $"取り込みを始めます (単体{(confirm ? "" : "、表示から直接")}{(save ? "" : "、保存しない")}、record {record}、Data.p4k {stamp.Path})");
         AddJob(job);
         job.Task = RunSingleAsync(job, stamp, owner, confirm);
@@ -892,7 +945,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         var side = ReadOurSidecar(shortName);
         if (side == null || _byShort.ContainsKey(shortName)) { DeleteChangedCache(shortName, reason); return; }
         _pendingDelete.Add(shortName);
-        var job = new Ship3DJob(side.Record, shortName, shortName, _refreshCts) { EstimatedSeconds = Math.Max(side.ExportSeconds, BaseSeconds), LogTag = "自動の取り直し" };
+        var job = new Ship3DJob(side.Record, shortName, shortName, _refreshCts) { Kind = IsItemRecord(side.Record) ? Ship3DJobKind.Item : Ship3DJobKind.Ship, EstimatedSeconds = Math.Max(side.ExportSeconds, BaseSeconds), LogTag = "自動の取り直し" };
         var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
         job.Task = tcs.Task;   // 個別の［読み込み］が同じ船なら合流する
         _refreshTcs[job] = tcs;
@@ -1138,7 +1191,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 $" (予想 {job.EstimatedSeconds:F0} 秒、参照ジオメトリ {est.GeometryMb:F1} MB、照合用の元ファイル {sources.Count} 個" +
                 $"{(job.Overlapped ? "、並行で動いたので係数の実績には使いません" : "")})" +
                 $"。元データの記録 {srcSeconds:F1} 秒、保存 {swSave.Elapsed.TotalSeconds:F1} 秒 ({job.LogTag})");
-            if (!job.Overlapped) Ship3DStats.Add(job.Short, est.GeometryMb, job.Watch.Elapsed.TotalSeconds, glbBytes);
+            if (!job.Overlapped && job.Kind == Ship3DJobKind.Ship) Ship3DStats.Add(job.Short, est.GeometryMb, job.Watch.Elapsed.TotalSeconds, glbBytes);
             job.SetPhase(Ship3DJobPhase.Done, "");
             _running.Remove(job);
             // まとめて取り込むの中では古いものを消さない (利用者の決定。保有船を優先した意味が無くなるため)。
@@ -1206,17 +1259,17 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             }
             catch (Exception ex) { Log($"最大容量を超えたので {f.Name} を消そうとしましたが、消せませんでした: {ex.Message}"); }
         }
-        if (deleted.Count > 0) Log($"最大容量 ({MaxMb:N0} MB) を超えたので、古いものから {deleted.Count} 隻を消しました: {string.Join(", ", deleted)}");
+        if (deleted.Count > 0) Log($"最大容量 ({MaxMb:N0} MB) を超えたので、古いものから {deleted.Count} 件を消しました: {string.Join(", ", deleted)}");
         if (total > max)
         {
             var left = CachedFiles();
             var text = left.Count == 1
-                ? $"「{Path.GetFileNameWithoutExtension(left[0].Name)}」1 隻だけで最大容量 ({MaxMb:N0} MB) を超えています ({FormatBytes(left[0].Length)})。消さずに残します"
+                ? $"「{Path.GetFileNameWithoutExtension(left[0].Name)}」1 件だけで最大容量 ({MaxMb:N0} MB) を超えています ({FormatBytes(left[0].Length)})。消さずに残します"
                 : $"最大容量 ({MaxMb:N0} MB) を超えていますが、表示中・書き出し中のものを除くと消せるものがありません (今 {FormatBytes(total)})";
             Notice = text;
             Log(text);
         }
-        else if (deleted.Count > 0) Notice = $"最大容量を超えたので、古いものから {deleted.Count} 隻を消しました";
+        else if (deleted.Count > 0) Notice = $"最大容量を超えたので、古いものから {deleted.Count} 件を消しました";
     }
 
     // ===== まとめて取り込む =====
@@ -1672,7 +1725,8 @@ internal static class Ship3DP4kIndex
 public enum Ship3DJobPhase { Estimating, Queued, Exporting, Done, Failed, Cancelled }
 
 // 書き出しの種類: 船の 3D モデル / ステーションの地図 (StationMapExports) / ステーションの 3D 表示 (Station3DExports)
-public enum Ship3DJobKind { Ship, Station, Station3D }
+// Item: 船以外の品 (武器・装備・船の部品など。2026-11-04)
+public enum Ship3DJobKind { Ship, Station, Station3D, Item }
 
 // 書き出し 1 隻 (進み具合の欄の 1 行)
 public sealed class Ship3DJob : INotifyPropertyChanged

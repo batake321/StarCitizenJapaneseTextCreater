@@ -1968,6 +1968,10 @@ public partial class MainWindow : Window
                 App.Config.SyncFolder,
                 App.Config.Ship3DFolder,
                 App.Config.Ship3DMaxMB,
+                App.Config.Ship3DNoSave,
+                App.Config.Station3DCacheMaxGB,
+                App.Config.AutoUpdateEnabled,
+                App.Config.AutoUpdateTime,
                 App.Config.ExtractedBuildVersion,
                 App.Config.ExtractedBuildChangeNum,
             };
@@ -2543,7 +2547,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            StationView3DShops.Open(record, name, null, null, this);
+            StationView3DShops.Show(record, name, null, null, this);
         }
         catch (Exception ex)
         {

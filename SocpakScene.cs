@@ -20,7 +20,7 @@ internal sealed class SocpakScene
     // 部品の形 1 つ (GLB の mesh 1 つ)。Positions は x,y,z の並び (f32)、Primitives は面を出す submesh ごとの索引 (3 つずつ三角形)
     public sealed class Mesh
     {
-        public string Name = "";
+        public string Name = ""; public string CgfPath = "";   // CgfPath: 部品の種類 (datacore の形のパス。補う面の表の鍵。2026-11-04)
         public float[] Positions = [];
         public List<uint[]> Primitives = new();
         public double[] Min = new double[3], Max = new double[3];   // accessor の min・max (f32 を double に)
@@ -57,6 +57,7 @@ internal sealed class SocpakScene
     public List<Container> Containers { get; } = new();
     // 読めなかった部品 (starbreaker の「failed to load CGF <パス>: <理由>」と同じ順・同じ中身)
     public List<(string CgfPath, string Reason)> FailedMeshes { get; } = new();
+    public List<string> CgfPaths { get; } = new();   // 置き方に出てくる部品の形のパス (読んだかどうかにかかわらず全部。補う面の表の「その場所で使う形」の一覧用。2026-11-04)
     // 読めなかった socpak (「failed to load <socpak>: <理由>」)
     public List<(string Socpak, string Reason)> FailedSocpaks { get; } = new();
 
@@ -120,6 +121,13 @@ internal static class SocpakExporter
             if (SharedContexts.Values.Any(x => !ReferenceEquals(x.P4k, a))) SharedContexts.Clear();
             return SharedContexts[lod] = new Context(a, lod, MeshCacheBytes);
         }
+    }
+
+    // (2026-11-04、利用者の指示「３D 表示後のメモリ後始末」) ステーションの 3D がどこにも開いていなくなったら、部品の形の置き場ごと捨てる。
+    // 取り出しの途中のものは自分の Context を持ったまま終わり、次に使うときに作り直す
+    public static void ReleaseShared()
+    {
+        lock (SharedLock) SharedContexts.Clear();
     }
 
     // 部品の形の読み取りの道具 (Data.p4k の目次・DataCore・材質の置き場)。同じ Data.p4k の間は使い回す
@@ -238,7 +246,7 @@ internal static class SocpakExporter
     // socpakPaths: p4k の中のパス (starbreaker に渡すのと同じ並び)。wantContainer: 部品の形を読む区画 (null なら全部)。
     //   読まない区画も置き方は読む (同じ CGF の材質は、並びで最初に出てきた区画のものになるため。starbreaker と同じ結果にする)。
     // wantMesh: 形を読む部品の名前 (null なら全部)。読まない部品は置き方にも入れない (呼ぶ側が名前で捨てるもの)
-    public static SocpakScene Export(Context ctx, IReadOnlyList<string> socpakPaths, Func<string, bool>? wantContainer = null, Func<string, bool>? wantMesh = null, CancellationToken ct = default)
+    public static SocpakScene Export(Context ctx, IReadOnlyList<string> socpakPaths, Func<string, bool>? wantContainer = null, Func<string, bool>? wantMesh = null, CancellationToken ct = default, Func<string, bool>? wantCgf = null)
     {
         var scene = new SocpakScene();
         // 1) 区画ごとの置き方 (load_interior_from_socpak)
@@ -281,6 +289,7 @@ internal static class SocpakExporter
             }
             containers.Add((name, path, placements, gravity[pi]));
         }
+        foreach (var cg in cgfs) scene.CgfPaths.Add(cg.Path);
         // 3) 部品の形 (使う区画の、使う名前のものだけ)。読めなかったものは並びの順に FailedMeshes へ。
         //   (2026-11-04、利用者の指示「マルチタスク対応にして」) 形は並べて読む (読む順だけ先に決め、読めなかったものはその順で入れるので結果は 1 つずつ読んだときと同じ)
         var meshObjs = new SocpakScene.Mesh?[cgfs.Count];
@@ -290,7 +299,7 @@ internal static class SocpakExporter
         {
             if (wantContainer != null && !wantContainer("interior_" + name)) continue;
             foreach (var (ix, _) in placements)
-                if ((wantMesh == null || wantMesh(cgfs[ix].Name)) && !tried[ix]) { tried[ix] = true; order.Add(ix); }
+                if ((wantMesh == null || wantMesh(cgfs[ix].Name)) && (wantCgf == null || wantCgf(cgfs[ix].Path)) && !tried[ix]) { tried[ix] = true; order.Add(ix); }
         }
         var errs = new string?[cgfs.Count];
         Parallel.ForEach(order, new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 2) }, ix =>
@@ -653,7 +662,7 @@ internal static class SocpakExporter
         finally { ctx.InFlight.TryRemove(new KeyValuePair<string, Lazy<(SocpakScene.Mesh?, string?)>>(key, lazy)); }
     }
 
-    private static SocpakScene.Mesh Renamed(SocpakScene.Mesh m, string name) => new() { Name = name, Positions = m.Positions, Primitives = m.Primitives, Min = m.Min, Max = m.Max };
+    private static SocpakScene.Mesh Renamed(SocpakScene.Mesh m, string name) => new() { Name = name, CgfPath = m.CgfPath, Positions = m.Positions, Primitives = m.Primitives, Min = m.Min, Max = m.Max };
 
     public sealed class MeshLoadException(string message) : Exception(message);
 
@@ -724,7 +733,7 @@ internal static class SocpakExporter
         if (needsBake) CryIvo.BakeNmc(mesh, nmc);
 
         // pack_mesh: 箱は全部の頂点、面は隠さない submesh だけ
-        var res = new SocpakScene.Mesh { Name = name, Positions = mesh.Positions };
+        var res = new SocpakScene.Mesh { Name = name, CgfPath = cgfPath, Positions = mesh.Positions };
         float[] mn = [float.MaxValue, float.MaxValue, float.MaxValue], mx = [float.MinValue, float.MinValue, float.MinValue];
         for (int v = 0; v < mesh.VertexCount; v++)
             for (int k = 0; k < 3; k++) { var f = mesh.Positions[v * 3 + k]; mn[k] = RustF32.Min(mn[k], f); mx[k] = RustF32.Max(mx[k], f); }

@@ -98,13 +98,13 @@ internal sealed partial class DataCoreDb
     private const int MaxMaterializeDepth = 24;
 
     // query::<Value> (skipReferences=false) と query_no_references (true)
-    public List<DcValue> QueryValues(CompiledPath path, Record record, bool skipReferences = false)
+    public List<DcValue> QueryValues(CompiledPath path, Record record, bool skipReferences = false, HashSet<string>? keep = null)
     {
         if (record.StructIndex != path.RootStruct) throw new QueryException("struct mismatch");
         var (o, s) = Instance(record.StructIndex, record.InstanceIndex);
         var res = new List<DcValue>();
         var r = new DcReader(Data, o, s);
-        ExecValues(path.Segments, 0, ref r, res, skipReferences);
+        ExecValues(path.Segments, 0, ref r, res, skipReferences, keep);
         return res;
     }
 
@@ -136,9 +136,9 @@ internal sealed partial class DataCoreDb
     }
     private DcReader Sub(int si, int ii) { var (o, s) = Instance(si, ii); return new DcReader(Data, o, s); }
 
-    private DcValue Mat(int si, ref DcReader r, bool skipRefs) => MaterializeStruct(si, ref r, 0, new HashSet<Guid128>(), skipRefs);
+    private DcValue Mat(int si, ref DcReader r, bool skipRefs, HashSet<string>? keep) => MaterializeStruct(si, ref r, 0, new HashSet<Guid128>(), skipRefs, keep);
 
-    private void ExecValues(List<Segment> segs, int idx, ref DcReader r, List<DcValue> res, bool skipRefs)
+    private void ExecValues(List<Segment> segs, int idx, ref DcReader r, List<DcValue> res, bool skipRefs, HashSet<string>? keep)
     {
         if (idx >= segs.Count) return;
         var seg = segs[idx];
@@ -149,8 +149,8 @@ internal sealed partial class DataCoreDb
             switch (seg.DataType)
             {
                 case DT.Class:
-                    if (leaf) res.Add(Mat(seg.Target ?? throw new QueryException("missing target"), ref r, skipRefs));
-                    else ExecValues(segs, idx + 1, ref r, res, skipRefs);
+                    if (leaf) res.Add(Mat(seg.Target ?? throw new QueryException("missing target"), ref r, skipRefs, keep));
+                    else ExecValues(segs, idx + 1, ref r, res, skipRefs, keep);
                     return;
                 case DT.StrongPointer:
                 case DT.WeakPointer:
@@ -159,8 +159,8 @@ internal sealed partial class DataCoreDb
                         if (si == -1 && ii == -1) return;
                         if (!TypeMatches(si, seg.TypeFilter)) return;
                         var sub = Sub(si, ii);
-                        if (leaf) res.Add(Mat(si, ref sub, skipRefs));
-                        else ExecValues(segs, idx + 1, ref sub, res, skipRefs);
+                        if (leaf) res.Add(Mat(si, ref sub, skipRefs, keep));
+                        else ExecValues(segs, idx + 1, ref sub, res, skipRefs, keep);
                         return;
                     }
                 case DT.Reference:
@@ -169,8 +169,8 @@ internal sealed partial class DataCoreDb
                         if (inst == 0 && rid.IsEmpty) return;
                         if (RecordById(rid) is not Record tr) return;
                         var sub = Sub(tr.StructIndex, tr.InstanceIndex);
-                        if (leaf) res.Add(Mat(tr.StructIndex, ref sub, skipRefs));
-                        else ExecValues(segs, idx + 1, ref sub, res, skipRefs);
+                        if (leaf) res.Add(Mat(tr.StructIndex, ref sub, skipRefs, keep));
+                        else ExecValues(segs, idx + 1, ref sub, res, skipRefs, keep);
                         return;
                     }
                 default:
@@ -189,8 +189,8 @@ internal sealed partial class DataCoreDb
                     if (si == -1 && ii == -1) continue;
                     if (!TypeMatches(si, seg.TypeFilter)) continue;
                     var sub = Sub(si, ii);
-                    if (leaf) res.Add(Mat(si, ref sub, skipRefs));
-                    else ExecValues(segs, idx + 1, ref sub, res, skipRefs);
+                    if (leaf) res.Add(Mat(si, ref sub, skipRefs, keep));
+                    else ExecValues(segs, idx + 1, ref sub, res, skipRefs, keep);
                 }
                 return;
             case DT.Class:
@@ -199,8 +199,8 @@ internal sealed partial class DataCoreDb
                     for (int i = 0; i < count; i++)
                     {
                         var sub = Sub(tsi, first + i);
-                        if (leaf) res.Add(Mat(tsi, ref sub, skipRefs));
-                        else ExecValues(segs, idx + 1, ref sub, res, skipRefs);
+                        if (leaf) res.Add(Mat(tsi, ref sub, skipRefs, keep));
+                        else ExecValues(segs, idx + 1, ref sub, res, skipRefs, keep);
                     }
                     return;
                 }
@@ -210,7 +210,7 @@ internal sealed partial class DataCoreDb
         }
     }
 
-    private DcValue MaterializeStruct(int si, ref DcReader r, int depth, HashSet<Guid128> visited, bool skipRefs)
+    private DcValue MaterializeStruct(int si, ref DcReader r, int depth, HashSet<Guid128> visited, bool skipRefs, HashSet<string>? keep)
     {
         var typeName = StructName(si);
         if (depth >= MaxMaterializeDepth)
@@ -226,26 +226,35 @@ internal sealed partial class DataCoreDb
             var name = PropName(pi);
             if (!IsKnownDT(prop.DataType) || !IsKnownCT(prop.ConversionType)) throw new QueryException("unknown type");
             var dt = (DT)prop.DataType;
+            // keep 指定時は、名前が keep に無い欄を読まずに飛ばす (欄の大きさは PropertyByteOffset の表と同じ数え方)。
+            // 呼ぶ側は欄を名前で探すので、keep の名前の欄は同じ値になる。飛ばした先の References を開かないので、木が爆発する record でも軽い
+            if (keep != null && !keep.Contains(name))
+            {
+                if ((CT)prop.ConversionType != CT.Attribute) r.Take(8);
+                else if (dt == DT.Class) r.Take((int)Structs[prop.StructIndex].StructSize);
+                else r.Take(InlineSize(dt));
+                continue;
+            }
             var v = (CT)prop.ConversionType != CT.Attribute
-                ? MaterializeArray(dt, prop.StructIndex, ref r, depth, visited, skipRefs)
-                : MaterializeAttribute(dt, prop.StructIndex, ref r, depth, visited, skipRefs);
+                ? MaterializeArray(dt, prop.StructIndex, ref r, depth, visited, skipRefs, keep)
+                : MaterializeAttribute(dt, prop.StructIndex, ref r, depth, visited, skipRefs, keep);
             fields.Add((name, v));
         }
         return new DcValue.Obj(typeName, fields, null);
     }
 
-    private DcValue MaterializeAttribute(DT dt, int propStruct, ref DcReader r, int depth, HashSet<Guid128> visited, bool skipRefs)
+    private DcValue MaterializeAttribute(DT dt, int propStruct, ref DcReader r, int depth, HashSet<Guid128> visited, bool skipRefs, HashSet<string>? keep)
     {
         switch (dt)
         {
-            case DT.Class: return MaterializeStruct(propStruct, ref r, depth + 1, visited, skipRefs);
+            case DT.Class: return MaterializeStruct(propStruct, ref r, depth + 1, visited, skipRefs, keep);
             case DT.StrongPointer:
             case DT.WeakPointer:
                 {
                     var (si, ii) = ReadPointer(ref r);
                     if (si == -1 && ii == -1) return DcValue.Null.I;
                     var sub = Sub(si, ii);
-                    return MaterializeStruct(si, ref sub, depth + 1, visited, skipRefs);
+                    return MaterializeStruct(si, ref sub, depth + 1, visited, skipRefs, keep);
                 }
             case DT.Reference:
                 {
@@ -258,7 +267,7 @@ internal sealed partial class DataCoreDb
                     if (RecordById(rid) is Record tr)
                     {
                         var sub = Sub(tr.StructIndex, tr.InstanceIndex);
-                        var v = MaterializeStruct(tr.StructIndex, ref sub, depth + 1, visited, false);
+                        var v = MaterializeStruct(tr.StructIndex, ref sub, depth + 1, visited, false, keep);
                         result = v is DcValue.Obj o ? o with { RecordId = rid } : v;
                     }
                     else result = DcValue.Null.I;
@@ -269,7 +278,7 @@ internal sealed partial class DataCoreDb
         }
     }
 
-    private DcValue MaterializeArray(DT dt, int propStruct, ref DcReader r, int depth, HashSet<Guid128> visited, bool skipRefs)
+    private DcValue MaterializeArray(DT dt, int propStruct, ref DcReader r, int depth, HashSet<Guid128> visited, bool skipRefs, HashSet<string>? keep)
     {
         int count = r.I32(), first = r.I32();
         var items = new List<DcValue>(Math.Max(0, Math.Min(count, 4096)));
@@ -282,7 +291,7 @@ internal sealed partial class DataCoreDb
                 case DT.Class:
                     {
                         var sub = Sub(propStruct, first + i);
-                        v = MaterializeStruct(propStruct, ref sub, depth + 1, visited, skipRefs);
+                        v = MaterializeStruct(propStruct, ref sub, depth + 1, visited, skipRefs, keep);
                         break;
                     }
                 case DT.StrongPointer:
@@ -290,7 +299,7 @@ internal sealed partial class DataCoreDb
                     {
                         var (si, ii) = dt == DT.StrongPointer ? Strong(idx) : Weak(idx);
                         if (si == -1 && ii == -1) v = DcValue.Null.I;
-                        else { var sub = Sub(si, ii); v = MaterializeStruct(si, ref sub, depth + 1, visited, skipRefs); }
+                        else { var sub = Sub(si, ii); v = MaterializeStruct(si, ref sub, depth + 1, visited, skipRefs, keep); }
                         break;
                     }
                 case DT.Reference:
@@ -305,7 +314,7 @@ internal sealed partial class DataCoreDb
                             if (RecordById(rid) is Record tr)
                             {
                                 var sub = Sub(tr.StructIndex, tr.InstanceIndex);
-                                var x = MaterializeStruct(tr.StructIndex, ref sub, depth + 1, visited, false);
+                                var x = MaterializeStruct(tr.StructIndex, ref sub, depth + 1, visited, false, keep);
                                 v = x is DcValue.Obj o ? o with { RecordId = rid } : x;
                             }
                             else v = DcValue.Null.I;

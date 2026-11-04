@@ -2,7 +2,8 @@
 // view3d.js の buildCur・当たり判定の升目を作る所を、ここへ移した (計算の中身は同じ)。
 // 受け取る: { type:'build', id, base (地点の置き場の URL), region (region.json), c (中心), r, keys: { col, ocol, labk }, names (色の種類の名前) }
 // 返す: { type:'progress', id, done, total } (読んだ区画の数)、{ type:'boxes', id, boxes } (外形: 描く部品の箱の線。中心からの相対、Float32Array)、
-//       { type:'done', id, buf, offs, ioffs, loffs, parts, ladders, elevDoors, stairs, fz, fa, pidx, lightParts, grids, times }、{ type:'error', id, message }
+//       { type:'done', id, buf, offs, ioffs, loffs, parts, ladders, elevDoors, stairs, fz, fa, pidx, lightParts, coarse, times }、{ type:'error', id, message }
+//       (coarse = 当たり判定の荒い区切り { all, fl, bigAll, bigFl }。升は画面の側が引いたときに作る)
 'use strict';
 const geoCache = new Map();
 async function loadGeo(base, region, gi) {
@@ -37,12 +38,231 @@ function flat(map) {
   for (let i = 0; i < keys.length; i++) for (const b of map.get(keys[i])) items[k++] = b;
   return { keys, starts, items };
 }
+// 升目用の開いた番地の表 (鍵 = 升目の番号 (倍精度の整数)。空きは NaN)。数えて → 並べた鍵・始まり・中身の配列にする
+function tableHash(key, mask) {
+  const lo = key >>> 0, hi = Math.floor(key / 4294967296) | 0;
+  return (Math.imul(lo ^ Math.imul(hi, 0x85ebca6b), 0x9E3779B1) >>> 7) & mask;
+}
+function makeTable() { const cap = 1 << 16; return { cap, n: 0, keys: new Float64Array(cap).fill(NaN), cnt: new Uint32Array(cap), pos: null }; }
+function tableSlot(T, key) {
+  const mask = T.cap - 1; let h = tableHash(key, mask);
+  while (T.keys[h] !== key) { if (T.keys[h] !== T.keys[h]) return -1; h = (h + 1) & mask; }
+  return h;
+}
+function tableCount(T, key) {
+  const mask = T.cap - 1; let h = tableHash(key, mask), k;
+  while ((k = T.keys[h]) !== key) {
+    if (k !== k) {
+      T.keys[h] = key; T.cnt[h] = 1;
+      if (++T.n * 2 > T.cap) tableGrow(T);
+      return;
+    }
+    h = (h + 1) & mask;
+  }
+  T.cnt[h]++;
+}
+function tableGrow(T) {
+  const oc = T.cap, ok = T.keys, on = T.cnt; T.cap = oc * 2; T.keys = new Float64Array(T.cap).fill(NaN); T.cnt = new Uint32Array(T.cap);
+  const mask = T.cap - 1;
+  for (let i = 0; i < oc; i++) { const k = ok[i]; if (k !== k) continue; let h = tableHash(k, mask); while (T.keys[h] === T.keys[h]) h = (h + 1) & mask; T.keys[h] = k; T.cnt[h] = on[i]; }
+}
+function tableLayout(T) {
+  let keys = new Float64Array(T.n); let q = 0, kmin = Infinity, kmax = -Infinity;
+  for (let i = 0; i < T.cap; i++) { const k = T.keys[i]; if (k === k) { keys[q++] = k; if (k < kmin) kmin = k; if (k > kmax) kmax = k; } }
+  // 鍵が 32 ビット整数に収まるなら Int32Array にする (値は同じ。引くのは二分探しで型を問わない。メモリが半分)
+  if (kmin >= -2147483648 && kmax <= 2147483647) keys = Int32Array.from(keys);
+  keys.sort();
+  const starts = new Uint32Array(T.n + 1); let tot = 0; T.pos = new Uint32Array(T.cap);
+  for (let i = 0; i < T.n; i++) { const sl = tableSlot(T, keys[i]); starts[i] = tot; T.pos[sl] = tot; tot += T.cnt[sl]; }
+  starts[T.n] = tot;
+  const items = new Uint32Array(tot);
+  return { items, grid: { keys, starts, items } };
+}
+// ===== 解析の結果のディスク保存 (WC) =====
+// (2026-11-04、利用者の指示「先読み、キャッシュ化 HDD 容量設定が空いていればファイル保存など早く動かす仕組みを入れて」)
+// 'done' の知らせ (描く形のバッファ・当たり判定の升目・部品の一覧など) を、そのまま保存して次に使う。
+//   保存の形: 知らせの中の ArrayBuffer・型付き配列は 1 つの data.bin に並べ、残り (数・文字・配列・入れ子) は meta.json の skeleton に JSON で書く。
+//     知らせの項目が増減しても、そのまま保存・復元できる (項目を名前で決めていない)。数の NaN・Infinity・-0・undefined は印を付けて書き、同じ値に戻す。
+//   置き場: ブラウザのオリジンの私的なファイル領域 (OPFS。WebView2 の利用者データのフォルダ = 作業ディレクトリの webview2_ship3d の中) の w-<鍵>\ (data.bin・meta.json)。
+//     meta.json は最後に書く (途中で止まったものは使わない)。
+//   鍵: アプリが渡す鍵 (wcache.key = 地点の保存と同じ鍵) + 中心・半径 + 色の種類の名前 (keys・names) + この解析の糸のスクリプト自身の SHA-256 (中身が変わったら別の鍵)。
+//   容量: アプリが渡す budget (バイト。上限 − 地点の保存の分) に収める。超えたら最後に使った時刻が古いものから消す。budget が 0 以下なら全部消す。
+//     アプリが渡す free (保存先のドライブの空き) が、保存する大きさ + WC_RESERVE に足りなければ保存しない。
+const WC_RESERVE = 3 * 1024 * 1024 * 1024, WC_CHUNK = 256 * 1024 * 1024, WC_VERSION = 1;
+const WC = (() => {
+  const TA = { Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array, BigUint64Array };
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  // 保存先 (OPFS)。試しの道具は self.__wcBackend で差し替える (handle: getSize/read/write/truncate/close の同期の取っ手)
+  const opfs = {
+    async root() { return await navigator.storage.getDirectory(); },
+    async list() { const out = []; const root = await this.root(); for await (const [name] of root.entries()) if (name.startsWith('w-')) out.push(name); return out; },
+    async handle(entry, file, create) {
+      const root = await this.root(); let d, fh;
+      try { d = await root.getDirectoryHandle(entry, { create }); fh = await d.getFileHandle(file, { create }); }
+      catch (e) { if (e && e.name === 'NotFoundError') return null; throw e; }
+      return await fh.createSyncAccessHandle();
+    },
+    async remove(entry) { const root = await this.root(); try { await root.removeEntry(entry, { recursive: true }); } catch (e) { if (!(e && e.name === 'NotFoundError')) throw e; } },
+  };
+  const be = () => self.__wcBackend || opfs;
+  const available = () => !!self.__wcBackend || (typeof navigator !== 'undefined' && navigator.storage && typeof navigator.storage.getDirectory === 'function');
+  const withLock = fn => (typeof navigator !== 'undefined' && navigator.locks) ? navigator.locks.request('scjt-wcache', fn) : fn();
+  let verP = null;
+  const version = () => verP ??= (async () => {
+    if (self.__wcVersion) return self.__wcVersion;
+    const txt = await (await fetch(self.location.href)).text();
+    return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(txt)))).slice(0, 16);
+  })();
+  const hex = u => Array.from(u, x => x.toString(16).padStart(2, '0')).join('');
+  async function keyOf(wc, c, r, keys, names) {
+    const s = JSON.stringify([WC_VERSION, wc.key, c, r, keys, names, await version()]);
+    return 'w-' + hex(new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(s)))).slice(0, 32);
+  }
+  async function readAll(h) { const n = h.getSize(); const u = new Uint8Array(n); let at = 0; while (at < n) { const k = h.read(u.subarray(at, Math.min(n, at + WC_CHUNK)), { at }); if (!(k > 0)) throw new Error('short read'); at += k; } return u; }
+  async function writeAll(h, u, at) { for (let o = 0; o < u.length; o += WC_CHUNK) { const part = u.subarray(o, Math.min(u.length, o + WC_CHUNK)); let w = 0; while (w < part.length) { const k = h.write(part.subarray(w), { at: at + o + w }); if (!(k > 0)) throw new Error('short write'); w += k; } } }
+  async function readMeta(entry) {
+    const h = await be().handle(entry, 'meta.json', false); if (!h) return null;
+    try { return JSON.parse(dec.decode(await readAll(h))); } catch (_) { return null; } finally { h.close(); }
+  }
+  async function writeMeta(entry, meta) {
+    const h = await be().handle(entry, 'meta.json', true);
+    try { const u = enc.encode(JSON.stringify(meta)); h.truncate(0); await writeAll(h, u, 0); h.flush && h.flush(); } finally { h.close(); }
+  }
+  // 知らせ → { skeleton, bufs: [ArrayBuffer] }
+  function encode(msg) {
+    const bufs = [], idx = new Map();
+    const add = ab => { let i = idx.get(ab); if (i === undefined) { i = bufs.length; bufs.push(ab); idx.set(ab, i); } return i; };
+    const walk = v => {
+      if (v === null || typeof v === 'boolean' || typeof v === 'string') return v;
+      if (typeof v === 'number') return Number.isFinite(v) && !Object.is(v, -0) ? v : { $n: Object.is(v, -0) ? '-0' : String(v) };
+      if (v === undefined) return { $u: 1 };
+      if (v instanceof ArrayBuffer) return { $ab: add(v) };
+      if (ArrayBuffer.isView(v)) {
+        if (v instanceof DataView || !TA[v.constructor.name] || !(v.buffer instanceof ArrayBuffer)) throw new Error('unsupported view');
+        return { $ta: v.constructor.name, b: add(v.buffer), o: v.byteOffset, l: v.length };
+      }
+      if (Array.isArray(v)) { const a = new Array(v.length); for (let i = 0; i < v.length; i++) a[i] = walk(v[i]); return a; }
+      if (typeof v === 'object' && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null)) {
+        const o = {}; for (const k of Object.keys(v)) { if (k.startsWith('$')) throw new Error('unsupported key ' + k); o[k] = walk(v[k]); } return o;
+      }
+      throw new Error('unsupported value ' + typeof v);
+    };
+    return { skeleton: walk(msg), bufs };
+  }
+  function decode(skeleton, bufs) {
+    const walk = v => {
+      if (v === null || typeof v !== 'object') return v;
+      if (Array.isArray(v)) { const a = new Array(v.length); for (let i = 0; i < v.length; i++) a[i] = walk(v[i]); return a; }
+      if ('$n' in v) return v.$n === '-0' ? -0 : Number(v.$n);
+      if ('$u' in v) return undefined;
+      if ('$ab' in v) return bufs[v.$ab];
+      if ('$ta' in v) return new TA[v.$ta](bufs[v.b], v.o, v.l);
+      const o = {}; for (const k of Object.keys(v)) o[k] = walk(v[k]); return o;
+    };
+    return walk(skeleton);
+  }
+  function uniqueBuffers(msg) {
+    const seen = new Set(), out = [];
+    const walk = v => {
+      if (v === null || typeof v !== 'object') return;
+      if (v instanceof ArrayBuffer) { if (!seen.has(v)) { seen.add(v); out.push(v); } return; }
+      if (ArrayBuffer.isView(v)) { if (!seen.has(v.buffer)) { seen.add(v.buffer); out.push(v.buffer); } return; }
+      if (Array.isArray(v)) { for (const x of v) walk(x); return; }
+      for (const k of Object.keys(v)) walk(v[k]);
+    };
+    walk(msg); return out;
+  }
+  // 全部の保存の合計 (バイト) と一覧 [{ entry, meta }]
+  async function scan() {
+    const res = []; let used = 0;
+    for (const entry of await be().list()) { const meta = await readMeta(entry); if (!meta || typeof meta.bytes !== 'number') { await be().remove(entry); continue; } used += meta.bytes; res.push({ entry, meta }); }
+    return { used, items: res };
+  }
+  // budget に収める (最後に使った時刻が古いものから消す。keep は消さない)。収めた後の合計を返す
+  async function enforce(budget, keep, extra) {
+    return await withLock(async () => {
+      let { used, items } = await scan();
+      items.sort((a, b) => (a.meta.lastUsed || 0) - (b.meta.lastUsed || 0));
+      for (const it of items) {
+        if (used + (extra || 0) <= Math.max(0, budget)) break;
+        if (it.entry === keep) continue;
+        await be().remove(it.entry); used -= it.meta.bytes;
+      }
+      return used;
+    });
+  }
+  // 保存したものがあれば復元した知らせ (無い・合わない・読めない = null)
+  async function load(entry, expectKey) {
+    try {
+      const meta = await readMeta(entry); if (!meta || meta.wk !== expectKey || meta.v !== WC_VERSION) return null;
+      const h = await be().handle(entry, 'data.bin', false); if (!h) return null;
+      try {
+        const total = meta.bufs.reduce((s, b) => s + b.len, 0);
+        if (h.getSize() !== total) return null;
+        const bufs = meta.bufs.map(b => new ArrayBuffer(b.len));
+        for (let i = 0; i < bufs.length; i++) {
+          const u = new Uint8Array(bufs[i]); let at = 0;
+          while (at < u.length) { const k = h.read(u.subarray(at, Math.min(u.length, at + WC_CHUNK)), { at: meta.bufs[i].off + at }); if (!(k > 0)) return null; at += k; }
+        }
+        const msg = decode(meta.skeleton, bufs);
+        meta.lastUsed = Date.now(); try { await writeMeta(entry, meta); } catch (_) { }
+        return msg;
+      } finally { h.close(); }
+    } catch (_) { return null; }
+  }
+  // 保存する。保存したら合計 (バイト)、しなかったら null
+  async function save(entry, expectKey, msg, wc) {
+    try {
+      const { skeleton, bufs } = encode(msg);
+      let off = 0; const tab = bufs.map(b => { const t = { off, len: b.byteLength }; off += b.byteLength; return t; });
+      const size = off + 4096;
+      if (!(wc.budget > 0) || size > wc.budget) return null;
+      if (typeof wc.free === 'number' && wc.free - size < WC_RESERVE) return null;
+      const used = await enforce(wc.budget, entry, size);
+      await be().remove(entry);   // 同じ鍵の古い・書きかけを消してから書く
+      const h = await be().handle(entry, 'data.bin', true);
+      if (!h) return null;
+      try {
+        h.truncate(0);
+        for (let i = 0; i < bufs.length; i++) await writeAll(h, new Uint8Array(bufs[i]), tab[i].off);
+        h.flush && h.flush();
+      } finally { h.close(); }
+      const meta = { v: WC_VERSION, wk: expectKey, bytes: off, bufs: tab, skeleton, lastUsed: Date.now(), created: Date.now() };
+      await writeMeta(entry, meta);
+      return used + off;
+    } catch (e) { try { await be().remove(entry); } catch (_) { } return null; }
+  }
+  // 保存があり、中身の大きさがそろっているか (読まずに調べる)
+  async function has(entry) {
+    try { const meta = await readMeta(entry); if (!meta || meta.v !== WC_VERSION) return false; const h = await be().handle(entry, 'data.bin', false); if (!h) return false; try { return h.getSize() === meta.bufs.reduce((s, b) => s + b.len, 0); } finally { h.close(); } } catch (_) { return false; }
+  }
+  return { available, keyOf, load, save, enforce, scan, encode, decode, uniqueBuffers, has };
+})();
+self.__WC = WC;
+
 self.onmessage = async e => {
-  const m = e.data; if (m.type !== 'build') return;
+  const m = e.data;
+  // 保存の合計を budget に収めて、合計を返す (budget が 0 以下なら全部消す)。画面の側が地点を頼む前・後に使う
+  if (m.type === 'wstat') { let used = null; try { if (WC.available()) used = await WC.enforce(m.budget || 0, null, 0); } catch (_) { } self.postMessage({ type: 'wstat', id: m.id, used }); return; }
+  if (m.type !== 'build') return;
   const { id, base, region, c, r, keys, names } = m;
   const COLK = keys.col, OCOLK = keys.ocol, LABK = keys.labk;
   const times = {}; let tp = performance.now(); const lap = k => { const t = performance.now(); times[k] = (t - tp) / 1000; tp = t; };
   try {
+    // 保存したものがあれば、それを返す (解析しない)。wcache = { key (アプリの鍵。無ければ保存しない), budget, free }。prewarm なら結果は返さず保存だけ
+    const wc = m.wcache; let wkey = null;
+    if (wc && wc.key && WC.available()) {
+      try {
+        wkey = await WC.keyOf(wc, c, r, keys, names);
+        const used0 = await WC.enforce(wc.budget || 0, wkey, 0);
+        const t0 = performance.now();
+        if (m.prewarm) { const mt = await WC.has(wkey); if (mt) { self.postMessage({ type: 'done', id, prewarm: true, wcache: { hit: true, used: used0 } }); return; } }
+        else {
+          const hit = await WC.load(wkey, wkey);
+          if (hit) { hit.times = { ...(hit.times || {}), cacheLoad: (performance.now() - t0) / 1000 }; hit.id = id; hit.wcache = { hit: true, used: used0 }; self.postMessage(hit, WC.uniqueBuffers(hit)); return; }
+        }
+      } catch (_) { wkey = null; }
+    }
     geoCache.clear();
     const lo = c.map(v => v - r), hi = c.map(v => v + r);
     const ins = region.instances.filter(i => i[3][0] <= hi[0] && i[4][0] >= lo[0] && i[3][1] <= hi[1] && i[4][1] >= lo[1] && i[3][2] <= hi[2] && i[4][2] >= lo[2]);
@@ -195,44 +415,48 @@ self.onmessage = async e => {
     const pidx = sel.map((s, i) => [s[0][0] + ':' + s[2], i]);
     geoCache.clear();
     lap('buildCur');
-    // ===== 当たり判定の升目 (view3d.js の buildGrid・buildCeil・buildWall・buildFloorGrid と同じ中身) =====
-    const isDoor = parts.map(q => { const w = q[1].split('_'); return w.some(x => x === 'door' || x === 'doors') && !w.includes('elevator'); });
-    const fg = new Map(), cg = new Map(), wg = new Map(), flg = new Map();
-    const push = (map, key, b) => { let l = map.get(key); if (!l) map.set(key, l = []); l.push(b); };
-    for (const k of COLK) {
-      const [o, n] = offs[k]; const [io, inn] = ioffs[k]; const ids = new Uint32Array(buf, io * 4, inn);
-      for (let t = 0; t < n / 9; t++) {
-        const b = o + t * 9;
-        const x0 = Math.min(F[b], F[b + 3], F[b + 6]), x1 = Math.max(F[b], F[b + 3], F[b + 6]), y0 = Math.min(F[b + 1], F[b + 4], F[b + 7]), y1 = Math.max(F[b + 1], F[b + 4], F[b + 7]);
-        const cz = (F[b + 3] - F[b]) * (F[b + 7] - F[b + 1]) - (F[b + 4] - F[b + 1]) * (F[b + 6] - F[b]);
-        const i0 = Math.floor(x0), i1 = Math.floor(x1), j0 = Math.floor(y0), j1 = Math.floor(y1);
-        const small1 = (i1 - i0 + 1) * (j1 - j0 + 1) <= 4096;
-        // 足元 (上向き)
-        if (cz > 0 && small1) for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) push(fg, i * 100003 + j, b);
-        if (isDoor[ids[t]]) continue;
-        // 頭の上 (下向き、2 m の升目)
-        if (cz < 0) {
-          const a0 = Math.floor(x0 / 2), a1 = Math.floor(x1 / 2), c0 = Math.floor(y0 / 2), c1 = Math.floor(y1 / 2);
-          if ((a1 - a0 + 1) * (c1 - c0 + 1) <= 1024) for (let i = a0; i <= a1; i++) for (let j = c0; j <= c1; j++) push(cg, i * 100003 + j, b);
+    // ===== 当たり判定の荒い区切り (coarse) =====
+    // (2026-11-05、利用者の指示「当たり判定も範囲を決めればメモリ節約になるんじゃない？」「物理的にいけないところを省いて、直線で」)
+    // 以前はここで 1 m (頭の上は 2 m) の升目 f・c・w・fl を全部作って渡していた (Seraphim ±30 m で約 4 GB・約 124 秒)。
+    // 今は 16 m の箱 (鍵 = floor(x/16) × 100003 + floor(y/16)。中心からの相対) ごとに、箱に掛かる三角形の位置 b を並べた一覧だけを作る。
+    // 升そのものは、画面の側 (view3d.js の cellGet) が升を引いたときに、その升の入る箱の一覧から以前の升目と同じ条件で選んで作る (中身・並びは以前の升目と同じ)。
+    //   all: COLK の全三角形 (f・c・w の元。ドアも入れる。ドアを除くのは画面の側)、fl: OCOLK の floor2・tube2 の三角形 (判定の床の元)。
+    //   big: 16 m の箱で 64 箱を超える大きな三角形 (親の決定) は、箱の一覧に入れず別の並び (bigAll・bigFl) に入れる。升を作るときは箱の一覧と big の両方を見る
+    //   (ここで三角形を落とすことはしない。以前の升目の上限 (1 m の升で 4096・2 m で 1024) は画面の側が升を作るときに同じ条件で掛ける)。
+    // 形: tableLayout と同じ (並べた鍵 keys・始まり starts・中身 items)。2 回走査 (数える → 詰める)。中身の並びは三角形の位置 b の昇順 (COLK の順・三角形の順 = b の順)
+    const BOX = 16, BIG_BOXES = 64;
+    const csweep = (add, big, only) => {
+      const ranges = only === 0 ? COLK.map(k => offs[k]) : ['floor2', 'tube2'].map(k => offs[k] || [0, 0]);
+      for (const [o, n] of ranges) {
+        for (let t = 0; t < n / 9; t++) {
+          const b = o + t * 9;
+          const I0 = Math.floor(Math.min(F[b], F[b + 3], F[b + 6]) / BOX), I1 = Math.floor(Math.max(F[b], F[b + 3], F[b + 6]) / BOX), J0 = Math.floor(Math.min(F[b + 1], F[b + 4], F[b + 7]) / BOX), J1 = Math.floor(Math.max(F[b + 1], F[b + 4], F[b + 7]) / BOX);
+          if ((I1 - I0 + 1) * (J1 - J0 + 1) > BIG_BOXES) { big(b); continue; }
+          for (let I = I0; I <= I1; I++) for (let J = J0; J <= J1; J++) add(I * 100003 + J, b);
         }
-        // 横の当たり
-        if (small1) for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) push(wg, i * 100003 + j, b);
       }
-    }
-    for (const k of ['floor2', 'tube2']) {
-      const [o, n] = offs[k] || [0, 0];
-      for (let t = 0; t < n / 9; t++) {
-        const b = o + t * 9;
-        const i0 = Math.floor(Math.min(F[b], F[b + 3], F[b + 6])), i1 = Math.floor(Math.max(F[b], F[b + 3], F[b + 6])), j0 = Math.floor(Math.min(F[b + 1], F[b + 4], F[b + 7])), j1 = Math.floor(Math.max(F[b + 1], F[b + 4], F[b + 7]));
-        if ((i1 - i0 + 1) * (j1 - j0 + 1) > 4096) continue;
-        for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) push(flg, i * 100003 + j, b);
-      }
-    }
-    const grids = { f: flat(fg), c: flat(cg), w: flat(wg), fl: flat(flg) };
-    lap('grids');
+    };
+    const coarseOf = gi => {
+      const T = makeTable(); const bigs = [];
+      csweep(key => tableCount(T, key), b => bigs.push(b), gi);
+      const out = tableLayout(T);
+      csweep((key, b) => { out.items[T.pos[tableSlot(T, key)]++] = b; }, () => { }, gi);
+      T.keys = null; T.cnt = null; T.pos = null;
+      return { grid: out.grid, big: Uint32Array.from(bigs) };
+    };
+    const ca = coarseOf(0), cf = coarseOf(1);
+    const coarse = { all: ca.grid, fl: cf.grid, bigAll: ca.big, bigFl: cf.big };
+    lap('coarse');
     const tr = [buf];
-    for (const g of Object.values(grids)) tr.push(g.keys.buffer, g.starts.buffer, g.items.buffer);
-    self.postMessage({ type: 'done', id, buf, offs, ioffs, loffs, parts, ladders, elevDoors, stairs, fz, fa, pidx, lightParts: [...lightParts], grids, times }, tr);
+    for (const g of [coarse.all, coarse.fl]) tr.push(g.keys.buffer, g.starts.buffer, g.items.buffer);
+    tr.push(coarse.bigAll.buffer, coarse.bigFl.buffer);
+    const out = { type: 'done', id, buf, offs, ioffs, loffs, parts, ladders, elevDoors, stairs, fz, fa, pidx, lightParts: [...lightParts], coarse, times };
+    // 保存する (転送すると中身が消えるので、先に書く)。保存した中身は times を除いた知らせ。書いた時間は times.cacheSave
+    let wused = null;
+    if (wkey) { const t1 = performance.now(); const { times: _t, id: _i, ...stored } = out; wused = await WC.save(wkey, wkey, { type: 'done', ...stored }, wc); times.cacheSave = (performance.now() - t1) / 1000; }
+    if (m.prewarm) { self.postMessage({ type: 'done', id, prewarm: true, wcache: { hit: false, used: wused } }); return; }
+    out.wcache = { hit: false, used: wused };
+    self.postMessage(out, tr);
   } catch (err) {
     geoCache.clear();
     self.postMessage({ type: 'error', id, message: String(err && err.message || err) });

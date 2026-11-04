@@ -95,6 +95,9 @@ public class AppConfig
     public long Ship3DMaxMB { get; set; } = 0;
     // (2026-11-04、利用者の決定「設定で取り込み可能」「デフォルトは保存」) true なら 3D モデルを保存しない (表示のたびに Data.p4k から直接読む)
     public bool Ship3DNoSave { get; set; } = false;
+    // ステーションの 3D (新しい方式) の、地点ごとの取り出し結果の保存 (StationView3DCache) の上限 (GB)。負なら未設定で、初期値 = 置き場所のドライブの残りの 1/3、ただし最大 10 GB。
+    // 0 なら保存しない (先読みもしない)
+    public double Station3DCacheMaxGB { get; set; } = -1;
 
     // 自動更新: 起動したときと毎日 AutoUpdateTime (HH:mm) に、新しい版を確かめる (AppUpdater)
     public bool AutoUpdateEnabled { get; set; } = true;

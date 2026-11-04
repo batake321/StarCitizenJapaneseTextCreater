@@ -215,7 +215,7 @@ public partial class Ship3DWindow : Window
             if (!string.Equals(record, _record, StringComparison.OrdinalIgnoreCase) || _shownShort != null) return;
             if (path == null)
             {
-                ShowOverlay("この船の 3D モデルを読み込めませんでした (理由はアプリのログにあります)。");
+                ShowOverlay(ex.NoShape(record) ? "この品には形がありません (形のデータが無い品です)。" : "3D モデルを読み込めませんでした (理由はアプリのログにあります)。");
                 return;
             }
             await ShowModelAsync(record, path);

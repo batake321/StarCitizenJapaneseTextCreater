@@ -44,7 +44,8 @@ internal static class StationView3D
     // 区画 (socpak) 1 つを渡すと、部品ごとの三角形が返る。アプリの中の読み取り (OwnExtractor) で取り出す
     // (2026-11-04、利用者の決定「starbreaker の処理を自前で持つ」(案 A)。前は StarBreaker で GLB に書き出して読んでいた)
     // SourcePart: 部品 1 つ (GLB の子のメッシュ)。Name はメッシュの名前、Mesh はメッシュの三角形 (float32 x9。同じメッシュの部品で共有してよい)、M は socpak の枠へのノードの行列 (4×4、行優先)
-    public sealed record SourcePart(string Name, float[] Mesh, double[] M);
+    // CgfPath: 部品の種類 (補う面の表の鍵。無ければ ""）。SizeRef: 大きさ (Small) の判定に使う形 (補う面の追加の部品が、元の部品の形で判定するため。null なら Mesh)
+    public sealed record SourcePart(string Name, float[] Mesh, double[] M, string CgfPath = "", float[]? SizeRef = null);
     public delegate Task<IReadOnlyList<SourcePart>?> Extractor(string socpak, CancellationToken ct);
 
     // (2026-11-04、利用者の決定「starbreaker の処理を自前で持つ」(案 A)) アプリの中の読み取り (SocpakExporter) で取り出す。
@@ -60,7 +61,8 @@ internal static class StationView3D
             var list = MatchSocpaksCached(ctx.P4k, pattern);
             if (list.Count == 0) { log?.Invoke($"取り出しが失敗しました ({socpak}): no .socpak files matching '{pattern}'"); return (IReadOnlyList<SourcePart>?)null; }
             var scene = SocpakExporter.Export(ctx, list, ct: ct);
-            var parts = PartsOf(scene);
+            // 粗い形で抜けた床の面を補う (StationFill)。歩くモードの裏の補い (view3d_fill_walk.db) のうち、形の印が今と同じ行も足す
+            var parts = StationFill.Augment(PartsOf(scene), StationFill.Table(Path.Combine(StationPlaces.Folder, LayoutDbName), StationFill.WalkDbPath, ctx.P4k));
             GravityCache[socpak] = GravityOf(scene);
             return parts.Count > 0 ? parts : null;
         }
@@ -74,7 +76,7 @@ internal static class StationView3D
     // SocpakExporter.MatchSocpaks と同じ結果 (目次の順に、ファイル名が .socpak で終わり、小文字のパスにパターンの小文字を含むもの) を、
     // socpak の名前の一覧 (Data.p4k ごとに 1 回作る) から引く (2026-11-04、親の指示「取り出しの内訳」: 目次 138 万件を区画ごとに見直すのに 0.02〜0.09 秒かかっていた)
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<P4kArchive, List<(string Low, string Name)>> SocpakNames = new();
-    private static List<string> MatchSocpaksCached(P4kArchive p4k, string pattern)
+    internal static List<string> MatchSocpaksCached(P4kArchive p4k, string pattern)
     {
         var names = SocpakNames.GetValue(p4k, a =>
         {
@@ -161,7 +163,7 @@ internal static class StationView3D
                     }
                     tris[pl.Mesh] = T = outl.ToArray();
                 }
-                if (T.Length > 0 && M2.All(double.IsFinite)) res.Add(new SourcePart(pl.Mesh.Name, T, M2));
+                if (T.Length > 0 && M2.All(double.IsFinite)) res.Add(new SourcePart(pl.Mesh.Name, T, M2, pl.Mesh.CgfPath));
             }
         }
         return res;
@@ -439,7 +441,7 @@ internal static class StationView3D
     public const string LayoutDbName = "view3d_layout.db";
     // 一括で作るときに、1 か所を始めてよいプロセスのメモリの上限 (バイト。BuildLayoutDb の説明)
     public const long LayoutMemGate = 2L << 30;
-    public const string LayoutDbFormat = "scjt-view3d-layoutdb-4";   // 2: クエストの扉・カードやヒューズを取る所・クエストのパネルを terminals に足した。3: 場所の中身 (place_*) を足した。4: 外の貨物エレベーターの数 (place_has.freight) を足した
+    public const string LayoutDbFormat = "scjt-view3d-layoutdb-5";   // 2: クエストの扉・カードやヒューズを取る所・クエストのパネルを terminals に足した。3: 場所の中身 (place_*) を足した。4: 外の貨物エレベーターの数 (place_has.freight) を足した。5: 抜けた床の補い part_fill を足した
 
     private static byte[] Doubles(double[] v) { var b = new byte[v.Length * 8]; Buffer.BlockCopy(v, 0, b, 0, b.Length); return b; }
     private static double[] DoublesOf(byte[] b) { var v = new double[b.Length / 8]; Buffer.BlockCopy(b, 0, v, 0, b.Length); return v; }
@@ -552,6 +554,7 @@ internal static class StationView3D
         Exec(c, "CREATE TABLE IF NOT EXISTS place_shops(record TEXT NOT NULL, n INTEGER NOT NULL, entity TEXT NOT NULL, guid TEXT NOT NULL, pos BLOB NOT NULL, PRIMARY KEY(record, n)) WITHOUT ROWID");
         Exec(c, "CREATE TABLE IF NOT EXISTS place_terms(record TEXT NOT NULL, n INTEGER NOT NULL, kind TEXT NOT NULL, pos BLOB NOT NULL, yaw REAL, entity TEXT NOT NULL, class TEXT NOT NULL, shop_guid TEXT NOT NULL, shop_entity TEXT NOT NULL, PRIMARY KEY(record, n)) WITHOUT ROWID");
         Exec(c, "CREATE TABLE IF NOT EXISTS place_hangars(record TEXT NOT NULL, n INTEGER NOT NULL, class TEXT NOT NULL, size TEXT NOT NULL, pos BLOB NOT NULL, PRIMARY KEY(record, n)) WITHOUT ROWID");
+        StationFill.CreateTable(c);   // part_fill: 粗い形で抜けた床の面（部品の種類ごと）
     }
 
     // 1 か所を書く (同じ record があれば消してから)。socpaks の使い回しの数は WriteCounts で数え直す
@@ -633,11 +636,12 @@ internal static class StationView3D
     // (2026-11-04、利用者の指示「この取り込みも並列処理を入れて」)。wait: 1 か所を始める前に呼ぶ (CPU 使用率が高い間は待つ、など。呼ぶ側が決める)
     public static (int Places, int Instances, int Socpaks, long Bytes, double Seconds, List<string> Failed) BuildLayoutDb(string path, string stampKey, StationIndex index,
         IReadOnlyDictionary<string, StationRoot> roots, Action<int, int>? progress = null, CancellationToken ct = default, int parallel = 1, Action<CancellationToken>? wait = null,
-        Action<double>? weightProgress = null)
+        Action<double>? weightProgress = null, Action<int, int>? fillProgress = null, Action<string>? fillLog = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var tmp = path + ".tmp";
         if (File.Exists(tmp)) File.Delete(tmp);
+        var prevFill = StationFill.ReadPrev(path);   // 前の DB の補う面と印 (印が同じ場所は比べ直さない)
         var failed = new List<string>();
         int places = 0, insts = 0, socs;
         using (var c = OpenDb(tmp, true))
@@ -694,6 +698,15 @@ internal static class StationView3D
                 else failed.Add($"{list[i].Key}: {made[i].Error}");
             }
             WriteCounts(c, tx);
+            // 粗い形 (LOD1) で抜けた床の面を細かい形 (LOD0) から求めて、場所ごとに入れる (StationFill)。前の DB に同じ印の場所があれば比べない
+            {
+                var fplaces = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+                for (int i = 0; i < list.Count; i++)
+                    if (made[i].Layout is { } lay) fplaces[list[i].Key] = lay.Instances.Select(x => x.Socpak).Distinct(StringComparer.Ordinal).ToList();
+                var fr = StationFill.Run(index.P4kPath, fplaces, prevFill, parallel, (d, n) => fillProgress?.Invoke(d, n), ct, fillLog);
+                StationFill.Write(c, tx, fr.Fill, fr.PlaceSrc, fr.PlaceKinds);
+                FillStats = fr.Stats;
+            }
             // 場所ごとにかかった秒 (次に作るときの重さ。WeightsOf)
             using (var q = c.CreateCommand())
             {
@@ -721,6 +734,7 @@ internal static class StationView3D
 
     // 前の記録が無い場所の、置かれた所 1 つあたりの秒 (試しの道具で全部の場所を作ったとき: 347 秒 ÷ 169,536)
     private const double SecPerInstance = 0.002;
+    public static StationFill.BuildStats? FillStats { get; private set; }   // 直近の一括で求めた補う面の数
     // 場所ごとの重さ (BuildLayoutDb の説明)。前の DB (path。版の印は見ない) が無い・読めなければ全部の場所を置かれた所の数で見る
     private static double[] WeightsOf(string path, StationIndex index, List<KeyValuePair<string, StationRoot>> list, CancellationToken ct)
     {
@@ -1032,6 +1046,152 @@ internal static class StationView3D
             st.BuildSeconds = sw.Elapsed.TotalSeconds;
             return st;
         }
+
+        // ===== 歩くモードの裏の補い (2026-11-05、利用者の指示「歩くモードで近く 5 m 以内の部品を裏で先に細かい形で調べる 見つけたら DB に入れる」
+        // 「そのエリアに荒いので部品がない場合、細かいのでチェック」「床でなく物体で」「床代わりの何かに対応できる。照明とかパネルとかチューブとか」) =====
+        // ビューアが知らせた「粗い形に物体 (面) が何も無い升」(cells: 升の中心の場所の座標 (x, y)。1 m の升) と足元の高さ pos[2] ± zTol について:
+        //   1. 置き方の一覧の箱 (Lo/Hi) が、升と z 帯に掛かるインスタンスを選ぶ。
+        //   2. そのインスタンスの部品の箱 (置き場 "g:<socpak>" の GeoCalc.PartBoxes。無ければ SocpakExporter.Export(ctx1) で部品と箱だけ出す。BuildGeo は通さない) で、升と z 帯に掛かる部品を選ぶ。
+        //   3. 細かい形 (LOD0) と粗い形 (LOD1) の両方がある形 (StationFill.HasLodVariant) だけを対象にする。区画に直接置かれた形・補う面の追加の部品 (CgfPath 空) は対象外。
+        //   4. 細かい形を読む (SocpakExporter.Shared(p4k, 0) で、その socpak のその部品だけ)。読んだ三角形は state に持ち、部品 (形) ごとに 1 回だけ読む。
+        //   5. 細かい形の三角形を場所の座標 (A·M·点) にし、物体の無い升の xy の範囲と z 帯に (三角形の箱で) 掛かるものだけを取る (上向きに限らない。「床でなく物体で」)。
+        //   6. 取れた三角形が 1 つでもあれば返す (部品の局所座標の三角形 = DB に入れるもの、場所の座標の三角形 = ビューアに送るもの)。
+        //   同じ (インスタンス, 部品, 升) は state で 1 回の 3D の中で二度調べない (親の決定)。失敗 (読めない・形が無い) は log に残して続ける
+        public sealed class WalkFillState
+        {
+            public readonly HashSet<string> Seen = new(StringComparer.Ordinal);                        // 調べた (インスタンス, 部品, 升)
+            public readonly Dictionary<string, float[]?> Lod0 = new(StringComparer.Ordinal);           // 形 (Norm) → 細かい形の三角形 (局所。読めなければ null)
+            public readonly Dictionary<string, bool> HasLod = new(StringComparer.Ordinal);             // 形 (Norm) → 細かい形と粗い形の両方があるか
+            public readonly Dictionary<string, WalkPart[]?> Parts = new(StringComparer.Ordinal);       // socpak → 部品 (置き場に GeoCalc が無いときに出したもの。出せなければ null)
+        }
+        // 部品 1 つ (名前・形のパス・ノードの行列 (4×4 行優先)・socpak の枠の箱 [下 x,y,z, 上 x,y,z])
+        public sealed record WalkPart(string Name, string CgfPath, double[] M, double[] Box);
+        // 見つかったもの: インスタンスの番号・部品の名前・形 (StationFill.Norm)・形の印 (StationFill.KindSig)・部品の局所座標の三角形 (x9)・場所の座標の三角形 (x9)
+        public sealed record WalkFillItem(int Inst, string Name, string Kind, string Sig, float[] LocalTris, float[] WorldTris);
+
+        public List<WalkFillItem> WalkCheck(string p4kPath, double[] pos, double zTol, IReadOnlyList<double[]> cells, WalkFillState state, Action<string>? log, CancellationToken ct)
+        {
+            var res = new List<WalkFillItem>();
+            if (cells.Count == 0) return res;
+            var ctx1 = SocpakExporter.Shared(p4kPath, 1);
+            double z0 = pos[2] - zTol, z1 = pos[2] + zTol;
+            // 升の全部を含む xy の範囲 (升は中心 ±0.5 m)
+            double cx0 = cells.Min(c => c[0]) - 0.5, cx1 = cells.Max(c => c[0]) + 0.5, cy0 = cells.Min(c => c[1]) - 0.5, cy1 = cells.Max(c => c[1]) + 0.5;
+            foreach (var inst in Layout)
+            {
+                ct.ThrowIfCancellationRequested();
+                // 1. 一覧の箱が升と z 帯に掛かるインスタンス (箱の無いインスタンスは掛かるか分からないので対象外)
+                if (inst.Lo is not { } lo || inst.Hi is not { } hi) continue;
+                if (lo[0] > cx1 || hi[0] < cx0 || lo[1] > cy1 || hi[1] < cy0 || lo[2] > z1 || hi[2] < z0) continue;
+                var parts = WalkPartsOf(inst.Socpak, ctx1, state, log, ct);
+                if (parts == null) continue;
+                var A = inst.A;
+                for (int pi = 0; pi < parts.Length; pi++)
+                {
+                    var part = parts[pi];
+                    if (part.CgfPath.Length == 0) continue;
+                    // 2. 部品の箱 (8 隅を場所の座標に) が升と z 帯に掛かるか (PartsHit と同じ変換)
+                    var b = part.Box;
+                    double[] bl = [double.MaxValue, double.MaxValue, double.MaxValue], bh = [double.MinValue, double.MinValue, double.MinValue];
+                    foreach (var x in new[] { b[0], b[3] }) foreach (var y in new[] { b[1], b[4] }) foreach (var z in new[] { b[2], b[5] })
+                        for (int a = 0; a < 3; a++) { var v = A[a * 4] * x + A[a * 4 + 1] * y + A[a * 4 + 2] * z + A[a * 4 + 3]; if (v < bl[a]) bl[a] = v; if (v > bh[a]) bh[a] = v; }
+                    if (bl[2] > z1 || bh[2] < z0 || bl[0] > cx1 || bh[0] < cx0 || bl[1] > cy1 || bh[1] < cy0) continue;
+                    var hit = new List<double[]>();
+                    foreach (var c in cells)
+                    {
+                        if (bl[0] > c[0] + 0.5 || bh[0] < c[0] - 0.5 || bl[1] > c[1] + 0.5 || bh[1] < c[1] - 0.5) continue;
+                        // 鍵は (インスタンス, 部品, 升の xy, 足元の z を 1 m で切った数)。別の階に移ったら同じ升も調べ直す (親の決定。ビューアの sentKey と同じ切り方)
+                        if (state.Seen.Add(FormattableString.Invariant($"{inst.Index}|{pi}|{c[0]:F1}|{c[1]:F1}|{Math.Floor(pos[2])}"))) hit.Add(c);
+                    }
+                    if (hit.Count == 0) continue;
+                    // 3. 細かい形と粗い形の両方がある形だけ
+                    var kind = StationFill.Norm(part.CgfPath);
+                    if (!state.HasLod.TryGetValue(kind, out var has)) state.HasLod[kind] = has = StationFill.HasLodVariant(ctx1.P4k, part.CgfPath, 1);
+                    if (!has) continue;
+                    // 4. 細かい形 (形ごとに 1 回)
+                    if (!state.Lod0.TryGetValue(kind, out var t0)) state.Lod0[kind] = t0 = WalkLod0(p4kPath, inst.Socpak, part.Name, kind, ctx1, log, ct);
+                    if (t0 == null) continue;
+                    // 5. 場所の座標にして、物体の無い升と z 帯に掛かる三角形だけ
+                    var M = part.M;
+                    var local = new List<float>(); var world = new List<float>();
+                    var wx = new double[3]; var wy = new double[3]; var wz = new double[3];
+                    for (int t = 0; t + 9 <= t0.Length; t += 9)
+                    {
+                        for (int k = 0; k < 3; k++)
+                        {
+                            double x = t0[t + k * 3], y = t0[t + k * 3 + 1], z = t0[t + k * 3 + 2];
+                            double sx = M[0] * x + M[1] * y + M[2] * z + M[3], sy = M[4] * x + M[5] * y + M[6] * z + M[7], sz = M[8] * x + M[9] * y + M[10] * z + M[11];
+                            wx[k] = A[0] * sx + A[1] * sy + A[2] * sz + A[3]; wy[k] = A[4] * sx + A[5] * sy + A[6] * sz + A[7]; wz[k] = A[8] * sx + A[9] * sy + A[10] * sz + A[11];
+                        }
+                        double tz0 = Math.Min(wz[0], Math.Min(wz[1], wz[2])), tz1 = Math.Max(wz[0], Math.Max(wz[1], wz[2]));
+                        if (tz0 > z1 || tz1 < z0) continue;
+                        double tx0 = Math.Min(wx[0], Math.Min(wx[1], wx[2])), tx1 = Math.Max(wx[0], Math.Max(wx[1], wx[2])), ty0 = Math.Min(wy[0], Math.Min(wy[1], wy[2])), ty1 = Math.Max(wy[0], Math.Max(wy[1], wy[2]));
+                        bool on = false;
+                        foreach (var c in hit) if (tx0 <= c[0] + 0.5 && tx1 >= c[0] - 0.5 && ty0 <= c[1] + 0.5 && ty1 >= c[1] - 0.5) { on = true; break; }
+                        if (!on) continue;
+                        for (int k = 0; k < 9; k++) local.Add(t0[t + k]);
+                        for (int k = 0; k < 3; k++) { world.Add((float)wx[k]); world.Add((float)wy[k]); world.Add((float)wz[k]); }
+                    }
+                    // 6. 1 つでもあれば返す
+                    if (local.Count > 0) res.Add(new WalkFillItem(inst.Index, part.Name, kind, StationFill.KindSig(ctx1.P4k, kind), local.ToArray(), world.ToArray()));
+                }
+            }
+            return res;
+        }
+
+        // インスタンスの socpak の部品 (名前・形のパス・行列・箱)。置き場 ("g:<socpak>") の GeoCalc があればその Parts と PartBoxes。無ければ粗い形を Export して部品と箱だけ出す (state に持つ)
+        private WalkPart[]? WalkPartsOf(string socpak, SocpakExporter.Context ctx1, WalkFillState state, Action<string>? log, CancellationToken ct)
+        {
+            if (CacheGet<GeoCalc>("g:" + socpak) is { } geo)
+            {
+                var arr = new WalkPart[geo.Parts.Count];
+                for (int i = 0; i < arr.Length; i++) arr[i] = new WalkPart(geo.Parts[i].Name, geo.Parts[i].CgfPath, geo.Parts[i].M, geo.PartBoxes[i]);
+                return arr;
+            }
+            if (state.Parts.TryGetValue(socpak, out var cached)) return cached;
+            WalkPart[]? res = null;
+            try
+            {
+                var list = MatchSocpaksCached(ctx1.P4k, socpak.Replace('/', '\\'));
+                if (list.Count == 0) log?.Invoke($"区画が見つかりません ({socpak})");
+                else
+                {
+                    var src = PartsOf(SocpakExporter.Export(ctx1, list, ct: ct));
+                    var boxes = PartBoxesLocal(src);
+                    res = new WalkPart[src.Count];
+                    for (int i = 0; i < res.Length; i++) res[i] = new WalkPart(src[i].Name, src[i].CgfPath, src[i].M, boxes[i]);
+                }
+            }
+            catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or ZstdSharp.ZstdException)
+            {
+                log?.Invoke($"区画の部品を出せませんでした ({socpak}): {e.Message}");
+            }
+            state.Parts[socpak] = res;
+            return res;
+        }
+
+        // 細かい形 (LOD0) の三角形 (部品の局所座標、x9)。その socpak のその部品 (名前と形のパス) だけを読む (StationFill.Build と同じやり方)。読めない・形が無ければ null
+        private static float[]? WalkLod0(string p4kPath, string socpak, string name, string kind, SocpakExporter.Context ctx1, Action<string>? log, CancellationToken ct)
+        {
+            try
+            {
+                var list = MatchSocpaksCached(ctx1.P4k, socpak.Replace('/', '\\'));
+                if (list.Count == 0) { log?.Invoke($"区画が見つかりません ({socpak})"); return null; }
+                var ctx0 = SocpakExporter.Shared(p4kPath, 0);
+                var scene0 = SocpakExporter.Export(ctx0, list, wantMesh: n => n == name, ct: ct, wantCgf: p => StationFill.Norm(p) == kind);
+                foreach (var c in scene0.Containers)
+                    foreach (var pl in c.Placements)
+                        if (StationFill.Norm(pl.Mesh.CgfPath) == kind) return StationFill.TrisOf(pl.Mesh);
+                var fail = scene0.FailedMeshes.FirstOrDefault(f => StationFill.Norm(f.CgfPath) == kind);
+                log?.Invoke($"細かい形が無い ({name} / {kind} / {socpak}){(fail.Reason is { Length: > 0 } rs ? ": " + rs : "")}");
+                return null;
+            }
+            catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or ZstdSharp.ZstdException)
+            {
+                log?.Invoke($"細かい形を読めませんでした ({name} / {kind} / {socpak}): {e.Message}");
+                return null;
+            }
+        }
     }
 
     private static readonly JsonSerializerOptions JsonOpts = new() { NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals };
@@ -1178,6 +1338,7 @@ internal static class StationView3D
     private sealed class Part
     {
         public string Name = "", Key = ""; public string[] Words = []; public string Kind = "other";
+        public string CgfPath = "";  // 部品の種類 (形のパス。SourcePart.CgfPath。補う面の追加の部品・区画に直接置かれた形は ""。歩くモードの裏の補い (WalkCheck) で使う)
         public float[] Mesh = [];   // メッシュの三角形 (x9)
         public double[] M = [];     // ノードの行列 (4×4、行優先)
         public int N => Mesh.Length / 9;
@@ -1785,6 +1946,18 @@ internal static class StationView3D
     // メッシュの三角形 (float32) は同じメッシュの部品で共有する (view_build_lib.py の meshcache と同じ)
     // 床にしない部品の大きさ (局所の箱の x か y がこれ未満。利用者の決定「縦か横のどちらかが 1 m 未満」)
     private const double SmallPart = 1.0;
+    // 補う面の比べる面を決める (StationFill)。アプリの床の判定 (判定 2 の Labels) を、部品の形をそのまま (行列を掛けず、局所の +z を上として) 当てた結果を返す。
+    // 判定の決まりは変えない。部品の名前の語 (ceiling・wall・counter・stair) は同じに当てる。light と 1 m 未満の除外は掛けない (利用者の指示)。
+    // 返す: 三角形ごとの LabNone・LabFloor・LabSlope・LabTube・LabCounter
+    internal static byte[] WalkLabelsOf(string meshName, float[] tris)
+    {
+        var words = StationFloorBuilder.MeshWords(meshName);
+        var p = new Part { Name = meshName, Key = string.Join("_", words), Words = words, Kind = words.Contains("counter") ? "counterpart" : "other", Mesh = tris, Small = false };
+        var V = new double[tris.Length];
+        for (int i = 0; i < V.Length; i++) V[i] = tris[i];
+        return Labels(p, V, out _, out _, out _);
+    }
+
     private static Part ToPart(SourcePart sp)
     {
         var words = StationFloorBuilder.MeshWords(sp.Name);
@@ -1794,10 +1967,11 @@ internal static class StationView3D
         // (2026-11-04、利用者の決定「縦か横のどちらかが 1 m 未満の部品は、床にしない」) 局所の箱の x・y: メッシュの点の x・y の幅に、ノードの行列の x・y の列の長さを掛けたもの
         // (view_build6.py の壁の決まりの lx・ly と同じ作り)
         double mnx = double.MaxValue, mxx = double.MinValue, mny = double.MaxValue, mxy = double.MinValue;
-        for (int i = 0; i < sp.Mesh.Length; i += 3) { mnx = Math.Min(mnx, sp.Mesh[i]); mxx = Math.Max(mxx, sp.Mesh[i]); mny = Math.Min(mny, sp.Mesh[i + 1]); mxy = Math.Max(mxy, sp.Mesh[i + 1]); }
+        var sz = sp.SizeRef ?? sp.Mesh;
+        for (int i = 0; i < sz.Length; i += 3) { mnx = Math.Min(mnx, sz[i]); mxx = Math.Max(mxx, sz[i]); mny = Math.Min(mny, sz[i + 1]); mxy = Math.Max(mxy, sz[i + 1]); }
         var M = sp.M;
         double lx = Math.Sqrt(M[0] * M[0] + M[4] * M[4] + M[8] * M[8]) * (mxx - mnx), ly = Math.Sqrt(M[1] * M[1] + M[5] * M[5] + M[9] * M[9]) * (mxy - mny);
-        return new Part { Name = sp.Name, Key = key, Words = words, Kind = kind, Mesh = sp.Mesh, M = sp.M, Small = Math.Min(lx, ly) < SmallPart };
+        return new Part { Name = sp.Name, Key = key, Words = words, Kind = kind, Mesh = sp.Mesh, M = sp.M, Small = Math.Min(lx, ly) < SmallPart, CgfPath = sp.CgfPath };
     }
 
     public static List<SourcePart> ReadGlb(string path)

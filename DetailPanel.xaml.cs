@@ -922,6 +922,8 @@ public partial class DetailPanel : UserControl
         ShowDetail(text);
         // 船・車両 (NOITEM_Vehicle) なら［3D 表示］［別ウィンドウ］を出す
         if (itemType.StartsWith("NOITEM_Vehicle", StringComparison.OrdinalIgnoreCase)) SetShip3DTarget(record, ShipNameFor(record));
+        // 武器・装備・船の部品などの品 (EntityClassDefinition の品目) でも出す (2026-11-04、利用者の要望「武器の3D出ないけど？」)。形が無い品は押すと「形がありません」と出る
+        else if (!isTreeRecord && itemType.Length > 0 && record.StartsWith("EntityClassDefinition.", StringComparison.OrdinalIgnoreCase)) SetShip3DTarget(record, ShipNameFor(record));
         // ステーション・都市・前哨基地・小惑星 (星図の Manmade 系・LandingZone・Outpost 系・Asteroid 系。IsStationPlace) なら［読み込み］［地図表示］［別ウィンドウ］を出す
         if (isTreeRecord && tree != null && tree.NodesByRecord.TryGetValue(record, out var place) && IsStationPlace(place)) SetStationTarget(place, tree);
         // 店で、店のある場所 (かその上) が地図の一覧に出る場所 (StationMapPlaceOf) なら［マップに表示］を出す
@@ -994,8 +996,10 @@ public partial class DetailPanel : UserControl
         var job = ex.Jobs.FirstOrDefault(j => j.Short.Equals(shortName, StringComparison.OrdinalIgnoreCase));
         // 自動の取り直しの順番待ちの間も押せる (押すとその船をいちばん先にする。Ship3DExports.IsRefreshWaiting・PromoteRefresh)
         // (2026-11-04) 「3D モデルを保存しない」のときは取り込み (保存) の［読み込み］は使わない (［3D 表示］で直接読む)
-        btnShip3DImport.IsEnabled = !Ship3DExports.NoSave && (state == Ship3DCacheState.None && job == null && !ex.CpuHigh || ex.IsRefreshWaiting(_ship3DRecord));
-        txtShip3D.Text = job != null ? $"3D モデル: 書き出し中 {job.Text}"
+        var noShape = ex.NoShape(_ship3DRecord);
+        btnShip3DImport.IsEnabled = !noShape && !Ship3DExports.NoSave && (state == Ship3DCacheState.None && job == null && !ex.CpuHigh || ex.IsRefreshWaiting(_ship3DRecord));
+        txtShip3D.Text = noShape && state == Ship3DCacheState.None ? "3D モデル: この品には形がありません (形のデータが無い品です)"
+            : job != null ? $"3D モデル: 書き出し中 {job.Text}"
             : state switch
             {
                 Ship3DCacheState.Fresh => "3D モデル: キャッシュあり",
@@ -1105,8 +1109,7 @@ public partial class DetailPanel : UserControl
             HideShip3D();
             return;
         }
-        webDetail.Visibility = Visibility.Collapsed;
-        txtDetail.Visibility = Visibility.Collapsed;
+        // (2026-11-04、利用者の指示「詳細の下に 3D 表示」) 詳細はそのまま残し、その下に 3D を出す
         web3D.Visibility = Visibility.Visible;
         btnShip3DBack.Visibility = Visibility.Visible;
     }
@@ -1120,8 +1123,6 @@ public partial class DetailPanel : UserControl
         Ship3DWeb.Blank(web3D);
         web3D.Visibility = Visibility.Collapsed;
         btnShip3DBack.Visibility = Visibility.Collapsed;
-        if (_webFailed) txtDetail.Visibility = Visibility.Visible;
-        else webDetail.Visibility = Visibility.Visible;
     }
 
     // ===== ステーションの地図 =====
@@ -1182,11 +1183,11 @@ public partial class DetailPanel : UserControl
             : inDb ? "" : "この場所は区画の置き方の一覧にありません (設定タブの［マップをまとめて取り込む］で作り直せます)";
     }
 
-    // ［3D 表示］: その場所の 3D (新しい方式) の窓を開く
+    // ［3D 表示］: その場所の 3D (新しい方式) を出す (別ウィンドウが開いていればそこへ、無ければ［マップ］タブへ。StationView3DShops.Show)
     private void BtnStationMap_Click(object sender, RoutedEventArgs e)
     {
         if (_stationPlace is not { } place) return;
-        StationView3DShops.Open(place.RecordName, place.Name, _stationTree, null, Window.GetWindow(this));
+        StationView3DShops.Show(place.RecordName, place.Name, _stationTree, null, Window.GetWindow(this));
     }
 
     // 表の店名の右の「MAP」: その店のある場所 (StationMapPlaceOf) の 3D の窓を開き、その店を行き先にする (［マップに表示］と同じ)。
@@ -1196,7 +1197,7 @@ public partial class DetailPanel : UserControl
         var tree = await GetShopTreeOrNullAsync();
         if (tree != null && tree.ShopsByRecord.TryGetValue(shopRecord, out var shop) && StationMapPlaceOf(shop) is { } place)
         {
-            StationView3DShops.Open(place.RecordName, place.Name, tree, shop.EntityName, Window.GetWindow(this));
+            StationView3DShops.Show(place.RecordName, place.Name, tree, shop.EntityName, Window.GetWindow(this));
             return;
         }
         ShowStatus("この店の場所の 3D が見つかりませんでした");
@@ -1210,7 +1211,7 @@ public partial class DetailPanel : UserControl
     private void BtnShopMap_Click(object sender, RoutedEventArgs e)
     {
         if (_stationPlace is not { } place || _stationShop is not { } shop) return;
-        StationView3DShops.Open(place.RecordName, place.Name, _stationTree, shop.EntityName, Window.GetWindow(this));
+        StationView3DShops.Show(place.RecordName, place.Name, _stationTree, shop.EntityName, Window.GetWindow(this));
     }
 
 }
