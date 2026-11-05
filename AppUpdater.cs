@@ -582,9 +582,13 @@ public sealed class AppUpdater
                         viaDelta = true;
                     }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    // 通信の失敗 (504・タイムアウト・切断など) で差分を取れなかったときは、丸ごとには切り替えない (更新の失敗として出す。もう一度やれば差分から)。
+                    // 2026-11-05、利用者の指摘「そもそも 504 だからと言って初めからやり直す根拠は？」「次のバージョンからはそうして」:
+                    // GitHub が 504 を返したとき、0.5 MB の差分の代わりに 153.0 MB の丸ごとを取りに行っていた
+                    catch (DeltaNetworkException) { throw; }
                     catch (Exception ex)
                     {
-                        // 差分が欠けている・当てた結果が合わないときは、その DB を丸ごと (圧縮) 取る
+                        // 差分がリリースに無い (404)・当てた結果が合わないときは、その DB を丸ごと (圧縮) 取る
                         _log($"{f.Path} の差分を当てられなかったので、丸ごと取ります: {ex.Message}");
                         total += f.GzSize;
                     }
@@ -620,13 +624,26 @@ public sealed class AppUpdater
                 var codec = DbDelta.Get(d.Codec) ?? throw new InvalidDataException($"差分の作り方 {d.Codec} を知りません");
                 var patch = Path.Combine(work, $"{step}.patch");
                 var before = got;
-                using (var resp = await _http.GetAsync(d.Url, HttpCompletionOption.ResponseHeadersRead, ct))
+                // 通信の失敗のときは、その差分を取り直す (DeltaFetchTries 回まで、間に DeltaFetchWaitMs)。それでも取れなければ DeltaNetworkException
+                for (int attempt = 1; ; attempt++)
                 {
-                    resp.EnsureSuccessStatusCode();
-                    await using var net = await resp.Content.ReadAsStreamAsync(ct);
-                    await using var counting = new CountingStream(net, n => onBytes?.Invoke(before + n));
-                    await using var outFs = new FileStream(patch, FileMode.Create, FileAccess.Write, FileShare.None);
-                    await counting.CopyToAsync(outFs, ct);
+                    try
+                    {
+                        using var resp = await _http.GetAsync(d.Url, HttpCompletionOption.ResponseHeadersRead, ct);
+                        resp.EnsureSuccessStatusCode();
+                        await using var net = await resp.Content.ReadAsStreamAsync(ct);
+                        await using var counting = new CountingStream(net, n => onBytes?.Invoke(before + n));
+                        await using var outFs = new FileStream(patch, FileMode.Create, FileAccess.Write, FileShare.None);
+                        await counting.CopyToAsync(outFs, ct);
+                        break;
+                    }
+                    catch (Exception ex) when (IsNetworkFailure(ex, ct))
+                    {
+                        if (attempt >= DeltaFetchTries)
+                            throw new DeltaNetworkException($"{f.Path} の差分 v{d.FromVersion}→v{d.ToVersion} を通信の失敗で取れませんでした ({DeltaFetchTries} 回試しました)。少し置いてから、もう一度更新してください: {ex.Message}", ex);
+                        _log($"{f.Path} の差分 v{d.FromVersion}→v{d.ToVersion} を取れなかったので、取り直します ({attempt}/{DeltaFetchTries}): {ex.Message}");
+                        await Task.Delay(DeltaFetchWaitMs, ct);
+                    }
                 }
                 got += new FileInfo(patch).Length;
                 if (Sha256OfFile(patch) != d.Sha256.ToLowerInvariant()) throw new InvalidDataException($"差分 v{d.FromVersion}→v{d.ToVersion} の中身が manifest と違います");
@@ -648,6 +665,22 @@ public sealed class AppUpdater
             try { Directory.Delete(work, true); } catch { }
         }
     }
+
+    // 差分を取るときの取り直し (2026-11-05): 回数と間の待ち
+    private const int DeltaFetchTries = 3;
+    private const int DeltaFetchWaitMs = 2000;
+
+    // 通信の失敗で差分を取れなかった (DownloadAsync は、これを丸ごとへの切り替えにしないで、更新の失敗として上へ出す)
+    internal sealed class DeltaNetworkException(string message, Exception inner) : Exception(message, inner);
+
+    // 通信の失敗か: HTTP の失敗 (504 など。接続できないときも)・途中の切断・タイムアウト。差分がリリースに無い (404) は通信の失敗にしない (丸ごとに切り替える)
+    private static bool IsNetworkFailure(Exception ex, CancellationToken ct) => ex switch
+    {
+        HttpRequestException h => h.StatusCode != System.Net.HttpStatusCode.NotFound,
+        IOException => true,
+        OperationCanceledException => !ct.IsCancellationRequested,
+        _ => false,
+    };
 
     private async Task<string> GetStringAsync(string url, CancellationToken ct)
     {
