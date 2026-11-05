@@ -96,11 +96,13 @@ public class AppConfig
     // ［マップ］の［現在位置］をキーで動かす (2026-11-05、利用者の指示「現在位置ボタンはゲームがアクティブでも L-CTRL + L-Shift + Ins がゲームとかぶらなければ
     // デフォルト(設定可能)で動作するようにするとかなり便利」): 使うか (既定は使う) と、キー (MapCurrentHotkey の書き方。例 "LAlt+LShift+Insert"。
     // 修飾キーは LCtrl / RCtrl / LShift / RShift / LAlt / RAlt、最後が主のキー (System.Windows.Input.Key の名前))。
-    // 既定は 左 Alt + 左 Shift + Insert (利用者の指示「CTRL しゃがみなんで、L-Alt + L-Shift + Ins じゃないとまずい」。v2.6.4・v2.6.5 の既定は 左 Ctrl + 左 Shift + Insert)
+    // 既定は 右 Shift + 左 Alt + Insert (2026-11-06、利用者の指示「R-Shift + L-Alt + Ins がいいかも L-Shift 割り当てある」。v2.6.6・v2.6.7 の既定は 左 Alt + 左 Shift + Insert、v2.6.4・v2.6.5 の既定は 左 Ctrl + 左 Shift + Insert)
     public bool MapCurrentHotkeyEnabled { get; set; } = true;
     public string MapCurrentHotkey { get; set; } = global::StarCitizenJapaneseTextCreater.MapCurrentHotkey.DefaultText;
     // 前の版の既定 (左 Ctrl + 左 Shift + Insert) のまま保存されていたキーを、今の既定に替える確かめを済ませた印 (MapCurrentHotkey.MigrateDefault。設定を読んだときに 1 回)
     public bool MapCurrentHotkeyDefaultMigrated { get; set; } = false;
+    // v2.6.6・v2.6.7 の既定 (左 Alt + 左 Shift + Insert) のまま保存されていたキーを、今の既定に替える確かめを済ませた印 (同じく MigrateDefault)
+    public bool MapCurrentHotkeyDefaultMigrated2 { get; set; } = false;
     // 現在位置のオーバーレイ (OreOverlayWindow。2026-11-05、利用者の指示「マップの現在位置ボタンを押したときに、ゲームの画面にオーバーレイ表示するようにして、
     // デフォルトはオフで設定で変えられるように。表示時間は出っぱなしから一定時間で消えるまで。デフォルトで 10 秒。」):
     // 出すか (既定は出さない)、表示する秒数 (既定 10。0 なら出したまま)、窓の位置・大きさ (WPF の単位)、位置を決めたことがあるか

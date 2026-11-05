@@ -17,7 +17,8 @@ namespace StarCitizenJapaneseTextCreater;
 //     押されている」で一致し (決めていない修飾キーが押されていたら動かさない。Windows キーが押されていても動かさない)、そのうえで決めた側のキーが押されているときだけ動かす
 //     (右 Alt・右 Shift で押したときは何もしない)。
 //   主のキーは仮想キーで見る。設定の書き方 (System.Windows.Input.Key の名前) では矢印の上の Insert とテンキーの 0 の Insert (NumLock が切のとき) を書き分けられないので、どちらでも動く。
-//   既定は 左 Alt + 左 Shift + Insert (DefaultText)。v2.6.4・v2.6.5 の既定は 左 Ctrl + 左 Shift + Insert だった (PreviousDefaultText)。
+//   既定は 右 Shift + 左 Alt + Insert (DefaultText)。v2.6.6・v2.6.7 の既定は 左 Alt + 左 Shift + Insert (PreviousDefaultText2)、v2.6.4・v2.6.5 の既定は 左 Ctrl + 左 Shift + Insert だった (PreviousDefaultText)。
+//     (2026-11-06、利用者の指示「現在位置の初期値は R-Shift + L-Alt + Ins がいいかも L-Shift 割り当てある」「2 変える」。ゲームでは左 Shift にも割り当てがある)
 //     (利用者の指示「CTRL しゃがみなんで、L-Alt + L-Shift + Ins じゃないとまずい」。ゲームでは Ctrl がしゃがみなので、左 Ctrl を含むキーだと押したときにしゃがむ)
 //     2026-11-05 に、ゲームの既定の割り当て (Data.p4k の Data/Libs/Config/defaultProfile.xml) に Insert を使う行が 1 つも無いことを確かめた
 internal sealed class MapCurrentHotkey
@@ -28,20 +29,26 @@ internal sealed class MapCurrentHotkey
         public bool HasModifier => LCtrl || RCtrl || LShift || RShift || LAlt || RAlt;
     }
 
-    // 設定の文字 (App.Config.MapCurrentHotkey) の既定: 左 Alt + 左 Shift + Insert。前の版 (v2.6.4・v2.6.5) の既定: 左 Ctrl + 左 Shift + Insert
-    public const string DefaultText = "LAlt+LShift+Insert";
+    // 設定の文字 (App.Config.MapCurrentHotkey) の既定: 右 Shift + 左 Alt + Insert。前の版の既定: v2.6.4・v2.6.5 は 左 Ctrl + 左 Shift + Insert、v2.6.6・v2.6.7 は 左 Alt + 左 Shift + Insert
+    public const string DefaultText = "RShift+LAlt+Insert";
     public const string PreviousDefaultText = "LCtrl+LShift+Insert";
+    public const string PreviousDefaultText2 = "LAlt+LShift+Insert";
 
-    // 設定を読んだとき (AppConfigLoader) に 1 回だけ: キーが前の版の既定 (左 Ctrl + 左 Shift + Insert) のままなら、今の既定 (左 Alt + 左 Shift + Insert) に替える。
+    // 設定を読んだとき (AppConfigLoader) に 1 回だけ: キーが前の版の既定のままなら、今の既定 (右 Shift + 左 Alt + Insert) に替える。
+    //   v2.6.6・v2.6.7 の既定 (左 Alt + 左 Shift + Insert) のまま → 替える。
+    //   v2.6.4・v2.6.5 の既定 (左 Ctrl + 左 Shift + Insert) のまま → 前の替え (印 MapCurrentHotkeyDefaultMigrated) がまだのときだけ替える
+    //   (前の替えが済んだ後に自分で 左 Ctrl + 左 Shift + Insert を選び直した人のキーは替えない)。
     // 前の版は設定の保存で全部の項目を書くので、1 回でも保存した人の設定には前の既定がもう書かれていて、既定を変えただけでは直らないため。
-    // 替えたかどうかにかかわらず、済んだ印 (AppConfig.MapCurrentHotkeyDefaultMigrated) を立てる。印は次に設定が保存されたときにファイルに入り、
-    // その後は利用者が自分で 左 Ctrl + 左 Shift + Insert を選び直しても替えない (印が保存されるまでは、起動のたびに同じ判定をする)。
+    // 替えたかどうかにかかわらず、済んだ印 (AppConfig.MapCurrentHotkeyDefaultMigrated・MapCurrentHotkeyDefaultMigrated2) を立てる。印は次に設定が保存されたときにファイルに入り、
+    // その後は利用者が自分で前の既定を選び直しても替えない (印が保存されるまでは、起動のたびに同じ判定をする)。
     // 使う・使わない (MapCurrentHotkeyEnabled) は変えない
     public static void MigrateDefault(AppConfig config)
     {
-        if (config.MapCurrentHotkeyDefaultMigrated) return;
-        if (Parse(config.MapCurrentHotkey) is { } now && now == Parse(PreviousDefaultText)) config.MapCurrentHotkey = DefaultText;
+        if (config.MapCurrentHotkeyDefaultMigrated2) return;
+        if (Parse(config.MapCurrentHotkey) is { } now && (now == Parse(PreviousDefaultText2) || (!config.MapCurrentHotkeyDefaultMigrated && now == Parse(PreviousDefaultText))))
+            config.MapCurrentHotkey = DefaultText;
         config.MapCurrentHotkeyDefaultMigrated = true;
+        config.MapCurrentHotkeyDefaultMigrated2 = true;
     }
 
     private static readonly (string Token, string Label)[] ModifierNames =

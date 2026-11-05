@@ -2623,7 +2623,7 @@
                                     <TextBlock Text="キー:" VerticalAlignment="Center" Margin="16,0,6,0"/>
                                     <TextBox x:Name="txtMapHotkey" Width="240" IsReadOnly="True" VerticalAlignment="Center" InputMethod.IsInputMethodEnabled="False"
                                              PreviewKeyDown="TxtMapHotkey_PreviewKeyDown" GotKeyboardFocus="TxtMapHotkey_GotKeyboardFocus" LostKeyboardFocus="TxtMapHotkey_LostKeyboardFocus"
-                                             ToolTip="この欄を選んで、割り当てるキーを押してください (Ctrl・Shift・Alt は左右を区別します。既定は 左 Alt + 左 Shift + Insert)。決めた側と違う側のキー (右 Alt・右 Shift など) で押しても動きません。「設定を保存」で有効になります"/>
+                                             ToolTip="この欄を選んで、割り当てるキーを押してください (Ctrl・Shift・Alt は左右を区別します。既定は 右 Shift + 左 Alt + Insert)。決めた側と違う側のキー (右 Alt・右 Shift など) で押しても動きません。「設定を保存」で有効になります"/>
                                     <TextBlock x:Name="txtMapHotkeyStatus" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal" Margin="0,4">

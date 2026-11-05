@@ -2013,6 +2013,7 @@ public partial class MainWindow : Window
                 App.Config.MapCurrentHotkeyEnabled,
                 App.Config.MapCurrentHotkey,
                 App.Config.MapCurrentHotkeyDefaultMigrated,
+                App.Config.MapCurrentHotkeyDefaultMigrated2,
                 App.Config.OreOverlayEnabled,
                 App.Config.OreOverlaySeconds,
                 App.Config.OreOverlayLeft,

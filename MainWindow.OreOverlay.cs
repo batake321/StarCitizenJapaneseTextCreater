@@ -239,7 +239,7 @@ public partial class MainWindow
     private void TxtMapHotkey_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
     {
         _mapHotkey.Unregister();
-        txtMapHotkeyStatus.Text = "割り当てるキーを押してください (例: 左 Alt + 左 Shift + Insert)";
+        txtMapHotkeyStatus.Text = "割り当てるキーを押してください (例: 右 Shift + 左 Alt + Insert)";
     }
 
     private void TxtMapHotkey_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
