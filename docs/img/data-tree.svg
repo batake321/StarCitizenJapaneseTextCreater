@@ -40,7 +40,7 @@
   <g>
     <path d="M62 242 L82 242" stroke="#3a4c60" stroke-width="1.5"/>
     <text class="f monod" x="90" y="247">output/global.ini</text>
-    <text class="f sm" x="330" y="247">統合済みの翻訳ファイル（[3. 反映] でゲームへコピー）</text>
+    <text class="f sm" x="330" y="247">統合済みの翻訳ファイル（[日本語化] でゲームへコピー）</text>
   </g>
   <g>
     <path d="M62 268 L82 268 " stroke="#3a4c60" stroke-width="1.5"/>

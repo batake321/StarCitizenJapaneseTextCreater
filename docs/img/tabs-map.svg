@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" width="900" height="620" role="img" aria-labelledby="t d">
   <title id="t">アプリ画面のタブ構成</title>
-  <desc id="d">上部の GamePath バーと、翻訳・翻訳エディタ・用語集・プロファイル・コモディティ・船舶管理・価格キャプチャ・契約・船舶戦闘・個人戦闘・船舶装備・個人装備・詳細・チャット・設定・ゲームログ・鉱石・BP・ログの 19 タブ。船舶管理の中に所持船・アップグレード管理・装備・電力管理の 4 タブ、個人戦闘の中に表・ダメージ判定の 2 タブがあります。</desc>
+  <desc id="d">上部の GamePath バーと、翻訳・翻訳エディタ・用語集・プロファイル・コモディティ・船舶管理・価格キャプチャ・契約・船舶戦闘・個人戦闘・船舶装備・個人装備・詳細・マップ・チャット・設定・ゲームログ・鉱石・BP・ログの 20 タブ。船舶管理の中に所持船・アップグレード管理・装備・電力管理の 4 タブ、個人戦闘の中に表・ダメージ判定の 2 タブがあります。</desc>
   <style>
     .f { font-family: "Segoe UI","Yu Gothic UI",Meiryo,sans-serif; }
     .lbl { font-size: 15px; fill: #dbe4ee; }
@@ -47,12 +47,13 @@
     <rect x="50" y="240" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="124" y="264" text-anchor="middle">船舶装備</text>
     <rect x="213" y="240" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="287" y="264" text-anchor="middle">個人装備</text>
     <rect x="376" y="240" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="450" y="264" text-anchor="middle">詳細</text>
-    <rect x="539" y="240" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="613" y="264" text-anchor="middle">チャット</text>
-    <rect x="702" y="240" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="776" y="264" text-anchor="middle">設定</text>
-    <rect x="50" y="290" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="124" y="314" text-anchor="middle">ゲームログ</text>
-    <rect x="213" y="290" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="287" y="314" text-anchor="middle">鉱石</text>
-    <rect x="376" y="290" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="450" y="314" text-anchor="middle">BP</text>
-    <rect x="539" y="290" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="613" y="314" text-anchor="middle">ログ</text>
+    <rect x="539" y="240" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="613" y="264" text-anchor="middle">マップ</text>
+    <rect x="702" y="240" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="776" y="264" text-anchor="middle">チャット</text>
+    <rect x="50" y="290" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="124" y="314" text-anchor="middle">設定</text>
+    <rect x="213" y="290" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="287" y="314" text-anchor="middle">ゲームログ</text>
+    <rect x="376" y="290" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="450" y="314" text-anchor="middle">鉱石</text>
+    <rect x="539" y="290" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="613" y="314" text-anchor="middle">BP</text>
+    <rect x="702" y="290" width="148" height="38" rx="6" fill="#16202c" stroke="#33465c"/><text x="776" y="314" text-anchor="middle">ログ</text>
   </g>
 
   <line x1="50" y1="346" x2="850" y2="346" stroke="#22303f"/>

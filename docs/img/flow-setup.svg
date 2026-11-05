@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 260" width="900" height="260" role="img" aria-labelledby="t d">
   <title id="t">初回セットアップの流れ</title>
-  <desc id="d">ダウンロードして展開、GamePath の確認、翻訳タブで 3. 反映 を押す、ゲームを起動、の 4 ステップです。AI 設定は任意で、新しいパッチを自分で訳したいときやチャットを使いたいときだけ必要です。</desc>
+  <desc id="d">ダウンロードして展開、GamePath の確認、翻訳タブで 日本語化 を押して出た窓で 次へ・実行、ゲームを起動、の 4 ステップです。AI 設定は任意で、新しいパッチを自分で訳したいときやチャットを使いたいときだけ必要です。</desc>
   <style>
     .f  { font-family: "Segoe UI","Yu Gothic UI",Meiryo,sans-serif; }
     .no { font-size: 15px; fill: #0b1017; font-weight: 700; }
@@ -40,9 +40,9 @@
     <rect x="436" y="44" width="200" height="120" rx="10" fill="#123146" stroke="#38bdf8" stroke-width="2"/>
     <circle cx="462" cy="70" r="14" fill="#38bdf8"/><text class="f no" x="462" y="75" text-anchor="middle">3</text>
     <text class="f ti" x="486" y="75" fill="#bfe6ff">翻訳タブ</text>
-    <text class="f ti" x="452" y="107" fill="#bfe6ff">[3. 反映] を押す</text>
-    <text class="f sm" x="452" y="129" fill="#a9d6ef">これだけ。抽出も中で</text>
-    <text class="f sm" x="452" y="147" fill="#a9d6ef">自動的に行われます</text>
+    <text class="f ti" x="452" y="107" fill="#bfe6ff">[日本語化] を押す</text>
+    <text class="f sm" x="452" y="129" fill="#a9d6ef">出た窓で [次へ] → [実行]。</text>
+    <text class="f sm" x="452" y="147" fill="#a9d6ef">読み取りも中で自動で行います</text>
   </g>
   <line x1="636" y1="104" x2="648" y2="104" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar2)"/>
 
@@ -56,6 +56,6 @@
   </g>
 
   <rect x="20" y="184" width="824" height="60" rx="8" fill="#141c26" stroke="#2a3a4d" stroke-dasharray="5 4"/>
-  <text class="f op" x="38" y="206">任意 — [AI 設定] と [2. 翻訳] が要るのは、次の場合だけです。</text>
+  <text class="f op" x="38" y="206">任意 — [AI 設定] と [AI翻訳] が要るのは、次の場合だけです。</text>
   <text class="f op" x="38" y="228">・同梱の翻訳データがまだ対応していない新しいパッチの未翻訳を、自分で訳したいとき　・訳の言い回しを変えたいとき　・AI チャットを使いたいとき</text>
 </svg>
