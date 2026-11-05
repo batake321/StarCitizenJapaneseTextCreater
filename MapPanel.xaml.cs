@@ -461,7 +461,10 @@ public partial class MapPanel : UserControl
                 if (auto)
                 {
                     // 自動: 外から見る形で出すステーションの 3D がもう［マップ］タブに出ていれば、そのまま。ほかの 3D が出ていたら星系図に戻す
-                    if (pnlPlace.Visibility == Visibility.Visible && !(showExterior && _place3D?.Record == near!.RecordName)) BackToStarMap();
+                    // Game.log で今いる着陸場所のステーションの 3D が出ているときも、そのまま (着いたときに出した 3D を、その後の自動の取得で消さない)
+                    var landed = StationWith3DOf(LogPlaceNode(tree, LandingPlaceProvider?.Invoke()));
+                    if (pnlPlace.Visibility == Visibility.Visible && !(showExterior && _place3D?.Record == near!.RecordName)
+                        && !(landed != null && _place3D?.Record == landed.RecordName)) BackToStarMap();
                     return;
                 }
                 // (2026-11-06、利用者の指示・親の決定。下の「近くのステーションを外から見る形で出す」) 近くのステーション (50 km 以内でいちばん近いもの) があり、
@@ -525,6 +528,39 @@ public partial class MapPanel : UserControl
         }
         return null;
     }
+    // node (とその星図の親) のうち、外から見る形で出すステーション (ExteriorStationOf と同じ決まり: 行き先のある 3D の場所で、いちばん上のもの)。無ければ null
+    private ShopTreeNode? StationWith3DOf(ShopTreeNode? node)
+    {
+        var hints = AmenityMapHints.All();
+        ShopTreeNode? st = null;
+        for (var a = node; a != null; a = a.Parent)
+            if (MapPlaceByRecordName(a.RecordName) != null && hints.TryGetValue(a.RecordName, out var h) && h.Targets) st = a;
+        return st;
+    }
+
+    // ===== 着陸場に着いたら、そのステーションを外から見る形で出す (2026-11-06、利用者の指示「管轄が変わったときも例えば orbituary に到着しました なら
+    //  orbituary の外観 3D に変えるべき 位置がとれないとき対策」) =====
+    // Game.log の追い読みで着陸場に着いた (GameLogPanel.QuantumEventSeen の "land"。ゲームログの「到着」と同じとき) ときに、その着陸場所 (LandingPlaceProvider) の
+    // ステーション (StationWith3DOf) の 3D を、外から見る形で出す。座標は使わない (/showlocation が返らないときも動く)。ゲームへは何も送らない。
+    // 出す先は現在位置を取ったときと同じ (3D の別ウィンドウが開いていればそこ、無ければ［マップ］タブ)。窓を前に出さず、［マップ］タブも選ばない (ほかのタブを見ていても邪魔しない)。
+    // 着いたので、出た後かの覚え (_lastInside) は捨てる
+    private void ShowArrivedExterior()
+    {
+        _ = Dispatcher.InvokeAsync(async () =>
+        {
+            try
+            {
+                var tree = _tree ?? await GetTreeAsync();
+                if (tree == null || tree.IsEmpty) return;
+                if (LandingPlaceProvider?.Invoke() is not { Length: > 0 } raw || StationWith3DOf(LogPlaceNode(tree, raw)) is not { } st) return;
+                _lastInside = null;
+                if (StationView3DShops.ShowInOpenWindow(st.RecordName, st.Name, tree, null, activate: false, exterior: true)) return;
+                ShowPlace3D(st.RecordName, st.Name, tree, null, exterior: true);
+            }
+            catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 着いたステーションの 3D を出せませんでした: {ex.Message}"); }
+        });
+    }
+
     private bool LeftStation(ShopTree tree, ShopTreeNode station)
     {
         if (QuantumStateProvider?.Invoke()?.LeftLandingRaw is not { Length: > 0 } raw) return false;
@@ -623,6 +659,8 @@ public partial class MapPanel : UserControl
     //   目的地を選んだ後に離陸してステーション・着陸場の区域を出た (kind = "exit"。GameLogQuantumState.TakeoffExitAt): 移動中になったときと同じ決まりで座標を取る (OnQuantumTakeoffExit)
     public void OnQuantumEvent(string kind)
     {
+        // 着陸場に着いた (ゲームログの「到着」と同じとき): そのステーションの 3D を外から見る形で出す (ShowArrivedExterior。座標を取らないので、自動の取得の設定に関係なく動く)
+        if (kind == "land") ShowArrivedExterior();
         if (!App.Config.MapAutoCapture) return;
         if (kind == "move") { OnQuantumMoving(); return; }
         if (kind == "exit") { OnQuantumTakeoffExit(); return; }
