@@ -16,7 +16,14 @@ namespace StarCitizenJapaneseTextCreater;
 //   窓: 枠なし・半透明の暗い背景に明るい文字・最前面 (Topmost)・タスクバーに出さない・フォーカスを取らない (ShowActivated = false と WS_EX_NOACTIVATE、
 //     WM_MOUSEACTIVATE に MA_NOACTIVATE)・Owner 無し。窓は 1 つだけ (s_window)。もう一度出すと中身を入れ替える。アプリの終了時は CloseIfOpen と
 //     主の窓の Closed で閉じる (Owner の無い窓が残ると、主の窓を閉じてもアプリが終わらないため)。
-//   中身: 窓の大きさに合わせて拡大縮小し、全部が見える (Viewbox。Stretch = Uniform)。
+//   中身: 設定の文字の大きさ (App.Config.OreOverlayFontSize) で組み、行は窓の幅で折り返す。組んだ中身が窓の高さに収まらないときだけ、全部が見えるように全体を縮める
+//     (切らない。大きくはしない。FitBox)。窓全体の不透明さは設定の透明度 (App.Config.OreOverlayOpacity。% で、100 が今までの見かけ)。
+//     (2026-11-05、利用者の指示「鉱石のオーバーレイ 文字が小さすぎる。あまりにも 4K だから特に 大きさを変えるのは設定でやらないと、ゲーム中はクリックできない。
+//      設定で表示させ、アプリの設定画面のボタンで移動やサイズ変更、文字サイズ、透明度を変えないと使えない」)
+//   調整用 (設定タブの［オーバーレイを表示して調整］。StartAdjust / StopAdjust): 出している間は時間で消えず、修飾キー無しでマウスを受ける (枠・つまみ・✕ を出す。
+//     ドラッグで移動、端・角のドラッグで大きさの変更。離したときに設定に入れてすぐ保存する)。動かさないクリックは何もしない。✕ は窓を閉じる (調整を終える)。
+//     調整用に出している間に現在位置を取ったときは、中身を入れ替えるだけ (調整用のまま)。設定タブの欄・ボタンからは SetBounds / ApplyAppearance / ResetToDefault で変える。
+//     位置・大きさ・調整用かどうかが変わったら OverlayChanged で知らせる (設定タブの欄とボタンの表示を合わせるため)。
 //   クリック: ふだんは下 (ゲーム) へ通す (WS_EX_TRANSPARENT)。左 Ctrl と左 Shift を両方押している間だけ受ける (ModifierPollMs ごとに
 //     GetAsyncKeyState(VK_LCONTROL) と GetAsyncKeyState(VK_LSHIFT) の最上位ビットを見て、拡張スタイルを切り替える。表示中だけ動くタイマー)。
 //     Ctrl だけ・Shift だけ・右 Ctrl・右 Shift のときは通す (ゲームの所持品の移動が Ctrl + 左クリックのため)。
@@ -29,11 +36,18 @@ namespace StarCitizenJapaneseTextCreater;
 //     SetWindowDisplayAffinity の説明)。付けられなくても例外にしない (アプリのログに 1 回出す)
 internal sealed class OreOverlayWindow : Window
 {
-    // 位置を決めたことが無い間の大きさ (Config.cs の既定) と、変更中の大きさの下限・主画面の端からの間 (WPF の単位)
-    public const double DefaultWidth = 760, DefaultHeight = 520;
-    private const double MinOverlayWidth = 200, MinOverlayHeight = 120, ScreenMargin = 16;
-    // 中身の元の幅 (この幅で組んでから、窓に合わせて拡大縮小する)
-    private const double ContentWidth = 1100;
+    // 位置・大きさを決めたことが無い間の大きさ (Config.cs の既定) と、大きさの下限・主画面の端からの間 (WPF の単位)
+    // (既定の大きさは、既定の文字の大きさ 20 で Yela の中身 (岩 16 行 + 品質 6 行) が縮まずに入る大きさ。確認用の描画で、幅 1416 のとき中身の高さは約 1150)
+    public const double DefaultWidth = 1440, DefaultHeight = 1200;
+    public const double MinOverlayWidth = 200, MinOverlayHeight = 120;
+    private const double ScreenMargin = 16;
+    // 文字の大きさ (WPF の単位) の既定と範囲、透明度 (窓全体の不透明さ。%) の既定と範囲
+    public const double DefaultFontSize = 20, MinFontSize = 8, MaxFontSize = 72;
+    public const int DefaultOpacity = 100, MinOpacity = 20, MaxOpacity = 100;
+    // 中身を組む幅の下限 (文字の大きさの何倍か)。窓がこれより狭いときは、この幅で組んでから全体を縮める (表の左の 4 つの列が切れないように)
+    private const double MinContentEm = 44;
+    // 中身の間 (余白) を決めたときの文字の大きさ (余白は文字の大きさに比例させる)
+    private const double BaseFontSize = 14;
     // 変更中に、端・角とみなす幅と、つまみの大きさ
     private const double EdgeBand = 12, HandleSize = 10;
     // 修飾キーの状態を見る間隔 (ms)
@@ -57,17 +71,34 @@ internal sealed class OreOverlayWindow : Window
     private static OreOverlayWindow? s_window;
     private static bool s_affinityFailureLogged;
 
-    // 中身を出す (窓が無ければ作る。あれば中身を入れ替え、消えるまでの時間を数え直す)。saveConfig: 確定したときに設定を保存する (MainWindow.SaveConfigToFile)
-    public static void ShowContent(OreHere.Content content, Action? saveConfig)
+    // 位置・大きさ (マウスで動かした・設定タブから変えた・確定した)、調整用かどうか、窓が開いているかが変わった
+    public static event Action? OverlayChanged;
+
+    // 調整用に出しているか (設定タブの［オーバーレイを表示して調整］)
+    public static bool IsAdjusting => s_window is { _adjusting: true };
+
+    // 設定の文字の大きさ (範囲の外・数でない値は既定) と透明度 (範囲に収める)
+    public static double ConfigFontSize() => App.Config.OreOverlayFontSize is var f && double.IsFinite(f) && f >= MinFontSize && f <= MaxFontSize ? f : DefaultFontSize;
+    public static int ConfigOpacity() => Math.Clamp(App.Config.OreOverlayOpacity, MinOpacity, MaxOpacity);
+
+    private static OreOverlayWindow GetOrCreate(Action? saveConfig)
     {
         var w = s_window;
         if (w == null)
         {
             w = new OreOverlayWindow(saveConfig);
             s_window = w;
-            w.Closed += (_, _) => { if (ReferenceEquals(s_window, w)) s_window = null; };
+            w.Closed += (_, _) => { if (ReferenceEquals(s_window, w)) s_window = null; OverlayChanged?.Invoke(); };
         }
         w._saveConfig = saveConfig;
+        return w;
+    }
+
+    // 中身を出す (窓が無ければ作る。あれば中身を入れ替え、消えるまでの時間を数え直す。調整用に出している間は中身を入れ替えるだけ)。
+    // saveConfig: 位置・大きさを決めたときに設定を保存する (MainWindow.SaveConfigToFile)
+    public static void ShowContent(OreHere.Content content, Action? saveConfig)
+    {
+        var w = GetOrCreate(saveConfig);
         w.SetContent(content);
         if (!w.IsVisible)
         {
@@ -77,15 +108,86 @@ internal sealed class OreOverlayWindow : Window
         w.RestartDismissTimer();
     }
 
+    // 調整用に出す (設定タブの［オーバーレイを表示して調整］): 中身を出し、時間で消えず、修飾キー無しでマウスを受ける状態にする
+    public static void StartAdjust(OreHere.Content content, Action? saveConfig)
+    {
+        var w = GetOrCreate(saveConfig);
+        w.SetContent(content);
+        if (!w.IsVisible)
+        {
+            w.ApplyBounds();
+            w.Show();
+        }
+        w._adjusting = true;
+        w.EnterEdit();
+        OverlayChanged?.Invoke();
+    }
+
+    // 調整用に出していれば閉じる (もう一度ボタンを押したとき)
+    public static void StopAdjust()
+    {
+        if (IsAdjusting) CloseIfOpen();
+    }
+
     // 開いていれば閉じる (アプリの終了時・設定でオフにしたとき)
     public static void CloseIfOpen()
     {
         try { s_window?.Close(); } catch { }
     }
 
+    // 今の位置と大きさ: 窓が出ていればその窓、出ていなければ設定から決まる値 (EffectiveBounds)
+    public static Rect CurrentBounds() =>
+        s_window is { IsVisible: true } w && double.IsFinite(w.Left) && double.IsFinite(w.Top) ? new Rect(w.Left, w.Top, w.Width, w.Height) : EffectiveBounds();
+
+    // 設定タブから位置・大きさを変える: 設定に入れ (画面の外・下限より小さい値は EffectiveBounds の決まりで直す)、窓が出ていればすぐ当てる。保存は呼ぶ側
+    public static void SetBounds(double left, double top, double width, double height)
+    {
+        var c = App.Config;
+        c.OreOverlayLeft = left;
+        c.OreOverlayTop = top;
+        c.OreOverlayWidth = Math.Max(MinOverlayWidth, width);
+        c.OreOverlayHeight = Math.Max(MinOverlayHeight, height);
+        c.OreOverlayPlaced = true;
+        var b = EffectiveBounds();
+        c.OreOverlayLeft = b.Left;
+        c.OreOverlayTop = b.Top;
+        c.OreOverlayWidth = b.Width;
+        c.OreOverlayHeight = b.Height;
+        if (s_window is { IsVisible: true } w) w.ApplyBounds();
+        OverlayChanged?.Invoke();
+    }
+
+    // 設定の文字の大きさ・透明度を、出ている窓にすぐ当てる (文字の大きさが変わっていれば中身を組み直す)
+    public static void ApplyAppearance()
+    {
+        if (s_window is not { } w) return;
+        w.Opacity = ConfigOpacity() / 100.0;
+        if (w._lastContent is { } content && w._font != ConfigFontSize()) w.SetContent(content);
+    }
+
+    // 位置・大きさ・文字の大きさ・透明度を既定に戻す (設定に入れ、窓が出ていればすぐ当てる。保存は呼ぶ側)
+    public static void ResetToDefault()
+    {
+        var c = App.Config;
+        c.OreOverlayLeft = 0;
+        c.OreOverlayTop = 0;
+        c.OreOverlayWidth = DefaultWidth;
+        c.OreOverlayHeight = DefaultHeight;
+        c.OreOverlayPlaced = false;
+        c.OreOverlayFontSize = DefaultFontSize;
+        c.OreOverlayOpacity = DefaultOpacity;
+        if (s_window is { IsVisible: true } w) w.ApplyBounds();
+        ApplyAppearance();
+        OverlayChanged?.Invoke();
+    }
+
     private Action? _saveConfig;
     private readonly Grid _root = new();
-    private readonly StackPanel _content = new() { Width = ContentWidth };
+    private readonly StackPanel _content = new();
+    private readonly FitBox _fit = new();
+    // 今出している中身 (文字の大きさを変えたときに組み直すため) と、その中身を組んだ文字の大きさ
+    private OreHere.Content? _lastContent;
+    private double _font = DefaultFontSize;
     private readonly Border _editFrame;
     private readonly Grid _handles = new() { Visibility = Visibility.Collapsed, IsHitTestVisible = false };
     private readonly Border _closeBox;
@@ -93,8 +195,9 @@ internal sealed class OreOverlayWindow : Window
     private readonly DispatcherTimer _dismissTimer = new();
     private IntPtr _hwnd;
     private bool _clickThrough;
-    // 変更中か、変更中のドラッグ (押している・動かした・どこを掴んだ・押した所 (画面)・押したときの窓)
-    private bool _editing;
+    // 変更中か (枠・つまみを出してマウスを受けている。調整用のときも真)、調整用に出しているか (設定タブから。真の間は時間で消えず、動かさないクリックで確定しない)、
+    // 変更中のドラッグ (押している・動かした・どこを掴んだ・押した所 (画面)・押したときの窓)
+    private bool _editing, _adjusting;
     private enum Zone { Move, Left, Right, Top, Bottom, TopLeft, TopRight, BottomLeft, BottomRight }
     private bool _pressed, _dragged;
     private Zone _zone;
@@ -122,12 +225,14 @@ internal sealed class OreOverlayWindow : Window
         WindowStartupLocation = WindowStartupLocation.Manual;
         FontFamily = new FontFamily("Yu Gothic UI, Meiryo UI, Segoe UI");
         FontSize = 14;
+        Opacity = ConfigOpacity() / 100.0;
 
-        // 背景 (半透明の暗い色) と中身 (窓の大きさに合わせて拡大縮小)
+        // 背景 (半透明の暗い色) と中身 (設定の文字の大きさで組み、窓の幅で折り返す。高さに収まらないときだけ縮める)
+        _fit.Child = _content;
         _root.Children.Add(new Border
         {
             Background = PanelBrush, CornerRadius = new CornerRadius(6), Padding = new Thickness(12, 10, 12, 10),
-            Child = new Viewbox { Stretch = Stretch.Uniform, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Child = _content },
+            Child = _fit,
         });
         // 変更中の枠・つまみ (角と辺の真ん中)・✕
         _editFrame = new Border { BorderBrush = AccentBrush, BorderThickness = new Thickness(2), CornerRadius = new CornerRadius(6), Visibility = Visibility.Collapsed, IsHitTestVisible = false };
@@ -162,7 +267,7 @@ internal sealed class OreOverlayWindow : Window
         _dismissTimer.Tick += (_, _) =>
         {
             _dismissTimer.Stop();
-            if (!_editing) Close();   // 変更中は時間で消さない (確定したときに数え直す)
+            if (!_editing && !_adjusting) Close();   // 変更中・調整用は時間で消さない (確定したときに数え直す)
         };
         SourceInitialized += OnSourceInitialized;
         IsVisibleChanged += (_, _) => { if (IsVisible) _modifierTimer.Start(); else _modifierTimer.Stop(); };
@@ -213,7 +318,7 @@ internal sealed class OreOverlayWindow : Window
     // 右 Ctrl (0xA3)・右 Shift (0xA1) は見ないので、右のキーでは押されていない扱い)
     private static bool LeftCtrlShiftDown() => (GetAsyncKeyState(VK_LCONTROL) & 0x8000) != 0 && (GetAsyncKeyState(VK_LSHIFT) & 0x8000) != 0;
 
-    // クリックを通すか決め直す: 変更中は通さない。そうでなければ、左 Ctrl + 左 Shift を押している間だけ受け、ほかは通す
+    // クリックを通すか決め直す: 変更中 (調整用を含む) は通さない。そうでなければ、左 Ctrl + 左 Shift を押している間だけ受け、ほかは通す
     private void UpdateClickThrough()
     {
         if (_hwnd == IntPtr.Zero) return;
@@ -224,13 +329,15 @@ internal sealed class OreOverlayWindow : Window
         _clickThrough = through;
     }
 
-    // 出すときの位置と大きさ: 設定の値。位置を決めたことが無ければ主画面の作業領域の右上。画面 (全部の画面を合わせた範囲) の外になるときは中へ戻す
-    private void ApplyBounds()
+    // 出すときの位置と大きさ: 設定の値。位置・大きさを決めたことが無ければ (OreOverlayPlaced が偽)、既定の大きさで主画面の作業領域の右上
+    // (決めたことが無い間は、設定に残っている大きさ (前の版の既定 760×520) を使わない。大きさを変えられるのは決めたときだけで、そのとき OreOverlayPlaced が真になる)。
+    // 画面 (全部の画面を合わせた範囲) の外になるときは中へ戻す
+    public static Rect EffectiveBounds()
     {
         var c = App.Config;
         double vl = SystemParameters.VirtualScreenLeft, vt = SystemParameters.VirtualScreenTop, vw = SystemParameters.VirtualScreenWidth, vh = SystemParameters.VirtualScreenHeight;
-        var w = double.IsFinite(c.OreOverlayWidth) && c.OreOverlayWidth >= MinOverlayWidth ? c.OreOverlayWidth : DefaultWidth;
-        var h = double.IsFinite(c.OreOverlayHeight) && c.OreOverlayHeight >= MinOverlayHeight ? c.OreOverlayHeight : DefaultHeight;
+        var w = c.OreOverlayPlaced && double.IsFinite(c.OreOverlayWidth) && c.OreOverlayWidth >= MinOverlayWidth ? c.OreOverlayWidth : DefaultWidth;
+        var h = c.OreOverlayPlaced && double.IsFinite(c.OreOverlayHeight) && c.OreOverlayHeight >= MinOverlayHeight ? c.OreOverlayHeight : DefaultHeight;
         w = Math.Min(w, vw);
         h = Math.Min(h, vh);
         double left, top;
@@ -248,45 +355,62 @@ internal sealed class OreOverlayWindow : Window
         // 画面の外に出ていれば中へ (RestoreWindowState と同じく、全部の画面を合わせた範囲に収まっているかで見る)
         left = Math.Clamp(left, vl, Math.Max(vl, vl + vw - w));
         top = Math.Clamp(top, vt, Math.Max(vt, vt + vh - h));
-        Width = w;
-        Height = h;
-        Left = left;
-        Top = top;
+        return new Rect(left, top, w, h);
     }
 
-    // 消えるまでの時間を数え直す (0 なら出したまま。変更中は数えない)
+    private void ApplyBounds()
+    {
+        var b = EffectiveBounds();
+        Width = b.Width;
+        Height = b.Height;
+        Left = b.Left;
+        Top = b.Top;
+    }
+
+    // 消えるまでの時間を数え直す (0 なら出したまま。変更中・調整用は数えない)
     private void RestartDismissTimer()
     {
         _dismissTimer.Stop();
         var seconds = App.Config.OreOverlaySeconds;
-        if (seconds <= 0 || _editing) return;
+        if (seconds <= 0 || _editing || _adjusting) return;
         _dismissTimer.Interval = TimeSpan.FromSeconds(seconds);
         _dismissTimer.Start();
     }
 
     // ===== 中身 =====
 
-    private TextBlock Text(string text, Brush? brush = null, double size = 14, bool bold = false, Thickness? margin = null) => new()
+    // 文字 1 つ。size: 文字の大きさが BaseFontSize (14) のときの大きさ (設定の文字の大きさに比例させる)。余白も同じ (M)
+    private TextBlock Text(string text, Brush? brush = null, double size = BaseFontSize, bool bold = false, Thickness? margin = null) => new()
     {
-        Text = text, Foreground = brush ?? TextBrush, FontSize = size, FontWeight = bold ? FontWeights.Bold : FontWeights.Normal,
+        Text = text, Foreground = brush ?? TextBrush, FontSize = size * _font / BaseFontSize, FontWeight = bold ? FontWeights.Bold : FontWeights.Normal,
         TextWrapping = TextWrapping.Wrap, Margin = margin ?? new Thickness(0),
     };
 
+    // 余白 (文字の大きさが BaseFontSize のときの値) を、設定の文字の大きさに比例させる
+    private Thickness M(double left, double top, double right, double bottom)
+    {
+        var k = _font / BaseFontSize;
+        return new Thickness(left * k, top * k, right * k, bottom * k);
+    }
+
     private void SetContent(OreHere.Content c)
     {
+        _lastContent = c;
+        _font = ConfigFontSize();
+        _fit.MinChildWidth = MinContentEm * _font;
         _content.Children.Clear();
         _content.Children.Add(Text(c.Title, size: 20, bold: true));
-        if (c.Message.Length > 0) _content.Children.Add(Text(c.Message, margin: new Thickness(0, 6, 0, 0)));
+        if (c.Message.Length > 0) _content.Children.Add(Text(c.Message, margin: M(0, 6, 0, 0)));
         if (c.Sections.Count > 0)
         {
             // 表: 岩 | 格 | 出やすさ | シグネチャー | 岩の中の資源と割合 (最後の列は折り返す)
-            var grid = new Grid { Margin = new Thickness(0, 6, 0, 0) };
+            var grid = new Grid { Margin = M(0, 6, 0, 0) };
             for (int i = 0; i < OreHere.Columns.Length; i++)
                 grid.ColumnDefinitions.Add(new ColumnDefinition { Width = i == OreHere.Columns.Length - 1 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
             int row = 0;
             void Cell(string text, int col, Brush? brush = null, bool bold = false, bool right = false, int span = 1, double top = 2)
             {
-                var t = Text(text, brush, bold: bold, margin: new Thickness(0, top, col + span < OreHere.Columns.Length ? 14 : 0, 0));
+                var t = Text(text, brush, bold: bold, margin: M(0, top, col + span < OreHere.Columns.Length ? 14 : 0, 0));
                 if (right) t.HorizontalAlignment = HorizontalAlignment.Right;
                 Grid.SetRow(t, row);
                 Grid.SetColumn(t, col);
@@ -317,15 +441,15 @@ internal sealed class OreOverlayWindow : Window
         }
         if (c.Quality.Count > 0)
         {
-            _content.Children.Add(Text(OreHere.QualityHeader, AccentBrush, bold: true, margin: new Thickness(0, 10, 0, 0)));
+            _content.Children.Add(Text(OreHere.QualityHeader, AccentBrush, bold: true, margin: M(0, 10, 0, 0)));
             var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             for (int i = 0; i < c.Quality.Count; i++)
             {
                 grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-                var range = Text(c.Quality[i].Range, bold: true, margin: new Thickness(0, 2, 14, 0));
-                var names = Text(c.Quality[i].Resources, margin: new Thickness(0, 2, 0, 0));
+                var range = Text(c.Quality[i].Range, bold: true, margin: M(0, 2, 14, 0));
+                var names = Text(c.Quality[i].Resources, margin: M(0, 2, 0, 0));
                 Grid.SetRow(range, i);
                 Grid.SetRow(names, i);
                 Grid.SetColumn(names, 1);
@@ -334,7 +458,7 @@ internal sealed class OreOverlayWindow : Window
             }
             _content.Children.Add(grid);
         }
-        foreach (var n in c.QualityNotes) _content.Children.Add(Text(n, DimBrush, size: 12, margin: new Thickness(0, 4, 0, 0)));
+        foreach (var n in c.QualityNotes) _content.Children.Add(Text(n, DimBrush, size: 12, margin: M(0, 4, 0, 0)));
     }
 
     // ===== 変更中 (位置・大きさ) =====
@@ -352,6 +476,7 @@ internal sealed class OreOverlayWindow : Window
     private void ExitEdit()
     {
         _editing = false;
+        _adjusting = false;
         _pressed = false;
         _editFrame.Visibility = Visibility.Collapsed;
         _handles.Visibility = Visibility.Collapsed;
@@ -360,22 +485,27 @@ internal sealed class OreOverlayWindow : Window
         UpdateClickThrough();
     }
 
+    // 今の位置と大きさを設定に入れてすぐ保存する
+    private void StoreBounds()
+    {
+        if (!double.IsFinite(Left) || !double.IsFinite(Top) || !double.IsFinite(Width) || !double.IsFinite(Height)) return;
+        var c = App.Config;
+        c.OreOverlayLeft = Left;
+        c.OreOverlayTop = Top;
+        c.OreOverlayWidth = Width;
+        c.OreOverlayHeight = Height;
+        c.OreOverlayPlaced = true;
+        try { _saveConfig?.Invoke(); }
+        catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[オーバーレイ] 位置と大きさを保存できませんでした: {ex.Message}"); }
+    }
+
     // 確定: 今の位置と大きさを設定に入れてすぐ保存し、クリックを通す状態に戻し、消えるまでの時間を数え直す
     private void Confirm()
     {
-        if (double.IsFinite(Left) && double.IsFinite(Top) && double.IsFinite(Width) && double.IsFinite(Height))
-        {
-            var c = App.Config;
-            c.OreOverlayLeft = Left;
-            c.OreOverlayTop = Top;
-            c.OreOverlayWidth = Width;
-            c.OreOverlayHeight = Height;
-            c.OreOverlayPlaced = true;
-            try { _saveConfig?.Invoke(); }
-            catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[オーバーレイ] 位置と大きさを保存できませんでした: {ex.Message}"); }
-        }
+        StoreBounds();
         ExitEdit();
         RestartDismissTimer();
+        OverlayChanged?.Invoke();
     }
 
     // マウスの今の位置 (画面。WPF の単位)
@@ -441,6 +571,7 @@ internal sealed class OreOverlayWindow : Window
         Top = top;
         Width = width;
         Height = height;
+        if (_adjusting) OverlayChanged?.Invoke();   // 設定タブの数値の欄にすぐ出す
     }
 
     private void Root_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -449,6 +580,64 @@ internal sealed class OreOverlayWindow : Window
         if (!_pressed) return;
         _pressed = false;
         _root.ReleaseMouseCapture();
+        if (_adjusting)
+        {
+            // 調整用: ドラッグを終えたら設定に入れてすぐ保存する。動かさないクリックは何もしない
+            if (_dragged) { StoreBounds(); OverlayChanged?.Invoke(); }
+            return;
+        }
         if (_editing && !_dragged) Confirm();   // 動かさないクリック: 確定
+    }
+
+    // 中身を入れる枠: 中身を幅いっぱい (下限は MinChildWidth) で組み、高さが収まればそのまま出す。収まらないときだけ、全部が入る倍率まで全体を縮める
+    // (縮めた分だけ広い幅で組み直すので、折り返しが減る。倍率は 2 分して探す)。大きくはしない
+    private sealed class FitBox : Decorator
+    {
+        public double MinChildWidth;
+        private readonly ScaleTransform _transform = new();
+        private double _scale = 1;
+
+        protected override Size MeasureOverride(Size constraint)
+        {
+            if (Child is not { } child) return new Size();
+            if (double.IsInfinity(constraint.Width) || double.IsInfinity(constraint.Height) || constraint.Width <= 0 || constraint.Height <= 0)
+            {
+                _scale = 1;
+                child.Measure(constraint);
+                return child.DesiredSize;
+            }
+            // 倍率 s のときの、縮めた後の高さ (幅 constraint.Width / s で組む)
+            double HeightAt(double s)
+            {
+                child.Measure(new Size(constraint.Width / s, double.PositiveInfinity));
+                return child.DesiredSize.Height * s;
+            }
+            var hi = MinChildWidth > 0 ? Math.Min(1, constraint.Width / MinChildWidth) : 1;
+            if (HeightAt(hi) <= constraint.Height) _scale = hi;
+            else
+            {
+                var lo = 0.02;
+                for (int i = 0; i < 14; i++)
+                {
+                    var mid = (lo + hi) / 2;
+                    if (HeightAt(mid) <= constraint.Height) lo = mid; else hi = mid;
+                }
+                _scale = lo;
+                HeightAt(lo);
+            }
+            return new Size(constraint.Width, Math.Min(constraint.Height, child.DesiredSize.Height * _scale));
+        }
+
+        protected override Size ArrangeOverride(Size arrangeSize)
+        {
+            if (Child is { } child)
+            {
+                _transform.ScaleX = _scale;
+                _transform.ScaleY = _scale;
+                if (!ReferenceEquals(child.RenderTransform, _transform)) child.RenderTransform = _transform;
+                child.Arrange(new Rect(0, 0, arrangeSize.Width / _scale, child.DesiredSize.Height));
+            }
+            return arrangeSize;
+        }
     }
 }

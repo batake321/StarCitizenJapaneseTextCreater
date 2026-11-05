@@ -10,7 +10,9 @@ namespace StarCitizenJapaneseTextCreater;
 // DB が無い・まだ作っていない場所は「手がかり無し」(null)。DB の版の印は見ない (パッチの直後で作り直す前でも、前の版の手がかりを使う)
 internal static class AmenityMapHints
 {
-    public sealed record Hints(bool Refinery, bool ExteriorFreight);
+    // Targets: 行き先 (端末・店・乗り場・ハンガーの入口・外の設備・案内するもの) が 1 つでもあるか (StationView3D.LayoutDbSummary。施設の手がかりではなく、
+    // 行き先の無い場所を開こうとしたときの差し替え StationView3DView.RedirectAsync に使う。2026-11-05)
+    public sealed record Hints(bool Refinery, bool ExteriorFreight, bool Targets);
 
     private static readonly object Lock = new();
     private static (DateTime Stamp, long Length, Dictionary<string, Hints> Map)? _cache;
@@ -26,7 +28,7 @@ internal static class AmenityMapHints
         try { var fi = new FileInfo(path); if (!fi.Exists) return new(StringComparer.Ordinal); stamp = fi.LastWriteTimeUtc; len = fi.Length; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return new(StringComparer.Ordinal); }
         lock (Lock) if (_cache is { } c && c.Stamp == stamp && c.Length == len) return c.Map;
-        var map = StationView3D.LayoutDbSummary(path).ToDictionary(kv => kv.Key, kv => new Hints(kv.Value.Refinery, kv.Value.Freight > 0), StringComparer.Ordinal);
+        var map = StationView3D.LayoutDbSummary(path).ToDictionary(kv => kv.Key, kv => new Hints(kv.Value.Refinery, kv.Value.Freight > 0, kv.Value.Targets), StringComparer.Ordinal);
         lock (Lock) _cache = (stamp, len, map);
         return map;
     }

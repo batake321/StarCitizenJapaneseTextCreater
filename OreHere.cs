@@ -150,6 +150,18 @@ public static class OreHere
         return Build(gamedataDbPath, translationsDbPath, data, where);
     }
 
+    // 見本の中身 (設定タブの［オーバーレイを表示して調整］で、現在位置が無い・その場所にデータが無いとき。裏のスレッドで呼ぶ):
+    // 採掘の表 (ore_locations) の場所の一覧 (OreSignatureCalc.Load の Places の並び = 星系の順 → 名前の順) の中で、船・ROC・手の 3 つの掘り方の行が揃っている最初の場所。
+    // 揃っている場所が無ければ一覧の最初の場所。場所が 1 つも無ければ null
+    public static Content? Sample(string gamedataDbPath, string translationsDbPath)
+    {
+        var data = OreSignatureCalc.Load(gamedataDbPath);
+        if (data.Places.Count == 0) return null;
+        string[] methods = [GameDataExtractor.OreMethodShip, GameDataExtractor.OreMethodRoc, GameDataExtractor.OreMethodHand];
+        var place = data.Places.FirstOrDefault(p => methods.All(m => data.Locations.Any(l => l.Place == p.Name && l.System == p.System && l.Method == m))) ?? data.Places[0];
+        return Build(gamedataDbPath, translationsDbPath, data, new Where(place, place.Name, place.System));
+    }
+
     // 掘り方の順 (GameDataQueryService.ResourceDetailText の MethodOrder と同じ: 船 → ROC → 手 → ほか)
     private static int MethodOrder(string m) => m switch
     {

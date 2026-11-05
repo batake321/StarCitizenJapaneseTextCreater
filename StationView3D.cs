@@ -560,21 +560,85 @@ internal static class StationView3D
         catch (Microsoft.Data.Sqlite.SqliteException) { return null; }
     }
 
-    // DB にある場所の全部 (record → (精製所の端末があるか, 外の貨物エレベーターの数))。版の印は見ない (古い DB でも手がかりには使う)。DB が無い・読めなければ空
-    public static Dictionary<string, (bool Refinery, int Freight)> LayoutDbSummary(string path)
+    // DB にある場所の全部 (record → (精製所の端末があるか, 外の貨物エレベーターの数, 行き先があるか))。版の印は見ない (古い DB でも手がかりには使う)。DB が無い・読めなければ空
+    // Targets (2026-11-05、親の決定。行き先の無い場所を開こうとしたときの差し替え StationView3DView.RedirectAsync に使う): 行き先の行
+    //   (端末 place_terms・店 place_shops・乗り場 place_transit・ハンガーの入口 place_hangars・外の設備 place_exts・案内するもの terminals) が 1 つでもあるか。
+    //   行き先の表が読めない DB (前の形) では、どの場所も「ある」のままにする (差し替えをしない)
+    public static Dictionary<string, (bool Refinery, int Freight, bool Targets)> LayoutDbSummary(string path)
     {
-        var res = new Dictionary<string, (bool, int)>(StringComparer.Ordinal);
+        var res = new Dictionary<string, (bool Refinery, int Freight, bool Targets)>(StringComparer.Ordinal);
         try
         {
             if (!File.Exists(path)) return res;
             using var c = OpenDb(path, false);
             using var cmd = c.CreateCommand();
             cmd.CommandText = "SELECT p.record, h.freight, EXISTS(SELECT 1 FROM place_terms t WHERE t.record = p.record AND t.kind = 'refinery') FROM places p LEFT JOIN place_has h ON h.record = p.record";
-            using var r = cmd.ExecuteReader();
-            while (r.Read()) res[r.GetString(0)] = (r.GetInt64(2) != 0, r.IsDBNull(1) ? 0 : r.GetInt32(1));
+            using (var r = cmd.ExecuteReader())
+                while (r.Read()) res[r.GetString(0)] = (r.GetInt64(2) != 0, r.IsDBNull(1) ? 0 : r.GetInt32(1), true);
+            try
+            {
+                cmd.CommandText = "SELECT p.record FROM places p WHERE " + string.Join(" AND ",
+                    new[] { "place_terms", "place_shops", "place_transit", "place_hangars", "place_exts", "terminals" }.Select(t => $"NOT EXISTS(SELECT 1 FROM {t} x WHERE x.record = p.record)"));
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) if (res.TryGetValue(r.GetString(0), out var v)) res[r.GetString(0)] = (v.Refinery, v.Freight, false);
+            }
+            catch (Microsoft.Data.Sqlite.SqliteException) { }
         }
         catch (Microsoft.Data.Sqlite.SqliteException) { }
         return res;
+    }
+
+    // 1 か所の区画の箱を全部合わせた範囲 (場所の座標。Session.LayoutCenter が真ん中を出すのと同じ範囲)。版の印は見ない。箱のある区画が無い・DB が無い・読めなければ null
+    public static (double[] Lo, double[] Hi)? LayoutDbBox(string path, string record)
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+            using var c = OpenDb(path, false);
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = "SELECT lo, hi FROM instances WHERE record = $r AND lo IS NOT NULL AND hi IS NOT NULL";
+            cmd.Parameters.AddWithValue("$r", record);
+            var lo = new[] { double.MaxValue, double.MaxValue, double.MaxValue }; var hi = new[] { double.MinValue, double.MinValue, double.MinValue };
+            var any = false;
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var a = DoublesOf((byte[])r[0]); var b = DoublesOf((byte[])r[1]);
+                if (a.Length < 3 || b.Length < 3) continue;
+                for (int i = 0; i < 3; i++) { lo[i] = Math.Min(lo[i], a[i]); hi[i] = Math.Max(hi[i], b[i]); }
+                any = true;
+            }
+            return any ? (lo, hi) : null;
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException) { return null; }
+    }
+
+    // 子の場所 child の区画が親の場所 parent の区画の中に入っているとき、親の 3D で子の場所へ飛ぶための行き先 (店の Entity 名。3D の窓の focusShop)。決まらなければ null。
+    // 決まるのは次の両方のとき (2026-11-05、親の決定。StationView3DView.RedirectAsync):
+    //   ・子の最初の区画 (instances の idx がいちばん小さいもの = 子のルートの socpak) と同じ socpak が、親の区画にちょうど 1 つある
+    //   ・子の最初の店 (place_shops の n がいちばん小さいもの = 子の場所だけを開いたときに最初に出る行き先) と同じ Entity 名の店が、親の店にちょうど 1 つある
+    // 版の印は見ない。DB が無い・読めなければ null
+    public static string? LayoutDbChildFocus(string path, string child, string parent)
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+            using var c = OpenDb(path, false);
+            using var cmd = c.CreateCommand();
+            cmd.Parameters.AddWithValue("$c", child);
+            cmd.Parameters.AddWithValue("$p", parent);
+            cmd.CommandText = "SELECT socpak FROM instances WHERE record = $c ORDER BY idx LIMIT 1";
+            if (cmd.ExecuteScalar() is not long soc) return null;
+            cmd.CommandText = "SELECT COUNT(*) FROM instances WHERE record = $p AND socpak = $s";
+            cmd.Parameters.AddWithValue("$s", soc);
+            if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 1) return null;
+            cmd.CommandText = "SELECT entity FROM place_shops WHERE record = $c ORDER BY n LIMIT 1";
+            if (cmd.ExecuteScalar() is not string entity || entity.Length == 0) return null;
+            cmd.CommandText = "SELECT COUNT(*) FROM place_shops WHERE record = $p AND entity = $e";
+            cmd.Parameters.AddWithValue("$e", entity);
+            return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 1 ? entity : null;
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException) { return null; }
     }
 
     // 1 か所の一覧を読む。無い・印が違えば null
@@ -2765,6 +2829,41 @@ internal static class StationView3D
             if (t.Kind is not ("elevator" or "tram")) continue;
             var hl = t.Stop.Contains("hangar", StringComparison.OrdinalIgnoreCase);
             targets.Add(new { kind = hl ? "hangar_lobby" : t.Kind, label = hl ? "hangar_lobby (エレベーターの行き先に hangar)" : t.Kind == "elevator" ? "エレベーター" : "トラム", name = loc.Get(t.Stop), pos = t.Pos });
+        }
+        // ハンガーロビー (2026-11-05、利用者の指示「飛ぶ先に ハンガーロビー がないのはダメだと思う」「ハンガーロビーは入れた方がいい。ハンガーのエレベーターの行き先と
+        // 関連してるはず」。親の決定): ハンガーへ行くエレベーターの、ハンガーへ下りる前に人がいる側の乗り場。
+        //   ハンガーのエレベーターの路線 = ビューア (view3d.js の elevOrder) と同じ見分け: 行き先の鍵が dockingport_NN・pad_NN で終わる乗り場のある路線、
+        //     ハンガーのエレベーター (上の hangarLines)、ハンガー行きの路線のタグ (HangarLineTags。ハンガーの入口のある地図だけ)。
+        //   その路線ごとに、エレベーターの乗り場を行き先の鍵でまとめ (dockingport_NN・pad_NN の乗り場は除く)、艦隊マネージャーの端末 (種類 fleet。船をハンガーに呼ぶ端末) に
+        //   いちばん近い乗り場のあるまとまりを、ハンガーロビーとする。艦隊マネージャーの端末の無い地図では決めない (行を足さない)。
+        //   (版 8 の一覧の全部の場所で確かめた値: 選ばれるまとまりは端末から 5.1〜16.7 m (Lorville の Teasa Spaceport だけ 43.4 m)、同じ路線のほかの行き先 (貨物デッキ・精製デッキ・
+        //    シップディーラーなど) は 229.9 m 以上。鍵は場所で違う: レストストップは @ui_interactor_lobby「ロビー」、Pyro のステーションは @ui_dest_entry_pyro「入口」、
+        //    Levski は「税関へ」、都市は「Teasa Spaceport」「NBIS ターミナル」など。鍵に lobby を含む乗り場で選んでいた前の決まりの 45 か所は、同じ行になる)
+        //   選んだまとまりを、同じ路線・同じ鍵の行き先の点 (destination) ごとに 1 つの行にする (乗り場は、いちばん近い行き先の点に付ける。行き先の点が無ければ全部で 1 つ)。
+        //   位置は、まとめた乗り場のうち行き先の点にいちばん近い乗り場。名前は鍵の訳 (ゲームの訳に「ハンガーロビー」に当たる言葉は無い)、乗り場が 2 つ以上なら「×数」。
+        //   もとの乗り場の行 (エレベーター: ロビー) はそのまま残す (道案内のいちばん近い乗り口・乗り口の玉は今までのまま)
+        {
+            var padDock = new System.Text.RegularExpressions.Regex(@"(dockingport|pad)_\d+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            var elev = map.Transit.Where(t => t.Kind == "elevator" && t.Line.Length > 0).ToList();
+            var liftLines = elev.Where(t => padDock.IsMatch(t.Stop)).Select(t => t.Line).Concat(hangarLines)
+                .Concat(map.Hangars.Count > 0 ? HangarLineTags : []).Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList();
+            var fleets = map.Terminals.Where(t => t.Kind == "fleet").Select(t => t.Pos).ToList();
+            static double D(double[] a, double[] b) => Math.Sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+            foreach (var line in fleets.Count > 0 ? liftLines : [])
+            {
+                var grp = elev.Where(t => t.Line == line && !padDock.IsMatch(t.Stop)).GroupBy(t => t.Stop).MinBy(g => g.Min(s => fleets.Min(f => D(f, s.Pos))));
+                if (grp == null) continue;
+                var stops = grp.ToList();
+                var dests = map.Transit.Where(t => t.Kind == "destination" && t.Line == line && t.Stop == grp.Key).Select(t => t.Pos).ToList();
+                if (dests.Count == 0) dests.Add([stops.Average(s => s.Pos[0]), stops.Average(s => s.Pos[1]), stops.Average(s => s.Pos[2])]);
+                int Nearest(double[] p) { int best = 0; for (int i = 1; i < dests.Count; i++) if (D(dests[i], p) < D(dests[best], p)) best = i; return best; }
+                foreach (var g in stops.GroupBy(s => Nearest(s.Pos)).OrderBy(g => g.Key))
+                {
+                    var at = g.MinBy(s => D(dests[g.Key], s.Pos))!;
+                    var n = g.Count();
+                    targets.Add(new { kind = "hangar_lobby", label = "ハンガーロビー", name = loc.Get(grp.Key) + (n > 1 ? $" ×{n}" : ""), pos = at.Pos });
+                }
+            }
         }
         foreach (var s in map.Stairs)
             targets.Add(new { kind = "stair", label = "階段 (下の端)", name = $"{s.From}→{s.To} ({s.Source})", ja = $"{FloorOf(s.From, s.Bottom)}→{FloorOf(s.To, s.Top)} ({s.Source})", pos = s.Bottom, top = s.Top });

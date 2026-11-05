@@ -380,6 +380,24 @@ public partial class MapPanel : UserControl
         catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 現在位置のオーバーレイを出せませんでした: {ex.GetType().Name}: {ex.Message}"); }
     }
 
+    // 設定タブの［オーバーレイを表示して調整］(MainWindow.OreOverlay.cs) で出す中身 (2026-11-05): いま取ってある現在位置 (App.Config.MapCurrent) の場所の中身
+    // (ShowOreOverlayAsync と同じ作り方)。現在位置が無い・その場所に行が無いときは、見本 (OreHere.Sample)。見本も作れなければ、作れた分 (無ければ「データはありません」)
+    public async Task<OreHere.Content> OreOverlayContentForAdjustAsync()
+    {
+        var tree = _tree ?? await GetTreeAsync();
+        var cur = App.Config.MapCurrent;
+        var db = DetailPanel.DbPath();
+        var translationsDb = Path.Combine(DetailPanel.WorkDir(), "translations.db");
+        var here = tree != null && !tree.IsEmpty && cur.Utc > 0;
+        var known = here ? KnownSystemForOverlay(tree!, cur) : null;
+        return await Task.Run(() =>
+        {
+            var content = here ? OreHere.Compose(tree!, db, translationsDb, (cur.X, cur.Y, cur.Z), cur.Utc, cur.System, known) : null;
+            if (content is { Sections.Count: > 0 }) return content;
+            return OreHere.Sample(db, translationsDb) ?? content ?? new OreHere.Content("現在位置", [], OreHere.NoDataMessage, [], []);
+        });
+    }
+
     // 現在位置のオーバーレイが、ほかの星系の広がり (小惑星帯) を見るときに使う「今いる星系」(OreHere.Resolve の 4 の段)。座標とは別の手がかりで分かるときだけ。分からなければ null。
     // 引き方は今ある仕組みのまま (新しいログの読み取りは足していない):
     //   1. 取った座標に付いている星系 (MapCurrentState.System。量子ジャンプの途中に取ったとき、線の星系で決めたもの)
@@ -1389,6 +1407,21 @@ public partial class MapPanel : UserControl
         {
             try { tree = await GetTreeAsync(); }
             catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 「{name}」の 3D に渡す店の表を作れませんでした: {ex.Message}"); }
+        }
+        // (2026-11-05、親の決定) 店の行き先の指定が無いとき: 行き先の無い場所 (ラグランジュ点 HUR L5 など) は、その区画の箱の中のいちばん近い行き先のある場所
+        // (HUR-L5 High Course Station) に、ステーションの中の小さな場所 (HUR-L5 High Course Clinic など) は、親のステーションをその場所の店を行き先にして開く形に
+        // 差し替える (決まりは StationView3DView.RedirectAsync)。差し替えたら状態の欄に 1 行出す。
+        // 行き先の無い場所は、場所のルートを Data.p4k から探すので、初めの 1 回は数秒かかる (確認用のプログラムで 3.9 秒)。その間も状態の欄に出す
+        if (focusShop == null && tree != null)
+        {
+            var searching = AmenityMapHints.Of(recordName) is { Targets: false };
+            if (searching) txtStatus.Text = $"{name} には行き先が無いので、近くの行き先のある場所を探しています…";
+            if (await StationView3DView.RedirectAsync(recordName, name, tree) is { } alt)
+            {
+                txtStatus.Text = alt.Status;
+                recordName = alt.Node.RecordName; name = alt.Node.Name; focusShop = alt.FocusShop;
+            }
+            else if (searching) txtStatus.Text = $"{name} の区画の中に行き先のある場所は無いので、そのまま開きます";
         }
         if (StationView3DShops.ShowInOpenWindow(recordName, name, tree, focusShop)) return;
         for (DependencyObject? d = this; d != null; d = LogicalTreeHelper.GetParent(d))

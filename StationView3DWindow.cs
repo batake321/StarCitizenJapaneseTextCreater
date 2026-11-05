@@ -702,6 +702,73 @@ public sealed class StationView3DView : Grid
         var places = StationPlaces.LoadPlaces(DetailPanel.DbPath()).Select(p => p.Place).ToList();
         return index.FindRoots(places).Roots.TryGetValue(record, out var r) ? r : null;
     }));
+
+    // ===== 開こうとした場所の差し替え (2026-11-05、親の決定。MapPanel.RoutePlaceAsync から。店の行き先の指定が無いときだけ) =====
+    // (利用者の報告「HUR-L5 星系からクリックして出ない」「HUR-L5 データちゃんとしてない」)
+    // 1. 行き先が 1 つも無い場所 (AmenityMapHints.Hints.Targets が偽。例: ラグランジュ点 StarMapObject.Stanton1_L5「HUR L5」。区画はガス雲と小惑星だけ):
+    //    その場所の区画の箱 (全部の区画の箱を合わせた範囲。StationView3D.LayoutDbBox。場所の座標) の中に、同じ星系の行き先のある場所
+    //    (星図の位置を、開こうとした場所のルートで場所の座標に直して見る) があれば、その中で、開こうとした場所の星図の位置からいちばん近い場所を代わりに開く。
+    //    箱の中に無ければ差し替えない (今までどおりその場所を開く)。
+    //    行き先のある場所のうち、星図の親をたどった先にも行き先のある場所があるもの (ステーションの中のクリニックなど。親の区画の一部) は候補にしない
+    //    (HUR L5 からは HUR-L5 High Course Clinic のほうが HUR-L5 High Course Station より約 0.6 km 近いため)。
+    //    自転する場所は、今の時刻の自転の角度 (補正を足したもの。場所の位置 CurrentLocation.PlacePosition と同じ角度) で直す。角度が決まらなければ差し替えない
+    // 2. 行き先のある場所で、星図の親も行き先のある場所で、その場所の区画が親の区画の中に入っているもの (例: StarMapObject.RR_HUR_L5_CLINIC「HUR-L5 High Course Clinic」。
+    //    その場所だけの 3D には、親のステーションの本体・着陸パッド・ハンガーが無い): 親の場所を、その場所の最初の店を行き先にして開く
+    //    (StationView3D.LayoutDbChildFocus で行き先が決まるときだけ。決まらなければ差し替えない)
+    // Status: 差し替えたことを知らせる 1 行 (［マップ］タブの状態の欄に出す)
+    internal sealed record PlaceRedirect(ShopTreeNode Node, string? FocusShop, string Status);
+    internal static async Task<PlaceRedirect?> RedirectAsync(string record, string name, ShopTree tree)
+    {
+        try
+        {
+            var hints = await Task.Run(AmenityMapHints.All);
+            if (!hints.TryGetValue(record, out var h) || tree.NodeByStarmapRecord(record) is not { } node) return null;
+            bool HasTargets(ShopTreeNode n) => hints.TryGetValue(n.RecordName, out var x) && x.Targets;
+            var db = StationView3DLayout.DbPath;
+            if (h.Targets)
+            {
+                if (node.Parent is not { } parent || !HasTargets(parent)) return null;
+                var parentRecord = parent.RecordName;
+                var focus = await Task.Run(() => StationView3D.LayoutDbChildFocus(db, record, parentRecord));
+                return focus == null ? null : new PlaceRedirect(parent, focus, $"{name} は {parent.Name} の中にあるので、{parent.Name} の 3D でその場所を出しました");
+            }
+            if (!node.Position.HasValue || Ship3DExports.CurrentStamp() is not { } stamp) return null;
+            if (await Task.Run(() => StationView3D.LayoutDbBox(db, record)) is not { } box) return null;
+            if (await RootOfAsync(record, stamp) is not { } root) return null;
+            var unix = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+            double theta = 0;
+            if (root.Spins)
+            {
+                if (BodyRecordOfUuid(root.SpinUuid) is not { } body || root.CorrectedTheta(unix, body, App.Config.MapSpinCorrections) is not { } th) return null;
+                theta = th;
+            }
+            var system = node.Root;
+            var same = tree.Places.Where(p => p.Root == system).ToList();
+            var thetas = CurrentLocation.ThetasAt(same, unix);
+            bool UnderTargets(ShopTreeNode n) { for (var a = n.Parent; a != null; a = a.Parent) if (HasTargets(a)) return true; return false; }
+            var cands = same.Where(p => p != node && p.Position.HasValue && HasTargets(p) && !UnderTargets(p)).Select(p => (Item: p, Pos: CurrentLocation.PlacePosition(p, thetas)));
+            var best = NearestInBox(root.GlobalXf(StationIndex.DefaultRule, theta).Inverse(), box.Lo, box.Hi, CurrentLocation.PlacePosition(node, thetas), cands);
+            return best == null ? null : new PlaceRedirect(best, null, $"{name} には行き先が無いので、近くの {best.Name} を開きました");
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{name}」の代わりに開く場所を決められませんでした (そのまま開きます): {ex.Message}");
+            return null;
+        }
+    }
+    // cands (全体の座標の位置) のうち、toLocal で場所の座標に直した点が箱 lo〜hi の中にあるもので、from (全体の座標) からいちばん近いもの。無ければ null
+    internal static T? NearestInBox<T>(StationXf toLocal, double[] lo, double[] hi, (double X, double Y, double Z) from, IEnumerable<(T Item, (double X, double Y, double Z) Pos)> cands) where T : class
+    {
+        T? best = null; var bd = double.MaxValue;
+        foreach (var (item, pos) in cands)
+        {
+            var q = toLocal.Apply(pos);
+            if (q.X < lo[0] || q.X > hi[0] || q.Y < lo[1] || q.Y > hi[1] || q.Z < lo[2] || q.Z > hi[2]) continue;
+            var d = (pos.X - from.X) * (pos.X - from.X) + (pos.Y - from.Y) * (pos.Y - from.Y) + (pos.Z - from.Z) * (pos.Z - from.Z);
+            if (d < bd) { bd = d; best = item; }
+        }
+        return best;
+    }
     private async Task HereAsync()
     {
         try

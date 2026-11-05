@@ -68,7 +68,10 @@ internal static class AppConfigLoader
             .AddJsonFile("appsettings.json", optional: false);
         if (userConfigPath != null)
             builder.AddJsonFile(userConfigPath, optional: true, reloadOnChange: false);
-        return builder.Build().Get<AppConfig>() ?? new AppConfig();
+        var config = builder.Build().Get<AppConfig>() ?? new AppConfig();
+        // 現在位置のキーが前の版の既定のままなら、今の既定に替える (1 回だけ。MapCurrentHotkey.MigrateDefault)
+        MapCurrentHotkey.MigrateDefault(config);
+        return config;
     }
 
     // 起動後に 1 回だけ出す知らせの文

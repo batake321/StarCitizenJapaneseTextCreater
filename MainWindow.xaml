@@ -2623,7 +2623,7 @@
                                     <TextBlock Text="キー:" VerticalAlignment="Center" Margin="16,0,6,0"/>
                                     <TextBox x:Name="txtMapHotkey" Width="240" IsReadOnly="True" VerticalAlignment="Center" InputMethod.IsInputMethodEnabled="False"
                                              PreviewKeyDown="TxtMapHotkey_PreviewKeyDown" GotKeyboardFocus="TxtMapHotkey_GotKeyboardFocus" LostKeyboardFocus="TxtMapHotkey_LostKeyboardFocus"
-                                             ToolTip="この欄を選んで、割り当てるキーを押してください (Ctrl・Shift・Alt は左右を区別します。既定は 左 Ctrl + 左 Shift + Insert)。右 Ctrl・右 Shift で押しても動きません。「設定を保存」で有効になります"/>
+                                             ToolTip="この欄を選んで、割り当てるキーを押してください (Ctrl・Shift・Alt は左右を区別します。既定は 左 Alt + 左 Shift + Insert)。決めた側と違う側のキー (右 Alt・右 Shift など) で押しても動きません。「設定を保存」で有効になります"/>
                                     <TextBlock x:Name="txtMapHotkeyStatus" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal" Margin="0,4">
@@ -2632,6 +2632,54 @@
                                     <TextBlock Text="表示する秒数:" VerticalAlignment="Center" Margin="16,0,6,0"/>
                                     <TextBox x:Name="txtOreOverlaySeconds" Width="60" VerticalAlignment="Center" ToolTip="出してから消えるまでの秒数 (既定 10)。0 なら出したままです。もう一度現在位置を取ると数え直します。「設定を保存」で有効になります"/>
                                     <TextBlock Text="0 なら出したまま" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
+                                </StackPanel>
+                                <!-- オーバーレイの調整 (MainWindow.OreOverlay.cs): 調整用に出す・位置・大きさ・文字の大きさ・透明度・既定に戻す。
+                                     変えたらすぐ、出ているオーバーレイに当てて設定に保存する (「設定を保存」を押さなくても残る) -->
+                                <StackPanel Orientation="Horizontal" Margin="0,10,0,4">
+                                    <Button x:Name="btnOreOverlayAdjust" Content="オーバーレイを表示して調整" Padding="14,4" Click="OreOverlayAdjust_Click"
+                                            ToolTip="押すと、オーバーレイを調整用に出したままにします (時間で消えません。上の「重ねて出す」を切っていても出ます)。出している間は、オーバーレイをマウスでそのままドラッグして移動、端・角をドラッグして大きさを変えられます。中身は、いま取ってある現在位置の場所の物です (現在位置が無い・その場所にデータが無いときは見本の場所)。もう一度押すと閉じます"/>
+                                    <Button Content="既定に戻す" Padding="14,4" Margin="12,0,0,0" Click="OreOverlayReset_Click"
+                                            ToolTip="オーバーレイの位置・大きさ・文字の大きさ・透明度を既定に戻します"/>
+                                    <TextBlock Text="下の欄とボタンで変えた値は、すぐオーバーレイに出て、保存されます" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,4">
+                                    <TextBlock Text="位置" VerticalAlignment="Center" Width="84"/>
+                                    <TextBlock Text="左:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                    <TextBox x:Name="txtOreOverlayLeft" Width="70" VerticalAlignment="Center" InputMethod.IsInputMethodEnabled="False"
+                                             LostKeyboardFocus="OreOverlayBox_LostKeyboardFocus" KeyDown="OreOverlayBox_KeyDown" ToolTip="オーバーレイの左の端の位置 (画面の左からの数)。入れて Enter か、ほかの欄へ移ると変わります"/>
+                                    <TextBlock Text="上:" VerticalAlignment="Center" Margin="12,0,6,0"/>
+                                    <TextBox x:Name="txtOreOverlayTop" Width="70" VerticalAlignment="Center" InputMethod.IsInputMethodEnabled="False"
+                                             LostKeyboardFocus="OreOverlayBox_LostKeyboardFocus" KeyDown="OreOverlayBox_KeyDown" ToolTip="オーバーレイの上の端の位置 (画面の上からの数)。入れて Enter か、ほかの欄へ移ると変わります"/>
+                                    <Button Content="←" Tag="L" Width="30" Margin="12,0,0,0" Click="OreOverlayMove_Click" ToolTip="左へ 10 動かします (Shift を押しながらで 1)"/>
+                                    <Button Content="→" Tag="R" Width="30" Margin="4,0,0,0" Click="OreOverlayMove_Click" ToolTip="右へ 10 動かします (Shift を押しながらで 1)"/>
+                                    <Button Content="↑" Tag="U" Width="30" Margin="4,0,0,0" Click="OreOverlayMove_Click" ToolTip="上へ 10 動かします (Shift を押しながらで 1)"/>
+                                    <Button Content="↓" Tag="D" Width="30" Margin="4,0,0,0" Click="OreOverlayMove_Click" ToolTip="下へ 10 動かします (Shift を押しながらで 1)"/>
+                                    <TextBlock Text="ボタンは 10 ずつ (Shift を押しながらで 1 ずつ)" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,4">
+                                    <TextBlock Text="大きさ" VerticalAlignment="Center" Width="84"/>
+                                    <TextBlock Text="幅:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                    <TextBox x:Name="txtOreOverlayWidth" Width="70" VerticalAlignment="Center" InputMethod.IsInputMethodEnabled="False"
+                                             LostKeyboardFocus="OreOverlayBox_LostKeyboardFocus" KeyDown="OreOverlayBox_KeyDown" ToolTip="オーバーレイの幅 (200 以上)。入れて Enter か、ほかの欄へ移ると変わります"/>
+                                    <Button Content="−" Tag="W-" Width="30" Margin="6,0,0,0" Click="OreOverlaySize_Click" ToolTip="幅を 10 狭くします (Shift を押しながらで 1)"/>
+                                    <Button Content="＋" Tag="W+" Width="30" Margin="4,0,0,0" Click="OreOverlaySize_Click" ToolTip="幅を 10 広くします (Shift を押しながらで 1)"/>
+                                    <TextBlock Text="高さ:" VerticalAlignment="Center" Margin="16,0,6,0"/>
+                                    <TextBox x:Name="txtOreOverlayHeight" Width="70" VerticalAlignment="Center" InputMethod.IsInputMethodEnabled="False"
+                                             LostKeyboardFocus="OreOverlayBox_LostKeyboardFocus" KeyDown="OreOverlayBox_KeyDown" ToolTip="オーバーレイの高さ (120 以上)。入れて Enter か、ほかの欄へ移ると変わります"/>
+                                    <Button Content="−" Tag="H-" Width="30" Margin="6,0,0,0" Click="OreOverlaySize_Click" ToolTip="高さを 10 低くします (Shift を押しながらで 1)"/>
+                                    <Button Content="＋" Tag="H+" Width="30" Margin="4,0,0,0" Click="OreOverlaySize_Click" ToolTip="高さを 10 高くします (Shift を押しながらで 1)"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,4">
+                                    <TextBlock Text="文字の大きさ:" VerticalAlignment="Center" Width="84"/>
+                                    <TextBox x:Name="txtOreOverlayFontSize" Width="50" VerticalAlignment="Center" InputMethod.IsInputMethodEnabled="False"
+                                             LostKeyboardFocus="OreOverlayBox_LostKeyboardFocus" KeyDown="OreOverlayBox_KeyDown" ToolTip="オーバーレイの文字の大きさ (8〜72。既定 20)。行は幅で折り返し、中身が高さに収まらないときだけ全体が縮みます。入れて Enter か、ほかの欄へ移ると変わります"/>
+                                    <Button Content="−" Tag="-" Width="30" Margin="6,0,0,0" Click="OreOverlayFont_Click" ToolTip="文字を 1 小さくします"/>
+                                    <Button Content="＋" Tag="+" Width="30" Margin="4,0,0,0" Click="OreOverlayFont_Click" ToolTip="文字を 1 大きくします"/>
+                                    <TextBlock Text="透明度:" VerticalAlignment="Center" Margin="24,0,6,0"/>
+                                    <Slider x:Name="sldOreOverlayOpacity" Width="200" Minimum="20" Maximum="100" TickFrequency="5" IsSnapToTickEnabled="True" VerticalAlignment="Center"
+                                            ValueChanged="OreOverlayOpacity_Changed" ToolTip="オーバーレイ全体の濃さ (20〜100 %。既定 100)。小さくするほど下のゲームの画面が透けます"/>
+                                    <TextBlock Text="{Binding Value, ElementName=sldOreOverlayOpacity, StringFormat={}{0:0} %}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                    <TextBlock Text="小さいほど透けます" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
                                 </StackPanel>
                                 <TextBlock TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontSize="12"
                                            Text="オーバーレイは、ふだんはクリックを下のゲームへ通します。左 Ctrl と左 Shift を両方押している間だけクリックを受けます (Ctrl だけ・Shift だけ・右のキーでは通します)。位置と大きさを変えるには、オーバーレイの上で 左 Ctrl + 左 Shift + クリックします。枠とつまみが出るので、ドラッグで移動、端・角のドラッグで大きさを変え、動かさずにクリックすると確定して保存します (✕ は確定せずに閉じます)。変更中は時間で消えません。ゲームのプロセスには触らず、アプリのゲームデータの表だけを使います。"/>
