@@ -19,6 +19,8 @@ internal static partial class ShipExport
         public readonly Dictionary<string, ShipGlb.PngBox?> PngCache = new(StringComparer.Ordinal);
         public Action<string>? Log;
         public CancellationToken Ct;
+        // 船でない品 (武器・装備・服など) の書き出しなら true (ShipExportItem.cs の品だけの決まりを使う。船は false で今までどおり)
+        public bool Item;
     }
 
     // ===== 船の選び方 (entity.rs find_candidates): EntityClassDefinition のうち、名前の小文字に検索の小文字を含むもの。名前の短い順 (UTF-8 のバイト数。同じなら record の順) の最初 =====
@@ -114,7 +116,42 @@ internal static partial class ShipExport
             }
             return res;
         }
+
+        // SubGeometry の木 (入れ子の SubGeometry も読む。2026-11-05、品の 3D で着る形・しまってある形を引くため。ShipExportItem.cs の ItemShape)。
+        // SubGeometry (上) と違い、Tags が空の物・形のパスが空の物も入れる (その下の段に形を持つことがあるため)
+        public List<SubGeomNode> SubGeometryTree(DataCoreDb.Record r)
+        {
+            var res = new List<SubGeomNode>();
+            var cp = TryCompile(Db, r.StructIndex, "Components[SGeometryResourceParams]", DataCoreDb.AnyLeaf);
+            if (cp == null) return res;
+            var comps = TryValues(Db, cp, r, false);
+            if (comps == null) return res;
+            foreach (var comp in comps)
+                if (DcValue.ObjField(comp, "Geometry") is { } g) ReadSubGeometry(g, res, 0);
+            return res;
+        }
+
+        private const int MaxSubGeometryDepth = 8;
+
+        private static void ReadSubGeometry(DcValue node, List<SubGeomNode> outList, int depth)
+        {
+            if (depth >= MaxSubGeometryDepth) return;
+            if (DcValue.ArrField(node, "SubGeometry") is not { } arr) return;
+            foreach (var sub in arr)
+            {
+                var tag = DcValue.StrField(sub, "Tags") ?? "";
+                var gd = DcValue.ObjField(sub, "Geometry");
+                var geom = gd == null ? null : DcValue.ObjField(gd, "Geometry") is { } gg ? NonEmpty(DcValue.StrField(gg, "path")) : null;
+                var mtl = gd == null ? null : DcValue.ObjField(gd, "Material") is { } mm ? NonEmpty(DcValue.StrField(mm, "path")) : null;
+                var kids = new List<SubGeomNode>();
+                ReadSubGeometry(sub, kids, depth + 1);
+                outList.Add(new SubGeomNode(tag, geom, mtl, kids));
+            }
+        }
     }
+
+    // SubGeometry の木の 1 つ (Tags・形のパス・材質のパス・その下の SubGeometry)。パスが空なら null
+    public sealed record SubGeomNode(string Tag, string? GeometryPath, string? MaterialPath, List<SubGeomNode> Children);
 
     private static string? NonEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
 
@@ -405,12 +442,23 @@ internal static partial class ShipExport
         return (ShipMeshes.ParseNmc(meta), mtl);
     }
 
-    private sealed record GeometryPart(string Path, string? Bone, string? MtlOverride);
+    // RelMatrix: 品の CDF の Attachment の、骨から見た向きと位置 (RelRotation・RelPosition。列優先 16。向きも位置も無ければ null)。品のときだけ読む (CdfRelMatrix)
+    private sealed record GeometryPart(string Path, string? Bone, string? MtlOverride, float[]? RelMatrix = null);
+
+    // resolve_geometry_files の結果。ModelIsBody: 品の CDF で、Model File が形を持つので Parts[0] が Model File そのもの (残りが Attachment)
+    private sealed record GeometryFiles(List<GeometryPart> Parts, string? Skeleton, bool ModelIsBody)
+    {
+        public void Deconstruct(out List<GeometryPart> parts, out string? skeleton) { parts = Parts; skeleton = Skeleton; }
+    }
 
     // resolve_geometry_files
-    private static (List<GeometryPart> Parts, string? Skeleton) ResolveGeometryFiles(P4kArchive p4k, string geometryPath)
+    // item: 船でない品の書き出し (Ctx.Item)。品では、CDF の Model File が形を持つ (相方の形のファイルが Data.p4k にある) とき、それを本体 (Parts[0]) にする
+    //   (2026-11-05、利用者の報告「CQ7 の 3D が、CQ7 マガジンとマズルだけになってる」: CQ7 の CDF は Model File が銃の本体の .cga で、Attachment は弾だけ。
+    //   今までは Model File を骨としてだけ読み、Attachment の最初の物を本体にしていた)。そのときは Attachment の Binding が 1 つも無くても失敗にしない。
+    //   Model File が骨だけ (.chr などで相方の形のファイルが無い) の CDF と、船 (item = false) は今までどおり
+    private static GeometryFiles ResolveGeometryFiles(P4kArchive p4k, string geometryPath, bool item = false)
     {
-        if (!geometryPath.ToLowerInvariant().EndsWith(".cdf", StringComparison.Ordinal)) return ([new GeometryPart(geometryPath, null, null)], null);
+        if (!geometryPath.ToLowerInvariant().EndsWith(".cdf", StringComparison.Ordinal)) return new([new GeometryPart(geometryPath, null, null)], null, false);
         var p = DataCorePathToP4k(geometryPath);
         int e = p4k.Find(p);
         if (e < 0) throw new ExportException($"file not found in P4k: {p}");
@@ -429,11 +477,44 @@ internal static partial class ShipExport
                     if (x.Tag(a) != "Attachment") continue;
                     var am = x.AttributeMap(a);
                     if (am.TryGetValue("Binding", out var b) && b.Length > 0)
-                        parts.Add(new GeometryPart(b, am.TryGetValue("BoneName", out var bn) ? bn : null, am.TryGetValue("Material", out var mo) && mo.Length > 0 ? mo : null));
+                        parts.Add(new GeometryPart(b, am.TryGetValue("BoneName", out var bn) ? bn : null, am.TryGetValue("Material", out var mo) && mo.Length > 0 ? mo : null,
+                            item ? CdfRelMatrix(am.GetValueOrDefault("RelRotation", ""), am.GetValueOrDefault("RelPosition", "")) : null));
                 }
         }
+        if (item && skel != null && p4k.Find(CompanionPath(p4k, DataCorePathToP4k(skel))) >= 0)
+        {
+            parts.Insert(0, new GeometryPart(skel, null, null));
+            return new(parts, skel, true);
+        }
         if (parts.Count == 0) throw new ExportException($"CDF {geometryPath} has no attachments");
-        return (parts, skel);
+        return new(parts, skel, false);
+    }
+
+    // CDF の Attachment の RelRotation (四元数) と RelPosition から、骨のノードの下に置く部品の行列 (列優先 16) を作る。向きも位置も無ければ null。
+    // (2026-11-05。Model File が本体の CDF の Attachment にだけ使う: Tripledown Pistol の弾 3 個と、そのマガジンの弾 2 個に向きの指定がある)
+    //   四元数の並びは w,x,y,z: 向きなしの Attachment は全部 "1,0,0,0" (C54 の本体など)。
+    //   掛け方は 骨 × 向き (骨のノードの下の部品の向き): Tripledown Pistol で、この並び・この掛け方のときだけ、銃の弾 3 個とマガジンの弾 3 個の前 (散弾の側) が
+    //   全部銃口の向きになる (ほかの並び・掛け方では後ろ向きか横向きになる。実データで確かめた)。
+    //   位置は向きの後に足す (行列 = 位置 × 向き)。向きの指定のある 5 個は位置が全部 0 なので、位置との組み合わせ方は実データでは確かめていない
+    private static float[]? CdfRelMatrix(string relRotation, string relPosition)
+    {
+        static float[]? Parse(string s, int n)
+        {
+            var p = s.Split(',');
+            if (p.Length != n) return null;
+            var v = new float[n];
+            for (int i = 0; i < n; i++)
+                if (!float.TryParse(p[i].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v[i]) || !float.IsFinite(v[i])) return null;
+            return v;
+        }
+        var q = Parse(relRotation, 4) ?? [1, 0, 0, 0];
+        var t = Parse(relPosition, 3) ?? [0, 0, 0];
+        float len = MathF.Sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+        if (!(len > 1e-6f)) q = [1, 0, 0, 0]; else for (int i = 0; i < 4; i++) q[i] /= len;
+        bool noRot = q[1] == 0 && q[2] == 0 && q[3] == 0;
+        if (noRot && t[0] == 0 && t[1] == 0 && t[2] == 0) return null;
+        var r = Glam.QuatToMat3(q[1], q[2], q[3], q[0]);
+        return [r[0], r[1], r[2], 0, r[3], r[4], r[5], 0, r[6], r[7], r[8], 0, t[0], t[1], t[2], 1];
     }
 
     private static List<CryIvo.Bone> LoadSkeleton(P4kArchive p4k, string? path)
@@ -452,7 +533,15 @@ internal static partial class ShipExport
         public float[][]? Palette;
         public string PrimaryPath = "", MaterialPath = "";
         public List<CryIvo.Bone> Bones = new();
+        // 品の CDF で Model File が本体のとき (GeometryFiles.ModelIsBody): Mesh・Nmc は Model File のもので、Attachment は Mesh に混ぜずにここに持つ
+        // (本体の submesh は Model File の NMC のノードに分かれているので、Attachment は骨の名前のノードの下へ別の部品として足す。AddAttachments)
+        public bool ModelIsBody;
+        public List<PartAttachment> Attachments = new();
     }
+
+    // CDF の Attachment 1 つ (Name: Binding のファイル名の拡張子を除いたもの。Bone: BoneName)
+    // RelMatrix: 骨から見た向きと位置 (GeometryPart.RelMatrix。無ければ null)
+    public sealed record PartAttachment(string Name, string? Bone, ShipMeshes.Mesh Mesh, SocpakGlb.MtlFile? Mtl, List<ShipMeshes.NmcNode>? Nmc, float[]? RelMatrix = null);
 
     // load_single_mesh (withTextures: material_mode が textures のとき)
     private static (ShipMeshes.Mesh Mesh, SocpakGlb.MtlFile? Mtl, ShipGlb.Textures? Tex, List<ShipMeshes.NmcNode>? Nmc) LoadSingleMesh(Ctx ctx, string geometryPath, string materialPath, bool withTextures)
@@ -472,7 +561,18 @@ internal static partial class ShipExport
     // load_geometry_parts
     private static Loaded LoadGeometryParts(Ctx ctx, string geometryPath, string materialPath, bool withTextures)
     {
-        var (parts, skelPath) = ResolveGeometryFiles(ctx.P4k, geometryPath);
+        var files = ResolveGeometryFiles(ctx.P4k, geometryPath, ctx.Item);
+        if (files.ModelIsBody)
+        {
+            try { return LoadModelBody(ctx, files, materialPath, withTextures); }
+            catch (Exception ex) when (IsLoadError(ex) && files.Parts.Count > 1)
+            {
+                // Model File の形を読めなかったら、今までどおり Attachment だけで組む
+                ctx.Log?.Invoke($"  CDF model '{files.Parts[0].Path}' failed: {ex.Message}");
+                files = new(files.Parts.Skip(1).ToList(), files.Skeleton, false);
+            }
+        }
+        var (parts, skelPath) = files;
         var primary = parts[0].Path;
         var bones = LoadSkeleton(ctx.P4k, skelPath);
         var eff = parts[0].MtlOverride ?? materialPath;
@@ -490,10 +590,43 @@ internal static partial class ShipExport
         return new Loaded { Mesh = mesh, Mtl = mtl, Tex = tex, Nmc = nmc, PrimaryPath = primary, MaterialPath = materialPath, Bones = bones };
     }
 
+    // 品の CDF で Model File が形を持つとき (GeometryFiles.ModelIsBody): Model File を本体として読む (材質は今までの決まり: record の Material のパスがあればそれ、
+    // 無ければ形のファイルが指す材質。ResolveMaterial)。Attachment は本体に混ぜずに別に読む (材質は Attachment の Material の指定、無ければその形のファイルが指す材質)
+    private static Loaded LoadModelBody(Ctx ctx, GeometryFiles files, string materialPath, bool withTextures)
+    {
+        var model = files.Parts[0].Path;
+        var (mesh, mtl, tex, nmc) = LoadSingleMesh(ctx, model, materialPath, withTextures);
+        // Model File の NMC のノードが骨の役をするので、NMC があるときは骨のノードを別に作らない (CQ7 の .cga は骨の表も同じ 24 個の名前で持っていて、同じ名前のノードが 2 組できるため)
+        var bones = nmc is { Count: > 0 } ? new List<CryIvo.Bone>() : LoadSkeleton(ctx.P4k, files.Skeleton);
+        var l = new Loaded { Mesh = mesh, Mtl = mtl, Tex = tex, Nmc = nmc, PrimaryPath = model, MaterialPath = materialPath, Bones = bones, ModelIsBody = true };
+        for (int i = 1; i < files.Parts.Count; i++)
+        {
+            var p = files.Parts[i];
+            try
+            {
+                var (am, amtl, _, anmc) = LoadSingleMesh(ctx, p.Path, p.MtlOverride ?? "", false);
+                var file = p.Path[(p.Path.LastIndexOfAny(['/', '\\']) + 1)..];
+                int dot = file.LastIndexOf('.');
+                l.Attachments.Add(new PartAttachment(dot > 0 ? file[..dot] : file, p.Bone, am, amtl, anmc, p.RelMatrix));
+            }
+            catch (Exception ex) when (IsLoadError(ex)) { ctx.Log?.Invoke($"  CDF part '{p.Path}' failed: {ex.Message}"); }
+        }
+        return l;
+    }
+
+    // Model File が本体の CDF の Attachment を、持ち主 (owner) の骨の名前のノードの下へ足す部品にする (ShipGlb の AttachChild が ParentNodeName の名前のノードを探して付ける。
+    // 見つからなければ持ち主のノード)。持ち主の部品のすぐ後に並べる (同じ名前のノードは後から作った物が引かれるため)
+    private static void AddAttachments(Loaded l, string owner, List<Payload> outList)
+    {
+        foreach (var a in l.Attachments)
+            outList.Add(new Payload { Mesh = a.Mesh, Mtl = a.Mtl, Nmc = a.Nmc, EntityName = a.Name, ParentNodeName = a.Bone ?? "", ParentEntityName = owner, OffMatrix = a.RelMatrix });
+    }
+
     internal static bool IsLoadError(Exception e) => e is InvalidDataException or IOException or ExportException or ZstdSharp.ZstdException or IndexOutOfRangeException or ArgumentOutOfRangeException or ArgumentException or OverflowException;
 
     // export_entity_payload (DataCore から形・材質のパス)
-    private static Loaded EntityPayload(Ctx ctx, DataCoreDb.Record record, bool withTextures, bool withMaterials)
+    // shape: 品の本体で、主の形の代わりに使う形と材質のパス (ItemGeometry が主の形と違う物を選んだとき。ShipExportItem.cs)。無ければ今までどおり DataCore の主の形
+    private static Loaded EntityPayload(Ctx ctx, DataCoreDb.Record record, bool withTextures, bool withMaterials, (string Geom, string Mtl)? shape = null)
     {
         var db = ctx.Db;
         var name = db.String2(record.NameOffset);
@@ -508,6 +641,7 @@ internal static partial class ShipExport
             mtl = db.QueryFirstString(mc, record) ?? "";
         }
         catch (Exception e) when (e is DataCoreDb.QueryException or InvalidDataException) { throw new ExportException($"DataCore query: {e.Message}"); }
+        if (shape is { } sh) (geom, mtl) = sh;
         var l = LoadGeometryParts(ctx, geom, mtl, withTextures);
         l.MaterialPath = mtl;
         if (!withMaterials) { l.Mtl = null; l.Tex = null; return l; }
@@ -811,7 +945,8 @@ internal static partial class ShipExport
     }
 
     // resolve_loadout_meshes
-    public static ResolvedNode ResolveLoadoutMeshes(Ctx ctx, DataCoreDb.Record record, LoadoutNode tree)
+    // shape: EntityPayload の shape と同じ (品の本体で、主の形の代わりに使う形と材質のパス)
+    public static ResolvedNode ResolveLoadoutMeshes(Ctx ctx, DataCoreDb.Record record, LoadoutNode tree, (string Geom, string Mtl)? shape = null)
     {
         var db = ctx.Db; var p4k = ctx.P4k;
         DataCoreDb.CompiledPath gc;
@@ -822,8 +957,9 @@ internal static partial class ShipExport
         catch (Exception e) when (e is DataCoreDb.QueryException or InvalidDataException) { throw new ExportException($"DataCore query: {e.Message}"); }
         var mc = TryCompile(db, record.StructIndex, "Components[SGeometryResourceParams].Geometry.Geometry.Material.path", DataCoreDb.StringLeaf);
         var mtl = (mc == null ? null : TryString(db, mc, record)) ?? "";
+        if (shape is { } sh) (geom, mtl) = sh;
         var (nmc, _) = NmcAndMaterial(p4k, geom, mtl);
-        ResolveGeometryFiles(p4k, geom);   // CDF が読めなければ失敗 (starbreaker と同じ)
+        ResolveGeometryFiles(p4k, geom, ctx.Item);   // CDF が読めなければ失敗 (starbreaker と同じ)
         var hasGeom = HasGeom(p4k, geom);
         var invisible = InvisiblePorts(ctx, record);
         var children = ResolveChildren(ctx, tree.Children, invisible);
@@ -878,6 +1014,8 @@ internal static partial class ShipExport
         public string EntityName = "", ParentNodeName = "", ParentEntityName = "";
         public bool NoRotation;
         public float[] OffPos = new float[3], OffRot = new float[3];
+        // 取り付け先のノードから見た置き方の行列 (列優先 16)。あれば OffPos・OffRot の代わりに使う (品の CDF の Attachment の向き。CdfRelMatrix。船では null)
+        public float[]? OffMatrix;
     }
 
     private static Loaded? LoadChildMesh(Ctx ctx, ResolvedNode child)
@@ -908,6 +1046,7 @@ internal static partial class ShipExport
                 if (LoadChildMesh(ctx, child) is { } l)
                 {
                     outList.Add(new Payload { Mesh = l.Mesh, Mtl = l.Mtl, Nmc = l.Nmc, Palette = l.Palette, Bones = l.Bones, EntityName = child.EntityName, ParentNodeName = attach, ParentEntityName = parentEntity, NoRotation = noRot, OffPos = child.OffPos, OffRot = child.OffRot });
+                    AddAttachments(l, child.EntityName, outList);   // 品の CDF で Model File が本体の子 (例: マガジン) の Attachment (船では空)
                     creates = true;
                 }
                 else creates = false;
@@ -932,10 +1071,11 @@ internal static partial class ShipExport
     }
 
     // outPath に GLB を書く (失敗したときの書きかけのファイルは呼ぶ側で消す)
-    public static Result Export(P4kArchive p4k, DataCoreDb db, string name, string outPath, Action<string>? log = null, CancellationToken ct = default)
+    // item: 船でない品 (武器・装備・服など。Ship3DExports.IsItemRecord) の書き出しなら true (品だけの決まりを使う。ShipExportItem.cs の頭の説明)。船は false で今までどおり
+    public static Result Export(P4kArchive p4k, DataCoreDb db, string name, string outPath, Action<string>? log = null, CancellationToken ct = default, bool item = false)
     {
         long len = 0;
-        var res = ExportCore(p4k, db, name, log, ct, null, false, () => new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20), s => len = s.Length);
+        var res = ExportCore(p4k, db, name, log, ct, null, false, item, () => new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20), s => len = s.Length);
         res.GlbBytes = len;
         return res;
     }
@@ -944,18 +1084,19 @@ internal static partial class ShipExport
     // 「"船・装備・武器の 3D は常に色付け" これは設定で切れるようにしてください。」)。GLB は書かず、GLB の JSON の部分 (UTF-8) だけを返す (形・画像の塊は数えて捨てる)。
     //   paint: null なら Export と同じ (既定のロードアウトの塗装)。"" なら塗装を当てない (既定で塗装の入った船の塗装なしの姿)。それ以外は当てる塗装の品の短い名前 (例 Paint_Gladius_Valiant)。
     //   noPalette: パレットの色 (本体・子・船内のパレット、塗装のパレット) を材質に当てない (色は材質そのものの色。ShipGlb.Input.NoPalette)
-    public static (Result Result, byte[] Json) ExportJson(P4kArchive p4k, DataCoreDb db, string name, string? paint, bool noPalette, CancellationToken ct = default)
+    //   item: Export の item と同じ (表を当てる GLB と同じ決まりで書き出す)
+    public static (Result Result, byte[] Json) ExportJson(P4kArchive p4k, DataCoreDb db, string name, string? paint, bool noPalette, CancellationToken ct = default, bool item = false)
     {
         var cap = new GlbJsonCapture();
-        var res = ExportCore(p4k, db, name, null, ct, paint, noPalette, () => cap, _ => { });
+        var res = ExportCore(p4k, db, name, null, ct, paint, noPalette, item, () => cap, _ => { });
         res.GlbBytes = cap.Length;
         return (res, cap.Json ?? throw new InvalidDataException("GLB の JSON を取り出せませんでした"));
     }
 
     // Export の本体。open は GLB を書く先 (Export と同じく、組み立ての直前に開く)、done は書き終えた先 (閉じる前) を渡す
-    private static Result ExportCore(P4kArchive p4k, DataCoreDb db, string name, Action<string>? log, CancellationToken ct, string? paint, bool noPalette, Func<Stream> open, Action<Stream> done)
+    private static Result ExportCore(P4kArchive p4k, DataCoreDb db, string name, Action<string>? log, CancellationToken ct, string? paint, bool noPalette, bool item, Func<Stream> open, Action<Stream> done)
     {
-        var ctx = new Ctx { P4k = p4k, Db = db, Log = log, Ct = ct };
+        var ctx = new Ctx { P4k = p4k, Db = db, Log = log, Ct = ct, Item = item };
         var record = FindRecord(db, name, out int cands) ?? throw new ExportException($"no EntityClassDefinition records matching '{name}'");
         var rname = db.String2(record.NameOffset);
         var idx = IndexOf(db);
@@ -963,8 +1104,11 @@ internal static partial class ShipExport
         log?.Invoke($"Loadout tree for {tree.EntityName}: {tree.Children.Count} children");
         ct.ThrowIfCancellationRequested();
 
-        var resolved = ResolveLoadoutMeshes(ctx, record, tree);
-        var root = EntityPayload(ctx, record, true, true);
+        // 品: 主の形が箱の品は、着る形・しまってある形を本体にする (ItemShape。主の形のままなら null)
+        var shape = item ? ItemShape(p4k, idx, record) : null;
+        if (shape is { } chosen) log?.Invoke($"Item shape: {chosen.Geom} (material {chosen.Mtl})");
+        var resolved = ResolveLoadoutMeshes(ctx, record, tree, shape);
+        var root = EntityPayload(ctx, record, true, true, shape);
         // 塗装: 指定が無ければ既定のロードアウトの塗装 (今までどおり)、"" なら当てない、それ以外はその塗装の品
         var (rootPal, rootMtl) = paint == null ? PaintOverride(ctx, record, tree, root.Palette, root.Mtl)
             : paint.Length == 0 ? (root.Palette, root.Mtl)
@@ -972,6 +1116,8 @@ internal static partial class ShipExport
         ct.ThrowIfCancellationRequested();
 
         var payloads = new List<Payload>();
+        // 品の CDF で Model File が本体のとき: Attachment を骨の名前のノードの下へ足す (船では空)
+        AddAttachments(root, resolved.EntityName, payloads);
         foreach (var (gp, bone) in LandingGear(db, record))
         {
             try
@@ -991,7 +1137,8 @@ internal static partial class ShipExport
         {
             ShipGlb.Write(ctx, new ShipGlb.Input
             {
-            RootMesh = root.Mesh, RootMtl = rootMtl, RootTex = root.Tex, RootNmc = resolved.Nmc, RootPalette = rootPal, RootBones = root.Bones,
+                // 品の CDF で Model File が本体のとき、本体のノードの木は Model File の NMC (submesh がノードに分かれているため。船と、Model File が骨だけの CDF は今までどおり)
+                RootMesh = root.Mesh, RootMtl = rootMtl, RootTex = root.Tex, RootNmc = root.ModelIsBody ? root.Nmc : resolved.Nmc, RootPalette = rootPal, RootBones = root.Bones,
                 Children = payloads, Interiors = interiors, EntityName = resolved.EntityName, GeometryPath = root.PrimaryPath, MaterialPath = root.MaterialPath,
                 NoPalette = noPalette,
             }, fs);

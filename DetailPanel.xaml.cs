@@ -318,7 +318,7 @@ public partial class DetailPanel : UserControl
 
     // 候補の一覧 (RequestList) をリストに並べ、selectIndex の候補を選んだ状態にして詳細を出す。名前の欄・分類は ShowItem と同じ扱い
     // (分類を (すべて) にし、名前の欄に選んだ候補の名前を入れる。検索はしない)。リストの行は検索の候補と同じ形 (DetailCandidate.Display):
-    // 資源は「名前 [資源]」、品目は item_index (無ければ items) の種類。同じ record は最初の 1 つだけ並べる。番号が範囲の外なら先頭を選ぶ
+    // 資源は「名前 [資源]」(鉱石の範囲に入らない資源は「名前 [コモディティ]」)、品目は item_index (無ければ items) の種類。同じ record は最初の 1 つだけ並べる。番号が範囲の外なら先頭を選ぶ
     public async void ShowList(IReadOnlyList<(string Record, string Name, bool IsResource)> items, int selectIndex)
     {
         if (items.Count == 0) return;
@@ -339,8 +339,10 @@ public partial class DetailPanel : UserControl
                 GameDataQueryService? q = File.Exists(db) ? GameDataQueryService.OpenReadOnly(db) : null;
                 try
                 {
+                    // 資源は、鉱石の範囲の資源が「資源」、それ以外が「コモディティ」(検索の候補と同じ。GameDataQueryService.ResourceTypeLookup)
+                    var resourceType = distinct.Any(x => x.IsResource) ? q?.ResourceTypeLookup() : null;
                     for (int i = 0; i < distinct.Count; i++)
-                        types[i] = distinct[i].IsResource ? GameDataQueryService.ResourceDetailType : q?.ItemTypeOf(distinct[i].Record) ?? "";
+                        types[i] = distinct[i].IsResource ? resourceType?.Invoke(distinct[i].Record) ?? GameDataQueryService.ResourceDetailType : q?.ItemTypeOf(distinct[i].Record) ?? "";
                 }
                 finally { q?.Dispose(); }
                 return distinct.Select((x, i) =>
@@ -1311,6 +1313,8 @@ public partial class DetailPanel : UserControl
         }
         // (2026-11-04、利用者の指示「詳細の下に 3D 表示」) 詳細はそのまま残し、その下に 3D を出す
         web3D.Visibility = Visibility.Visible;
+        split3D.Visibility = Visibility.Visible;
+        Apply3DLayout();
         btnShip3DBack.Visibility = Visibility.Visible;
     }
 
@@ -1322,7 +1326,71 @@ public partial class DetailPanel : UserControl
         _ship3DShown = null;
         Ship3DWeb.Blank(web3D);
         web3D.Visibility = Visibility.Collapsed;
+        // 仕切りを隠し、3D の行を元 (高さ Auto = 0) に戻す。詳細の文が今までどおり全体を使う
+        split3D.Visibility = Visibility.Collapsed;
+        row3D.MinHeight = 0;
+        row3D.MaxHeight = double.PositiveInfinity;
+        row3D.Height = GridLength.Auto;
+        rowDetail.MinHeight = DetailMinHeight;
         btnShip3DBack.Visibility = Visibility.Collapsed;
+    }
+
+    // ===== 3D の欄の高さ (2026-11-05、利用者の指示「3D 部分を上に広げたりしたい」) =====
+    // 詳細の文と 3D の欄の間の仕切り (split3D) を上下にドラッグして、3D の欄の高さを変える。船・車両の 3D でも武器・装備の 3D でも同じ欄 (web3D)。
+    //   既定: Ship3DDefaultHeight (前は決まった高さ 340 だった)。
+    //   下限: Ship3DMinHeight。ビューアの左上の名前 (上から 8 + 1 行)・右上の ✕ (上から 8 + 高さ 28)・左下の操作の説明
+    //     (下から 8、12px × 1.5 の行。幅が狭いと 2 行が 4 行まで折り返す = 72 + 8) が重ならず欠けない高さ。
+    //   上限: 詳細の文が DetailMinHeightWith3D 残る所まで (名前の見出しと小さな絵が読める高さ)。
+    //   枠が「詳細の文の下限 + 仕切り + 3D の下限」より低いときは、2 つの下限を同じ割合で縮める (どちらも 0 にせず、枠の外へはみ出さない)。
+    //   覚える: ドラッグを終えたときに App.Config.Detail3DHeight に入れて、すぐ設定を保存する (SaveConfig。MainWindow が渡す。［マップ］と同じ流儀)。
+    //   割り当てられた高さが変わったとき (DetailArea_SizeChanged。窓の大きさ・上の一覧の仕切りなど): 覚えた高さを今の高さに収まるように当て直す (覚えた高さは変えない。広がれば覚えた高さに戻る)。
+    //   3D の中身は、ビューア (wwwroot\ship3d\viewer.html) が window の resize で描く大きさと縦横の比を合わせ直す
+    internal const double Ship3DDefaultHeight = 340;
+    private const double Ship3DMinHeight = 120, DetailMinHeightWith3D = 100, DetailMinHeight = 40;
+
+    // 設定を保存する (MainWindow.SaveConfigToFile を渡してもらう)
+    public Action? SaveConfig { get; set; }
+
+    // 覚えた高さ (設定の値が数でない・下限より小さければ既定)
+    private static double Saved3DHeight() =>
+        App.Config.Detail3DHeight is var h && double.IsFinite(h) && h >= Ship3DMinHeight ? h : Ship3DDefaultHeight;
+
+    // 3D を出している間の行の高さと下限を決め直す (出していなければ何もしない)
+    private void Apply3DLayout()
+    {
+        if (web3D.Visibility != Visibility.Visible) return;
+        // 使える高さ: この行に割り当てられた高さ (空の部品 probeDetailArea の高さ) から枠の線を引いたもの
+        var total = Math.Max(0, probeDetailArea.ActualHeight - borderDetail.BorderThickness.Top - borderDetail.BorderThickness.Bottom);
+        var split = split3D.Height;
+        double detailMin = DetailMinHeightWith3D, viewMin = Ship3DMinHeight;
+        if (total > 0 && total < detailMin + split + viewMin)
+        {
+            // 枠が低い: 2 つの下限を同じ割合で縮める
+            var room = Math.Max(0, total - split);
+            detailMin = Math.Floor(room * DetailMinHeightWith3D / (DetailMinHeightWith3D + Ship3DMinHeight));
+            viewMin = Math.Max(0, room - detailMin);
+        }
+        rowDetail.MinHeight = detailMin;
+        row3D.MinHeight = viewMin;
+        // 上限 (枠の高さ − 詳細の文の下限 − 仕切り)。仕切り (GridSplitter) は、片方の行が * のときは決まった高さの行 (3D の行) だけを変え、
+        // その行の MinHeight / MaxHeight の中でしか動かさないので、上へ広げられる限りを 3D の行の MaxHeight で決める
+        var viewMax = total > 0 ? Math.Max(viewMin, total - detailMin - split) : double.PositiveInfinity;
+        row3D.MaxHeight = viewMax;
+        row3D.Height = new GridLength(Math.Max(viewMin, Math.Min(Saved3DHeight(), viewMax)));
+    }
+
+    // 詳細の文と 3D の欄に割り当てられた高さが変わった (窓の大きさ・上の一覧の仕切り・上のバーの出し入れ)
+    private void DetailArea_SizeChanged(object sender, SizeChangedEventArgs e) => Apply3DLayout();
+
+    // 仕切りのドラッグを終えた: 今の 3D の欄の高さを覚えて、すぐ保存する
+    private void Split3D_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
+    {
+        var h = row3D.ActualHeight;
+        if (!double.IsFinite(h) || h <= 0) return;
+        App.Config.Detail3DHeight = Math.Round(Math.Max(h, Ship3DMinHeight));
+        try { SaveConfig?.Invoke(); }
+        catch (Exception ex) { AppendAppLog($"[詳細] 3D の欄の高さを保存できませんでした: {ex.Message}"); }
+        Apply3DLayout();
     }
 
     // ===== ステーションの地図 =====

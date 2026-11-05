@@ -553,7 +553,7 @@ internal static class ShipGlb
                 int wi = Nodes.Count;
                 NameToIdx.TryAdd(lowerName, wi);
                 var wk = roots.Select(r => cbase + r).Concat(boneIdx).ToList();
-                var off = OffsetMatrix(child.OffPos, child.OffRot);
+                var off = child.OffMatrix ?? OffsetMatrix(child.OffPos, child.OffRot);
                 Nodes.Add(new Node { Name = child.EntityName, Children = wk.Count == 0 ? null : wk, Matrix = off });
                 childRoot = wi;
             }
@@ -561,7 +561,7 @@ internal static class ShipGlb
             {
                 int ni = Nodes.Count;
                 NameToIdx.TryAdd(lowerName, ni);
-                Nodes.Add(new Node { Name = child.EntityName, Mesh = packed?.MeshIdx, Matrix = OffsetMatrix(child.OffPos, child.OffRot) });
+                Nodes.Add(new Node { Name = child.EntityName, Mesh = packed?.MeshIdx, Matrix = child.OffMatrix ?? OffsetMatrix(child.OffPos, child.OffRot) });
                 childRoot = ni;
             }
             int? parentIdx = NameToIdx.TryGetValue(child.ParentNodeName.ToLowerInvariant(), out var pi) ? pi
@@ -571,7 +571,7 @@ internal static class ShipGlb
             {
                 var wt = WorldTranslation(target);
                 float[] pt = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, wt[0], wt[1], wt[2], 1];
-                var fm = OffsetMatrix(child.OffPos, child.OffRot) is { } om ? Glam.Mul(pt, om) : pt;
+                var fm = (child.OffMatrix ?? OffsetMatrix(child.OffPos, child.OffRot)) is { } om ? Glam.Mul(pt, om) : pt;
                 Nodes[childRoot].Matrix = fm;
                 AppendChild(scene.Count > 0 ? scene[0] : 0, childRoot);
             }

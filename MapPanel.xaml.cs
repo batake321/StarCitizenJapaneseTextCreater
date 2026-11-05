@@ -300,7 +300,101 @@ public partial class MapPanel : UserControl
     private async void BtnCurrent_Click(object sender, RoutedEventArgs e)
     {
         var (ok, _) = await CaptureCurrentAsync();
-        if (ok) await GoHere3DAsync();
+        if (!ok) return;
+        // 現在位置のオーバーレイ (設定がオンのときだけ。ゲームの画面の上に、その場所で採掘できる物を出す。3D を出す流れは待たせない)
+        _ = ShowOreOverlayAsync();
+        await GoHere3DAsync();
+    }
+
+    // ===== 現在位置のキー (2026-11-05、利用者の指示「現在位置ボタンはゲームがアクティブでも L-CTRL + L-Shift + Ins がゲームとかぶらなければ
+    //  デフォルト(設定可能)で動作するようにするとかなり便利」) =====
+    // MainWindow がキー (MapCurrentHotkey) を受けて呼ぶ。［現在位置］ボタンと同じ処理 (座標を取る → オーバーレイ → 建物の中ならその場所の 3D)。
+    // ボタンとの違いは、ゲームからフォーカスを取らないことだけ:
+    //   ・ゲームの窓がもう前にあれば、前に出す操作 (Alt を押して離す・600ms 待つ) をしない (CaptureAsync の keepGameFront)
+    //   ・取った後・取れなかったときに、アプリの窓を前に出さない (BringAppToFront を呼ばない)
+    //   ・3D を出すときに、3D の別ウィンドウを前に出さない・最小化を戻さない (GoHere3DAsync(activate: false))
+    // 送る前に、キーが離されるのを待つ (押したままだと、ゲームに送る Enter・/showlocation の字が Ctrl・Shift との組み合わせになるため)。
+    // HotkeyReleaseTimeoutMs たっても離されなければ送らない (状態の欄とアプリのログに出す)。
+    // 取っている途中 (ボタン・自動・キー) に来たキーは何もしない (ボタンは取っている間は押せないのと同じ)。
+    // keysDown: キー (修飾キー・主のキー) のどれかがまだ押されているか (MapCurrentHotkey.AnyKeyDown)
+    private const int HotkeyReleaseTimeoutMs = 3000, HotkeyReleasePollMs = 15;
+    private const string HotkeyFrom = "キー";
+    private bool _hotkeyBusy;
+    public async Task CaptureCurrentFromHotkeyAsync(Func<bool> keysDown)
+    {
+        if (_hotkeyBusy || _capturing) return;
+        _hotkeyBusy = true;
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (keysDown())
+            {
+                if (sw.ElapsedMilliseconds >= HotkeyReleaseTimeoutMs)
+                {
+                    txtStatus.Text = $"キーが {HotkeyReleaseTimeoutMs / 1000} 秒たっても押されたままなので送りませんでした（キーを離してからもう一度押してください）";
+                    App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 現在位置を取れませんでした（ボタン・{HotkeyFrom}）: キーが押されたままなので送りませんでした");
+                    return;
+                }
+                await Task.Delay(HotkeyReleasePollMs);
+            }
+            var (ok, _) = await CaptureCurrentAsync(HotkeyFrom, keepGameFront: true);
+            if (!ok) return;
+            _ = ShowOreOverlayAsync();
+            await GoHere3DAsync(activate: false);
+        }
+        catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] キーで現在位置を取れませんでした: {ex.Message}"); }
+        finally { _hotkeyBusy = false; }
+    }
+
+    // ===== 現在位置のオーバーレイ (OreOverlayWindow。2026-11-05、利用者の指示「マップの現在位置ボタンを押したときに、ゲームの画面にオーバーレイ表示するようにして、
+    //  デフォルトはオフで設定で変えられるように」) =====
+    // ［現在位置］ボタン (BtnCurrent_Click)・キー (CaptureCurrentFromHotkeyAsync)・ステーションの 3D の［現在位置］(CaptureCurrentWithOverlayAsync) で
+    // 座標が取れた後に呼ぶ。自動の取得からは呼ばない。
+    // 設定がオフなら何もしない。今の現在位置 (App.Config.MapCurrent) から場所を決めて中身を作り (OreHere.Compose。裏のスレッド)、窓に出す
+
+    // ステーションの 3D (［マップ］タブの中・別ウィンドウ) の［現在位置］(StationView3DView.CaptureHook) から: ［現在位置］と同じ処理 (CaptureCurrentAsync) をし、
+    // 座標が取れたらオーバーレイも出す (2026-11-05、利用者の指示「マップの現在位置ボタンを押したときに、ゲームの画面にオーバーレイ表示する」。3D の［現在位置］も現在位置のボタン)
+    public async Task<(bool Ok, string Status)> CaptureCurrentWithOverlayAsync(string from)
+    {
+        var r = await CaptureCurrentAsync(from);
+        if (r.Ok) _ = ShowOreOverlayAsync();
+        return r;
+    }
+
+    private async Task ShowOreOverlayAsync()
+    {
+        if (!App.Config.OreOverlayEnabled) return;
+        try
+        {
+            var tree = _tree ?? await GetTreeAsync();
+            if (tree == null || tree.IsEmpty) return;
+            var cur = App.Config.MapCurrent;
+            if (!(cur.Utc > 0)) return;
+            var db = DetailPanel.DbPath();
+            var translationsDb = Path.Combine(DetailPanel.WorkDir(), "translations.db");
+            var known = KnownSystemForOverlay(tree, cur);
+            var content = await Task.Run(() => OreHere.Compose(tree, db, translationsDb, (cur.X, cur.Y, cur.Z), cur.Utc, cur.System, known));
+            if (!App.Config.OreOverlayEnabled) return;
+            OreOverlayWindow.ShowContent(content, SaveConfig);
+        }
+        catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 現在位置のオーバーレイを出せませんでした: {ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    // 現在位置のオーバーレイが、ほかの星系の広がり (小惑星帯) を見るときに使う「今いる星系」(OreHere.Resolve の 4 の段)。座標とは別の手がかりで分かるときだけ。分からなければ null。
+    // 引き方は今ある仕組みのまま (新しいログの読み取りは足していない):
+    //   1. 取った座標に付いている星系 (MapCurrentState.System。量子ジャンプの途中に取ったとき、線の星系で決めたもの)
+    //   2. ［マップ］の推定位置 (CurrentLocation.Effective) の、Game.log からの段: 着陸場所 (LandingPlaceProvider) の場所、
+    //      無ければ「最後の到着が最後の目的地の選択より後で、その後に Location が変わっていない」ときの量子ジャンプの目的地。その場所の星系 (Root.System)。
+    //      Effective には取った座標を渡さず (取った座標の段は星系を教えない)、Location の番号も渡さない (覚えた居場所 MapLocationMemories の段を飛ばす。
+    //      今の番号の覚えは、この取得がアプリの決めた星系 (いちばん近い場所の星系) で書き直した直後なので、手がかりにならない)。
+    //   ［ゲームログ］の追い読みが動いていなければ 2 は無い
+    private string? KnownSystemForOverlay(ShopTree tree, MapCurrentState cur)
+    {
+        if (cur.System is { Length: > 0 }) return cur.System;
+        var q = QuantumStateProvider?.Invoke();
+        if (q == null) return null;
+        var est = CurrentLocation.Effective(tree, new MapCurrentState(), Now(), logRunning: true, LandingPlaceProvider?.Invoke(), q with { LocationId = null }, null);
+        return est?.Place?.Root.System;
     }
 
     // ===== 現在位置を押したら、建物の中ならその場所の 3D を出す (2026-11-05、利用者の指示「マップの現在位置をクリックしたときに建物内なら 3D 表示まで入れて」) =====
@@ -311,7 +405,9 @@ public partial class MapPanel : UserControl
     // その場所の 3D があるか: 星系図に地図のある場所の印を出している場所 (MapPlaceByRecordName。押すとその場所の 3D を出すのと同じ)。
     // どれかに当たらなければ何もしない (星系図のまま)。当たれば、3D をどこに出すかの今の決まり (別ウィンドウが開いていればそこ、無ければ［マップ］タブ) で出し、
     // その 3D で、3D の［現在位置］と同じ出し方 (取り直さない) をする (StationView3DView.RequestHere)
-    private async Task GoHere3DAsync()
+    // activate: 3D の別ウィンドウに出すとき、その窓を前に出すか (既定は出す)。現在位置のキーから来たとき (CaptureCurrentFromHotkeyAsync) は偽
+    // (ゲームからフォーカスを取らない。3D の中身の更新・［マップ］タブへの切り替えは同じ)
+    private async Task GoHere3DAsync(bool activate = true)
     {
         try
         {
@@ -323,7 +419,7 @@ public partial class MapPanel : UserControl
             var where = CurrentLocation.WhereaboutsOf(eff.Pos, loc, LogPlaceNode(tree, LandingPlaceProvider?.Invoke()));
             if (!where.Inside || where.Place is not { } wp) return;
             if (MapPlaceByRecordName(wp.RecordName) is not { } mp) return;
-            if (StationView3DShops.ShowInOpenWindow(mp.Record, mp.Name, tree, null, here: true)) return;
+            if (StationView3DShops.ShowInOpenWindow(mp.Record, mp.Name, tree, null, here: true, activate: activate)) return;
             for (DependencyObject? d = this; d != null; d = LogicalTreeHelper.GetParent(d))
                 if (d is TabItem tab) { tab.IsSelected = true; break; }
             ShowPlace3D(mp.Record, mp.Name, tree, null, here: true);
@@ -336,7 +432,10 @@ public partial class MapPanel : UserControl
     // マップタブが開かれていない (この欄が画面に無い) ときは、図の作り直しを次に開いたときに回す (RenderOrDeferAsync。
     // 画面に無い WebView2 の初期化は画面に出るまで終わらないので、そのまま待つと取得中のまま止まり、自動の取得も動かなくなる)
     // from: 押したボタンの画面 (アプリのログの「（ボタン・<from>）」に出す。既定は［マップ］タブの［現在位置］)
-    public async Task<(bool Ok, string Status)> CaptureCurrentAsync(string from = "［マップ］タブ")
+    public Task<(bool Ok, string Status)> CaptureCurrentAsync(string from = "［マップ］タブ") => CaptureCurrentAsync(from, keepGameFront: false);
+
+    // keepGameFront: 現在位置のキーから (CaptureCurrentFromHotkeyAsync)。ゲームからフォーカスを取らない (CaptureAsync の keepGameFront)。ほかはボタンと同じ
+    private async Task<(bool Ok, string Status)> CaptureCurrentAsync(string from, bool keepGameFront)
     {
         if (_capturing) return (false, "現在位置を取っている途中です");
         if (KnownCurrentSystem() is { } known && !known.Equals(CurrentView(), StringComparison.OrdinalIgnoreCase))
@@ -355,14 +454,14 @@ public partial class MapPanel : UserControl
                 btnCurrent.IsEnabled = true;
             }
         }
-        var ok = await CaptureAsync(auto: false, from);
+        var ok = await CaptureAsync(auto: false, from, keepGameFront);
         // (2026-11-02、利用者の指摘「現在位置ボタンで位置がとれないとでる」) 座標を読めなかったときは、1 回だけ取り直す。
         // 間は自動の取得の取り直し (目的地の選択の後、取れなければ 3 秒おきにあと 2 回) と同じ 3 秒
         if (!ok && _lastFailUnreadable)
         {
             App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 座標を読めなかったので、{ButtonRetryDelay.TotalSeconds:0} 秒後に 1 回だけ取り直します（ボタン・{from}）");
             await Task.Delay(ButtonRetryDelay);
-            ok = await CaptureAsync(auto: false, from + "・取り直し");
+            ok = await CaptureAsync(auto: false, from + "・取り直し", keepGameFront);
         }
         // 取れなかったときの Game.log の手がかり (ステーションの地図がハンガーにいるかの推測に使う。StationMapPanel)
         // 時刻は UTC (Game.log の行の時刻 (GameLogParser) と同じ)
@@ -541,7 +640,9 @@ public partial class MapPanel : UserControl
         try { return (await tcs.Task, false, null); }
         catch (Exception ex) { return (default, false, ex); }
     }
-    private async Task<bool> CaptureAsync(bool auto, string from = "［マップ］タブ")
+    // keepGameFront: 現在位置のキーから (auto = false のときだけ意味がある)。ボタンと同じ処理だが、ゲームからフォーカスを取らない:
+    // ゲームの窓がもう前にあれば前に出す操作をせず、読み終えても・取れなくてもアプリの窓を前に出さない
+    private async Task<bool> CaptureAsync(bool auto, string from = "［マップ］タブ", bool keepGameFront = false)
     {
         if (_capturing) return false;
         _capturing = true;
@@ -562,14 +663,15 @@ public partial class MapPanel : UserControl
             var game = ShowLocationSender.FindGameWindow();
             if (game == IntPtr.Zero) return Fail("ゲーム (Star Citizen) が起動していません");
             if (auto && !ShowLocationSender.IsForeground(game)) return Fail("ゲームの窓が前に無かったので自動の取得をしませんでした");
-            if (!auto)
+            // キー (keepGameFront) で、ゲームの窓がもう前にあるとき: 前に出す操作 (Alt を押して離す・600ms 待つ) をしない (自動の取得と同じく、前にあることだけ確かめた)
+            if (!auto && !(keepGameFront && ShowLocationSender.IsForeground(game)))
             {
                 // ボタン: ゲームの窓を前に出す (Alt を押して離してから。600ms 待つ)。前に出なければ送らない
                 ShowLocationSender.BringToFront(game);
                 await Task.Delay(600);
                 if (!ShowLocationSender.IsForeground(game))
                 {
-                    BringAppToFront();
+                    if (!keepGameFront) BringAppToFront();
                     return Fail("ゲームの窓を前に出せませんでした (キーは送っていません)");
                 }
             }
@@ -583,7 +685,7 @@ public partial class MapPanel : UserControl
                     $"[マップ] mobiGlas の確認: {(mg.Open ? "開いている" : "閉じている")} ({mg.Elapsed.TotalMilliseconds:0} ms。読めた言葉: {string.Join("・", mg.Hits)})");
                 if (mg.Open)
                 {
-                    if (!auto) BringAppToFront();
+                    if (!auto && !keepGameFront) BringAppToFront();
                     return Fail(auto ? "mobiGlas が開いているので自動の取得をしませんでした" : "mobiGlas が開いているので送りませんでした（閉じてからもう一度押してください）");
                 }
             }
@@ -667,7 +769,7 @@ public partial class MapPanel : UserControl
                     clipboardNote = " (クリップボードを元に戻せませんでした)";
                     App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] クリップボードを元に戻せませんでした（{mode}）: {restoreError.GetType().FullName}: {restoreError.Message}");
                 }
-                if (!auto) BringAppToFront();
+                if (!auto && !keepGameFront) BringAppToFront();
             }
             if (sent == ShowLocationSender.SendResult.NotFront)
             {

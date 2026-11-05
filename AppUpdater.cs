@@ -25,6 +25,13 @@ namespace StarCitizenJapaneseTextCreater;
 //     結果は update\result.json と update\update_log.txt
 //   入れ替えないとき (手で入れるよう知らせる): 必要な .NET の版が今の版より新しい / インストール先に書き込めない (Program Files など) /
 //     開発中のフォルダ (publish・bin) から起動している / manifest が無い
+//   版が同じで、同梱の DB だけが新しくなったとき (2026-11-05。release_db.ps1 が同じ版のリリースの manifest を差し替え、DB の .gz と差分を足す):
+//     最新のリリースの版が今の版と同じなら、「最新の版です」で終える前に manifest を読み、同梱の DB (DbOnlyUpdateNames) だけをインストール先と比べる
+//     (CheckDbOnlyAsync。exe・dll などは比べない・取らない)。違えば「データベースの更新」として知らせ、取り方・入れ替えは版の更新と同じ道を通る
+//     (差分の並び → 合計が丸ごと以上なら丸ごと → 当てるたびに SHA-256 を確かめ、失敗したら丸ごと。アプリを閉じて入れ替え → 起動し直し →
+//     起動のときに App.PlanBundledDbSync が個人データを引き継いで作業フォルダの DB を作り直す)。
+//     ［今は更新しない］は manifest の DB の組 (名前と SHA-256) を覚え (State.SkippedDbSet)、同じ組は自動の確かめでは知らせない。
+//     manifest を読めないなど確かめに失敗したら、ログにだけ残して「最新の版です」にする。版が新しいときの流れは変えていない
 public sealed class AppUpdater
 {
     public const string DefaultLatestUrl = "https://api.github.com/repos/batake321/StarCitizenJapaneseTextCreater/releases/latest";
@@ -82,6 +89,7 @@ public sealed class AppUpdater
         public bool Restart { get; set; }
         public string RestartExe { get; set; } = "";
         public string WorkDir { get; set; } = "";            // plan を作ったときの作業フォルダ (runner は、これと今の設定の両方で DB を外すか決める)
+        public bool DbOnly { get; set; }                     // 同じ版の、同梱の DB だけの更新 (ログ・結果の文だけが変わる。入れ替えのしかたは同じ)
     }
 
     public sealed class ApplyResult
@@ -103,6 +111,16 @@ public sealed class AppUpdater
         public string LastDailyDate { get; set; } = "";  // 毎日の時刻の確かめをした日 (yyyy-MM-dd)
         public DateTime RateLimitResetUtc { get; set; }
         public string SkippedVersion { get; set; } = "";  // ［今は更新しない］を選んだ版 (自動の確かめでは、この版では知らせない)
+        public string SkippedDbSet { get; set; } = "";    // ［今は更新しない］を選んだ、同じ版の DB の組 (DbSetKeyOf。自動の確かめでは、この組では知らせない)
+        // 版が同じときの DB の確かめで計算した、インストール先の DB の SHA-256 の覚え (鍵はフルパスの小文字)。
+        // 大きさと更新日時が同じ間は、ファイルを読み直さずにこれを使う (HashMemo)。版が新しいときの確かめでは使わない
+        public Dictionary<string, DbHashRecord> DbHashes { get; set; } = new();
+    }
+    public sealed class DbHashRecord
+    {
+        public long Length { get; set; }
+        public long LastWriteUtcTicks { get; set; }
+        public string Sha256 { get; set; } = "";
     }
 
     // ===== 確かめの結果 =====
@@ -119,6 +137,8 @@ public sealed class AppUpdater
         public ApplyPlan? Plan { get; set; }
         public long DownloadBytes { get; set; }   // 差分の .gz の合計 (manifest の gzsize)
         public int ChangedFiles { get; set; }
+        public bool DbOnly { get; set; }           // 版は同じで、同梱の DB だけの更新 (知らせの窓の文と、［今は更新しない］で覚えるものが変わる)
+        public string DbSetKey { get; set; } = "";  // DbOnly のとき: manifest の DB の組 (［今は更新しない］で State.SkippedDbSet に覚える)
     }
 
     public string RootDir { get; }
@@ -275,7 +295,19 @@ public sealed class AppUpdater
             var htmlUrl = root.TryGetProperty("html_url", out var h) && h.ValueKind == JsonValueKind.String ? h.GetString() ?? "" : "";
             var v3 = latest.ToString(3);
             if (latest <= CurrentVersion)
+            {
+                // 版が同じ: 同梱の DB だけが新しくなっていないかを見る。確かめられなければ、ログにだけ残して今までどおり「最新の版です」
+                if (latest == CurrentVersion)
+                {
+                    try
+                    {
+                        if (await CheckDbOnlyAsync(root, latest, v3, htmlUrl, auto, state, ct) is { } dbResult) return dbResult;
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch (Exception ex) { _log($"データベースの更新の確かめに失敗しました (最新の版として扱います): {ex.Message}"); }
+                }
                 return new CheckResult { Kind = CheckKind.UpToDate, Version = v3, Message = $"最新の版です (v{CurrentVersion.ToString(3)})" };
+            }
             if (auto && state.SkippedVersion == v3)
                 return new CheckResult { Kind = CheckKind.Skipped, Version = v3, Message = $"v{v3} は［今は更新しない］を選んだ版なので知らせません" };
 
@@ -340,6 +372,140 @@ public sealed class AppUpdater
 
         CheckResult Fail(string m) { _log(m); return new CheckResult { Kind = CheckKind.Failed, Message = m }; }
         CheckResult Manual(CheckResult r, string m) { _log(m); r.Kind = CheckKind.ManualNeeded; r.Message = m; return r; }
+    }
+
+    // ===== 版が同じで、同梱の DB だけが新しくなったとき =====
+    // 比べる・取るのは、manifest のこの名前のファイル (インストール先のいちばん上にあるもの) だけ。exe・dll などは比べない・取らない
+    public static readonly string[] DbOnlyUpdateNames = ["gamedata_cache.db", "translations.db", "equipment_cache.db", "view3d_layout.db"];
+    public static bool IsDbOnlyUpdateFile(string relPath) =>
+        relPath.IndexOfAny(['/', '\\']) < 0 && DbOnlyUpdateNames.Contains(relPath, StringComparer.OrdinalIgnoreCase);
+
+    // manifest の DB の組: 「名前=SHA-256」を名前の順に ; でつないだもの (小文字)。［今は更新しない］で覚える
+    internal static string DbSetKeyOf(Manifest manifest) =>
+        string.Join(";", manifest.Files.Where(f => IsDbOnlyUpdateFile(f.Path))
+            .Select(f => $"{f.Path.ToLowerInvariant()}={f.Sha256.ToLowerInvariant()}")
+            .OrderBy(s => s, StringComparer.Ordinal));
+
+    // 最新のリリース (root = releases/latest の JSON。版は今の版と同じ) の manifest を読み、同梱の DB だけをインストール先と比べる。
+    // 戻り値: DB の更新があれば、その結果 (Available / ManualNeeded / Skipped)。無ければ null (呼び出し側が「最新の版です」にする)。
+    // manifest が無いときも null。manifest を読めない・版が違う・パスがおかしいときは例外 (呼び出し側がログにだけ残して「最新の版です」にする)。
+    // manifest は確かめるたびに取りに行く: releases/latest が 304 (ETag が同じ) で前に読んだ JSON を使うときも、manifest の URL
+    // (…/releases/download/v<版>/update-manifest.json) は添付の名前で決まり、同じ版のまま差し替えられた manifest を読める
+    private async Task<CheckResult?> CheckDbOnlyAsync(JsonElement root, Version latest, string v3, string htmlUrl, bool auto, State state, CancellationToken ct)
+    {
+        string? manifestUrl = null;
+        if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
+            foreach (var a in assets.EnumerateArray())
+                if (a.TryGetProperty("name", out var n) && n.GetString() == ManifestAssetName && a.TryGetProperty("browser_download_url", out var u))
+                    manifestUrl = u.GetString();
+        if (manifestUrl == null) return null;
+        var manifest = JsonSerializer.Deserialize<Manifest>(await GetStringAsync(manifestUrl, ct)) ?? throw new InvalidDataException("manifest を読めません");
+        if (ParseVersion(manifest.Version) != latest) throw new InvalidDataException($"manifest の版 ({manifest.Version}) がリリースの版 (v{v3}) と違います");
+        // インストール先の DB の SHA-256 は、大きさと更新日時が前に計算したときと同じなら、覚えたものを使う (毎回 DB を全部読み直さない)
+        var memo = new HashMemo(state.DbHashes);
+        var result = EvaluateDbOnly(manifest, v3, htmlUrl, auto, state.SkippedDbSet, ct, memo.Sha256Of);
+        if (memo.Changed)
+        {
+            // 覚えを書く (state.json を読み直してから。確かめの間にほかの所が書いた値を消さないように)
+            var st = LoadState();
+            st.DbHashes = memo.Now;
+            SaveState(st);
+        }
+        return result;
+    }
+
+    // インストール先の DB の SHA-256 の覚え (State.DbHashes)。Sha256Of は、ファイルの大きさと更新日時が覚えと同じなら覚えた SHA-256 を返し、
+    // 違う・覚えが無いときは計算し直す。計算の間に大きさか更新日時が変わったら、その結果は覚えない。
+    // Now は今回見たファイルの分だけ (見なかったファイルの古い覚えは落とす)。入れ替え (runner) は新しいファイルを書いてから名前を入れ替えるので、
+    // 更新日時が変わり、次の確かめで計算し直される
+    internal sealed class HashMemo(Dictionary<string, DbHashRecord>? old)
+    {
+        private readonly Dictionary<string, DbHashRecord> _old = old ?? new();
+        public Dictionary<string, DbHashRecord> Now { get; } = new();
+        public int Computed { get; private set; }   // 計算し直した数 (確かめ用)
+
+        public string Sha256Of(string path)
+        {
+            var key = Path.GetFullPath(path).ToLowerInvariant();
+            var fi = new FileInfo(path);
+            long len = fi.Length, ticks = fi.LastWriteTimeUtc.Ticks;
+            if (_old.TryGetValue(key, out var m) && m != null && m.Length == len && m.LastWriteUtcTicks == ticks && m.Sha256 is { Length: 64 })
+            {
+                Now[key] = m;
+                return m.Sha256.ToLowerInvariant();
+            }
+            var sha = Sha256OfFile(path);
+            Computed++;
+            fi.Refresh();
+            if (fi.Exists && fi.Length == len && fi.LastWriteTimeUtc.Ticks == ticks)
+                Now[key] = new DbHashRecord { Length = len, LastWriteUtcTicks = ticks, Sha256 = sha };
+            return sha;
+        }
+
+        // 覚えが前と違うか (書き直す必要があるか)
+        public bool Changed =>
+            Now.Count != _old.Count || Now.Any(kv => !_old.TryGetValue(kv.Key, out var o) || o == null
+                || o.Length != kv.Value.Length || o.LastWriteUtcTicks != kv.Value.LastWriteUtcTicks || o.Sha256 != kv.Value.Sha256);
+    }
+
+    // manifest の同梱の DB だけを、インストール先のファイルと大きさ・SHA-256 で比べる (比べ方・差分の並びの決め方は、版が新しいときの CheckAsync の 4. と同じ)。
+    // 違う DB が無ければ null。作業フォルダがインストール先と同じなら、版が新しいときと同じく translations.db・gamedata_cache.db・equipment_cache.db を外す。
+    // sha256Of: インストール先のファイルの SHA-256 の求め方 (既定は毎回計算する Sha256OfFile。CheckDbOnlyAsync は覚えを使う HashMemo.Sha256Of を渡す)
+    internal CheckResult? EvaluateDbOnly(Manifest manifest, string v3, string htmlUrl, bool auto, string skippedDbSet, CancellationToken ct = default,
+                                         Func<string, string>? sha256Of = null)
+    {
+        sha256Of ??= Sha256OfFile;
+        // 名前のおかしいパスが 1 つでもあれば、manifest を信用しない
+        if (manifest.Files.FirstOrDefault(f => !SafeRelative(f.Path, InstallDir)) is { } bad)
+            throw new InvalidDataException($"manifest のパスが正しくありません: {bad.Path}");
+        var skipDbs = WorkDirIsInstallDir;
+        var changed = new List<ManifestFile>();
+        foreach (var f in manifest.Files)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!IsDbOnlyUpdateFile(f.Path)) continue;            // 同梱の DB だけ
+            if (skipDbs && IsBundledDbOrSide(f.Path)) continue;   // 差分の対象からも外し、取らない
+            var local = Path.Combine(InstallDir, f.Path);
+            string? localSha = File.Exists(local) ? sha256Of(local) : null;
+            if (localSha != null && new FileInfo(local).Length == f.Size && localSha == f.Sha256.ToLowerInvariant()) continue;
+            f.Chain = localSha != null && DbDelta.IsDeltaFile(f.Path) ? FindChain(f, localSha) : new();
+            if (f.Chain.Count > 0 && f.Chain.Sum(d => d.Size) >= f.GzSize) f.Chain = new();
+            changed.Add(f);
+        }
+        if (changed.Count == 0) return null;
+
+        var key = DbSetKeyOf(manifest);
+        if (auto && skippedDbSet == key)
+            return new CheckResult { Kind = CheckKind.Skipped, Version = v3, DbOnly = true, DbSetKey = key, Message = "このデータベースの更新は［今は更新しない］を選んだので知らせません" };
+
+        var result = new CheckResult
+        {
+            Version = v3, ReleaseUrl = htmlUrl, DbOnly = true, DbSetKey = key,
+            // 知らせの窓の「更新するデータベース」の欄 (どの DB か・取る大きさ・差分か丸ごとか)
+            ReleaseNotes = string.Join("\n", changed.Select(f =>
+                string.Format(f.Chain.Count > 0 ? UpdateTexts.DbListDelta : UpdateTexts.DbListFull, UpdateTexts.DbLabel(f.Path), UpdateTexts.Size(DownloadSizeOf(f))))),
+        };
+        if (skipDbs) result.DbNote = UpdateTexts.DbNotReplaced;
+        if (InstallDirProblem() is { } problem)
+        {
+            result.Kind = CheckKind.ManualNeeded;
+            result.Message = $"データベースの更新があります。{problem}";
+            _log(result.Message);
+            return result;
+        }
+        var vdir = Path.Combine(RootDir, $"v{v3}");
+        result.Plan = new ApplyPlan
+        {
+            Version = v3, InstallDir = InstallDir, StagingDir = Path.Combine(vdir, "files"), BackupDir = Path.Combine(vdir, "backup"),
+            Files = changed, RestartExe = Path.Combine(InstallDir, "StarCitizenJapaneseTextCreater.exe"), DbOnly = true,
+        };
+        result.Plan.WorkDir = WorkDir;
+        result.Kind = CheckKind.Available;
+        result.DownloadBytes = changed.Sum(DownloadSizeOf);
+        result.ChangedFiles = changed.Count;
+        result.Message = $"データベースの更新があります ({string.Join("・", changed.Select(f => f.Path))}、{UpdateTexts.Size(result.DownloadBytes)})";
+        _log(result.Message);
+        return result;
     }
 
     // その DB の取り方の大きさ (差分をたどれれば差分の合計、無ければ .gz)
@@ -431,8 +597,11 @@ public sealed class AppUpdater
         // 変わったファイルが 0 個のときは置き場所のフォルダがまだ無いので、作ってから書く (2026-11-02、「Could not find a part of the path …plan.json.tmp」で失敗した)
         Directory.CreateDirectory(Path.GetDirectoryName(plan.StagingDir)!);
         WritePlanDurable(Path.Combine(Path.GetDirectoryName(plan.StagingDir)!, "plan.json"), plan);
-        _log($"新しい版 v{plan.Version} の差分 {plan.Files.Count} ファイル ({total / 1024.0 / 1024.0:N1} MB) を {plan.StagingDir} に用意しました");
+        _log($"{PlanName(plan)} の差分 {plan.Files.Count} ファイル ({total / 1024.0 / 1024.0:N1} MB) を {plan.StagingDir} に用意しました");
     }
+
+    // ログに出す更新の名前 (版の更新は今までどおり「新しい版 v<版>」。同じ版の DB だけの更新は「データベースの更新 (v<版>)」)
+    private static string PlanName(ApplyPlan plan) => plan.DbOnly ? $"データベースの更新 (v{plan.Version})" : $"新しい版 v{plan.Version}";
 
     // 差分を古い順に取って当てる。1 つ当てるたびに、その版の DB の SHA-256 と合うかを確かめる。最後に目当ての SHA-256 と大きさを確かめて dest に置く
     private async Task ApplyChainAsync(ManifestFile f, string localPath, string dest, CancellationToken ct, Action<long>? onBytes)
@@ -595,7 +764,7 @@ public sealed class AppUpdater
             psi.ArgumentList.Add("--apply-update");
             psi.ArgumentList.Add(planPath);
             Process.Start(psi);
-            _log($"新しい版 v{plan.Version} の入れ替えを始めました (アプリが閉じた後に入れ替えます{(restart ? "。終わったら起動し直します" : "")})");
+            _log($"{PlanName(plan)} の入れ替えを始めました (アプリが閉じた後に入れ替えます{(restart ? "。終わったら起動し直します" : "")})");
             return true;
         }
         catch (Exception ex)
@@ -797,7 +966,7 @@ public sealed class AppUpdater
                 }
                 plan = JsonSerializer.Deserialize<ApplyPlan>(File.ReadAllText(planPath!)) ?? throw new InvalidDataException("plan を読めません");
                 restart = plan.Restart;
-                Log($"v{plan.Version} の入れ替えを始めます ({plan.Files.Count} ファイル、入れ先 {plan.InstallDir})");
+                Log($"v{plan.Version} の入れ替えを始めます ({(plan.DbOnly ? "データベースだけ、" : "")}{plan.Files.Count} ファイル、入れ先 {plan.InstallDir})");
                 // ふつうの［終了して更新］の最初の入れ替えだけ、アプリが終わるのを待つ (PID が使い回されていないか、名前と開始時刻で同じアプリか確かめる)
                 if (!WaitForAppExit(plan, TimeSpan.FromMinutes(5)))
                 {
@@ -949,7 +1118,7 @@ public sealed class AppUpdater
                 if (Sha256OfFile(target) != sha) throw new IOException($"入れ替えた {f.Path} の中身が違います");
             }
             result.Ok = true;
-            result.Message = $"v{plan.Version} に入れ替えました ({plan.Files.Count} ファイル)";
+            result.Message = plan.DbOnly ? $"v{plan.Version} のデータベースを入れ替えました ({plan.Files.Count} ファイル)" : $"v{plan.Version} に入れ替えました ({plan.Files.Count} ファイル)";
             Log(result.Message);
             // 成功: 用意したファイルと控えを消す
             DeleteVersionDir(Path.GetDirectoryName(plan.StagingDir)!, Log);
@@ -979,7 +1148,7 @@ public sealed class AppUpdater
             result.Ok = false;
             if (notRestored.Count == 0)
             {
-                result.Message = $"v{plan.Version} への入れ替えに失敗したため、元に戻しました: {ex.Message}";
+                result.Message = plan.DbOnly ? $"v{plan.Version} のデータベースの入れ替えに失敗したため、元に戻しました: {ex.Message}" : $"v{plan.Version} への入れ替えに失敗したため、元に戻しました: {ex.Message}";
                 Log(result.Message);
                 // 元に戻し終えた: 成功のときと同じく、用意したファイルと控え (update<版>) を消す
                 DeleteVersionDir(Path.GetDirectoryName(plan.StagingDir)!, Log);

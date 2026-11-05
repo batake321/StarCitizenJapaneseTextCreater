@@ -795,7 +795,9 @@ internal static class ShipPaints
     internal static byte[] BuildTable(P4kArchive p4k, DataCoreDb db, string shortName, string id, string glbPath, string p4kKey)
     {
         string? paint = id == IdNone ? "" : id == IdNoPalette || id == IdStandardTable ? null : id;
-        var (res, json) = ShipExport.ExportJson(p4k, db, shortName, paint, id == IdNoPalette);
+        // 船でない品 (色付けなし・標準の表を当てる品) は、GLB を書いたときと同じ品の決まりで書き出す (Ship3DExports の書き出しの item と同じ)
+        var item = Ship3DExports.IsItemShort(shortName);
+        var (res, json) = ShipExport.ExportJson(p4k, db, shortName, paint, id == IdNoPalette, item: item);
         if (!string.Equals(Ship3DExports.ShortName(res.ResolvedName), shortName, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException($"読み取りが別の船 ({res.ResolvedName}) を選びました");
         var glb = new FileInfo(glbPath);
@@ -812,7 +814,7 @@ internal static class ShipPaints
             if (paint == null && id != IdNoPalette) reimport = true;   // 標準の表そのもの
             else
             {
-                var (_, stdJson) = ShipExport.ExportJson(p4k, db, shortName, null, false);
+                var (_, stdJson) = ShipExport.ExportJson(p4k, db, shortName, null, false, item: item);
                 using var docStd = JsonDocument.Parse(TrimPad(stdJson), new JsonDocumentOptions { MaxDepth = 256 });
                 reimport = newFrame.AsSpan().SequenceEqual(FrameHash(docStd.RootElement));
             }

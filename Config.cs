@@ -33,6 +33,9 @@ public class AppConfig
 
     // UI
     public double MissionDetailFontSize { get; set; } = 14;
+    // ［詳細］タブの 3D の欄の高さ (詳細の文との間の仕切りをドラッグして変えた高さ。WPF の単位。既定は前の決まった高さと同じ 340)。
+    // (2026-11-05、利用者の指示「3D 部分を上に広げたりしたい」。DetailPanel の「3D の欄の高さ」)
+    public double Detail3DHeight { get; set; } = DetailPanel.Ship3DDefaultHeight;
 
     // 装備名の後ろに分類の印 [軍1C] を付けるか
     public bool EquipmentClassMarks { get; set; } = true;
@@ -90,6 +93,22 @@ public class AppConfig
     // ［マップ］の「QT の前後で自動で現在位置を取る」(既定はオフ)
     public bool MapAutoCapture { get; set; } = false;
     public List<MapSpinCorrection> MapSpinCorrections { get; set; } = new();
+    // ［マップ］の［現在位置］をキーで動かす (2026-11-05、利用者の指示「現在位置ボタンはゲームがアクティブでも L-CTRL + L-Shift + Ins がゲームとかぶらなければ
+    // デフォルト(設定可能)で動作するようにするとかなり便利」): 使うか (既定は使う) と、キー (MapCurrentHotkey の書き方。例 "LCtrl+LShift+Insert"。
+    // 修飾キーは LCtrl / RCtrl / LShift / RShift / LAlt / RAlt、最後が主のキー (System.Windows.Input.Key の名前))
+    public bool MapCurrentHotkeyEnabled { get; set; } = true;
+    public string MapCurrentHotkey { get; set; } = global::StarCitizenJapaneseTextCreater.MapCurrentHotkey.DefaultText;
+    // 現在位置のオーバーレイ (OreOverlayWindow。2026-11-05、利用者の指示「マップの現在位置ボタンを押したときに、ゲームの画面にオーバーレイ表示するようにして、
+    // デフォルトはオフで設定で変えられるように。表示時間は出っぱなしから一定時間で消えるまで。デフォルトで 10 秒。」):
+    // 出すか (既定は出さない)、表示する秒数 (既定 10。0 なら出したまま)、窓の位置・大きさ (WPF の単位)、位置を決めたことがあるか
+    // (無い間は主画面の作業領域の右上に出す)。位置・大きさの既定は数値にしておく (NaN は設定の保存で書けない)
+    public bool OreOverlayEnabled { get; set; } = false;
+    public int OreOverlaySeconds { get; set; } = 10;
+    public double OreOverlayLeft { get; set; } = 0;
+    public double OreOverlayTop { get; set; } = 0;
+    public double OreOverlayWidth { get; set; } = OreOverlayWindow.DefaultWidth;
+    public double OreOverlayHeight { get; set; } = OreOverlayWindow.DefaultHeight;
+    public bool OreOverlayPlaced { get; set; } = false;
 
     // PC 間の同期: 個人データの書き出し・取り込みに使う共有フォルダ (空なら同期しない)
     public string SyncFolder { get; set; } = "";

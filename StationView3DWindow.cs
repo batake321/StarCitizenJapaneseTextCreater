@@ -31,13 +31,16 @@ public sealed class StationView3DWindow : Window
     }
 
     // (2026-11-04、利用者の指示「別ウィンドウひらいてたらそっちに」) 開いている窓に、別の場所 (か店の行き先) を出し直す: 今の 3D を閉じて新しい 3D に替え、窓を前に出す
-    public void ShowPlace(string record, string name, Func<string, string, string>? shopLabel, Func<string, string, object?>? shopSales, string? focusShop)
+    // activate: 窓を前に出すか (既定は出す)。現在位置のキーから来たとき (MapPanel.CaptureCurrentFromHotkeyAsync) は偽: 中身だけ替え、
+    // 最小化も戻さず前にも出さない (ゲームからフォーカスを取らないため。2026-11-05)
+    public void ShowPlace(string record, string name, Func<string, string, string>? shopLabel, Func<string, string, object?>? shopSales, string? focusShop, bool activate = true)
     {
         var old = View;
         View = new StationView3DView(record, name, shopLabel, shopSales, focusShop);
         Title = $"ステーションの 3D (新しい方式) - {View.PlaceTitle}";
         Content = View;
         old.Close3D();
+        if (!activate) return;
         if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
         Activate();
     }
@@ -116,6 +119,8 @@ public sealed class StationView3DView : Grid
 
     // 開いているステーションの 3D の数 (作ってから Close3D するまで)。0 になったら部品の形の置き場も捨てる
     private static int s_open;
+    // ステーションの 3D がどこかに開いているか (別ウィンドウ・［マップ］タブ)。開いている間は、同梱の新しい区画の置き方の一覧を置き場所へ写さない (StationView3DLayout.CopyNewerBundled)
+    internal static bool AnyOpen => Volatile.Read(ref s_open) > 0;
 
     // 閉じる (窓を閉じた・［マップ］タブでほかの場所に替えた・星系図に戻った): 取り出しを止め、WebView2 を捨て、一時の置き場を消す。
     // (2026-11-04、利用者の指示「３D 表示後のメモリ後始末」) 区画の結果・使い回しの置き場 (Session) を手放し、3D がどこにも開いていなければ
@@ -1044,6 +1049,7 @@ public sealed class StationView3DView : Grid
 //   作るもの: 星図の場所の表 (ゲームデータの DB の starmap_locations) をルート探しして見つかった場所の全部 (StationView3D.BuildLayoutDb)
 //   同梱 (2026-11-04、利用者の指示「DBに入れたものは配れる。時価データでなくアドレスだから」): インストール先 (AppContext.BaseDirectory) に view3d_layout.db があり、
 //   その印が今のゲームの版と同じなら、作らずに置き場所へ写す (起動の後・窓を開いたとき)。印が違えば (パッチが来た) 裏で作り直す。
+//   (2026-11-05) 置き場所の DB が今のゲームの版のときも、同梱の物が今の版で、作った時刻 (built_utc) が新しければ写す (CopyNewerBundled。3D が開いていない間だけ)
 //   印 (GameKey) は、どの PC でも同じになるよう、Data.p4k と同じフォルダの build_manifest.id の Branch・Version・RequestedP4ChangeNum にする
 //   (読めなければ、その PC の Data.p4k の印 (パス・大きさ・更新日時)。その DB は配っても使われない)
 internal static class StationView3DLayout
@@ -1119,6 +1125,30 @@ internal static class StationView3DLayout
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log($"同梱の区画の置き方の一覧を写せませんでした: {ex.Message}"); return false; }
     }
+    // 置き場所の DB が今の版のとき (2026-11-05、親の決定): 同梱の DB も今の版で、同梱の作った時刻 (meta の built_utc。一括で作ったときだけ書かれる) が
+    // 置き場所の DB より新しければ、同梱の物を置き場所へ写す (写したら true。決まりは StationLayoutBundled)。
+    // DB だけの更新やアプリの更新で、同じパッチのまま配置を作り直して配ったものを入れるため。利用者が後から作り直した DB (時刻が新しい) は替えない。
+    // ステーションの 3D が開いている間は写さない (開いている画面は前の DB の中身と保存の鍵で動いているため。次の起動の後にまた見る)。
+    // 写すと、この PC で足したハンガーの中の分 (PutLayoutDb の行) は無くなり、次にそのハンガーを開いたときに作り直される (LayoutFor)
+    private static bool CopyNewerBundled(string key)
+    {
+        try
+        {
+            if (!StationLayoutBundled.IsNewer(DbPath, BundledPath, StationView3D.LayoutDbFormat, key)) return false;
+            if (StationView3DView.AnyOpen)
+            {
+                Log("同梱の区画の置き方の一覧のほうが新しいですが、ステーションの 3D を開いているので、今は写しません (次の起動の後に写します)");
+                return false;
+            }
+            var tmp = DbPath + ".copy";
+            File.Copy(BundledPath, tmp, true);
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            File.Move(tmp, DbPath, true);
+            Log($"同梱の区画の置き方の一覧のほうが新しいので、置き場所へ写しました (版 {key}。ハンガーの中の分は、次に開いたときに作り直します)");
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Log($"同梱の新しい区画の置き方の一覧を写せませんでした (次の起動の後にまた試します): {ex.Message}"); return false; }
+    }
     public static readonly object PutLock = new();
     private static readonly object Gate = new();
     private static Task? _task;
@@ -1154,7 +1184,14 @@ internal static class StationView3DLayout
             if (_task != null && !_task.IsCompleted && _taskKey == key) return _task;
             if (!force)
             {
-                if (StationView3D.LayoutDbIsCurrent(DbPath, key)) return Task.CompletedTask;
+                if (StationView3D.LayoutDbIsCurrent(DbPath, key))
+                {
+                    // 置き場所の DB は今の版。同梱の物のほうが新しく作ったものなら写す (CopyNewerBundled)。写したら、作り直したときと同じく Changed を知らせる
+                    bool copiedNewer;
+                    lock (PutLock) copiedNewer = CopyNewerBundled(key);
+                    if (copiedNewer) Task.Run(() => Changed?.Invoke());
+                    return Task.CompletedTask;
+                }
                 lock (PutLock) if (CopyBundled(key)) return Task.CompletedTask;
             }
             _taskKey = key; _done = 0; _total = 0; LastError = null;

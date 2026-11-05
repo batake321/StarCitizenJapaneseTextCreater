@@ -18,6 +18,8 @@
          ビューア → アプリ {type:'paintTable', ship, id} (塗装を選んだとき。初めての塗装は作るのに数秒かかる)
            ← {type:'paintTable', ship, id, url} (材質の表の JSON の URL) か {type:'paintTable', ship, id, error}
          材質の表: {materials: glTF の材質の配列, prims: mesh ごとの primitive ごとの材質の番号}。形・画像は読み込んだ GLB のまま、材質だけを差し替える
+     船内を歩くモード (2026-11-05): ［船内］のときに左上の 2 段目に［歩くモード］［走る］［姿勢］［すり抜け］を出す (船でない品・小さな絵では出さない)。
+       計算は walk.js (ステーションの 3D の歩くモード wwwroot/stationmap/view3d.js を写したもの)。歩くモードが OFF のときの船内の動きは今までどおり
      GLB の座標 (実物で確かめたもの。t_ORIG_600i.glb / t_ORIG_X1.glb): いちばん上のノード CryEngine_Z_up が Z 上向きを Y 上向きに直していて、
        上 = +Y、前 = -Z (600i の hardpoint_seat_pilot が z = -45 で船の範囲 -66.7〜60.2 の前寄り。操縦席のノードの +Y 軸 (CryEngine の前) も -Z を向く)、
        左 = -X (hardpoint_seat_bridge_left が x = -1.41、_right が +1.41)。 -->
@@ -36,6 +38,9 @@
   button.on { background: #3d6db5; border-color: #5a8ad6; }
   #top { position: absolute; left: 8px; top: 8px; display: flex; gap: 6px; align-items: center; }
   #title { margin-left: 8px; font-weight: bold; text-shadow: 0 0 3px #000; }
+  /* 船内を歩くモードのボタンと状態の文 (［船内］のときだけ出す。［船外］［船内］の並びの下の段) */
+  #walkBar { position: absolute; left: 8px; top: 42px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  #walkInfo { text-shadow: 0 0 3px #000; }
   #help { position: absolute; left: 8px; bottom: 8px; color: #bbb; font-size: 12px; text-shadow: 0 0 3px #000; line-height: 1.5; pointer-events: none; }
   #msg { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.7); padding: 12px 18px; border-radius: 6px; max-width: 80%; white-space: pre-wrap; }
   #msg.hidden { display: none; }
@@ -76,6 +81,13 @@
       <button id="btnInside" title="船の中を見ます (Home で操縦席)">船内</button>
       <span id="title"></span>
     </div>
+    <div id="walkBar" class="hidden">
+      <button id="walkBtn" title="船内を歩きます (今見ている所の真下の床に立ちます)">歩くモード: OFF</button>
+      <button id="runBtn">走る: OFF</button>
+      <button id="stBtn">姿勢: 立つ</button>
+      <button id="ncBtn">すり抜け: OFF</button>
+      <span id="walkInfo"></span>
+    </div>
     <button id="btnClose" title="閉じる">✕</button>
     <div id="help">左ドラッグ: 回転 (船外は船のまわり / 船内は見回す)　右ドラッグ: 平行移動　ホイール: 拡大縮小 (船内は前後)<br>
       W/A/S/D: 前後左右　↑/↓: 上下　Insert/Delete: 拡大/縮小　Home: 初めの位置</div>
@@ -94,6 +106,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from '../three/examples/jsm/loaders/GLTFLoader.js';
+import { createWalk } from './walk.js';
 
 const params = new URLSearchParams(location.search);
 const glbUrl = params.get('glb') || '';
@@ -194,6 +207,10 @@ const inside = { pos: new THREE.Vector3(), yaw: 0, pitch: 0, fov: 70, home: null
 let mode = 'outside';
 let shipRadius = 10;
 let model = null;
+// 船内を歩くモード (walk.js)。船でない品・小さな絵では作らない (ボタンも出さない)
+const walkMode = (isItem || isThumb) ? null : createWalk({
+  camera, inside, applyCamera, model: () => model, parser: () => gltfParser, mode: () => mode, focus: () => canvas.focus(),
+});
 
 function applyCamera() {
   if (mode === 'outside') {
@@ -207,7 +224,8 @@ function applyCamera() {
     camera.rotation.set(inside.pitch, inside.yaw, 0, 'YXZ');
     camera.fov = inside.fov;
   }
-  camera.near = 0.05;
+  // 船でない品は、小さい品に寄っても手前が切れないよう、手前の限りも品の大きさに合わせる (船は今までどおり 0.05 m)
+  camera.near = isItem ? Math.min(0.05, shipRadius * 0.05) : 0.05;
   camera.far = Math.max(5000, shipRadius * 50);
   camera.updateProjectionMatrix();
 }
@@ -217,14 +235,41 @@ function setMode(m) {
   document.getElementById('btnOutside').classList.toggle('on', m === 'outside');
   document.getElementById('btnInside').classList.toggle('on', m === 'inside');
   camLight.visible = m === 'inside';
+  // 歩くモードは［船内］のときだけ (［船外］へ替えたら OFF にする)
+  document.getElementById('walkBar').classList.toggle('hidden', m !== 'inside' || !walkMode);
+  if (m !== 'inside') walkMode?.off();
   applyCamera();
+}
+
+// 外接球の半径の下限 (m)。船は 0.5 m。船でない品 (?item=1。小さな絵 ?thumb=1 にも item=1 が付く) は品の実際の大きさで距離を決めるので、
+// 半径が 0 に近いときに計算が壊れないための小さな値だけにする (2026-11-05、利用者の報告「手りゅう弾やシャツなどもおかしい」: 小さい品が 0.5 m の球に合わせた距離で小さく出ていた)
+const MIN_RADIUS = isItem ? 0.005 : 0.5;
+// 船外の近づける限り (m)。船は 0.2 m。品は半径に対して同じ割合 (0.2 / 0.5)
+const minOutsideRadius = () => isItem ? Math.min(0.2, shipRadius * 0.4) : 0.2;
+
+// 形の範囲。船は今までどおり部品ごとの箱 (頂点の表の全体) を合わせたもの。
+// 船でない品は、描く面が実際に使う頂点だけで測る: 部品 (ノード) に分かれた形は、どの部品も形全体の頂点の表を指していて、部品ごとの箱を合わせると
+// 部品の置き場所の分だけ実際より大きくなり、品が小さく出るため (例: CQ7 は銃の本体が 8 つのノードに分かれている)
+function modelBox() {
+  if (!isItem) return new THREE.Box3().setFromObject(model);
+  const box = new THREE.Box3();
+  const v = new THREE.Vector3();
+  model.updateMatrixWorld(true);
+  model.traverse(o => {
+    if (!o.isMesh || !o.visible || !o.geometry) return;
+    const pos = o.geometry.attributes.position, idx = o.geometry.index;
+    if (!pos) return;
+    const n = idx ? idx.count : pos.count;
+    for (let i = 0; i < n; i++) box.expandByPoint(v.fromBufferAttribute(pos, idx ? idx.getX(i) : i).applyMatrix4(o.matrixWorld));
+  });
+  return box.isEmpty() ? new THREE.Box3().setFromObject(model) : box;
 }
 
 // 船外の初めの位置: 左斜め前方の上から船を見下ろす。船全体 (外接球) が画面に入る距離
 function outsideHome() {
-  const box = new THREE.Box3().setFromObject(model);
+  const box = modelBox();
   const sphere = box.getBoundingSphere(new THREE.Sphere());
-  shipRadius = Math.max(sphere.radius, 0.5);
+  shipRadius = Math.max(sphere.radius, MIN_RADIUS);
   const dir = new THREE.Vector3().addScaledVector(SHIP_LEFT, 1).addScaledVector(SHIP_FORWARD, 1).addScaledVector(SHIP_UP, 0.8).normalize();
   const vHalf = THREE.MathUtils.degToRad(50) / 2;
   const hHalf = Math.atan(Math.tan(vHalf) * camera.aspect);
@@ -241,6 +286,8 @@ function goOutsideHome() {
 
 // 位置 (place: 船内の位置のリストの 1 つ) に移る (船内表示にする)
 function goPlace(place) {
+  // 歩くモード中は、立つ所を動かさない (ステーションの歩くモードの［飛ぶ先］と同じ。view3d.js の goTarget: if (walk) return)
+  if (walkMode?.on()) return;
   inside.pos.copy(place.pos);
   if (place.look) {
     // 見る点があれば (医療ベッド)、その点の向きにする (見下ろすときは pitch が負)
@@ -531,7 +578,7 @@ canvas.addEventListener('contextmenu', e => e.preventDefault());
 window.addEventListener('contextmenu', e => e.preventDefault());
 canvas.addEventListener('pointerdown', e => {
   canvas.focus();
-  if (e.button !== 0 && e.button !== 2) return;
+  if (e.button !== 0 && e.button !== 2 && !walkMode?.on()) return;   // 歩くモード中はどのボタンのドラッグでも見回す (ステーションの歩くモードと同じ)
   drag = { button: e.button, x: e.clientX, y: e.clientY };
   canvas.setPointerCapture(e.pointerId);
 });
@@ -540,6 +587,7 @@ canvas.addEventListener('pointermove', e => {
   if (!drag || !model) return;
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
   drag.x = e.clientX; drag.y = e.clientY;
+  if (walkMode?.on()) { walkMode.look(dx, dy, drag.button); return; }   // 歩くモード中は見回す (右ドラッグだけ上下が逆)
   if (drag.button === 0) {
     if (mode === 'outside') {
       outside.theta -= dx * 0.005;
@@ -561,8 +609,9 @@ canvas.addEventListener('pointermove', e => {
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
   if (!model) return;
+  if (walkMode?.on()) return;   // 歩くモード中はホイールで動かない (ステーションの歩くモードと同じ)
   if (mode === 'outside') {
-    outside.radius = THREE.MathUtils.clamp(outside.radius * Math.exp(e.deltaY * 0.001), 0.2, shipRadius * 20);
+    outside.radius = THREE.MathUtils.clamp(outside.radius * Math.exp(e.deltaY * 0.001), minOutsideRadius(), shipRadius * 20);
   } else {
     const fwd = new THREE.Vector3();
     camera.getWorldDirection(fwd);
@@ -575,11 +624,12 @@ const keys = new Set();
 const MOVE_CODES = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown'];
 window.addEventListener('keydown', e => {
   if (!model) return;
-  if (MOVE_CODES.includes(e.code)) { keys.add(e.code); e.preventDefault(); return; }
+  // 歩くモード中は、自由に動くキー (W/A/S/D・↑/↓) を取らない (歩くキーは walk.js が見る)
+  if (MOVE_CODES.includes(e.code)) { if (!walkMode?.on()) keys.add(e.code); e.preventDefault(); return; }
   if (e.code === 'Insert' || e.code === 'Delete') {
     // 拡大 / 縮小 (船外は近づく・離れる、船内は画角を狭める・広げる)。押し続けると繰り返す
     const zoomIn = e.code === 'Insert';
-    if (mode === 'outside') outside.radius = THREE.MathUtils.clamp(outside.radius * (zoomIn ? 0.9 : 1 / 0.9), 0.2, shipRadius * 20);
+    if (mode === 'outside') outside.radius = THREE.MathUtils.clamp(outside.radius * (zoomIn ? 0.9 : 1 / 0.9), minOutsideRadius(), shipRadius * 20);
     else inside.fov = THREE.MathUtils.clamp(inside.fov * (zoomIn ? 0.9 : 1 / 0.9), 15, 100);
     applyCamera();
     e.preventDefault();
@@ -593,7 +643,8 @@ window.addEventListener('blur', () => keys.clear());
 
 function moveByKeys(dt) {
   if (keys.size === 0) return;
-  const speed = mode === 'outside' ? Math.max(outside.radius * 0.5, 1) : INSIDE_SPEED;
+  // 船外は距離に比例 (船は下限 1 m/秒。品は小さい品で速すぎないよう下限なし)
+  const speed = mode === 'outside' ? (isItem ? outside.radius * 0.5 : Math.max(outside.radius * 0.5, 1)) : INSIDE_SPEED;
   const fwd = new THREE.Vector3();
   camera.getWorldDirection(fwd);
   fwd.y = 0;
@@ -616,9 +667,10 @@ function moveByKeys(dt) {
 let last = performance.now();
 function frame(now) {
   const dt = Math.min((now - last) / 1000, 0.1);
+  const wdt = Math.min((now - last) / 1000, 0.5);   // 歩くモードの時間の刻みの上限 (ステーションの歩くモードと同じ 0.5 秒)
   last = now;
   if (model) {
-    moveByKeys(dt);
+    if (walkMode?.on()) walkMode.step(wdt); else moveByKeys(dt);
     // 平行光は船の左斜め前の上から当てる (カメラが動いても向きは変えない)
     renderer.render(scene, camera);
   }
@@ -788,6 +840,7 @@ async function applyWanted() {
       removeAdded();
       for (const e of meshEntries) e.o.material = e.orig;
       disposePaintMaterials([]);
+      walkMode?.geoChanged();   // 作り直して足した部品が外れたら、歩くモードの当たりの元を作り直す
     } else {
       showBusy(`塗装「${labelOf(id)}」を当てています...`);
       const made = await buildMaterials(tables.get(tid));
@@ -810,6 +863,7 @@ function putTable(made) {
   for (const a of made.added) a.host.add(a.mesh);
   paintAdded = made.added;
   disposePaintMaterials(made.all);
+  walkMode?.geoChanged();   // 描く部品が変わったら (作り直して足した・外した)、歩くモードの当たりの元を作り直す
 }
 function removeAdded() {
   for (const a of paintAdded) a.host.remove(a.mesh);
@@ -1003,7 +1057,7 @@ if (!glbUrl) {
     // 塗装の切り替えのために、glTF の mesh・primitive の番号と、今の (標準の) 材質を覚えておく
     rememberMeshes(gltf.parser, root);
 
-    const box = new THREE.Box3().setFromObject(model);
+    const box = modelBox();
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     const sunDir = new THREE.Vector3().addScaledVector(SHIP_LEFT, 0.6).addScaledVector(SHIP_FORWARD, 0.6).addScaledVector(SHIP_UP, 1).normalize();
     sun.position.copy(sphere.center).addScaledVector(sunDir, Math.max(sphere.radius, 1) * 3);

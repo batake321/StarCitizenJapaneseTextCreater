@@ -12,6 +12,8 @@ namespace StarCitizenJapaneseTextCreater;
 //     ［今は更新しない］: この版は見送る (自動の確かめでは、この版では聞かない)
 //     ［後で手動で更新する］: 自動更新を切にする (設定を保存)。以後は［更新を確認］で
 //   失敗 (ネットワーク・ハッシュの不一致・書き込めない) は、ログ (［ログ］・app_log.txt) と設定タブの状態の欄にだけ出す (窓は出さない)
+//   版は同じで同梱の DB だけが新しくなったとき (AppUpdater.CheckResult.DbOnly) も、同じ窓・同じボタンで聞く (文だけ「データベースの更新があります」)。
+//     ［今は更新しない］は、版でなくその DB の組を見送る (State.SkippedDbSet)。入れた後の［日本語化］は利用者が押す (自動ではゲームへ書かない)
 public partial class MainWindow
 {
     private AppUpdater? _updater;
@@ -135,7 +137,8 @@ public partial class MainWindow
         {
             case UpdateWindow.UpdateChoice.Update when r.Plan != null:
                 // 取り終えた: 閉じる処理を通して閉じ、App の Exit で入れ替えを始める (終わったら起動し直す)
-                Log($"[更新] v{r.Version} をダウンロードしました。アプリを閉じて入れ替えます");
+                Log(r.DbOnly ? $"[更新] データベースの更新 (v{r.Version}) をダウンロードしました。アプリを閉じて入れ替えます"
+                             : $"[更新] v{r.Version} をダウンロードしました。アプリを閉じて入れ替えます");
                 AppUpdater.PendingOnExit = (_updater, r.Plan);
                 Dispatcher.BeginInvoke(() =>
                 {
@@ -143,6 +146,15 @@ public partial class MainWindow
                     Close();
                 });
                 break;
+            case UpdateWindow.UpdateChoice.Skip when r.DbOnly && (r.Kind == AppUpdater.CheckKind.Available || r.Kind == AppUpdater.CheckKind.ManualNeeded):
+            {
+                // 同じ版の DB だけの更新: この DB の組 (manifest の DB の名前と SHA-256) は見送る (自動の確かめでは、同じ組ではもう知らせない。版の見送りは変えない)
+                var st = _updater.LoadState();
+                st.SkippedDbSet = r.DbSetKey;
+                _updater.SaveState(st);
+                if (r.Kind == AppUpdater.CheckKind.Available) txtUpdateStatus.Text = UpdateTexts.DbSkipped;
+                break;
+            }
             case UpdateWindow.UpdateChoice.Skip when r.Kind == AppUpdater.CheckKind.Available || r.Kind == AppUpdater.CheckKind.ManualNeeded:
             {
                 // この版は見送る (手で入れる必要がある版の知らせも、同じ版ではもう出さない)

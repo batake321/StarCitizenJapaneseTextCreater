@@ -34,11 +34,29 @@ internal static class UpdateTexts
     public const string UpdatingTitle = "更新を入れています";
     public const string UpdatingMessage = "更新を入れています…\n終わったら起動します。";
     public const string UpdatingTimeout = "更新を入れるのに時間がかかっています。少し待ってから、もう一度起動してください。";
+    // 版は同じで、同梱の DB だけの更新 (AppUpdater.CheckResult.DbOnly) のときの文。ほかの文 (今の版・ダウンロードの大きさ・ボタン) は版の更新と同じものを使う
+    public const string DbWindowTitle = "データベースの更新があります";
+    public const string DbQuestion = "データベースの更新があります。ダウンロードしますか？";
+    public const string DbListHeader = "更新するデータベース";
+    public const string DbListDelta = "- {0}: {1}（差分）";     // {0} = DB の名前 (DbLabel), {1} = 取る大きさ
+    public const string DbListFull = "- {0}: {1}（丸ごと）";
+    public const string DbSkipped = "このデータベースの更新は見送ります。次のデータベースの更新か、新しい版が出たら知らせます";
+    public const string DbAfterNote = "更新の後、［日本語化］を押すとゲームに反映されます";   // 入れ替えただけではゲームへ書かない (翻訳タブの［日本語化］)
+    // 知らせの窓に出す DB の名前 (ファイルの名前と、中身の一言)
+    public static string DbLabel(string fileName) => fileName.ToLowerInvariant() switch
+    {
+        "translations.db" => "translations.db（翻訳）",
+        "gamedata_cache.db" => "gamedata_cache.db（ゲームデータ）",
+        "equipment_cache.db" => "equipment_cache.db（装備の購入場所）",
+        "view3d_layout.db" => "view3d_layout.db（ステーションの 3D）",
+        _ => fileName,
+    };
 
     public static string Size(long bytes) => bytes >= 1024 * 1024 ? $"{bytes / 1024.0 / 1024.0:N1} MB" : $"{Math.Max(1, bytes / 1024.0):N0} KB";
 }
 
 // 更新を知らせる窓。最前面 (Topmost) に出すが、フォーカスは奪わない (ShowActivated = false で Show。モーダルにしない)。
+// 版は同じで同梱の DB だけの更新 (r.DbOnly) のときは、題・問いの文・欄の見出しだけを DB 用にする (「更新内容」の欄に、更新する DB と取る大きさを出す)。
 // ゲームを遊んでいる最中でも気づけるように、作業領域の右下に出す (全画面の排他モードのゲームの上には出ない)。
 // 選んだ結果は Choice で返す (窓を × で閉じたら NextCheck)。［終了して更新］は、この窓の中でダウンロードの進み具合を出し、
 // 取り終えたら Downloaded を起こす (呼び出し側がアプリを閉じる)。失敗したら窓に出し、選び直せるようにする
@@ -60,7 +78,7 @@ internal sealed class UpdateWindow : Window
     public UpdateWindow(AppUpdater.CheckResult r, Version current, Func<IProgress<(long Done, long Total)>, CancellationToken, Task>? download, bool manualOnly)
     {
         _download = download;
-        Title = r.Kind == AppUpdater.CheckKind.ManualNeeded ? UpdateTexts.ManualNeededTitle : UpdateTexts.WindowTitle;
+        Title = r.DbOnly ? UpdateTexts.DbWindowTitle : r.Kind == AppUpdater.CheckKind.ManualNeeded ? UpdateTexts.ManualNeededTitle : UpdateTexts.WindowTitle;
         Topmost = true;
         ShowActivated = false;
         ShowInTaskbar = true;
@@ -78,7 +96,7 @@ internal sealed class UpdateWindow : Window
         DockPanel.SetDock(head, Dock.Top);
         head.Children.Add(new TextBlock
         {
-            Text = r.Kind == AppUpdater.CheckKind.ManualNeeded ? r.Message : string.Format(UpdateTexts.Question, r.Version),
+            Text = r.Kind == AppUpdater.CheckKind.ManualNeeded ? r.Message : r.DbOnly ? UpdateTexts.DbQuestion : string.Format(UpdateTexts.Question, r.Version),
             FontSize = 16, FontWeight = FontWeights.Bold, TextWrapping = TextWrapping.Wrap,
         });
         head.Children.Add(new TextBlock { Text = string.Format(UpdateTexts.CurrentVersion, current.ToString(3)), Foreground = Brushes.DimGray, Margin = new Thickness(0, 4, 0, 0) });
@@ -86,7 +104,9 @@ internal sealed class UpdateWindow : Window
             head.Children.Add(new TextBlock { Text = string.Format(UpdateTexts.DownloadSize, UpdateTexts.Size(r.DownloadBytes), r.ChangedFiles), Margin = new Thickness(0, 2, 0, 0) });
         if (!string.IsNullOrEmpty(r.DbNote))
             head.Children.Add(new TextBlock { Text = r.DbNote, Foreground = Brushes.DarkOrange, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) });
-        head.Children.Add(new TextBlock { Text = UpdateTexts.NotesHeader, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 10, 0, 4) });
+        if (r.DbOnly)
+            head.Children.Add(new TextBlock { Text = UpdateTexts.DbAfterNote, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) });
+        head.Children.Add(new TextBlock { Text = r.DbOnly ? UpdateTexts.DbListHeader : UpdateTexts.NotesHeader, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 10, 0, 4) });
         root.Children.Add(head);
 
         var foot = new StackPanel();

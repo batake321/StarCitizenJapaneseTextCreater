@@ -199,7 +199,7 @@ public partial class GameDataExtractor
                 try
                 {
                     using var ddl = _db!.CreateCommand();
-                    ddl.CommandText = OreLocationsDdl + OreSignaturesDdl;
+                    ddl.CommandText = OreLocationsDdl + OreSignaturesDdl + OreQualityDdl + OreRockPartsDdl + OreAreasDdl;
                     ddl.ExecuteNonQuery();
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -241,6 +241,63 @@ public partial class GameDataExtractor
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     StatusChanged?.Invoke($"[シグネチャー] 書き込めませんでした (前のデータを残します): {ex.Message}");
+                }
+                // 資源の品質 (ore_quality) と岩の中身の行 (ore_rock_parts)。同じ読み込みで作った行。0 行なら前の行を残し、表が無ければ空の表だけ作る (ore_signatures と同じ扱い)
+                try
+                {
+                    var qRows = finder.OreQuality;
+                    if (qRows.Count == 0)
+                    {
+                        using var ddl = _db!.CreateCommand();
+                        ddl.CommandText = OreQualityDdl;
+                        ddl.ExecuteNonQuery();
+                        StatusChanged?.Invoke("[品質] 資源の品質の範囲を 1 行も作れませんでした (前のデータを残します)");
+                    }
+                    else
+                    {
+                        WriteOreQuality(_db!, qRows);
+                        StatusChanged?.Invoke($"[品質] 資源の品質の範囲 {qRows.Count} 行 (資源 {qRows.Select(r => r.ResourceUuid).Distinct().Count()} 種・星系の上書き {qRows.Count(r => r.System.Length > 0)} 行)"
+                            + (finder.OreQualitySkippedLocations.Count > 0 ? $"。星系でない場所の上書き ({finder.OreQualitySkippedLocations.Count} か所) は入れていません" : ""));
+                    }
+                    var pRows = finder.OreRockParts;
+                    if (pRows.Count == 0)
+                    {
+                        using var ddl = _db!.CreateCommand();
+                        ddl.CommandText = OreRockPartsDdl;
+                        ddl.ExecuteNonQuery();
+                        StatusChanged?.Invoke("[品質] 岩の中身の行を 1 行も作れませんでした (前のデータを残します)");
+                    }
+                    else
+                    {
+                        WriteOreRockParts(_db!, pRows);
+                        StatusChanged?.Invoke($"[品質] 岩の中身の行 {pRows.Count} 行 (プリセット {pRows.Select(r => r.Preset).Distinct().Count()} 件・岩の中身 {pRows.Select(r => r.Composition).Distinct().Count()} 種)");
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    StatusChanged?.Invoke($"[品質] 書き込めませんでした (前のデータを残します): {ex.Message}");
+                }
+                // 採掘できる場所の広がり (ore_areas。小惑星帯の中にいるかを決める)。同じ読み込みで作った行。0 行なら前の行を残し、表が無ければ空の表だけ作る
+                try
+                {
+                    var aRows = finder.OreAreas;
+                    if (aRows.Count == 0)
+                    {
+                        using var ddl = _db!.CreateCommand();
+                        ddl.CommandText = OreAreasDdl;
+                        ddl.ExecuteNonQuery();
+                        StatusChanged?.Invoke("[採掘できる場所の広がり] 1 行も作れませんでした (前のデータを残します)");
+                    }
+                    else
+                    {
+                        WriteOreAreas(_db!, aRows);
+                        StatusChanged?.Invoke($"[採掘できる場所の広がり] {aRows.Count} 行 (場所 {aRows.Select(r => (r.Place, r.System)).Distinct().Count()} 件: "
+                            + string.Join("・", aRows.GroupBy(r => (r.Place, r.System)).Select(g => $"{g.Key.Place} {g.Count()}")) + ")");
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    StatusChanged?.Invoke($"[採掘できる場所の広がり] 書き込めませんでした (前のデータを残します): {ex.Message}");
                 }
             }
             // 6b. 星図の場所 (starmap_locations) とゲームの店 (game_shops)、それと DB の価格との紐づけ (shop_price_links)。
@@ -435,6 +492,209 @@ public partial class GameDataExtractor
         tx.Commit();
     }
 
+    // ── 資源の品質 (ore_quality・ore_rock_parts。現在位置のオーバーレイ (OreHere)。DeliverableSourceFinder.FindOreLocations が ore_locations と一緒に作る) ──
+    // (2026-11-05、利用者の指示「品質も出るなら出してほしい」) どれもゲームデータの値そのまま (計算した値は入れない)。
+    // ore_quality: 1 行 = 資源 1 つの品質の分布 1 つ (既定か、星系の上書き):
+    //   resource_uuid / resource_record: ore_locations と同じ (ResourceType の uuid と record 名)
+    //   system: '' = 既定 (ResourceType の properties[] の ResourceTypeCraftingData の qualityDistribution)。
+    //     星系の上書き (同じ所の qualityLocationOverride の locationOverrideList[] の 1 つ) は星系名 (ore_locations.system と同じ文字。例 'Pyro')。
+    //     星系名は、上書きの location の StarMapObject が種類 SolarSystem (StarMapObjectType の name) で、その英語名 (例 Pyro System) の末尾の " System" を
+    //     除いたもの。そうでない location (小惑星の基地など) の上書きは入れない
+    //   source: 分布を持つレコードの record 名 (CraftingQualityDistributionRecord.… / CraftingQualityLocationOverrideRecord.…)
+    //   location: 上書きの location の StarMapObject の record 名 (既定は '')
+    //   q_min / q_max / mean / stddev: CraftingQualityDistributionNormal の min / max / mean / stddev
+    // ore_rock_parts: 1 行 = 岩の中身 (MineableComposition の compositionArray) の 1 行 (ore_locations は同じ資源の行を 1 つにまとめるが、こちらはまとめない):
+    //   preset / method / rock: ore_locations と同じ文字。composition: MineableComposition の record 名。part_index: compositionArray の中の順 (0 から)
+    //   resource_uuid / resource_record / min_pct / max_pct / probability: その行の mineableElement の resourceType と minPercentage / maxPercentage / probability
+    //   quality_scale: その行の qualityScale (項目が無ければ NULL)
+    // インデックス構築 (Step 6c) で作り直す (作れなかったときは前の行を残す)。前の版の DB には表が無いので、起動後に一度だけ作る (NeedsOreLocations → RebuildOreLocationsAsync)
+    internal const string OreQualityTable = "ore_quality";
+    internal const string OreQualityDdl = """
+
+        CREATE TABLE IF NOT EXISTS ore_quality (
+            resource_uuid TEXT NOT NULL,
+            resource_record TEXT NOT NULL,
+            system TEXT NOT NULL,
+            source TEXT NOT NULL,
+            location TEXT NOT NULL,
+            q_min INTEGER NOT NULL,
+            q_max INTEGER NOT NULL,
+            mean REAL NOT NULL,
+            stddev REAL NOT NULL,
+            PRIMARY KEY (resource_uuid, system)
+        );
+        """;
+    internal const string OreRockPartsTable = "ore_rock_parts";
+    internal const string OreRockPartsDdl = """
+
+        CREATE TABLE IF NOT EXISTS ore_rock_parts (
+            preset TEXT NOT NULL,
+            method TEXT NOT NULL,
+            rock TEXT NOT NULL,
+            composition TEXT NOT NULL,
+            part_index INTEGER NOT NULL,
+            resource_uuid TEXT NOT NULL,
+            resource_record TEXT NOT NULL,
+            min_pct REAL NOT NULL,
+            max_pct REAL NOT NULL,
+            probability REAL NOT NULL,
+            quality_scale REAL,
+            PRIMARY KEY (preset, method, composition, part_index)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ore_rock_parts_preset_rock ON ore_rock_parts(preset, method, rock);
+        """;
+
+    // ── 採掘できる場所の広がり (ore_areas。現在位置のオーバーレイ (OreHere) が、小惑星帯の中にいるかを決めるのに使う。2026-11-05) ──
+    // 星図の場所に名前の無い小惑星帯 (Aaron Halo・Glaciem Ring・Keeger Belt) は、近くの場所の名前では当たらないので、ゲームデータにある広がりで決める。
+    // 1 行 = 採掘の設定 (HarvestableProviderParams の preset) と小惑星の広がりを持つ Entity のある socpak が、星系に置かれた 1 か所 (SocOreArea・ShopTables.FindOreAreaPlacements):
+    //   preset / place / system: ore_locations と同じ文字 (place はその socpak の場所の名前 = OrePlaces の決め方。system は preset の星系で、置かれた星系と同じものだけ)
+    //   socpak / entity: その socpak (ObjectContainers の下の相対パスの小文字) と Entity の Name
+    //   ox / oy / oz: socpak の枠の原点 (星系の座標。starmap_locations の x / y / z と同じ座標)。frame: 枠の回転 (行の順の 3×3 の 9 つの数を「,」でつないだもの)
+    //   kind = 'ring' (小惑星の輪。SAsteroidRingComponentParams): cx / cy / cz = 輪の中心 (枠の中の位置)、inner_m / outer_m = innerRadiusKm / outerRadiusKm × 1000、
+    //     depth_m = depthKm × 1000 (厚み。枠の z の向きに中心から ± depth_m ÷ 2。Aaron Halo の socpak の箱 (minBounds / maxBounds) が x・y は ± 外側の半径、z は ± 厚み ÷ 2 だった)
+    //   kind = 'box' (ガス雲。SAsteroidGasCloudComponentParams): min_x … max_z = その socpak の ObjectContainer の minBounds / maxBounds (枠の中の箱)。
+    //     箱はガス雲を収める箱で、ガス雲そのものの形ではない (箱の中でも雲の外の所がありうる)
+    // 惑星・衛星の下に置かれたもの (天体と一緒に回る)・回転のある輪・星系のどこにも置かれていない socpak (Akiro Cluster の akirocluster.socpak) は入らない。
+    // インデックス構築 (Step 6c) で作り直す (作れなかったときは前の行を残す)。前の版の DB には表が無いので、起動後に一度だけ作る (NeedsOreLocations → RebuildOreLocationsAsync)
+    internal const string OreAreasTable = "ore_areas";
+    internal const string OreAreasDdl = """
+
+        CREATE TABLE IF NOT EXISTS ore_areas (
+            preset TEXT NOT NULL,
+            place TEXT NOT NULL,
+            system TEXT NOT NULL,
+            socpak TEXT NOT NULL,
+            entity TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            ox REAL NOT NULL,
+            oy REAL NOT NULL,
+            oz REAL NOT NULL,
+            frame TEXT NOT NULL,
+            cx REAL NOT NULL,
+            cy REAL NOT NULL,
+            cz REAL NOT NULL,
+            inner_m REAL NOT NULL,
+            outer_m REAL NOT NULL,
+            depth_m REAL NOT NULL,
+            min_x REAL NOT NULL,
+            min_y REAL NOT NULL,
+            min_z REAL NOT NULL,
+            max_x REAL NOT NULL,
+            max_y REAL NOT NULL,
+            max_z REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ore_areas_system ON ore_areas(system);
+        """;
+
+    internal readonly record struct OreAreaRow(string Preset, string Place, string System, string Socpak, string Entity, string Kind,
+        double OX, double OY, double OZ, string Frame, double CX, double CY, double CZ, double Inner, double Outer, double Depth,
+        double MinX, double MinY, double MinZ, double MaxX, double MaxY, double MaxZ);
+
+    // ore_areas を入れ替える (表が無ければ作る)
+    internal static void WriteOreAreas(SqliteConnection db, List<OreAreaRow> rows)
+    {
+        using var tx = db.BeginTransaction();
+        using (var ddl = db.CreateCommand())
+        {
+            ddl.Transaction = tx;
+            ddl.CommandText = OreAreasDdl + "DELETE FROM ore_areas;";
+            ddl.ExecuteNonQuery();
+        }
+        using (var ins = db.CreateCommand())
+        {
+            ins.Transaction = tx;
+            ins.CommandText = "INSERT INTO ore_areas(preset,place,system,socpak,entity,kind,ox,oy,oz,frame,cx,cy,cz,inner_m,outer_m,depth_m,min_x,min_y,min_z,max_x,max_y,max_z) "
+                + "VALUES(@p,@pl,@s,@soc,@e,@k,@ox,@oy,@oz,@f,@cx,@cy,@cz,@in,@out,@d,@x0,@y0,@z0,@x1,@y1,@z1)";
+            var text = new[] { "@p", "@pl", "@s", "@soc", "@e", "@k", "@f" }.ToDictionary(n => n, n => ins.Parameters.Add(n, SqliteType.Text));
+            var real = new[] { "@ox", "@oy", "@oz", "@cx", "@cy", "@cz", "@in", "@out", "@d", "@x0", "@y0", "@z0", "@x1", "@y1", "@z1" }.ToDictionary(n => n, n => ins.Parameters.Add(n, SqliteType.Real));
+            foreach (var r in rows)
+            {
+                text["@p"].Value = r.Preset; text["@pl"].Value = r.Place; text["@s"].Value = r.System; text["@soc"].Value = r.Socpak; text["@e"].Value = r.Entity;
+                text["@k"].Value = r.Kind; text["@f"].Value = r.Frame;
+                real["@ox"].Value = r.OX; real["@oy"].Value = r.OY; real["@oz"].Value = r.OZ; real["@cx"].Value = r.CX; real["@cy"].Value = r.CY; real["@cz"].Value = r.CZ;
+                real["@in"].Value = r.Inner; real["@out"].Value = r.Outer; real["@d"].Value = r.Depth;
+                real["@x0"].Value = r.MinX; real["@y0"].Value = r.MinY; real["@z0"].Value = r.MinZ; real["@x1"].Value = r.MaxX; real["@y1"].Value = r.MaxY; real["@z1"].Value = r.MaxZ;
+                ins.ExecuteNonQuery();
+            }
+        }
+        tx.Commit();
+    }
+
+    internal readonly record struct OreQualityRow(string ResourceUuid, string ResourceRecord, string System, string Source, string Location,
+        int Min, int Max, double Mean, double Stddev);
+    internal readonly record struct OreRockPartRow(string Preset, string Method, string Rock, string Composition, int PartIndex,
+        string ResourceUuid, string ResourceRecord, double MinPct, double MaxPct, double Probability, double? QualityScale);
+
+    // ore_quality を入れ替える (表が無ければ作る)
+    internal static void WriteOreQuality(SqliteConnection db, List<OreQualityRow> rows)
+    {
+        using var tx = db.BeginTransaction();
+        using (var ddl = db.CreateCommand())
+        {
+            ddl.Transaction = tx;
+            ddl.CommandText = OreQualityDdl + "DELETE FROM ore_quality;";
+            ddl.ExecuteNonQuery();
+        }
+        using (var ins = db.CreateCommand())
+        {
+            ins.Transaction = tx;
+            ins.CommandText = "INSERT OR IGNORE INTO ore_quality(resource_uuid,resource_record,system,source,location,q_min,q_max,mean,stddev) VALUES(@u,@r,@s,@src,@loc,@mn,@mx,@me,@sd)";
+            var pU = ins.Parameters.Add("@u", SqliteType.Text);
+            var pR = ins.Parameters.Add("@r", SqliteType.Text);
+            var pS = ins.Parameters.Add("@s", SqliteType.Text);
+            var pSrc = ins.Parameters.Add("@src", SqliteType.Text);
+            var pLoc = ins.Parameters.Add("@loc", SqliteType.Text);
+            var pMn = ins.Parameters.Add("@mn", SqliteType.Integer);
+            var pMx = ins.Parameters.Add("@mx", SqliteType.Integer);
+            var pMe = ins.Parameters.Add("@me", SqliteType.Real);
+            var pSd = ins.Parameters.Add("@sd", SqliteType.Real);
+            foreach (var r in rows)
+            {
+                pU.Value = r.ResourceUuid; pR.Value = r.ResourceRecord; pS.Value = r.System; pSrc.Value = r.Source; pLoc.Value = r.Location;
+                pMn.Value = r.Min; pMx.Value = r.Max; pMe.Value = r.Mean; pSd.Value = r.Stddev;
+                ins.ExecuteNonQuery();
+            }
+        }
+        tx.Commit();
+    }
+
+    // ore_rock_parts を入れ替える (表が無ければ作る)
+    internal static void WriteOreRockParts(SqliteConnection db, List<OreRockPartRow> rows)
+    {
+        using var tx = db.BeginTransaction();
+        using (var ddl = db.CreateCommand())
+        {
+            ddl.Transaction = tx;
+            ddl.CommandText = OreRockPartsDdl + "DELETE FROM ore_rock_parts;";
+            ddl.ExecuteNonQuery();
+        }
+        using (var ins = db.CreateCommand())
+        {
+            ins.Transaction = tx;
+            ins.CommandText = "INSERT OR IGNORE INTO ore_rock_parts(preset,method,rock,composition,part_index,resource_uuid,resource_record,min_pct,max_pct,probability,quality_scale) "
+                + "VALUES(@p,@m,@k,@c,@i,@u,@r,@mn,@mx,@pr,@q)";
+            var pP = ins.Parameters.Add("@p", SqliteType.Text);
+            var pM = ins.Parameters.Add("@m", SqliteType.Text);
+            var pK = ins.Parameters.Add("@k", SqliteType.Text);
+            var pC = ins.Parameters.Add("@c", SqliteType.Text);
+            var pI = ins.Parameters.Add("@i", SqliteType.Integer);
+            var pU = ins.Parameters.Add("@u", SqliteType.Text);
+            var pR = ins.Parameters.Add("@r", SqliteType.Text);
+            var pMn = ins.Parameters.Add("@mn", SqliteType.Real);
+            var pMx = ins.Parameters.Add("@mx", SqliteType.Real);
+            var pPr = ins.Parameters.Add("@pr", SqliteType.Real);
+            var pQ = ins.Parameters.Add("@q", SqliteType.Real);
+            foreach (var r in rows)
+            {
+                pP.Value = r.Preset; pM.Value = r.Method; pK.Value = r.Rock; pC.Value = r.Composition; pI.Value = r.PartIndex;
+                pU.Value = r.ResourceUuid; pR.Value = r.ResourceRecord; pMn.Value = r.MinPct; pMx.Value = r.MaxPct; pPr.Value = r.Probability;
+                pQ.Value = (object?)r.QualityScale ?? DBNull.Value;
+                ins.ExecuteNonQuery();
+            }
+        }
+        tx.Commit();
+    }
+
     // ore_locations を入れ替える (表が無ければ作る)
     private void WriteOreLocations(List<OreLocationRow> rows)
     {
@@ -472,15 +732,19 @@ public partial class GameDataExtractor
         tx.Commit();
     }
 
-    // インデックスを構築した DB で、ore_locations かシグネチャー (ore_signatures) の表がまだ無いか (前の版で構築した DB・前の版のバックアップを取り込んだ DB)。
+    // インデックスを構築した DB で、ore_locations・シグネチャー (ore_signatures)・品質 (ore_quality / ore_rock_parts)・広がり (ore_areas) の表のどれかがまだ無いか
+    // (前の版で構築した DB・前の版のバックアップを取り込んだ DB)。
     // 起動後の RebuildOreLocationsAsync を走らせるか決めるため。表は EnsureDb では作らない (無いことを印にする)
     public bool NeedsOreLocations()
     {
         EnsureDb();
         using var cmd = _db!.CreateCommand();
-        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM item_index) AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (@t, @s)) < 2";
+        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM item_index) AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (@t, @s, @q, @p, @a)) < 5";
         cmd.Parameters.AddWithValue("@t", OreLocationsTable);
         cmd.Parameters.AddWithValue("@s", OreSignaturesTable);
+        cmd.Parameters.AddWithValue("@q", OreQualityTable);
+        cmd.Parameters.AddWithValue("@p", OreRockPartsTable);
+        cmd.Parameters.AddWithValue("@a", OreAreasTable);
         return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
     }
 
@@ -640,9 +904,9 @@ public partial class GameDataExtractor
             if (IsIndexBuildRunning) return 0;
             using (var ddl = _db!.CreateCommand())
             {
-                // 採掘できる場所・シグネチャーの表は、作れなかったときも空で作る (次の起動で走り直さないように)。
+                // 採掘できる場所・シグネチャー・品質の表は、作れなかったときも空で作る (次の起動で走り直さないように)。
                 // 星図の場所・店・紐づけの表は空で作らない (今の形で作れなかったら、次の起動でまた試す)
-                ddl.CommandText = OreLocationsDdl + OreSignaturesDdl;
+                ddl.CommandText = OreLocationsDdl + OreSignaturesDdl + OreQualityDdl + OreRockPartsDdl + OreAreasDdl;
                 ddl.ExecuteNonQuery();
             }
             // 店・星図の表が今の形でできていなければ、そうと分かるように知らせる (印は WriteShopTables が今の形で作れたときだけ書いている)
@@ -662,7 +926,13 @@ public partial class GameDataExtractor
             var oreCount = Convert.ToInt32(cnt.ExecuteScalar() ?? 0L);
             cnt.CommandText = "SELECT COUNT(*) FROM ore_signatures";
             var sigCount = Convert.ToInt32(cnt.ExecuteScalar() ?? 0L);
-            StatusChanged?.Invoke($"[採掘できる場所] 起動後の作り直しを終えました (ore_locations は今 {oreCount} 行・ore_signatures は今 {sigCount} 行)");
+            cnt.CommandText = "SELECT COUNT(*) FROM ore_quality";
+            var qualityCount = Convert.ToInt32(cnt.ExecuteScalar() ?? 0L);
+            cnt.CommandText = "SELECT COUNT(*) FROM ore_rock_parts";
+            var partCount = Convert.ToInt32(cnt.ExecuteScalar() ?? 0L);
+            cnt.CommandText = "SELECT COUNT(*) FROM ore_areas";
+            var areaCount = Convert.ToInt32(cnt.ExecuteScalar() ?? 0L);
+            StatusChanged?.Invoke($"[採掘できる場所] 起動後の作り直しを終えました (ore_locations は今 {oreCount} 行・ore_signatures は今 {sigCount} 行・ore_quality は今 {qualityCount} 行・ore_rock_parts は今 {partCount} 行・ore_areas は今 {areaCount} 行)");
             return oreCount;
         }
         finally
@@ -1086,6 +1356,8 @@ public partial class GameDataExtractor
         // socpak → その .soc の部屋 (Entity EntityClass="Room") のうち roomName が @interiormap_ / @area_name_ のもの (鍵, socpak の枠の中心, 半径 (Radius))。
         // 店の名札 (ShopTables.BuildAreaLabels。店の socpak の中のものだけ) に使う
         public Dictionary<string, List<(string Key, double X, double Y, double Z, double Radius)>> AreaRooms { get; } = new(StringComparer.Ordinal);
+        // socpak → その .soc にある、採掘の設定を持つ小惑星の広がり (SocOreArea)。ore_areas (小惑星帯の中にいるか) に使う
+        public Dictionary<string, List<SocOreArea>> OreAreas { get; } = new(StringComparer.Ordinal);
         public int SocpakCount { get; private set; }
         public int BadCount { get; private set; }
 
@@ -1102,7 +1374,7 @@ public partial class GameDataExtractor
             using var zip = new ZipArchive(fs, ZipArchiveMode.Read);
             // 読む (順に) と調べる (並列に) を分ける。socpak は無圧縮で入っているので、entry をそのまま読んで中の zip を開く (一時ファイルは作らない)
             var queue = new System.Collections.Concurrent.BlockingCollection<(string Rel, byte[] Data)>(boundedCapacity: 8);
-            var results = new System.Collections.Concurrent.ConcurrentBag<(string Rel, HashSet<string> Records, HashSet<string>? Kids, List<(string Planet, HashSet<string> Creatures)> Ale, List<(string Child, string Smo)> ChildSmo, List<SocShop> Shops, List<SocChild>? Containers, double? RotHours, double? PlanetRadius, List<(string Key, double X, double Y, double Z, double Radius)> Labels)>();
+            var results = new System.Collections.Concurrent.ConcurrentBag<(string Rel, HashSet<string> Records, HashSet<string>? Kids, List<(string Planet, HashSet<string> Creatures)> Ale, List<(string Child, string Smo)> ChildSmo, List<SocShop> Shops, List<SocChild>? Containers, double? RotHours, double? PlanetRadius, List<(string Key, double X, double Y, double Z, double Radius)> Labels, List<SocOreArea> OreAreas)>();
             int bad = 0;
             var workers = Enumerable.Range(0, Math.Max(1, Environment.ProcessorCount - 1)).Select(_ => Task.Run(() =>
             {
@@ -1143,8 +1415,9 @@ public partial class GameDataExtractor
             catch (AggregateException) when (ct.IsCancellationRequested) { ct.ThrowIfCancellationRequested(); }
             s.SocpakCount = count;
             s.BadCount = bad;
-            foreach (var (rel, records, kids, ale, childSmo, shops, containers, rotHours, planetRadius, labels) in results)
+            foreach (var (rel, records, kids, ale, childSmo, shops, containers, rotHours, planetRadius, labels, oreAreas) in results)
             {
+                if (oreAreas.Count > 0) s.OreAreas[rel] = oreAreas;
                 // 半径の無いもの (負) は案内図の名札、あるものは部屋の名前
                 if (labels.Any(l => l.Radius < 0)) s.AreaLabels[rel] = labels.Where(l => l.Radius < 0).Select(l => (l.Key, l.X, l.Y, l.Z)).ToList();
                 if (labels.Any(l => l.Radius >= 0)) s.AreaRooms[rel] = labels.Where(l => l.Radius >= 0).ToList();
@@ -1181,8 +1454,12 @@ public partial class GameDataExtractor
             return s;
         }
 
-        private static (string Rel, HashSet<string> Records, HashSet<string>? Kids, List<(string Planet, HashSet<string> Creatures)> Ale, List<(string Child, string Smo)> ChildSmo, List<SocShop> Shops, List<SocChild>? Containers, double? RotHours, double? PlanetRadius, List<(string Key, double X, double Y, double Z, double Radius)> Labels) ScanOne(string rel, byte[] data, DeliverableDcb dcb)
+        private static (string Rel, HashSet<string> Records, HashSet<string>? Kids, List<(string Planet, HashSet<string> Creatures)> Ale, List<(string Child, string Smo)> ChildSmo, List<SocShop> Shops, List<SocChild>? Containers, double? RotHours, double? PlanetRadius, List<(string Key, double X, double Y, double Z, double Radius)> Labels, List<SocOreArea> OreAreas) ScanOne(string rel, byte[] data, DeliverableDcb dcb)
         {
+            // 採掘の設定を持つ小惑星の広がり (SocOreArea): .soc の Entity (輪はそのまま、ガス雲は箱が決まってから) と、直下の xml の ObjectContainer の minBounds / maxBounds
+            var oreRings = new List<SocOreArea>();
+            var oreClouds = new List<(string PresetUuid, string Entity, double X, double Y, double Z)>();
+            ((double X, double Y, double Z) Min, (double X, double Y, double Z) Max)? ocBounds = null;
             var shops = new List<SocShop>();
             // 案内図の名札 (Radius は -1) と部屋の名前 (Radius は部屋の半径)
             var labels = new List<(string Key, double X, double Y, double Z, double Radius)>();
@@ -1229,6 +1506,20 @@ public partial class GameDataExtractor
                         if (ent != null && double.TryParse((string?)ent.Attribute("planetRadius"), System.Globalization.NumberStyles.Float,
                                 System.Globalization.CultureInfo.InvariantCulture, out var prd) && double.IsFinite(prd) && prd > 0)
                             planetRadius = prd;
+                    }
+                    catch (System.Xml.XmlException) { }
+                }
+                // 採掘の設定を持つ小惑星の広がり: .soc の Entity (HarvestableProviderParams と小惑星の輪・ガス雲) と、直下の xml の minBounds / maxBounds
+                if (lower.EndsWith(".soc", StringComparison.Ordinal) && text.Contains("HarvestableProviderParams", StringComparison.Ordinal)
+                    && (text.Contains("SAsteroidRingComponentParams", StringComparison.Ordinal) || text.Contains("SAsteroidGasCloudComponentParams", StringComparison.Ordinal)))
+                    ReadSocOreAreas(bytes, text, oreRings, oreClouds);
+                if (lower == ownXml && text.Contains("minBounds", StringComparison.Ordinal))
+                {
+                    try
+                    {
+                        var root = System.Xml.Linq.XDocument.Parse(Encoding.UTF8.GetString(bytes)).Root;
+                        if (root?.Name == "ObjectContainer" && ParseVec3((string?)root.Attribute("minBounds")) is { } bmin && ParseVec3((string?)root.Attribute("maxBounds")) is { } bmax)
+                            ocBounds = (bmin, bmax);
                     }
                     catch (System.Xml.XmlException) { }
                 }
@@ -1298,7 +1589,69 @@ public partial class GameDataExtractor
                     catch (Exception) { }   // 調査と同じく、JSON として読めない .ale は飛ばす (socpak のほかの中身は使う)
                 }
             }
-            return (rel, records, kids, ale, childSmo, shops, containers, rotHours, planetRadius, labels);
+            // ガス雲の広がり: socpak にガス雲の Entity が 1 つだけで、ObjectContainer の箱 (minBounds / maxBounds) の中心がその Entity の Pos と同じときだけ、箱を広がりにする
+            var oreAreas = oreRings;
+            if (oreClouds.Count == 1 && ocBounds is { } ob)
+            {
+                var cloud = oreClouds[0];
+                if (Math.Abs((ob.Min.X + ob.Max.X) / 2 - cloud.X) <= OreAreaCenterTolerance && Math.Abs((ob.Min.Y + ob.Max.Y) / 2 - cloud.Y) <= OreAreaCenterTolerance
+                    && Math.Abs((ob.Min.Z + ob.Max.Z) / 2 - cloud.Z) <= OreAreaCenterTolerance)
+                    oreAreas.Add(new SocOreArea(cloud.PresetUuid, OreAreaBox, cloud.Entity, cloud.X, cloud.Y, cloud.Z, 0, 0, 0, ob.Min.X, ob.Min.Y, ob.Min.Z, ob.Max.X, ob.Max.Y, ob.Max.Z));
+            }
+            return (rel, records, kids, ale, childSmo, shops, containers, rotHours, planetRadius, labels, oreAreas);
+        }
+
+        // ガス雲の箱の中心と Entity の Pos を「同じ」とみなす差 (m。文字にした数の丸めの分。広がりを決める数ではない)
+        private const double OreAreaCenterTolerance = 0.01;
+
+        // .soc のバイト列から、採掘の設定 (HarvestableProviderComponent の preset) と小惑星の広がり (AsteroidFieldComponent) を両方持つ Entity を読む (SocOreArea の説明)。
+        // .soc には CryXmlB がいくつも埋め込まれているので ReadSocShops と同じく切り分け、"HarvestableProviderParams" を含むものだけを読む。読めない CryXmlB は飛ばす。
+        // 輪 (SAsteroidRingComponentParams) は rings に、ガス雲 (SAsteroidGasCloudComponentParams) は clouds に足す
+        internal static void ReadSocOreAreas(byte[] bytes, string latin1, List<SocOreArea> rings, List<(string PresetUuid, string Entity, double X, double Y, double Z)> clouds)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            static double? Num(System.Xml.Linq.XElement e, string name) =>
+                double.TryParse((string?)e.Attribute(name), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) && double.IsFinite(v) ? v : null;
+            var starts = new List<int>();
+            for (int at = latin1.IndexOf("CryXmlB", StringComparison.Ordinal); at >= 0; at = latin1.IndexOf("CryXmlB", at + 7, StringComparison.Ordinal))
+                starts.Add(at);
+            for (int i = 0; i < starts.Count; i++)
+            {
+                var a = starts[i];
+                var z = i + 1 < starts.Count ? starts[i + 1] : bytes.Length;
+                if (latin1.IndexOf("HarvestableProviderParams", a, z - a, StringComparison.Ordinal) < 0) continue;
+                System.Xml.Linq.XDocument doc;
+                try { doc = CryXmlParser.ParseBinaryBytes(bytes[a..z]); }
+                catch { continue; }
+                foreach (var ent in doc.Descendants("Entity"))
+                {
+                    var hp = ent.Descendants("HarvestableProviderComponent").FirstOrDefault(c => (string?)c.Attribute("__type") == "HarvestableProviderParams");
+                    var preset = ((string?)hp?.Attribute("preset") ?? "").Trim().ToLowerInvariant();
+                    if (preset.Length == 0) continue;
+                    var field = ent.Descendants("AsteroidFieldComponent").FirstOrDefault(c => c.Attribute("__type") != null);
+                    var type = (string?)field?.Attribute("__type");
+                    var name = (string?)ent.Attribute("Name") ?? "";
+                    // Entity の Pos (無ければ socpak の枠の原点)。書いてあるのに読めないものは入れない
+                    var posText = (string?)ent.Attribute("Pos");
+                    var pos = posText == null ? (0.0, 0.0, 0.0) : ParseVec3(posText);
+                    if (pos is not { } p) continue;
+                    if (type == "SAsteroidRingComponentParams")
+                    {
+                        // 回転のある輪は向きが決められないので入れない (回転の無いもの = 4 つの数のうち 1 つが ±1 でほかが 0、または Rotate が無い)
+                        var rot = ((string?)ent.Attribute("Rotate") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries);
+                        if (rot.Length > 0)
+                        {
+                            var q = rot.Select(v => double.TryParse(v.Trim(), System.Globalization.NumberStyles.Float, inv, out var d) ? d : double.NaN).ToArray();
+                            if (q.Length != 4 || q.Any(double.IsNaN) || q.Count(v => v == 0) != 3 || q.Count(v => Math.Abs(v) == 1) != 1) continue;
+                        }
+                        if (Num(field!, "innerRadiusKm") is not { } inner || Num(field!, "outerRadiusKm") is not { } outer || Num(field!, "depthKm") is not { } depth) continue;
+                        if (!(inner >= 0) || !(outer > inner) || !(depth > 0)) continue;
+                        rings.Add(new SocOreArea(preset, OreAreaRing, name, p.X, p.Y, p.Z, inner * 1000, outer * 1000, depth * 1000, 0, 0, 0, 0, 0, 0));
+                    }
+                    else if (type == "SAsteroidGasCloudComponentParams")
+                        clouds.Add((preset, name, p.X, p.Y, p.Z));
+                }
+            }
         }
 
         private const string ChildPrefix = "data/objectcontainers/";
@@ -1486,6 +1839,17 @@ public partial class GameDataExtractor
     // socpak の xml の Child 1 つ (子の socpak・親からの位置・starMapRecord・入れ子の Child・回転の四元数 (w,x,y,z。無ければ null)・entityName (無ければ ""))
     internal sealed record SocChild(string Socpak, double X, double Y, double Z, string StarMapRecord, List<SocChild> Kids,
         (double W, double X, double Y, double Z)? Rot = null, string EntityName = "");
+
+    // socpak の中の「採掘の設定を持つ小惑星の広がり」1 つ (ore_areas に使う。2026-11-05、小惑星帯の中にいるかを決めるため)。
+    // .soc の Entity のうち、HarvestableProviderComponent (__type="HarvestableProviderParams" の preset) と AsteroidFieldComponent を両方持つもの:
+    //   Kind = OreAreaRing: AsteroidFieldComponent が SAsteroidRingComponentParams。輪の中心 (C。Entity の Pos。socpak の枠)・
+    //     内側と外側の半径・厚み (innerRadiusKm / outerRadiusKm / depthKm を m にしたもの)。Entity に回転 (Rotate) があるものは輪の向きが決められないので入れない
+    //   Kind = OreAreaBox: AsteroidFieldComponent が SAsteroidGasCloudComponentParams (ガス雲)。広がりは、その socpak の直下の xml の
+    //     ObjectContainer の minBounds / maxBounds (socpak の枠の箱)。ガス雲の Entity が socpak に 1 つだけで、箱の中心がその Entity の Pos と同じときだけ入れる
+    //     (実データの 3 つ (glaciem_gascloud_gen・keeger_gascloud_gen・akirocluster) はどれもそうなっていた)
+    internal const string OreAreaRing = "ring", OreAreaBox = "box";
+    internal sealed record SocOreArea(string PresetUuid, string Kind, string Entity, double CX, double CY, double CZ,
+        double Inner, double Outer, double Depth, double MinX, double MinY, double MinZ, double MaxX, double MaxY, double MaxZ);
 
     // .soc の中の店 1 つ (Entity の Name・EntityCryGUID、EntityComponentShop の franchise (ShopFranchise の uuid)・shopInventoryType (ITEM / COMMODITY)、
     // Entity の Pos (socpak の枠。読めなければ null。店の名札 (game_shops.area_label) を探すのに使う)、
@@ -1954,6 +2318,9 @@ public partial class GameDataExtractor
             var clusterCache = new Dictionary<string, (int?, int?, double?)>(StringComparer.Ordinal);
             OreSignatures.Clear();
             _sigSeen.Clear();
+            OreRockParts.Clear();
+            _partSeen.Clear();
+            _qualityResources.Clear();
             foreach (var rel in _d.Files)
             {
                 if (!_d.Rec.TryGetValue(rel, out var hpp) || hpp == null || !hpp.StartsWith("HarvestableProviderPreset.", StringComparison.Ordinal)) continue;
@@ -1985,6 +2352,13 @@ public partial class GameDataExtractor
                                 var sigRow = new OreSignatureRow(method, comp.Rock, rs, OreGradeOf(comp.Record), cMin, cMax, cProb);
                                 if (_sigSeen.Add(sigRow)) OreSignatures.Add(sigRow);
                             }
+                            // 岩の中身の行 (ore_rock_parts): compositionArray の行をまとめずにそのまま (preset・掘り方・岩の中身ごとに 1 回)
+                            if (_partSeen.Add((hpp, method, comp.Record)))
+                                for (int pi = 0; pi < comp.RawParts.Count; pi++)
+                                {
+                                    var raw = comp.RawParts[pi];
+                                    OreRockParts.Add(new OreRockPartRow(hpp, method, comp.Rock, comp.Record, pi, raw.Uuid, raw.Record, raw.Min, raw.Max, raw.Prob, raw.QualityScale));
+                                }
                             var chance = rp / sum * 100;
                             foreach (var part in comp.Parts)
                             {
@@ -2007,7 +2381,50 @@ public partial class GameDataExtractor
                     foreach (var ((uuid, method, rock), a) in agg)
                         rows.Add(new OreLocationRow(uuid, a.Record, hpp, place, system, method, rock, a.Chance, a.Min, a.Max, a.Prob, a.GroupProbability));
             }
+            BuildOreQuality();
+            BuildOreAreas();
             return rows;
+        }
+
+        // 採掘できる場所の広がり (ore_areas の行。FindOreLocations が終わりに作る)
+        public List<OreAreaRow> OreAreas { get; } = new();
+
+        // ore_areas の行を作る: 広がりのある socpak (DeliverableSocpaks.OreAreas) が星系に置かれた所 (ShopTables.FindOreAreaPlacements) ごとに、
+        // その socpak の場所の名前を付ける。名前は、socpak そのものから決まるものだけ (OreSocpakOwnPlaceName: 小惑星帯のフォルダの帯の名前か、
+        // 星系のフォルダの直下の socpak の名前。ore_locations の場所と同じ文字)。置かれた所の親を辿って名前を決める socpak (ラグランジュ点のガス雲・小惑星の基地のガス雲など。
+        // 同じ socpak があちこちに置かれ、置かれた所ごとに名前が違う) は入れない (それらは星図の場所の名前で当たる)。
+        // 置かれた星系 (恒星の StarMapObject の英語名) と preset の星系 (preset のファイルのパス) が同じものだけ (別の星系・テスト用の socpak の使い回しを入れない。OrePlaces と同じ考え)。
+        // preset が引けないものは入れない
+        private void BuildOreAreas()
+        {
+            OreAreas.Clear();
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            foreach (var p in ShopTables.FindOreAreaPlacements(_d, _s))
+            {
+                if (!_smoName.TryGetValue(p.Star, out var starName) || starName.StartsWith('@')) continue;
+                if (!_s.OreAreas.TryGetValue(p.Socpak, out var areas)) continue;
+                var frame = string.Join(",", p.Frame.Select(v => v.ToString("R", inv)));
+                foreach (var a in areas)
+                {
+                    if (!_d.IdToRecord.TryGetValue(a.PresetUuid, out var hpp) || !hpp.StartsWith("HarvestableProviderPreset.", StringComparison.Ordinal)) continue;
+                    if (!_d.RecordToFile.TryGetValue(hpp, out var hppRel)) continue;
+                    var system = SystemFromPath(hppRel, "harvestable/providerpresets/system/");
+                    if (system.Length == 0 || !system.Equals(starName, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (OreSocpakOwnPlaceName(p.Socpak, system) is not { } place) continue;
+                    OreAreas.Add(new OreAreaRow(hpp, place, system, p.Socpak, a.Entity, a.Kind, p.X, p.Y, p.Z, frame, a.CX, a.CY, a.CZ, a.Inner, a.Outer, a.Depth,
+                        a.MinX, a.MinY, a.MinZ, a.MaxX, a.MaxY, a.MaxZ));
+                }
+            }
+        }
+
+        // socpak そのものから決まる場所の名前 (OreSocpakPlaceNames の初めの 2 つの決め方だけ: 小惑星帯のフォルダ (BeltFolderNameKeys) の帯の名前、
+        // 星・月などの socpak (pu/system/<星系>/<名前>.socpak。PlanetSocpakName) の名前)。親を辿らないと決まらない socpak・名前の引けないものは null
+        private string? OreSocpakOwnPlaceName(string soc, string system)
+        {
+            foreach (var (folder, key) in BeltFolderNameKeys)
+                if (soc.StartsWith(folder, StringComparison.Ordinal) && _ini.TryGetValue(key, out var belt) && OreService.EnglishText(belt) is { } beltName)
+                    return beltName;
+            return PlanetSocpakName(soc, system) is { Length: > 0 } own ? own : null;
         }
 
         private sealed class OreAcc
@@ -2016,8 +2433,112 @@ public partial class GameDataExtractor
             public double Chance, Min, Max, Prob, GroupProbability;
         }
 
-        // 岩の種類 1 つ: 名前と、MineableComposition の record 名 (格を名前から決めるため)、中の資源 (同じ資源の行はまとめたもの)
-        private sealed record OreComposition(string Rock, string Record, List<(string Uuid, string Record, double Min, double Max, double Prob)> Parts);
+        // 岩の種類 1 つ: 名前と、MineableComposition の record 名 (格を名前から決めるため)、中の資源 (同じ資源の行はまとめたもの)、
+        // compositionArray の行そのまま (まとめないもの。qualityScale つき。ore_rock_parts に使う)
+        private sealed record OreComposition(string Rock, string Record, List<(string Uuid, string Record, double Min, double Max, double Prob)> Parts,
+            List<(string Uuid, string Record, double Min, double Max, double Prob, double? QualityScale)> RawParts);
+
+        // 岩の中身の行 (FindOreLocations が ore_locations の行と一緒に作る。preset・掘り方・岩の中身ごとに 1 回)
+        public List<OreRockPartRow> OreRockParts { get; } = new();
+        private readonly HashSet<(string Preset, string Method, string Composition)> _partSeen = new();
+
+        // 資源の品質の分布 (FindOreLocations が終わりに作る。BuildOreQuality)。OreQualitySkippedLocations: 星系でないので入れなかった上書きの location (record 名か参照の文字)
+        public List<OreQualityRow> OreQuality { get; } = new();
+        public HashSet<string> OreQualitySkippedLocations { get; } = new(StringComparer.Ordinal);
+        // 岩の中に出てきた資源の uuid → record 名 (CompositionOf が入れる。品質の行はこの資源の分だけ作る)
+        private readonly Dictionary<string, string> _qualityResources = new(StringComparer.Ordinal);
+
+        // 資源 (ResourceTypeDatabase の record の中の ResourceType) の properties[] の最初の ResourceTypeCraftingData の
+        // qualityDistribution.qualityDistributionRecord と qualityLocationOverride.locationOverrideRecord (参照の文字。無ければ null)。
+        // (MineableElement の resourceType は参照 (_RecordId_ と _RecordName_) だけで properties を持たないので、ResourceTypeDatabase の record から読む)
+        private static (string? Distribution, string? Override) QualityRefsOf(JsonElement resourceType)
+        {
+            foreach (var p in Arr(Get(resourceType, "properties")))
+            {
+                if (Str(p, "_Type_") != "ResourceTypeCraftingData") continue;
+                return (Get(p, "qualityDistribution") is { } qd ? RefString(qd, "qualityDistributionRecord") : null,
+                    Get(p, "qualityLocationOverride") is { } ov ? RefString(ov, "locationOverrideRecord") : null);
+            }
+            return (null, null);
+        }
+
+        // 分布 (CraftingQualityDistributionNormal) の min / max / mean / stddev。その型でない・数でなければ null (ほかの型の項目は読まない)
+        private static (int Min, int Max, double Mean, double Stddev)? QualityNormalOf(JsonElement? dist)
+        {
+            if (dist is not { ValueKind: JsonValueKind.Object } d || Str(d, "_Type_") != "CraftingQualityDistributionNormal") return null;
+            if (Get(d, "min") is not { ValueKind: JsonValueKind.Number } mn || Get(d, "max") is not { ValueKind: JsonValueKind.Number } mx
+                || Get(d, "mean") is not { ValueKind: JsonValueKind.Number } me || Get(d, "stddev") is not { ValueKind: JsonValueKind.Number } sd) return null;
+            return ((int)mn.GetDouble(), (int)mx.GetDouble(), me.GetDouble(), sd.GetDouble());
+        }
+
+        // 上書きの location (StarMapObject の参照) → 星系名 (ore_locations.system と同じ文字)。
+        // その StarMapObject の種類が SolarSystem (StarMapObjectType の name) で、英語名 (name の訳。例 "Pyro System") が " System" で終わるときだけ、それを除いた名前。
+        // そうでなければ null (record は引けたら record 名、引けなければ参照の文字)
+        private const string SolarSystemTypeName = "SolarSystem", SystemNameSuffix = " System";
+        private (string? System, string Record) QualitySystemOf(string locationRef)
+        {
+            if (DeliverableDcb.RecordsRelOfRef(locationRef) is not { } rel || !_d.RelLowerToRecord.TryGetValue(rel, out var record)) return (null, locationRef);
+            if (!_d.StarMapTypeId.TryGetValue(record, out var typeId) || !_d.StarMapTypeNames.TryGetValue(typeId, out var typeName) || typeName != SolarSystemTypeName)
+                return (null, record);
+            if (!_smoName.TryGetValue(record, out var en) || en.StartsWith('@') || !en.EndsWith(SystemNameSuffix, StringComparison.OrdinalIgnoreCase)) return (null, record);
+            var name = en[..^SystemNameSuffix.Length].Trim();
+            return (name.Length > 0 ? name : null, record);
+        }
+
+        // ore_quality の行を作る (岩の中に出てきた資源 (_qualityResources) ごとに、既定の分布 1 行と、星系の上書きの行)。同じ (資源, 星系) は最初の 1 つ。
+        // 資源の品質の参照は ResourceTypeDatabase の record (resourcetypedatabase/resourcetypedatabase.json。ResourceSources と同じ読み方) から読む
+        private void BuildOreQuality()
+        {
+            OreQuality.Clear();
+            OreQualitySkippedLocations.Clear();
+            if (_qualityResources.Count == 0 || _d.ReadText("resourcetypedatabase/resourcetypedatabase.json") is not { } rtText) return;
+            // 資源の uuid → (既定の分布のレコードの参照, 星系の上書きのレコードの参照)。同じ資源が 2 か所以上に出る (精錬後の資源として入れ子になる) ので、参照のあるものを使う
+            var refsOf = new Dictionary<string, (string? Distribution, string? Override)>(StringComparer.Ordinal);
+            using (var doc = JsonDocument.Parse(rtText))
+            {
+                void Walk(JsonElement o)
+                {
+                    if (o.ValueKind == JsonValueKind.Object)
+                    {
+                        if (Str(o, "_Type_") == "ResourceType" && Str(o, "_RecordId_") is { Length: > 0 } id && _qualityResources.ContainsKey(id))
+                        {
+                            var r = QualityRefsOf(o);
+                            if ((r.Distribution != null || r.Override != null) && (!refsOf.TryGetValue(id, out var had) || (had.Distribution == null && had.Override == null))) refsOf[id] = r;
+                        }
+                        foreach (var p in o.EnumerateObject()) Walk(p.Value);
+                    }
+                    else if (o.ValueKind == JsonValueKind.Array)
+                        foreach (var v in o.EnumerateArray()) Walk(v);
+                }
+                Walk(doc.RootElement);
+            }
+            var seen = new HashSet<(string Uuid, string System)>();
+            foreach (var (uuid, resourceRecord) in _qualityResources.OrderBy(kv => kv.Value, StringComparer.Ordinal))
+            {
+                if (!refsOf.TryGetValue(uuid, out var found)) continue;
+                var refs = (Record: resourceRecord, found.Distribution, found.Override);
+                if (RefText(refs.Distribution) is { } distText)
+                {
+                    using var dd = JsonDocument.Parse(distText);
+                    if (dd.RootElement.TryGetProperty("_RecordValue_", out var dv) && QualityNormalOf(Get(dv, "qualityDistribution")) is { } n && seen.Add((uuid, "")))
+                        OreQuality.Add(new OreQualityRow(uuid, refs.Record, "", Str(dd.RootElement, "_RecordName_"), "", n.Min, n.Max, n.Mean, n.Stddev));
+                }
+                if (RefText(refs.Override) is { } ovText)
+                {
+                    using var od = JsonDocument.Parse(ovText);
+                    if (!od.RootElement.TryGetProperty("_RecordValue_", out var ov)) continue;
+                    var source = Str(od.RootElement, "_RecordName_");
+                    foreach (var entry in Arr(Get(Get(ov, "locationOverride"), "locationOverrideList")))
+                    {
+                        if (RefString(entry, "location") is not { } locRef) continue;
+                        var (system, locRecord) = QualitySystemOf(locRef);
+                        if (system == null) { OreQualitySkippedLocations.Add(locRecord); continue; }
+                        if (QualityNormalOf(Get(entry, "qualityDistribution")) is { } on && seen.Add((uuid, system)))
+                            OreQuality.Add(new OreQualityRow(uuid, refs.Record, system, source, locRecord, on.Min, on.Max, on.Mean, on.Stddev));
+                    }
+                }
+            }
+        }
 
         // シグネチャーの行 (FindOreLocations が ore_locations の行と一緒に作る。同じ行は 1 つ)
         public List<OreSignatureRow> OreSignatures { get; } = new();
@@ -2138,6 +2659,7 @@ public partial class GameDataExtractor
                     var key = deposit.StartsWith('@') ? deposit[1..] : deposit;
                     var rock = key.Length > 0 && _ini.TryGetValue(key, out var en) && OreService.EnglishText(en) is { } usable ? usable : compRecord;
                     var parts = new List<(string Uuid, string Record, double Min, double Max, double Prob)>();
+                    var rawParts = new List<(string Uuid, string Record, double Min, double Max, double Prob, double? QualityScale)>();
                     foreach (var part in Arr(Get(cv, "compositionArray")))
                     {
                         if (RefText(RefString(part, "mineableElement")) is not { } meText) continue;
@@ -2147,11 +2669,14 @@ public partial class GameDataExtractor
                         if (uuid.Length == 0) continue;
                         var record = Str(rt, "_RecordName_");
                         double mn = Num(Get(part, "minPercentage")), mx = Num(Get(part, "maxPercentage")), pr = Num(Get(part, "probability"));
+                        // 品質 (ore_rock_parts・ore_quality): 行そのまま (qualityScale つき) と、資源の品質の分布の参照 (資源ごとに最初の 1 回)
+                        rawParts.Add((uuid, record, mn, mx, pr, Get(part, "qualityScale") is { ValueKind: JsonValueKind.Number } qs ? qs.GetDouble() : null));
+                        _qualityResources.TryAdd(uuid, record);
                         var i = parts.FindIndex(x => x.Uuid == uuid);
                         if (i < 0) parts.Add((uuid, record, mn, mx, pr));
                         else parts[i] = (uuid, parts[i].Record, Math.Min(parts[i].Min, mn), Math.Max(parts[i].Max, mx), Math.Max(parts[i].Prob, pr));
                     }
-                    if (parts.Count > 0) result = new OreComposition(rock, compRecord, parts);
+                    if (parts.Count > 0) result = new OreComposition(rock, compRecord, parts, rawParts);
                 }
             }
             return cache[compRef] = result;
@@ -2948,6 +3473,88 @@ public partial class GameDataExtractor
                                        ? string.Join(",", fm.Select(v => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture))) : null };
             }
             return rows;
+        }
+
+        // 採掘の設定を持つ小惑星の広がり (DeliverableSocpaks.OreAreas) のある socpak が、星系のどこに置かれているか (ore_areas に使う)。
+        // BuildStarmap の座標と同じ足し方: starMapRecord が Star の StarMapObject の Child を原点にして Child の木を辿り
+        // (子の位置 = 親の位置 + 親の枠の回転·pos、子の枠の回転 = 親の枠の回転 × R(rot))、その socpak を置く Child ごとに 1 つ
+        // (Star = 恒星の StarMapObject の record 名、X / Y / Z = socpak の枠の原点 (星系の座標)、Frame = 枠の回転 (行の順の 3×3))。
+        // BuildStarmap と違い、同じ socpak が何度置かれていても、その中の Child を置かれた回数だけ辿る (小惑星帯のガス雲の socpak は、
+        // 何度も置かれる区画の socpak の中にあるため。輪になった参照は辿らない)。
+        // 惑星・衛星 (Planet / Moon) の Child の下に置かれたものは入れない (天体と一緒に自転するので、時刻で位置が変わる。天体の近くは近くの天体で場所を決める)。
+        // 同じ恒星・同じ socpak・同じ位置 (1 m に丸めて) は 1 つ
+        internal readonly record struct OreAreaPlacement(string Socpak, string Star, double X, double Y, double Z, double[] Frame);
+        public static List<OreAreaPlacement> FindOreAreaPlacements(DeliverableDcb dcb, DeliverableSocpaks soc)
+        {
+            var list = new List<OreAreaPlacement>();
+            if (soc.OreAreas.Count == 0) return list;
+            string TypeOf(string rn) => dcb.StarMapTypeId.TryGetValue(rn, out var ty) && dcb.StarMapTypeNames.TryGetValue(ty, out var tn) ? tn : "";
+            string? RecordOfUuid(string uuid) => uuid.Length > 0 && dcb.IdToRecord.TryGetValue(uuid, out var rn) && rn.StartsWith("StarMapObject.", StringComparison.Ordinal) ? rn : null;
+            // 中を辿る socpak: その xml の Child の木 (入れ子も) のどこかから、広がりのある socpak に届くものだけ (届かない socpak の中は辿らない)
+            var parents = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            void Link(string container, IEnumerable<SocChild> nodes)
+            {
+                foreach (var n in nodes)
+                {
+                    if (n.Socpak.Length > 0)
+                    {
+                        if (!parents.TryGetValue(n.Socpak, out var ps)) parents[n.Socpak] = ps = new HashSet<string>(StringComparer.Ordinal);
+                        ps.Add(container);
+                    }
+                    Link(container, n.Kids);
+                }
+            }
+            foreach (var (key, nodes) in soc.Containers) Link(key, nodes);
+            var leads = new HashSet<string>(StringComparer.Ordinal);
+            var queue = new Queue<string>(soc.OreAreas.Keys);
+            while (queue.Count > 0)
+                if (parents.TryGetValue(queue.Dequeue(), out var ps))
+                    foreach (var p in ps)
+                        if (leads.Add(p)) queue.Enqueue(p);
+
+            var seen = new HashSet<(string Star, string Socpak, long X, long Y, long Z)>();
+            // (恒星, socpak) を最初に見つけた恒星の Child (BuildStarmap と同じく、先に辿った木のものを使う。後の木の同じ socpak は入れない)
+            var firstTree = new Dictionary<(string Star, string Socpak), int>();
+            var path = new HashSet<string>(StringComparer.Ordinal);
+            void Visit(SocChild node, string star, int tree, double x, double y, double z, double[] mp, bool underBody)
+            {
+                var m = MatMul(mp, RotMatrix(node.Rot));
+                var rec = RecordOfUuid(node.StarMapRecord);
+                var body = underBody || (rec != null && TypeOf(rec) is "Planet" or "Moon");
+                if (!body && node.Socpak.Length > 0 && soc.OreAreas.ContainsKey(node.Socpak))
+                {
+                    if (!firstTree.TryGetValue((star, node.Socpak), out var t0)) firstTree[(star, node.Socpak)] = t0 = tree;
+                    if (t0 == tree && seen.Add((star, node.Socpak, (long)Math.Round(x), (long)Math.Round(y), (long)Math.Round(z))))
+                        list.Add(new OreAreaPlacement(node.Socpak, star, x, y, z, m));
+                }
+                void Kid(SocChild k)
+                {
+                    var (dx, dy, dz) = MatApply(m, k.X, k.Y, k.Z);
+                    Visit(k, star, tree, x + dx, y + dy, z + dz, m, body);
+                }
+                foreach (var k in node.Kids) Kid(k);
+                if (node.Socpak.Length > 0 && leads.Contains(node.Socpak) && soc.Containers.TryGetValue(node.Socpak, out var own) && path.Add(node.Socpak))
+                {
+                    foreach (var k in own) Kid(k);
+                    path.Remove(node.Socpak);
+                }
+            }
+            var starNodes = new List<(SocChild Node, string Star)>();
+            void FindStars(IEnumerable<SocChild> nodes)
+            {
+                foreach (var n in nodes)
+                {
+                    if (RecordOfUuid(n.StarMapRecord) is { } rec && TypeOf(rec) == "Star") starNodes.Add((n, rec));
+                    FindStars(n.Kids);
+                }
+            }
+            foreach (var (_, nodes) in soc.Containers.OrderBy(kv => kv.Key, StringComparer.Ordinal)) FindStars(nodes);
+            // BuildStarmap と同じ順 (入れ子の Child の多いもの (星系の木) から)
+            static int Count(SocChild n) => 1 + n.Kids.Sum(Count);
+            int treeIndex = 0;
+            foreach (var (n, star) in starNodes.Select((s, i) => (s, i)).OrderByDescending(v => Count(v.s.Node)).ThenBy(v => v.i).Select(v => v.s))
+                Visit(n, star, treeIndex++, 0, 0, 0, RotMatrix(null), false);
+            return list;
         }
 
         // 四元数 (w,x,y,z。長さ 1。null なら回さない) の回転行列 (行の順の 3×3)。R(q)·v はふつうの右手系の回転

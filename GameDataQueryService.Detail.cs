@@ -109,7 +109,7 @@ public partial class GameDataQueryService
         {
             var res = OreService.LoadResources(DbPath, _translationsDbPath)
                 .FirstOrDefault(x => isResource ? x.RecordName.Equals(rec, StringComparison.OrdinalIgnoreCase) : x.Uuid.Equals(rec, StringComparison.OrdinalIgnoreCase));
-            if (res != null) return new DetailCandidate(res.RecordName, res.NameEn ?? OreService.ShortRecord(res.RecordName), ResourceDetailType, "", "");
+            if (res != null) return new DetailCandidate(res.RecordName, res.NameEn ?? OreService.ShortRecord(res.RecordName), ResourceTypeOf(res.RecordName), "", "");
         }
         try
         {
@@ -126,18 +126,87 @@ public partial class GameDataQueryService
     // ［詳細］タブの候補の種類「資源」(resource_types の資源。DetailCandidate.ItemType に入れる)
     internal const string ResourceDetailType = "Resource";
 
+    // ［詳細］タブの候補の種類「コモディティ」(resource_types の資源のうち、鉱石の範囲 (OreRange) に入らないもの。DetailCandidate.ItemType に入れる)。
+    // (2026-11-05、利用者の報告「資源はおかしい」: Ace Interceptor Helmet (ResourceType.AceInterceptorHelmet。貨物の箱を持つ加工品) が「資源」として出て、
+    // 【採掘できる場所】に「採掘できる場所のデータがありません。」と出ていた) 採掘できる資源・その精錬後・鉱石の 5 つの group のどれでもない資源は、
+    // 種類を「コモディティ」(アプリのタブの言葉) と出し、【採掘できる場所】の節を出さない (ResourceDetailText)
+    internal const string CommodityDetailType = "Commodity";
+
+    // 鉱石の範囲 (分類「鉱石」の一覧 GetOreCategoryResources と同じ決まり): 採掘で取れる資源 (ore_locations に行がある資源) とその精錬後 (refined_uuid の先) の uuid。
+    // これと OreCategoryWholeGroups の group の資源が鉱石の範囲 (InOreRange)
+    private HashSet<string> MinedAndRefinedUuids()
+    {
+        var mined = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT DISTINCT resource_uuid FROM ore_locations";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) if (!r.IsDBNull(0)) mined.Add(r.GetString(0));
+        }
+        catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
+        var include = new HashSet<string>(mined, StringComparer.OrdinalIgnoreCase);
+        if (mined.Count > 0)
+        {
+            try
+            {
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "SELECT uuid, refined_uuid FROM resource_types WHERE refined_uuid IS NOT NULL";
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                    if (!r.IsDBNull(0) && mined.Contains(r.GetString(0)) && !r.IsDBNull(1) && r.GetString(1).Length > 0) include.Add(r.GetString(1));
+            }
+            catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
+        }
+        return include;
+    }
+
+    private static bool InOreRange(OreResource x, HashSet<string> minedAndRefined) =>
+        minedAndRefined.Contains(x.Uuid) || OreCategoryWholeGroups.Contains(x.GroupRecord, StringComparer.OrdinalIgnoreCase);
+
+    // 資源ごとの［詳細］の種類 (ResourceDetailType「資源」か CommodityDetailType「コモディティ」) を決める道具。
+    // 保存データに採掘の表 (ore_locations) の行も group も無い (前の版の DB で見分けられない) ときは、全部を今までどおり「資源」にする
+    private Func<OreResource, string> ResourceTypePicker(List<OreResource> resources)
+    {
+        var include = MinedAndRefinedUuids();
+        if (include.Count == 0 && !resources.Any(r => r.GroupRecord.Length > 0)) return _ => ResourceDetailType;
+        return r => InOreRange(r, include) ? ResourceDetailType : CommodityDetailType;
+    }
+
+    // 資源 (resource_types の record 名か uuid) → ［詳細］の種類 の引き方を 1 回で作る (何件も引くとき用)。resource_types に無ければ「資源」(今までどおり)
+    public Func<string, string> ResourceTypeLookup()
+    {
+        var resources = OreService.LoadResources(DbPath, _translationsDbPath);
+        var pick = ResourceTypePicker(resources);
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in resources)
+        {
+            var t = pick(r);
+            if (r.RecordName.Length > 0) map[r.RecordName] = t;
+            if (r.Uuid.Length > 0) map[r.Uuid] = t;
+        }
+        return rec => map.TryGetValue(rec ?? "", out var t) ? t : ResourceDetailType;
+    }
+
+    // 資源 1 件の［詳細］の種類 (ResourceTypeLookup)
+    public string ResourceTypeOf(string recordOrUuid) => ResourceTypeLookup()(recordOrUuid);
+
     // 資源の候補: resource_types の英語名 (OreService.LoadResources の NameEn。［鉱石］タブと同じ引き方) か日本語名に q を含むもの (大文字小文字無視)。
     // 名前は英語名 (無ければ record 名の "ResourceType." を除いたもの)。名前の無い資源 (英語名も日本語名も無い) は出さない。
+    // 種類は鉱石の範囲の資源が「資源」、それ以外が「コモディティ」(ResourceTypePicker)。
     // 並びは 名前が q と同じもの → q で始まるもの → ほか、それぞれ名前の順
     private List<DetailCandidate> SearchResourceCandidates(string q)
     {
         var result = new List<DetailCandidate>();
-        foreach (var r in OreService.LoadResources(DbPath, _translationsDbPath))
+        var resources = OreService.LoadResources(DbPath, _translationsDbPath);
+        Func<OreResource, string>? typeOf = null;
+        foreach (var r in resources)
         {
             if (r.NameEn == null && r.NameJa == null) continue;
             var hit = (r.NameEn?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false) || (r.NameJa?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false);
             if (!hit) continue;
-            result.Add(new DetailCandidate(r.RecordName, r.NameEn ?? OreService.ShortRecord(r.RecordName), ResourceDetailType, "", ""));
+            typeOf ??= ResourceTypePicker(resources);
+            result.Add(new DetailCandidate(r.RecordName, r.NameEn ?? OreService.ShortRecord(r.RecordName), typeOf(r), "", ""));
         }
         int Rank(DetailCandidate c) => c.Name.Equals(q, StringComparison.OrdinalIgnoreCase) ? 0 : c.Name.StartsWith(q, StringComparison.OrdinalIgnoreCase) ? 1 : 2;
         return result.OrderBy(Rank).ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase).ToList();
@@ -162,32 +231,11 @@ public partial class GameDataQueryService
 
     public List<(string Record, string Name, string Kind)> GetOreCategoryResources()
     {
-        var mined = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        try
-        {
-            using var cmd = _conn.CreateCommand();
-            cmd.CommandText = "SELECT DISTINCT resource_uuid FROM ore_locations";
-            using var r = cmd.ExecuteReader();
-            while (r.Read()) if (!r.IsDBNull(0)) mined.Add(r.GetString(0));
-        }
-        catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
-        var include = new HashSet<string>(mined, StringComparer.OrdinalIgnoreCase);
-        if (mined.Count > 0)
-        {
-            try
-            {
-                using var cmd = _conn.CreateCommand();
-                cmd.CommandText = "SELECT uuid, refined_uuid FROM resource_types WHERE refined_uuid IS NOT NULL";
-                using var r = cmd.ExecuteReader();
-                while (r.Read())
-                    if (!r.IsDBNull(0) && mined.Contains(r.GetString(0)) && !r.IsDBNull(1) && r.GetString(1).Length > 0) include.Add(r.GetString(1));
-            }
-            catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
-        }
+        var include = MinedAndRefinedUuids();
         var result = new List<(string Record, string Name, string Kind)>();
         foreach (var x in OreService.LoadResources(DbPath, _translationsDbPath))
         {
-            if (!include.Contains(x.Uuid) && !OreCategoryWholeGroups.Contains(x.GroupRecord, StringComparer.OrdinalIgnoreCase)) continue;
+            if (!InOreRange(x, include)) continue;
             var name = x.NameEn ?? OreService.ShortRecord(x.RecordName);
             if (name.Contains("PLACEHOLDER", StringComparison.OrdinalIgnoreCase) || name.Contains("プレースホルダ")) continue;
             var kind = OreCategoryGroupLabels.TryGetValue(x.GroupRecord, out var label) ? label : OreService.ShortRecord(x.GroupRecord);
@@ -198,6 +246,8 @@ public partial class GameDataQueryService
 
     // 資源の詳細 (［詳細］タブ)。rec が "ResourceType." で始まる record 名か resource_types の uuid のときだけ文字を返す (それ以外・resource_types に無ければ null):
     //   【基本】名前 (英語名。無ければ record 名の "ResourceType." を除いたもの)・種類・record 名
+    //     鉱石の範囲に入らない資源 (種類「コモディティ」。ResourceTypePicker) は、group が表にあれば「分類」(group の名前) を足し、【採掘できる場所】の節を出さない
+    //     (【この資源を使う BP】は同じに出す)
     //   【採掘できる場所】ore_locations の表。精錬後の資源 (例 Copper) は、resource_types.refined_uuid でそれになる原石 (Ore_Copper 等) の行も合わせて出す。
     //     ore_locations の行 (1 場所 1 行) を (資源, preset, 掘り方, 岩の種類) で 1 行にまとめ、場所の列に場所名を ", " でつなぐ
     //     (番号の付いた小さな場所 (GameDataExtractor.OreSmallPlacePrefixes) は個別に並べず「Mining Claim (157 か所)」のように種類ごとの件数にする)。
@@ -238,11 +288,20 @@ public partial class GameDataQueryService
         }
         catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { }
 
+        // 鉱石の範囲に入らない資源 (コモディティ): 種類を「コモディティ」と出し、group があれば「分類」を足し、【採掘できる場所】の節は出さない
+        var type = ResourceTypePicker(resources)(res);
         var sb = new StringBuilder();
-        sb.AppendLine(DetailTitle(name, DetailTypeLabel(ResourceDetailType)));
+        sb.AppendLine(DetailTitle(name, DetailTypeLabel(type)));
         sb.AppendLine("【基本】");
         sb.AppendLine($"  名前: {name}");
-        sb.AppendLine($"  種類: {DetailTypeLabel(ResourceDetailType)}");
+        sb.AppendLine($"  種類: {DetailTypeLabel(type)}");
+        if (type == CommodityDetailType)
+        {
+            if (res.GroupRecord.Length > 0 && res.GroupName.Length > 0) sb.AppendLine($"  分類: {res.GroupName}");
+            sb.AppendLine($"  record 名: {OreService.ShortRecord(res.RecordName)}");
+            AppendUses();
+            return sb.ToString();
+        }
         sb.AppendLine($"  record 名: {OreService.ShortRecord(res.RecordName)}");
         sb.AppendLine();
         sb.AppendLine("【採掘できる場所】");
@@ -1123,6 +1182,7 @@ public partial class GameDataQueryService
         "InventoryContainer" => "インベントリコンテナ",
         "SalvageModifier" => "サルベージモジュール",
         ResourceDetailType => "資源",
+        CommodityDetailType => "コモディティ",
         _ when itemType.StartsWith("Char_Armor_", StringComparison.Ordinal) => "アーマー",
         _ when itemType.StartsWith("Char_Clothing_", StringComparison.Ordinal) => "服",
         _ => new ShipPortInfo { ItemType = itemType }.TypeDisplay,

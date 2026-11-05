@@ -362,6 +362,8 @@ if ($status) {
     $commitMsg += "`n`nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     git commit -m $commitMsg
     git push origin main
+    # push に失敗したら止める (前は止まらずに進み、リリースのタグが push 前のコミットに付いた)
+    if ($LASTEXITCODE -ne 0) { throw "git push に失敗しました (終了コード $LASTEXITCODE)。リリースは作っていません。'git push origin main' が通る状態にしてから、もう一度実行してください (commit は済んでいます)" }
     Write-Host "Push OK" -ForegroundColor Green
 } else {
     Write-Host "No changes to commit" -ForegroundColor Yellow
@@ -388,19 +390,40 @@ $headers = @{
     "Content-Type"  = "application/json"
 }
 
+# リリースは下書き (draft) で作り、添付を全部 (manifest まで) 載せ終えてから公開に切り替える (2026-11-05)。
+# 公開してから manifest が載るまでの間に前の版のアプリが更新を確かめると、「差分の更新の情報が無いため、手で入れてください」の窓が出て、
+# その版を見送りとして覚えてしまうため。下書きは releases/latest に出ないので、前の版のアプリからは見えない。
+# タグは target_commitish に渡したコミット (今の HEAD) から作られる。そのコミットがリモートにあることを先に確かめ、無ければ下書きを作る前に止める
+$headSha = [string](git rev-parse HEAD)
+if ($LASTEXITCODE -ne 0 -or $headSha -notmatch '^[0-9a-f]{40}([0-9a-f]{24})?$') { throw "今の HEAD のコミットを読めませんでした (git rev-parse HEAD)。リリースは作っていません" }
+$remoteMainLine = [string](git ls-remote origin refs/heads/main)
+if ($LASTEXITCODE -ne 0 -or -not $remoteMainLine) { throw "リモート (origin) の main を読めませんでした (git ls-remote origin refs/heads/main)。リリースは作っていません" }
+$remoteMainSha = ($remoteMainLine -split '\s+')[0]
+if ($remoteMainSha -ne $headSha) {
+    # リモートの main が今の HEAD より先に進んでいるだけなら、HEAD はリモートにある (手元の origin/main の手前にある) ので続ける
+    git merge-base --is-ancestor $headSha origin/main 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "今の HEAD ($headSha) がリモート (origin の main は $remoteMainSha) にありません (push できていません)。リリースは作っていません。'git push origin main' をしてから、もう一度実行してください"
+    }
+    Write-Host "  注意: リモートの main ($remoteMainSha) は今の HEAD ($headSha) より先に進んでいます。タグは今の HEAD に付けます" -ForegroundColor Yellow
+}
+
 $releaseBody = if ($Message) { $Message } else { "Release v$Version" }
 $bodyJson = @{
     tag_name   = "v$Version"
+    target_commitish = $headSha
     name       = "v$Version"
     body       = $releaseBody
-    draft      = $false
+    draft      = $true
     prerelease = $false
 } | ConvertTo-Json
 
 $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases" -Method Post -Headers $headers -Body ([System.Text.Encoding]::UTF8.GetBytes($bodyJson)) -ContentType "application/json; charset=utf-8"
 $releaseId = $release.id
-Write-Host "Release created: $($release.html_url)" -ForegroundColor Green
+Write-Host "Draft release created (id $releaseId): $($release.html_url)" -ForegroundColor Green
 
+# 5.〜5.5. の添付を載せている途中で失敗したら、下書きが残ったことと直し方を出して止まる (下の catch)
+try {
 # 5. Upload ZIP asset
 Write-Host "=== Upload Asset ===" -ForegroundColor Cyan
 $uploadUrl = "https://uploads.github.com/repos/$Repo/releases/$releaseId/assets?name=$ZipName"
@@ -442,10 +465,35 @@ foreach ($name in ($newAssets.Keys | Sort-Object)) {
 $manifestUpUrl = "https://uploads.github.com/repos/$Repo/releases/$releaseId/assets?name=update-manifest.json"
 Invoke-RestMethod -Uri $manifestUpUrl -Method Post -Headers @{ "Authorization" = "token $token"; "Content-Type" = "application/json" } -InFile $ManifestPath | Out-Null
 Write-Host "Update manifest uploaded" -ForegroundColor Green
+} catch {
+    throw ("添付を載せている途中で失敗しました: $($_.Exception.Message)`n" +
+           "下書きのリリース v$Version (id $releaseId) が残っています (公開していないので、利用者のアプリからは見えません)。`n" +
+           "直し方: リリースのページ (https://github.com/$Repo/releases) で下書きを消してから、もう一度このスクリプトを実行する (commit と push は済んでいるので、やり直しても増えません)。`n" +
+           "または、その下書きに残りの添付を載せてから公開する (update-manifest.json は最後に載せる)")
+}
+
+# 6. 下書きを公開に切り替える (添付が全部載ってから。PATCH /repos/{owner}/{repo}/releases/{release_id} の draft: false)
+Write-Host "=== Publish release ===" -ForegroundColor Cyan
+$publishJson = @{ draft = $false } | ConvertTo-Json
+$published = $null
+try {
+    $published = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/$releaseId" -Method Patch -Headers $headers -Body ([System.Text.Encoding]::UTF8.GetBytes($publishJson)) -ContentType "application/json; charset=utf-8"
+} catch {
+    throw ("公開への切り替えに失敗しました: $($_.Exception.Message)`n" +
+           "添付は全部載っています。リリースのページ (https://github.com/$Repo/releases) で、下書きの v$Version (id $releaseId) を公開すれば済みます")
+}
+if ($published.draft) {
+    throw "公開への切り替えの応答が、まだ下書きのままです。添付は全部載っています。リリースのページ (https://github.com/$Repo/releases) で、下書きの v$Version (id $releaseId) を公開してください"
+}
+Write-Host "Published: v$Version" -ForegroundColor Green
+
+# 最後に出す URL は、公開した後の応答から取る (下書きのときに返った URL は、公開した後の URL と同じとは限らない)
+$publishedZip = @($published.assets | Where-Object { $_.name -eq $ZipName }) | Select-Object -First 1
+$downloadUrl = if ($publishedZip -and $publishedZip.browser_download_url) { [string]$publishedZip.browser_download_url } else { "$DownloadBase/$ZipName" }
 
 Write-Host ""
 Write-Host "=== Done ===" -ForegroundColor Green
-Write-Host "Release: $($release.html_url)"
-Write-Host "Download: $($asset.browser_download_url)"
+Write-Host "Release: $($published.html_url)"
+Write-Host "Download: $downloadUrl"
 
 

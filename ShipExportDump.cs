@@ -9,9 +9,11 @@ namespace StarCitizenJapaneseTextCreater;
 // props の並びは Rust では HashMap の並び (出すたびに変わる) なので、ここでは読んだ順。照合のハッシュ (Ship3DEstimator.CanonicalHash) はキーを並べ替えるので影響しない
 internal static partial class ShipExport
 {
-    public static (string Json, string ResolvedName) DumpHierarchy(P4kArchive p4k, DataCoreDb db, string name, CancellationToken ct = default)
+    // item: Export の item と同じ (船でない品)。品で主の形の代わりに別の形を本体にするとき (ItemShape) は、root の geometry と root_nmc をその形のものにする
+    // (照合の元ファイルの一覧に、実際に読む形が入るように。船は今までどおり)
+    public static (string Json, string ResolvedName) DumpHierarchy(P4kArchive p4k, DataCoreDb db, string name, CancellationToken ct = default, bool item = false)
     {
-        var ctx = new Ctx { P4k = p4k, Db = db, Ct = ct };
+        var ctx = new Ctx { P4k = p4k, Db = db, Ct = ct, Item = item };
         var record = FindRecord(db, name, out _) ?? throw new ExportException($"no EntityClassDefinition records matching '{name}'");
         var idx = IndexOf(db);
         var tree = ResolveLoadout(idx, record);
@@ -20,6 +22,7 @@ internal static partial class ShipExport
         var rootGeom = (gc == null ? null : TryString(db, gc, record)) ?? "";
         var mc = TryCompile(db, record.StructIndex, "Components[SGeometryResourceParams].Geometry.Geometry.Material.path", DataCoreDb.StringLeaf);
         var rootMtl = (mc == null ? null : TryString(db, mc, record)) ?? "";
+        if (item && ItemShape(p4k, idx, record) is { } shape) (rootGeom, rootMtl) = shape;
         o.Append("  \"root\": {\n    \"entity\": ").Append(Dbg(tree.EntityName)).Append(",\n    \"geometry\": ").Append(Dbg(rootGeom)).Append("\n  },\n");
         DumpNmc(o, "root_nmc", p4k, rootGeom, rootMtl);
         var invisible = InvisiblePorts(ctx, record);

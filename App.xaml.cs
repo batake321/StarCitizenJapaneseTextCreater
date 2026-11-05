@@ -342,6 +342,22 @@ public partial class App : Application
             return;
         }
 
+        // 公開の前に: 配る DB (作業フォルダの gamedata_cache.db) に、採掘できる場所・シグネチャー・品質・広がりの表を画面なしで作り直して入れる
+        // (--rebuild-ore-tables [作業フォルダ])。起動後の裏の作り直しと同じ処理 (GameDataExtractor.RebuildOreLocationsAsync)。結果は標準出力と終了コード
+        if (e.Args.Length >= 1 && e.Args[0] == "--rebuild-ore-tables")
+        {
+            Console.OutputEncoding = System.Text.Encoding.UTF8;
+            int code;
+            try { code = RunRebuildOreTables(e.Args.Length >= 2 ? e.Args[1] : null); }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"NG: {ex.GetType().Name}: {ex.Message}");
+                code = 1;
+            }
+            Environment.Exit(code);
+            return;
+        }
+
         if (e.Args.Length >= 2 && e.Args[0] == "--export-backup")
         {
             _exportingBackup = true;   // この途中の例外は、記録してから失敗の終了コードで終わる
@@ -522,6 +538,69 @@ public partial class App : Application
         return Directory.GetDirectories(parent)
             .Where(d => File.Exists(Path.Combine(d, "Data.p4k")))
             .ToList();
+    }
+
+    // --rebuild-ore-tables [作業フォルダ]: 起動後の裏の作り直し (MainWindow の「採掘できる場所」の段) と同じ GameDataExtractor.RebuildOreLocationsAsync を画面なしで走らせる
+    // (2026-11-05、利用者の指示「今取り込んで直して DB 更新してから公開すればいい」。配る DB に ore_quality・ore_rock_parts・ore_areas を入れておき、
+    //  各利用者の PC で起動後の作り直しが走らないようにする)。
+    //   設定は起動時と同じ読み方 (AppConfigLoader。個人の設定が無いときに既定を写さないのは --export-backup と同じ)。ゲームのフォルダも起動時と同じ決め方。
+    //   作業フォルダは引数があればそれ、無ければ設定の作業フォルダ。その中の gamedata_cache.db に書く (無ければやめる)。
+    //   アプリが起動中で、書く先が設定の作業フォルダと同じなら走らせない (同じ DB に 2 つから書かないため)。
+    //   終わったら作業フォルダの DB をチェックポイントし (-wal を空にする)、5 つの表の行数を出す。新しい 3 つの表のどれかが 0 行なら失敗 (終了コード 1)。
+    //   書き込みは表ごとのトランザクション (前の行を消して入れ直すのを 1 つにまとめる) なので、途中で止まっても、書きかけの表は前の行のまま残る
+    private static int RunRebuildOreTables(string? workDirArg)
+    {
+        var appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "StarCitizenJapaneseTextCreater");
+        var loaded = AppConfigLoader.Load(AppContext.BaseDirectory, Path.Combine(appDataDir, "appsettings.json"), DateTime.Now, copyDefaultIfMissing: false);
+        if (loaded.Notice is { } notice) Console.WriteLine(notice);
+        Config = loaded.Config;
+        if (string.IsNullOrEmpty(Config.GamePath) || !Directory.Exists(Config.GamePath))
+        {
+            var detected = DetectFromLauncherLog();
+            if (detected.Count > 0) Config.GamePath = detected[0];
+        }
+        var configured = string.IsNullOrEmpty(Config.WorkingDirectory) ? @"C:\temp" : Config.WorkingDirectory;
+        var workDir = string.IsNullOrWhiteSpace(workDirArg) ? configured : workDirArg;
+        var dbPath = Path.Combine(workDir, "gamedata_cache.db");
+        if (!File.Exists(dbPath)) { Console.WriteLine($"NG: gamedata_cache.db がありません: {dbPath}"); return 1; }
+
+        using var running = new System.Threading.Mutex(true, SingleInstanceMutexName, out var createdNew);
+        static string Full(string p) => Path.GetFullPath(p).TrimEnd('\\', '/');
+        if (!createdNew && string.Equals(Full(workDir), Full(configured), StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine("NG: アプリが起動中です。アプリを閉じてから走らせてください (同じ DB に 2 つから書かないため)");
+            return 1;
+        }
+        Config.WorkingDirectory = workDir;
+        Console.WriteLine($"作業フォルダ: {workDir}");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        using (var extractor = new GameDataExtractor(workDir))
+        {
+            if (!extractor.IsReady) { Console.WriteLine("NG: Data.p4k が見つかりません (設定のゲームパスを確認してください)"); return 1; }
+            Console.WriteLine($"作り直しの判定 (NeedsOreLocations): {extractor.NeedsOreLocations()}");
+            extractor.StatusChanged += s => Console.WriteLine(s);
+            // 同期コンテキストの無いスレッドプール上で待つ (RunBackupExport と同じ理由)
+            Task.Run(() => extractor.RebuildOreLocationsAsync()).GetAwaiter().GetResult();
+            Console.WriteLine($"作り直しの判定 (NeedsOreLocations): {extractor.NeedsOreLocations()} (偽なら、起動後の作り直しは走らない)");
+        }
+        // 作業フォルダの DB をチェックポイントする (閉じるときと同じ。-wal を空にする)
+        CheckpointWorkDbs();
+        var counts = new Dictionary<string, long>();
+        using (var c = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Pooling=False"))
+        {
+            c.Open();
+            foreach (var table in new[] { GameDataExtractor.OreLocationsTable, GameDataExtractor.OreSignaturesTable, GameDataExtractor.OreQualityTable,
+                         GameDataExtractor.OreRockPartsTable, GameDataExtractor.OreAreasTable })
+            {
+                using var cmd = c.CreateCommand();
+                cmd.CommandText = $"SELECT COUNT(*) FROM {table}";
+                counts[table] = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L);
+            }
+        }
+        var summary = string.Join("・", counts.Select(kv => $"{kv.Key} {kv.Value} 行"));
+        var ok = counts[GameDataExtractor.OreQualityTable] > 0 && counts[GameDataExtractor.OreRockPartsTable] > 0 && counts[GameDataExtractor.OreAreasTable] > 0;
+        Console.WriteLine($"{(ok ? "OK" : "NG")}: {summary} ({sw.Elapsed.TotalSeconds:F0} 秒)");
+        return ok ? 0 : 1;
     }
 
     private void RunBackupExport(string outputDir)

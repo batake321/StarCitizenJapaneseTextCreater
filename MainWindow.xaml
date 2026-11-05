@@ -2226,7 +2226,7 @@
                                 </Grid.RowDefinitions>
 
                                 <TextBlock Grid.Row="0" TextWrapping="Wrap" Margin="0,0,0,8" Foreground="#666"
-                                           Text="StarBreaker CLI で Data.p4k からゲーム内データ（船・武器・コンポーネント・契約）を抽出しDBに格納します。インデックス構築（約2分半）でパッチ毎のデータをキャッシュし、FTS5 全文検索で日本語・あいまい検索が可能になります。ベクトル検索構築は「AI 設定」のバックエンド（Ollama優先）を使用し約2分15秒（合計約5分）。"/>
+                                           Text="アプリの中の処理で Data.p4k からゲーム内データ（船・武器・コンポーネント・契約）を抽出しDBに格納します。インデックス構築（約2分半）でパッチ毎のデータをキャッシュし、FTS5 全文検索で日本語・あいまい検索が可能になります。ベクトル検索構築は「AI 設定」のバックエンド（Ollama優先）を使用し約2分15秒（合計約5分）。"/>
 
                                 <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
                                     <Button x:Name="btnExtractGameData" Content="インデックス構築"
@@ -2611,6 +2611,31 @@
                                 <TextBlock Grid.Row="7" Grid.ColumnSpan="3" TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontSize="12"
                                            Text="［詳細］タブで船を出しているときの［3D 表示］［別ウィンドウ］は、取り込み済みの船はその 3D モデルを、取り込んでいない船は選択中のチャンネルのゲームデータ (Data.p4k) から直接読んで出します (テクスチャ付き・船内込み)。「3D モデルを保存しない」を入れていなければ、読んだものを置いておきます。ゲームデータが変わると読み直します。［船舶・車両をまとめて取り込む］は、予想サイズの合計が最大容量を超える手前で止めます (古いものを消して入れ替えません)。CPU 使用率が 90% 以上のときは書き出しを始めません。ステーション・都市の 3D (新しい方式) は、区画の置き方の一覧 (stations フォルダの view3d_layout.db) だけを置き、形は開いたときにゲームデータから見る所の分だけ取り出して描きます。"/>
                             </Grid>
+                        </GroupBox>
+
+                        <!-- 現在位置のキーとオーバーレイ (MainWindow.OreOverlay.cs / MapCurrentHotkey / OreOverlayWindow): ［マップ］の［現在位置］をキーで動かす・
+                             取れたときにその場所で採掘できる物をゲームの画面に重ねて出す -->
+                        <GroupBox Header="現在位置のキーとオーバーレイ" Margin="0,0,0,8">
+                            <StackPanel Margin="8">
+                                <StackPanel Orientation="Horizontal" Margin="0,4">
+                                    <CheckBox x:Name="chkMapHotkey" Content="キーで現在位置を取る" VerticalAlignment="Center"
+                                              ToolTip="入れると (既定)、右の欄のキーを押したときに、［マップ］の［現在位置］ボタンと同じ処理をします。ゲームの窓が前にあるままでも動き、アプリの窓は前に出しません。「設定を保存」で有効になります"/>
+                                    <TextBlock Text="キー:" VerticalAlignment="Center" Margin="16,0,6,0"/>
+                                    <TextBox x:Name="txtMapHotkey" Width="240" IsReadOnly="True" VerticalAlignment="Center" InputMethod.IsInputMethodEnabled="False"
+                                             PreviewKeyDown="TxtMapHotkey_PreviewKeyDown" GotKeyboardFocus="TxtMapHotkey_GotKeyboardFocus" LostKeyboardFocus="TxtMapHotkey_LostKeyboardFocus"
+                                             ToolTip="この欄を選んで、割り当てるキーを押してください (Ctrl・Shift・Alt は左右を区別します。既定は 左 Ctrl + 左 Shift + Insert)。右 Ctrl・右 Shift で押しても動きません。「設定を保存」で有効になります"/>
+                                    <TextBlock x:Name="txtMapHotkeyStatus" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,4">
+                                    <CheckBox x:Name="chkOreOverlay" Content="現在位置を取ったら、その場所で採掘できる物をゲームの画面に重ねて出す" VerticalAlignment="Center"
+                                              ToolTip="入れると、［マップ］の［現在位置］ボタン・ステーションの 3D の［現在位置］・上のキーで座標が取れたときに、その場所で採掘できる岩・資源 (出やすさ・シグネチャー・岩の中の割合・品質の範囲) を、ゲームの画面の上に重ねて出します。切ると (既定) 出しません。自動の取得では出しません。「設定を保存」で有効になります"/>
+                                    <TextBlock Text="表示する秒数:" VerticalAlignment="Center" Margin="16,0,6,0"/>
+                                    <TextBox x:Name="txtOreOverlaySeconds" Width="60" VerticalAlignment="Center" ToolTip="出してから消えるまでの秒数 (既定 10)。0 なら出したままです。もう一度現在位置を取ると数え直します。「設定を保存」で有効になります"/>
+                                    <TextBlock Text="0 なら出したまま" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
+                                </StackPanel>
+                                <TextBlock TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#666" FontSize="12"
+                                           Text="オーバーレイは、ふだんはクリックを下のゲームへ通します。左 Ctrl と左 Shift を両方押している間だけクリックを受けます (Ctrl だけ・Shift だけ・右のキーでは通します)。位置と大きさを変えるには、オーバーレイの上で 左 Ctrl + 左 Shift + クリックします。枠とつまみが出るので、ドラッグで移動、端・角のドラッグで大きさを変え、動かさずにクリックすると確定して保存します (✕ は確定せずに閉じます)。変更中は時間で消えません。ゲームのプロセスには触らず、アプリのゲームデータの表だけを使います。"/>
+                            </StackPanel>
                         </GroupBox>
 
                         <!-- 日本語フォント (gfx) (FontGfxInstaller / MainWindow.FontGfx.cs): 公開物の fonts_en.gfx (Noto Sans JP に置き換えたもの) をゲームのフォルダに置く・元に戻す -->

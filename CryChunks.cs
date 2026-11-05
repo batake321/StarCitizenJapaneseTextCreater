@@ -551,14 +551,16 @@ internal sealed class CryMtl
         return new Sub(name, shader, mask, nodraw, diffuse);
     }
 
-    public static bool IsDecal(Sub m) => m.StringGenMask.Contains("%DECAL") || m.Shader == "MeshDecal";
+    // デカールの見分けは StringGenMask の語で見る (SocpakGlb.SubMat.IsDecal と同じ決まり。「%DECALS」はデカールにしない。2026-11-05、利用者の決定「広げる」:
+    // ステーションでは店に並んだ服・工具袋・帽子などの面が出ていなかった)
+    public static bool IsDecal(Sub m) => SocpakGlb.SubMat.HasDecalWord(m.StringGenMask) || m.Shader == "MeshDecal";
 
     // pack_mesh で面を出さない submesh: should_hide、または (テクスチャを使わないので) デカール
     public static bool HideWithoutTextures(Sub m)
     {
         if (m.IsNoDraw) return true;
         var mask = m.StringGenMask;
-        if (mask.Contains("%PARALLAX_OCCLUSION_MAPPING") && (IsDecal(m) || mask.Contains("%DECAL"))) return true;
+        if (mask.Contains("%PARALLAX_OCCLUSION_MAPPING") && IsDecal(m)) return true;
         if (IsDecal(m) && m.DiffuseTex == null && (mask.Contains("STENCIL_MAP") || !mask.Contains("%VERTCOLORS"))) return true;
         return IsDecal(m);
     }

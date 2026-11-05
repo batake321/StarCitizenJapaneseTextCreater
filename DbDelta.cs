@@ -4,7 +4,7 @@ using System.IO.Compression;
 
 namespace StarCitizenJapaneseTextCreater;
 
-// 同梱の大きな DB (gamedata_cache.db・translations.db・equipment_cache.db) の、ファイルの中の差分。
+// 同梱の大きな DB (gamedata_cache.db・translations.db・equipment_cache.db・view3d_layout.db) の、ファイルの中の差分。
 // 作る (release.ps1 が exe の --make-db-delta で呼ぶ) と当てる (AppUpdater がダウンロードのときに呼ぶ) を、ここ 1 か所にまとめる。
 // 差分の作り方は codec の名前で選び、manifest の deltas[].codec に書く。アプリは知らない codec の差分は使わず、DB を丸ごと取る。
 // 作り方を入れ替えるときは、IDbDeltaCodec を足して Codecs に登録し、Default を替える (前の codec の差分も、登録が残っていれば当てられる)
@@ -30,8 +30,9 @@ internal static class DbDelta
     public static IDbDeltaCodec Default => ZstdPrefixV1;
     public static IDbDeltaCodec? Get(string? name) => name != null && Codecs.TryGetValue(name, out var c) ? c : null;
 
-    // 差分で更新する同梱の DB (manifest の deltas を作る・使うファイル)
-    public static readonly string[] DeltaFiles = ["gamedata_cache.db", "translations.db", "equipment_cache.db"];
+    // 差分で更新する同梱の DB (manifest の deltas を作る・使うファイル)。release.ps1・release_db.ps1 の $deltaDbNames と同じ並びにする
+    // (2026-11-05: view3d_layout.db を足した。release.ps1 は v2.6.0 から差分を載せていたが、ここに無かったのでアプリは丸ごと取っていた)
+    public static readonly string[] DeltaFiles = ["gamedata_cache.db", "translations.db", "equipment_cache.db", "view3d_layout.db"];
     public static bool IsDeltaFile(string relPath) => DeltaFiles.Contains(Path.GetFileName(relPath), StringComparer.OrdinalIgnoreCase);
 }
 

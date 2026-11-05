@@ -27,13 +27,25 @@ internal static class SocpakGlb
         public string? DiffuseTex, NormalTex;
         public List<Layer> Layers = new();
         public byte PaletteTint;
-        public bool IsDecal => StringGenMask.Contains("%DECAL") || Shader == "MeshDecal";
+        // 面を隠す決まりのデカールの見分け (船・ステーション・品の 3D で同じ決まり)。StringGenMask を「%」で区切った語で見る (HasDecalWord。CryMtl.IsDecal も同じ)。
+        // (2026-11-05、利用者の報告「Zeus Exploration Backpack は、何も出ない」と、利用者の決定「広げる」) 移植元 (StarBreaker v0.2.2 の mtl.rs) と同じく
+        // 「%DECAL」という文字の並びがあるかで見ていたので、別の語「%DECALS」(LayerBlend_V2 の材質にある) もデカールとして扱い、DiffuseTex の無い材質の面
+        // (バックパック・ヘルメット・店に並んだ服・工具袋・帽子、船内の吊るしたシャツなど) を全部隠していた。
+        // AlphaConfig・DoubleSided は今までどおり文字の並びで見る (変えたときの影響を調べていないので変えていない)
+        public bool IsDecal => HasDecalWord(StringGenMask) || Shader == "MeshDecal";
+        // 語が「DECAL」そのものか「DECAL_」で始まる (DECAL_OPACITY_MAP) ときだけデカールの語 (「DECALS」は別の語)
+        public static bool HasDecalWord(string stringGenMask)
+        {
+            foreach (var w in stringGenMask.Split('%', StringSplitOptions.RemoveEmptyEntries))
+                if (w == "DECAL" || w.StartsWith("DECAL_", StringComparison.Ordinal)) return true;
+            return false;
+        }
         public bool IsGlass => Shader == "GlassPBR";
         public bool ShouldHide()
         {
             if (IsNoDraw) return true;
             var m = StringGenMask;
-            if (m.Contains("%PARALLAX_OCCLUSION_MAPPING") && (IsDecal || m.Contains("%DECAL"))) return true;
+            if (m.Contains("%PARALLAX_OCCLUSION_MAPPING") && IsDecal) return true;
             if (IsDecal && DiffuseTex == null && (m.Contains("STENCIL_MAP") || !m.Contains("%VERTCOLORS"))) return true;
             return false;
         }

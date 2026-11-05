@@ -679,6 +679,10 @@ internal static class CurrentLocation
 
     public static double InsideRange(ShopTreeNode n) => Math.Max((n.Radius ?? 0) * 2, InsideMinDistance);
 
+    // 「その場所の中か付近」とみなす距離 (WhereaboutsOf の、いちばん近い場所の中の距離 (InsideRange) と付近の距離 (NearestNearDistance) の大きいほう)。
+    // 現在位置のオーバーレイ (OreHere) が、採掘できる場所 (小惑星) の中か付近にいるかを同じ距離で決めるのに使う
+    public static double InsideOrNearRange(ShopTreeNode n) => Math.Max(InsideRange(n), NearestNearDistance);
+
     // 現在位置 pos の現在地: Game.log の居場所 (logPlace) が中の距離以内ならその中、無ければいちばん近い場所 (loc.Near の先頭) が中の距離以内ならその中
     // (いちばん近い場所が地表の場所 (IsSurfacePlace) なら、中とは言わず付近にする。地表のアウトポストは中心からの距離がほぼ同じで取り違えるため)。
     // どちらでもなければ、Game.log の居場所が 50 Km 以内ならその場所、いちばん近い場所が 5 Km 以内ならその付近、それも無ければ宇宙

@@ -83,17 +83,28 @@
 
         <!-- 詳細 (Markdown を HTML にして WebView2 で出す。文字を選んでコピーできる)。WebView2 が使えないときは下の文字の欄で出す。
              3D 表示はその上に別の WebView2 (web3D) で出す (詳細の WebView2 とは別) -->
-        <Border Grid.Row="6" BorderBrush="#CCC" BorderThickness="1">
+        <!-- この行に割り当てられた高さを知るための空の部品 (中身が無いので、高さは割り当てられた高さそのもの。下の枠は、中の行の下限のぶんより
+             小さくならないので、枠の高さでは割り当ての高さが分からない)。3D の欄の高さの上限を決めるのに使う (DetailPanel.xaml.cs の Apply3DLayout) -->
+        <Border x:Name="probeDetailArea" Grid.Row="6" IsHitTestVisible="False" SizeChanged="DetailArea_SizeChanged"/>
+        <Border x:Name="borderDetail" Grid.Row="6" BorderBrush="#CCC" BorderThickness="1">
+            <!-- 行: 詳細の文 / 仕切り (3D を出している間だけ) / 3D の欄。3D の欄の高さは仕切りのドラッグで変えられ、設定に覚える
+                 (DetailPanel.xaml.cs の「3D の欄の高さ」。出していない間は 3D の行の高さは Auto = 0 で、詳細の文が全体を使う) -->
             <Grid>
                 <Grid.RowDefinitions>
-                    <RowDefinition Height="*" MinHeight="40"/>
+                    <RowDefinition x:Name="rowDetail" Height="*" MinHeight="40"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition x:Name="row3D" Height="Auto"/>
                 </Grid.RowDefinitions>
                 <wv2:WebView2 x:Name="webDetail"/>
-                <!-- 3D は詳細の下に出す (マウスのドラッグで回す・ホイールで拡大縮小。ビューアの操作) -->
-                <wv2:WebView2 x:Name="web3D" Grid.Row="1" Height="340" Visibility="Collapsed"/>
+                <!-- 詳細の文と 3D の欄の間の仕切り (2026-11-05、利用者の指示「3D 部分を上に広げたりしたい」)。上へドラッグすると 3D の欄が上に広がる。
+                     ドラッグの間はこの部品がマウスを掴むので、上下の WebView2 の上へ来ても途切れない。キーでは動かさない (Focusable = False) -->
+                <GridSplitter x:Name="split3D" Grid.Row="1" Height="6" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                              ResizeDirection="Rows" ResizeBehavior="PreviousAndNext" Background="#E0E0E0" Focusable="False" Visibility="Collapsed"
+                              DragCompleted="Split3D_DragCompleted" ToolTip="上下にドラッグすると、3D の欄の高さを変えられます (高さは覚えます)"/>
+                <!-- 3D は詳細の下に出す (マウスのドラッグで回す・ホイールで拡大縮小。ビューアの操作)。高さは行 (row3D) の高さ -->
+                <wv2:WebView2 x:Name="web3D" Grid.Row="2" Visibility="Collapsed"/>
                 <!-- 船でない品の 3D の小さな絵を描くための隠した WebView2 (見せない。ビューアを ?thumb=1 で開いて 1 コマ描き PNG を受け取る。DetailPanel.RenderThumbAsync) -->
-                <wv2:WebView2 x:Name="webThumb" Grid.Row="1" Height="0" Visibility="Collapsed"/>
+                <wv2:WebView2 x:Name="webThumb" Grid.Row="2" Height="0" Visibility="Collapsed"/>
                 <TextBox x:Name="txtDetail" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, Yu Gothic UI" FontSize="13"
                          VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" BorderThickness="0" Padding="6"
                          Visibility="Collapsed"/>

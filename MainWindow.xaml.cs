@@ -128,6 +128,8 @@ public partial class MainWindow : Window
         // ［マップ］: 最後の表示を設定に入れたら、設定のファイルに保存する
         // (保存に失敗しても MessageBox は出さず、アプリのログに出すだけ)
         mapPanel.SaveConfig = () => SaveConfigToFile(showError: false);
+        // ［詳細］: 3D の欄の高さ (仕切りのドラッグ) を設定に入れたら、設定のファイルに保存する (同じく MessageBox は出さない)
+        detailPanel.SaveConfig = () => SaveConfigToFile(showError: false);
         // ［マップ］の［現在位置］: ［ゲームログ］の追い読みの今の着陸場所 (Game.log の居場所。自転の角度の実測の基準に使う)
         mapPanel.LandingPlaceProvider = gameLogPanel.CurrentLandingPlace;
         // ［マップ］の推定位置: ［ゲームログ］の追い読みの量子ジャンプの状態
@@ -137,7 +139,8 @@ public partial class MainWindow : Window
         // ［マップ］の自動の取得: ［ゲームログ］の追い読みで量子ジャンプの目的地の選択・到着の行を見たら知らせる
         gameLogPanel.QuantumEventSeen += mapPanel.OnQuantumEvent;
         // ステーションの 3D (新しい方式) の［現在位置］: ［マップ］の［現在位置］と同じ処理 (マップタブが開かれていなくても動く。MapPanel.CaptureCurrentAsync)
-        StationView3DView.CaptureHook = mapPanel.CaptureCurrentAsync;
+        // (座標が取れたら現在位置のオーバーレイも出す: CaptureCurrentWithOverlayAsync)
+        StationView3DView.CaptureHook = mapPanel.CaptureCurrentWithOverlayAsync;
         // 前の版の 2D の地図・古い方式のステーションの 3D のファイルを消す (1 回だけ。消せなかったものがあれば次の起動でまた。StationView3DLayout.CleanupOldMaps)
         _ = Task.Run(StationView3DLayout.CleanupOldMaps);
     }
@@ -231,6 +234,8 @@ public partial class MainWindow : Window
         InitFontGfx();
         // 自動更新 (MainWindow.Update.cs): 起動したときと毎日の時刻の確かめ
         InitAutoUpdate();
+        // 現在位置のキーとオーバーレイ (MainWindow.OreOverlay.cs): 設定タブの欄と、キーの登録
+        InitOreOverlaySettings();
     }
 
     private void PopulateChannels()
@@ -1891,6 +1896,7 @@ public partial class MainWindow : Window
         App.Config.SyncFolder = txtSyncFolder.Text.Trim();
         SaveShip3DSettings();
         SaveAutoUpdateSettings();
+        SaveOreOverlaySettings();
         App.Config.UexApiKey = txtUexApiKey.Text.Trim();
         if (double.TryParse(txtMissionFontSize.Text.Trim(), out var fs) && fs >= 8 && fs <= 30)
         {
@@ -1914,6 +1920,33 @@ public partial class MainWindow : Window
         if (App.ConfigSaveDisabled) return;
         try
         {
+            var json = BuildConfigJson();
+            // 同じフォルダの一時ファイルに書いてから入れ替える (元が無ければ移す)
+            var tmp = App.ConfigPath + ".tmp";
+            File.WriteAllText(tmp, json, Encoding.UTF8);
+            if (File.Exists(App.ConfigPath)) File.Replace(tmp, App.ConfigPath, null);
+            else File.Move(tmp, App.ConfigPath);
+        }
+        catch (Exception ex)
+        {
+            // showError = false (マップタブからの保存): MessageBox を出さず、アプリのログに出すだけ
+            if (showError) MessageBox.Show($"設定保存エラー: {ex.Message}", "エラー");
+            else App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 設定を保存できませんでした: {ex.GetType().FullName}: {ex.Message}");
+        }
+    }
+
+    // 窓の位置・大きさの鍵 (App.Config.WindowLeft など)。まだ決まっていない (NaN の) 間は設定のファイルに書かない (BuildConfigJson)
+    private static readonly string[] WindowBoundsKeys = [nameof(AppConfig.WindowLeft), nameof(AppConfig.WindowTop), nameof(AppConfig.WindowWidth), nameof(AppConfig.WindowHeight)];
+
+    // 設定のファイルに書く JSON (App.Config の今の値)。保存するものは下の一覧に 1 つずつ並べる (一覧に無いものは保存されない)。
+    // (2026-11-05、利用者の指示「直す」) 窓の位置・大きさ (WindowLeft / WindowTop / WindowWidth / WindowHeight) は、まだ決まっていない間は NaN (Config.cs の既定。
+    // 値を入れるのは最大化していないときの SaveConfigForExit だけ)。NaN は JSON の数に書けず (System.ArgumentException)、前は保存がまるごと失敗していた
+    // (初回の起動から、最大化していない状態で初めて終了するまでの間・最大化したまま終了した後)。有限の値でないときは、その鍵を書かない。
+    // 鍵が無ければ、読み込み (AppConfigLoader) は今までどおり既定の NaN のまま読むので、窓の位置・大きさの扱い (RestoreWindowState) は変わらない
+    internal static string BuildConfigJson()
+    {
+        static double? FiniteOrNull(double v) => double.IsFinite(v) ? v : null;
+        {
             var config = new
             {
                 App.Config.GamePath,
@@ -1934,10 +1967,10 @@ public partial class MainWindow : Window
                 App.Config.VoiceVoxUrl,
                 App.Config.VoiceVoxSpeakerId,
                 App.Config.VoiceVoxSpeedScale,
-                App.Config.WindowLeft,
-                App.Config.WindowTop,
-                App.Config.WindowWidth,
-                App.Config.WindowHeight,
+                WindowLeft = FiniteOrNull(App.Config.WindowLeft),
+                WindowTop = FiniteOrNull(App.Config.WindowTop),
+                WindowWidth = FiniteOrNull(App.Config.WindowWidth),
+                WindowHeight = FiniteOrNull(App.Config.WindowHeight),
                 App.Config.WindowMaximized,
                 App.Config.TradeShipName,
                 App.Config.TradeScu,
@@ -1946,6 +1979,7 @@ public partial class MainWindow : Window
                 App.Config.TradeSellSystem,
                 App.Config.UexApiKey,
                 App.Config.MissionDetailFontSize,
+                App.Config.Detail3DHeight,
                 App.Config.EquipmentClassMarks,
                 App.Config.BlueprintMissionMarks,
                 App.Config.MissionReputationMarks,
@@ -1976,6 +2010,15 @@ public partial class MainWindow : Window
                 App.Config.MapLocationMemories,
                 App.Config.MapAutoCapture,
                 App.Config.MapSpinCorrections,
+                App.Config.MapCurrentHotkeyEnabled,
+                App.Config.MapCurrentHotkey,
+                App.Config.OreOverlayEnabled,
+                App.Config.OreOverlaySeconds,
+                App.Config.OreOverlayLeft,
+                App.Config.OreOverlayTop,
+                App.Config.OreOverlayWidth,
+                App.Config.OreOverlayHeight,
+                App.Config.OreOverlayPlaced,
                 App.Config.SyncFolder,
                 App.Config.Ship3DFolder,
                 App.Config.Ship3DMaxMB,
@@ -1990,22 +2033,16 @@ public partial class MainWindow : Window
                 App.Config.ExtractedBuildChangeNum,
             };
 
-            var json = JsonSerializer.Serialize(config, new JsonSerializerOptions
+            var options = new JsonSerializerOptions
             {
                 WriteIndented = true,
                 Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-            });
-            // 同じフォルダの一時ファイルに書いてから入れ替える (元が無ければ移す)
-            var tmp = App.ConfigPath + ".tmp";
-            File.WriteAllText(tmp, json, Encoding.UTF8);
-            if (File.Exists(App.ConfigPath)) File.Replace(tmp, App.ConfigPath, null);
-            else File.Move(tmp, App.ConfigPath);
-        }
-        catch (Exception ex)
-        {
-            // showError = false (マップタブからの保存): MessageBox を出さず、アプリのログに出すだけ
-            if (showError) MessageBox.Show($"設定保存エラー: {ex.Message}", "エラー");
-            else App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 設定を保存できませんでした: {ex.GetType().FullName}: {ex.Message}");
+            };
+            // 窓の位置・大きさのうち値の無い (null にした) 鍵だけを除いてから文字にする (ほかの鍵・並び・書き方は変えない)
+            var node = JsonSerializer.SerializeToNode(config, options)!.AsObject();
+            foreach (var key in WindowBoundsKeys)
+                if (node.TryGetPropertyValue(key, out var value) && value is null) node.Remove(key);
+            return node.ToJsonString(options);
         }
     }
 
@@ -4827,6 +4864,9 @@ public partial class MainWindow : Window
         if (_exitReady)
         {
             _captureService?.Dispose();
+            // 現在位置のキーの登録を外し、オーバーレイが出ていれば閉じる (Owner の無い窓が残ると、主の窓を閉じてもアプリが終わらない)
+            _mapHotkey.Unregister();
+            OreOverlayWindow.CloseIfOpen();
             CloseHangarEquip();
             return;
         }
@@ -4847,6 +4887,8 @@ public partial class MainWindow : Window
             _updateTimer?.Stop();
             // 自動更新の窓が開いていれば閉じる (開いたままだと、主の窓を閉じてもアプリが終わらない。× と同じく「次回更新時に知らせる」になる)
             try { _updateWindow?.Close(); } catch { }
+            // 現在位置のオーバーレイも閉じる (同じ理由)
+            OreOverlayWindow.CloseIfOpen();
             var baseTitle = Title;
             try { Title = $"{baseTitle} - 終了しています…"; } catch { }
             // 閉じる処理の間は窓の中を押せなくする (インデックス構築などを始められないように)

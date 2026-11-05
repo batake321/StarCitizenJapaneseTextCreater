@@ -232,7 +232,46 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         public string HierarchyHash { get; set; } = "";
         // 元ファイルの一覧 (p4k の中の大きさと Data.p4k に記録された CRC)
         public List<SourceFile> Sources { get; set; } = new();
+        // 書き出したときの、品 (船以外) の取り出しの処理の版 (ItemExportVersion。この欄が無い前の版の記録は 0)。船の記録にも同じ数を書くが、船では見ない
+        public int ItemExportVersion { get; set; }
+        // 書き出したときの、船・車両の取り出しの処理の版 (ShipExportVersion。この欄が無い前の版の記録は 0)。品の記録にも同じ数を書くが、品では見ない
+        public int ShipExportVersion { get; set; }
     }
+
+    // 品 (船以外) の取り出しの処理の版。品の形の選び方・面の出し方を変えたら進める。取り込み済みの品の記録の版がこれより古い (欄が無い) ときは、
+    // その品のキャッシュを「なし」として扱い、次に開いたときに作り直す (CacheStateOf。船は ShipExportVersion)。
+    //   1 (2026-11-05): CDF の Model File が形を持つ品は本体をそれに / 主の形が箱の品は着る形・しまってある形に / 面を隠す決まりのデカールを語で見る (ShipExportItem.cs の頭の説明)
+    internal const int ItemExportVersion = 1;
+
+    // 船・車両の取り出しの処理の版。船の面の出し方を変えたら進める。取り込み済みの船の記録の版がこれより古い (欄が無い) ときは、Data.p4k の印が今と同じでも
+    // その船のキャッシュを「なし」として扱う (CacheStateOf): 次にその船を開いたとき (［3D 表示］・別ウィンドウ・［読み込み］) に取り込み直して置き換え、
+    // ［船舶・車両をまとめて取り込む］も押せるようになる (押せば版の古い船をまとめて取り込み直す)。裏で自動に取り込み直すことはしない
+    // (自動の取り直し ScanAsync は Data.p4k の印が違う船だけを照合し、元データが変わっていた船だけを取り直す。版が古いだけの船は並ばない)。
+    // 材質の決め方の版 (ShipGlb.GeneratorVersion) とは別 (そちらを上げると、取り込み直さなくても標準の材質の表が当たる)。
+    //   1 (2026-11-05、利用者の決定「広げる」): 面を隠す決まりのデカールの見分けを語で見る (「%DECALS」の材質の面 = 船内の吊るした服・小物が出る。SocpakGlb.SubMat.IsDecal)
+    internal const int ShipExportVersion = 1;
+
+    // 横の記録の版と Data.p4k の印から決まるキャッシュの状態 (ファイル・設定に触らない)。
+    //   品: 版が古ければ「なし」(印を見る前。照合を通さずに作り直す)。そうでなければ、印が今と同じなら最新、違えば照合が要る。
+    //   船: 印が違えば照合が要る (パッチの後の扱いは今までどおり。照合で元データが同じなら印だけ新しくなり、変わっていれば自動の取り直しに並ぶ)。
+    //       印が同じなら、版が古ければ「なし」、そうでなければ最新
+    internal static Ship3DCacheState CacheStateOf(bool isItem, int itemExportVersion, int shipExportVersion, bool stampSame)
+    {
+        if (isItem) return itemExportVersion < ItemExportVersion ? Ship3DCacheState.None : stampSame ? Ship3DCacheState.Fresh : Ship3DCacheState.NeedsVerify;
+        if (!stampSame) return Ship3DCacheState.NeedsVerify;
+        return shipExportVersion < ShipExportVersion ? Ship3DCacheState.None : Ship3DCacheState.Fresh;
+    }
+
+    private static Ship3DCacheState CacheStateOf(Sidecar s, P4kStamp stamp)
+    {
+        bool stampSame = string.Equals(s.P4kPath, stamp.Path, StringComparison.OrdinalIgnoreCase) && s.P4kSize == stamp.Size && s.P4kWriteUtcTicks == stamp.WriteUtcTicks;
+        // 版が両方とも今のものなら、船か品かを保存データで引かなくても決まる
+        bool isItem = (s.ItemExportVersion < ItemExportVersion || s.ShipExportVersion < ShipExportVersion) && IsItemRecord(s.Record);
+        return CacheStateOf(isItem, s.ItemExportVersion, s.ShipExportVersion, stampSame);
+    }
+
+    // 短い名前の record が船でない品か (ShortName の逆。品の record は「EntityClassDefinition.」で始まる)
+    internal static bool IsItemShort(string shortName) => IsItemRecord("EntityClassDefinition." + shortName);
 
     // 横の記録を読む。読めて、アプリの印があり、record の短い名前がファイル名と同じときだけ返す (それ以外は null = このアプリのものではない)
     private static Sidecar? ReadOurSidecar(string shortName)
@@ -275,8 +314,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         if (!File.Exists(GlbPath(shortName))) return Ship3DCacheState.None;
         var s = ReadOurSidecar(shortName);
         if (s == null) return Ship3DCacheState.None;
-        return string.Equals(s.P4kPath, stamp.Path, StringComparison.OrdinalIgnoreCase) && s.P4kSize == stamp.Size && s.P4kWriteUtcTicks == stamp.WriteUtcTicks
-            ? Ship3DCacheState.Fresh : Ship3DCacheState.NeedsVerify;
+        // 取り出しの処理の版が古い品・船は、無いものとして扱う (次に開いたときに作り直して置き換える。保存しない設定では今までどおり直接読む。CacheStateOf)
+        return CacheStateOf(s, stamp);
     }
 
     // StateOf のうちファイルだけで決まる部分: 最新 (Fresh) か。UI スレッドの外から呼べる (設定タブのまとめて取り込むのボタンの数え直しに使う)。
@@ -286,7 +325,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         var shortName = ShortName(record);
         if (!File.Exists(GlbPath(shortName))) return false;
         var s = ReadOurSidecar(shortName);
-        return s != null && string.Equals(s.P4kPath, stamp.Path, StringComparison.OrdinalIgnoreCase) && s.P4kSize == stamp.Size && s.P4kWriteUtcTicks == stamp.WriteUtcTicks;
+        return s != null && CacheStateOf(s, stamp) == Ship3DCacheState.Fresh;
     }
 
     // StateOf が照合中・後で消すもの (最新でない) とする船か。UI スレッドで呼ぶ
@@ -304,7 +343,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         var state = StateOf(record);
         if (state == Ship3DCacheState.Fresh) return GlbPath(ShortName(record));
         if (state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying)
-            return await VerifyAsync(record) ? GlbPath(ShortName(record)) : null;
+            // 照合で元データが同じでも、取り出しの処理の版が古い船は使わない (照合の後は「なし」になる。呼ぶ側が取り込み直す)
+            return await VerifyAsync(record) && StateOf(record) == Ship3DCacheState.Fresh ? GlbPath(ShortName(record)) : null;
         return null;
     }
 
@@ -347,7 +387,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 }
                 if (reason == null)
                 {
-                    var dump = await Ship3DEstimator.DumpHierarchyAsync(stamp, shortName, CancellationToken.None);
+                    var dump = await Ship3DEstimator.DumpHierarchyAsync(stamp, shortName, CancellationToken.None, IsItemRecord(side.Record));
                     if (dump.Hash != side.HierarchyHash) reason = "船の構成 (--dump-hierarchy の内容) が変わっていました";
                 }
                 if (reason == null)
@@ -652,7 +692,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 if (waitKind != _lastWaitKind)
                 {
                     _lastWaitKind = waitKind;
-                    Log($"待ち行列 (船・ステーションの地図 共通): {reason} (待ち {_queue.Count} 件、動いている {_running.Count} 本 + ステーションの地図が足した starbreaker {_extraRuns} 本)");
+                    Log($"待ち行列 (船・ステーションの地図 共通): {reason} (待ち {_queue.Count} 件、動いている {_running.Count} 本 + ステーションの地図が足した取り出し {_extraRuns} 本)");
                 }
                 foreach (var (j, _) in _queue) j.SetPhase(Ship3DJobPhase.Queued, reason);
                 return;
@@ -1148,7 +1188,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             {
                 var p4k = P4kArchive.Shared(stamp.Path);
                 var db = DataCoreShared.Get(null, stamp.Path);
-                return ShipExport.Export(p4k, db, job.Short, tmp, line => job.Tracker.OnLine(line, job.Watch.Elapsed.TotalSeconds), ct);
+                return ShipExport.Export(p4k, db, job.Short, tmp, line => job.Tracker.OnLine(line, job.Watch.Elapsed.TotalSeconds), ct, item: job.Kind == Ship3DJobKind.Item);
             }, ct);
             job.Watch.Stop();
             LogJob(job, $"書き出しが終わりました: {job.Watch.Elapsed.TotalSeconds:F1} 秒、最後の段階 [{job.Tracker.StageText}]、選ばれた record {res.ResolvedName}、GLB {FormatBytes(res.GlbBytes)}");
@@ -1203,6 +1243,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 GeometryMb = Math.Round(est.GeometryMb, 1),
                 HierarchyHash = est.HierarchyHash,
                 Sources = sources,
+                ItemExportVersion = ItemExportVersion,
+                ShipExportVersion = ShipExportVersion,
             });
             Log($"「{job.Name}」({job.Short}) を書き出しました: {job.Watch.Elapsed.TotalSeconds:F1} 秒、{FormatBytes(glbBytes)}" +
                 $" (予想 {job.EstimatedSeconds:F0} 秒、参照ジオメトリ {est.GeometryMb:F1} MB、照合用の元ファイル {sources.Count} 個" +
@@ -1380,9 +1422,13 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 if (state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying)
                 {
                     BatchText = $"船舶・車両をまとめて取り込む: 照合中 {i + 1} / {list.Count} 隻目 ({s.Name})";
-                    if (await VerifyAsync(s.Record)) { skipFresh++; skippedFresh.Add(s.Short); continue; }
+                    if (await VerifyAsync(s.Record))
+                    {
+                        // 元データが同じでも、取り出しの処理の版が古い船 (照合の後は「なし」) は飛ばさずに取り込み直す
+                        if (StateOf(s.Record) == Ship3DCacheState.Fresh) { skipFresh++; skippedFresh.Add(s.Short); continue; }
+                    }
                     // 照合で変わっていた船は自動の取り直しに並んだ (QueueRefresh)。その取り直しが書き出すので、見積もりの前に外す (書き出し中と同じ扱い)
-                    if (_byShort.ContainsKey(s.Short)) { skipRunning++; skippedRunning.Add(s.Short); continue; }
+                    else if (_byShort.ContainsKey(s.Short)) { skipRunning++; skippedRunning.Add(s.Short); continue; }
                 }
                 else if (state == Ship3DCacheState.Fresh) { skipFresh++; skippedFresh.Add(s.Short); continue; }
                 if (HasForeignFile(s.Short)) { skipForeign++; skippedForeign.Add(s.Short); continue; }
@@ -2034,9 +2080,10 @@ internal static class Ship3DEstimator
 
     // 船の構成 (--dump-hierarchy と同じもの) を作って、選ばれた船 (root.entity)・内容のハッシュ・中身の文字を返す。
     // 選ばれた船が求める短い名前と違えば失敗 (書き出しても別の船になるため)
-    public static async Task<(string Hash, string Text)> DumpHierarchyAsync(Ship3DExports.P4kStamp stamp, string shortName, CancellationToken ct)
+    // item: 船でない品か (ShipExport.DumpHierarchy の item。品で主の形の代わりに別の形を本体にするときは、その形を root の形として出す)
+    public static async Task<(string Hash, string Text)> DumpHierarchyAsync(Ship3DExports.P4kStamp stamp, string shortName, CancellationToken ct, bool item)
     {
-        var (text, resolved) = await Task.Run(() => ShipExport.DumpHierarchy(P4kArchive.Shared(stamp.Path), DataCoreShared.Get(null, stamp.Path), shortName, ct), ct);
+        var (text, resolved) = await Task.Run(() => ShipExport.DumpHierarchy(P4kArchive.Shared(stamp.Path), DataCoreShared.Get(null, stamp.Path), shortName, ct, item), ct);
         if (!string.Equals(Ship3DExports.ShortName(resolved), shortName, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException($"読み取りが別の船 ({resolved}) を選びました。求める record は {shortName} です");
         using var doc = JsonDocument.Parse(text, LenientJson);
@@ -2086,7 +2133,7 @@ internal static class Ship3DEstimator
         if (_estimates.TryGetValue(cacheKey, out var cached)) return cached;
 
         var sizesTask = GetSizesAsync(stamp);
-        var (hash, text) = await DumpHierarchyAsync(stamp, shortName, ct);
+        var (hash, text) = await DumpHierarchyAsync(stamp, shortName, ct, Ship3DExports.IsItemRecord(record));
         var flat = text.Replace("\\\\", "/");
         var geometry = new HashSet<string>(StringComparer.Ordinal);
         foreach (Match m in GeometryPathRegex.Matches(flat)) geometry.Add(Normalize(m.Groups[1].Value));
