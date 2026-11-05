@@ -30,6 +30,7 @@ if (APP) window.chrome.webview.addEventListener('message', e => {
   if (d.type === 'notes') { onNotes(d); return; }
   if (d.type === 'noteAdded') { onNoteAdded(d); return; }
   if (d.type === 'exterior') { onExterior(d); return; }   // 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート。下の「外から見たときの印と見出し」)
+  if (d.type === 'exteriorView') { onExteriorView(); return; }   // 外から全体が見える形にする (下の「外から見る形」。2026-11-06)
   // マイハンガーの大きさのうち、ハンガーの区画が決まるもの (アプリの StationHangarCatalog.Resolve)。本体の station.json に覚え、行き先の窓はこの大きさだけを出す (hangarSizesOf)
   if (d.type === 'hangarSizes') { const sv = stationSaved ? stationSaved.VIEW : VIEW; if (Array.isArray(d.sizes)) { if (sv) sv.hangarSizesOk = d.sizes; else pendingSizes = d.sizes; } return; }   // 場所のデータ (VIEW) が入る前なら覚えて、入った後に当てる
   if (d.type === 'noteError') { document.getElementById('msg').textContent = 'コメントの印を保存できませんでした: ' + (d.message || ''); return; }
@@ -105,11 +106,14 @@ cv.addEventListener('pointermove', e => {
   upd();
 });
 const LEAVE_DIST = 10000;   // ［マップ］タブの中で、中心からこれ (m) より遠ざかると星系図に戻る
+// 星系図に戻る距離 (初めは LEAVE_DIST)。外から見る形で開いた・切り替えたとき (runExteriorView。2026-11-06) は、そのときの距離の 2 倍との大きいほうにする
+// (全部の印が入る距離が LEAVE_DIST を超える場所で、開いた直後の 1 回の引きで星系図に戻ってしまわないように)
+let leaveDist = LEAVE_DIST;
 cv.addEventListener('wheel', e => {
   e.preventDefault();
   const nd = dist * Math.exp(e.deltaY * 0.001);
   // ［マップ］タブの中 (?tab=1) では、遠ざかり切ったら星系図に戻る (アプリへ知らせる)
-  if (APP && qs.get('tab') === '1' && !walk && e.deltaY > 0 && nd > LEAVE_DIST) { window.chrome.webview.postMessage({ type: 'leave' }); return; }
+  if (APP && qs.get('tab') === '1' && !walk && e.deltaY > 0 && nd > leaveDist) { window.chrome.webview.postMessage({ type: 'leave' }); return; }
   if (e.deltaY < 0 && nd < 2) {
     // 中心の 2 m より近くへは、中心を見ている向きへ進める (カメラも同じだけ進む)
     const step = Math.max(0.2, dist) * (1 - Math.exp(e.deltaY * 0.001));
@@ -1465,6 +1469,7 @@ function show(t0, keep) {
   renderGuide();
   drawHereMark();
   if (pendingHere && !pendingHereSince) setTimeout(runPendingHere, 0);   // 待つのをやめていた here (runPendingHere) を、地点を読み込めたので出す   // 現在位置の印 (地点の中心が変わったので置き直す)
+  if (pendingExtView && !pendingExtSince && !pendingExtMarksSince) setTimeout(runExteriorView, 0);   // 待つのをやめていた「外から見る形」(runExteriorView。2026-11-06) を、地点を読み込めたので行う
   const fl2 = document.getElementById('flist2'); fl2.innerHTML = '';
   const allB = document.createElement('button'); allB.textContent = '全部 (切らない)'; allB.onclick = () => { selFloor = null; applyFloor(); }; fl2.appendChild(allB);
   (p.flist || []).slice().reverse().forEach(fl => {
@@ -1999,7 +2004,11 @@ function nearCheck() {
 // 旧方式の「初めの位置」(goHome) は無いので、丸の大きさの基準 (homeRadius) は「今の向きで全部の印が画面の真ん中 HOME_FILL に入るいちばん近い距離」(旧方式の fitRadius と同じ求め方) にする。
 // 旧方式の「ハンガーの印を屋根の扉の中心へ動かす」(roofDoors) は、旧方式と同じ所 (onExterior の buildMarks の直後。ハンガーの集まりは動かす前の位置、寄せる箱は動かした後の位置) で行う。
 // 外部貨物エレベーター (freight) は {type:'exterior'} の freight:[{pos,text}] (text は旧方式と同じ「外部貨物EV」)。切り替えはキャプションのスイッチ chkExtFreight (旧方式の chkFreight)。
-let extTick = () => { }, onExterior = () => { }, requestExterior = () => { };
+// extReady・extFit: 外から見る形 (下の「外から見る形」。2026-11-06) が使う。extReady = 印の知らせ ({type:'exterior'}) が届いたか。
+// extFit = 回す中心をステーションの中心 (寄せる箱の中心。印の知らせがまだなら station.json の center、それも無ければ今の地点の中心) にし、今の向きのまま、
+// 全部の印とステーションの中心が画面の真ん中 HOME_FILL に入るいちばん近い距離 (homeRadius。入らなければその探し方の上限) まで引く。
+// 外部視点になる距離 (読み込んだ地点の半径 cur.r) より近くにはしない
+let extTick = () => { }, onExterior = () => { }, requestExterior = () => { }, extReady = () => false, extFit = () => { };
 {
   const svg = document.getElementById('extLines');
   const capsEl = document.getElementById('extCaps');
@@ -2523,8 +2532,19 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { };
   let lastLayoutAt = 0, lastLayoutMs = 0;
   const LAYOUT_SLOW_MS = 40, LAYOUT_THROTTLE_MS = 200, SETTLE_MS = 250;
   let lastDirtyAt = 0, needFull = false, wasOn = false, lastSig = '';
-  requestExterior = () => { marks = []; clear(); if (APP) window.chrome.webview.postMessage({ type: 'exteriorGet' }); };
+  let got = false;   // 印の知らせ ({type:'exterior'}) が届いたか (extReady)
+  requestExterior = () => { marks = []; got = false; clear(); if (APP) window.chrome.webview.postMessage({ type: 'exteriorGet' }); };
+  extReady = () => got;
+  extFit = () => {
+    const cc = toV(cur.center);
+    const ctr = got ? center : Array.isArray(VIEW?.center) && VIEW.center.length === 3 ? toV(VIEW.center) : cc;
+    tgt.copy(ctr).sub(cc); upd();
+    const pts = marks.map(m => m.pos.clone().sub(cc)); pts.push(tgt.clone());
+    const home = homeRadius(pts);
+    dist = Math.max(home > 0 ? home : Math.max(stationRadius * 8, 100), cur.r); upd();
+  };
   onExterior = d => {
+    got = true;
     marks = buildMarks(d);
     // (2026-11-02、利用者の指示「ハンガーの入り口がどこにあるかが重要」による親の決定。旧方式 viewer.html 1091〜1101 行の移植) 屋根に扉のあるハンガーの印は、扉の部品の真ん中へ動かす。
     // 結び付け方: ハンガーの印 (InstancedHangarGateway の Pos) と、扉の部品を置いた原点が ROOF_DOOR_JOIN 以内で同じ所にあり (写しの GrimHEX・Checkmate で、扉の部品の原点は
@@ -2716,6 +2736,7 @@ function onHere(d) {
   const msg = document.getElementById('msg');
   if (!d.ok) { msg.textContent = d.note || '現在位置を出せませんでした'; return; }
   hereStart = 'no';   // トラムのある場所の始め方 (startAtHere) より、こちらを先にする
+  pendingExtView = false;   // 待っている「外から見る形」(runExteriorView) より、こちらを先にする
   if (!cur || loading || !VIEW) { pendingHere = d; runPendingHere(); return; }
   msg.textContent = d.note || '';
   // ハンガーの中なら、そのハンガーの 3D を開く (データが決まらない・乗り場が無いときは、今までどおり本体のその点に立つ。知らせは出す)
@@ -2724,6 +2745,41 @@ function onHere(d) {
   if (SITE) leaveHangarQuiet();
   if (!walk) document.getElementById('walkBtn').click();
   travelTo(d.pos, wyaw, null, window.__here = {}, false);
+}
+// ===== 外から見る形 (2026-11-06、利用者の指示「あとあると便利なのは、現在位置を取ったときにステーションから 50Km 以内かつそのステーションから出た後でなければ、
+//  そのステーションの外観の 3D を map 表示して pad の場所などを分かりやすくする機能」。親の決定) =====
+// アプリが {type:'exteriorView'} で頼む (［マップ］の現在位置で、近くのステーションを外から見る形で出すとき。StationView3DView.RequestExterior)。
+// 今ある外部視点 (extView。外から見たときの印と見出しが出る) になる所まで引くだけで、新しい描き方は無い: 見るモードにし、extFit で回す中心と距離を決める。中の行き先へは飛ばない。
+// 読み込んだ地点は替えない (開いたときは初めの行き先のまわり、出していた 3D から切り替えたときは今の地点のまま)。
+// 場所のデータ・地点の読み込みがまだ・読み込み中なら、済むまで待つ (here の待ち方 runPendingHere と同じ: FAIL_HOLD_MS まで。過ぎたら待つのをやめ、次に地点を読み込めた時点 (show の後) で行う)。
+// 印の知らせ (extReady) は、地点が読み込めてから FAIL_HOLD_MS まで待ち、来ないままなら印なしで引く。
+// マイハンガーの中を出しているときは、ステーションへ戻り、入るときに乗った乗り場のまわりを読み込んでから引く (読み込めなければやめる)。
+// 待っている間に［現在位置］の知らせ (here) が来たら、そちらを先にしてやめる (onHere)。
+// ［マップ］タブの中では、引いた距離の 2 倍が LEAVE_DIST より大きければ、星系図に戻る距離 (leaveDist) をそこまで広げる
+let pendingExtView = false, pendingExtSince = 0, pendingExtMarksSince = 0;
+function onExteriorView() { pendingExtView = true; pendingExtMarksSince = 0; hereStart = 'no'; pendingHere = null; runExteriorView(); }
+function runExteriorView() {
+  if (!pendingExtView) return;
+  if (!pendingExtSince) pendingExtSince = performance.now();
+  if (!VIEW || !cur || loading || pendingGo) { if (performance.now() - pendingExtSince < FAIL_HOLD_MS) setTimeout(runExteriorView, 300); else pendingExtSince = 0; return; }
+  pendingExtSince = 0;
+  if (SITE) {
+    const back = hangarBack ? hangarBack.pos.slice() : null;
+    if (!back) { pendingExtView = false; return; }
+    if (walk) document.getElementById('walkBtn').click();
+    leaveHangarQuiet();
+    const before = cur;
+    loadRegion(back, regionR()).then(() => { if (cur === before) pendingExtView = false; else runExteriorView(); });
+    return;
+  }
+  if (!extReady()) {
+    if (!pendingExtMarksSince) pendingExtMarksSince = performance.now();
+    if (performance.now() - pendingExtMarksSince < FAIL_HOLD_MS) { setTimeout(runExteriorView, 300); return; }
+  }
+  pendingExtView = false; pendingExtMarksSince = 0;
+  if (walk) document.getElementById('walkBtn').click();
+  extFit();
+  leaveDist = Math.max(LEAVE_DIST, dist * 2);
 }
 // マイハンガーの中から、ステーションへ戻る (［現在位置］で移るとき。移る先は呼ぶ側が決める)
 function leaveHangarQuiet() { if (!stationSaved) return; SITE = ''; VIEW = stationSaved.VIEW; BASE = stationSaved.BASE; document.getElementById('title').textContent = stationSaved.title; stationSaved = null; hangarBack = null; document.getElementById('hangarBar').style.display = 'none'; renderTargets(); }

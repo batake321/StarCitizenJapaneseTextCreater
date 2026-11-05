@@ -421,7 +421,8 @@ public partial class MapPanel : UserControl
     // 建物の中か: 星系図の現在地の文が「〜 内」になるときと同じ決まり (MapState の取った座標の場合: CurrentLocation.Locate → WhereaboutsOf の Inside)。
     //   使う位置は、いちばん新しく取った座標 (ComputeEffective の Kind が Taken のときだけ。推定の位置では切り替えない)。取り直さない。
     // その場所の 3D があるか: 星系図に地図のある場所の印を出している場所 (MapPlaceByRecordName。押すとその場所の 3D を出すのと同じ)。
-    // 位置が無い (取った座標でない) ときは何もしない。建物の中でない・その場所の 3D が無いときは、［マップ］タブに 3D を出していたら星系図に戻す (無ければ星系図のまま)。当たれば、3D をどこに出すかの今の決まり (別ウィンドウが開いていればそこ、無ければ［マップ］タブ) で出し、
+    // 位置が無い (取った座標でない) ときは何もしない。建物の中でない・その場所の 3D が無いときは、近くのステーションを外から見る形で出す決まり (2026-11-06。下の ExteriorStationOf・LeftStation) に
+    // 当たればそのステーションの 3D を外から見る形で出し、当たらなければ［マップ］タブに 3D を出していたら星系図に戻す (無ければ星系図のまま)。建物の中でその場所の 3D があれば、3D をどこに出すかの今の決まり (別ウィンドウが開いていればそこ、無ければ［マップ］タブ) で出し、
     // その 3D で、3D の［現在位置］と同じ出し方 (取り直さない) をする (StationView3DView.RequestHere)
     // activate: 3D の別ウィンドウに出すとき、その窓を前に出すか (既定は出す)。現在位置のキーから来たとき (CaptureCurrentFromHotkeyAsync) は偽
     // (ゲームからフォーカスを取らない。3D の中身の更新・［マップ］タブへの切り替えは同じ)
@@ -437,6 +438,17 @@ public partial class MapPanel : UserControl
             var where = CurrentLocation.WhereaboutsOf(eff.Pos, loc, LogPlaceNode(tree, LandingPlaceProvider?.Invoke()));
             if (!where.Inside || where.Place is not { } wp || MapPlaceByRecordName(wp.RecordName) is not { } mp)
             {
+                // (2026-11-06、利用者の指示・親の決定。下の「近くのステーションを外から見る形で出す」) 近くのステーション (50 km 以内でいちばん近いもの) があり、
+                // そのステーションから出た後でなければ、そのステーションの 3D を外から全体が見える形で出す (中の行き先へは飛ばない)。
+                // 出す先は建物の中のときと同じ (別ウィンドウが開いていればそこ、無ければ［マップ］タブ)。同じステーションを出していれば開き直さず、外からの見え方に切り替える
+                if (ExteriorStationOf(loc) is { } st && !LeftStation(tree, st))
+                {
+                    if (StationView3DShops.ShowInOpenWindow(st.RecordName, st.Name, tree, null, activate: activate, exterior: true)) return;
+                    for (DependencyObject? d = this; d != null; d = LogicalTreeHelper.GetParent(d))
+                        if (d is TabItem tab) { tab.IsSelected = true; break; }
+                    ShowPlace3D(st.RecordName, st.Name, tree, null, exterior: true);
+                    return;
+                }
                 // (2026-11-06、利用者の報告「宇宙空間で現在位置を取ったときに、その前に map にステーション内部の 3D が表示されてると星系のマップにならない」)
                 // 建物の中でない・その場所の 3D が無いときに、［マップ］タブに 3D を出していたら、星系図に戻す (別ウィンドウの 3D はそのまま)
                 if (pnlPlace.Visibility == Visibility.Visible) BackToStarMap();
@@ -448,6 +460,38 @@ public partial class MapPanel : UserControl
             ShowPlace3D(mp.Record, mp.Name, tree, null, here: true);
         }
         catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 現在位置の場所の 3D を出せませんでした: {ex.Message}"); }
+    }
+
+    // ===== 近くのステーションを外から見る形で出す (2026-11-06、利用者の指示「あとあると便利なのは、現在位置を取ったときにステーションから 50Km 以内かつ
+    //  そのステーションから出た後でなければ、そのステーションの外観の 3D を map 表示して pad の場所などを分かりやすくする機能」。親の決定) =====
+    // GoHere3DAsync の「建物の中でない・その場所の 3D が無い」ときの枝から。入口 (［現在位置］ボタン・現在位置のキー・星系図の現在位置の印) は GoHere3DAsync のまま。
+    // 対象のステーション (ExteriorStationOf): 3D のある場所 (MapPlaceByRecordName で引ける場所) のうち、取った位置からの距離が Exterior3DMaxDistance 以内で、いちばん近いもの。
+    //   距離は、現在地の判定と同じ場所の位置 (CurrentLocation.Locate の結果 loc.All。自転の角度を当てた位置からの距離) で測る。
+    //   候補にする場所の決まりは、行き先の無い場所の差し替え (StationView3DView.RedirectAsync) の候補と同じ: 行き先のある場所 (AmenityMapHints の Targets) で、
+    //   星図の親をたどった先に行き先のある 3D の場所が無いもの (ステーションの中のクリニックなどは候補にせず、親のステーションが候補になる。
+    //   行き先の無い 3D の場所 (ラグランジュ点など。区画はガス雲と小惑星だけ) も候補にしない)
+    // そのステーションから出た後か (LeftStation): Game.log の追い読み (QuantumStateProvider の LeftLandingRaw) で、いちばん新しく居た着陸場所から出て今は着陸場所の外にいて、
+    //   その着陸場所がそのステーション (そのステーションそのものか、星図の親をたどった先がそのステーション) のとき。
+    //   Game.log で分からないとき (追い読みが動いていない・着陸場所の中にいる・居た記録が無い・元の名前が分からない・最後に居たのが別の場所) は、出た後でない
+    private const double Exterior3DMaxDistance = 50000;
+    private ShopTreeNode? ExteriorStationOf(CurrentLocation.Result loc)
+    {
+        var hints = AmenityMapHints.All();
+        bool Has3D(ShopTreeNode n) => MapPlaceByRecordName(n.RecordName) != null && hints.TryGetValue(n.RecordName, out var h) && h.Targets;
+        bool Under3D(ShopTreeNode n) { for (var a = n.Parent; a != null; a = a.Parent) if (Has3D(a)) return true; return false; }
+        foreach (var row in loc.All)   // 近い順
+        {
+            if (row.Distance > Exterior3DMaxDistance) break;
+            if (Has3D(row.Node) && !Under3D(row.Node)) return row.Node;
+        }
+        return null;
+    }
+    private bool LeftStation(ShopTree tree, ShopTreeNode station)
+    {
+        if (QuantumStateProvider?.Invoke()?.LeftLandingRaw is not { Length: > 0 } raw) return false;
+        for (var n = LogPlaceNode(tree, raw); n != null; n = n.Parent)
+            if (ReferenceEquals(n, station)) return true;
+        return false;
     }
 
     // ［現在位置］と同じ処理の公開の入口 (ステーションの 3D (新しい方式) の［現在位置］(StationView3DWindow.CaptureHook) からも呼ぶ)。
@@ -1431,7 +1475,8 @@ public partial class MapPanel : UserControl
     private string _place3DName = "";
     private ShopTree? _place3DTree;
     // here: 出した後に、その 3D で現在位置の所を出す (StationView3DView.RequestHere。GoHere3DAsync)
-    private void ShowPlace3D(string recordName, string name, ShopTree? tree, string? focusShop, bool here = false)
+    // exterior: 出した後に、その 3D を外から全体が見える形にする (StationView3DView.RequestExterior。GoHere3DAsync の近くのステーション。2026-11-06)。同じ場所を出していれば出し直さない
+    private void ShowPlace3D(string recordName, string name, ShopTree? tree, string? focusShop, bool here = false, bool exterior = false)
     {
         if (_place3D == null || _place3D.Record != recordName || focusShop != null)
         {
@@ -1450,6 +1495,7 @@ public partial class MapPanel : UserControl
         webMap.Visibility = Visibility.Collapsed;
         pnlPlace.Visibility = Visibility.Visible;
         if (here) _place3D.RequestHere();
+        else if (exterior) _place3D.RequestExterior();
     }
 
     // 星系図を出す。［星系図に戻る］・3D から遠ざかり切ったとき。

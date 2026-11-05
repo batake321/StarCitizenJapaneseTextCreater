@@ -7,6 +7,13 @@ namespace StarCitizenJapaneseTextCreater;
 // ゲームのプロセスには触らない。使うのは gamedata_cache.db の ore_locations / ore_signatures (［鉱石］タブ・［詳細］と同じ表) と、
 // 品質の表 ore_quality / ore_rock_parts (GameDataExtractor.DeliverableSources.cs。無い DB では品質と倍率を省く)、名前の訳 (translations.db)。
 //   場所: 取った座標から決める (Resolve)。
+//     0. 箱の中 (2026-11-06、利用者の指示「Stanton 星系の Pyrogateway HUR-5 両方とも鉱石採掘できるものの情報がないと出る」「DB でなくゲームデータから直接拾うのは？
+//        要するに、今いる場所で集まりの箱を調べる」): 現在位置が、その星系の採掘できる場所の広がり (ore_areas) の箱 (ガス雲を収める箱・クラスターの箱) の中にあれば、
+//        その箱の preset の岩を出す。2 つ以上の箱に入っていれば、箱の中心がいちばん近いもの。岩の行は preset で引く (ore_locations の、その preset の行のある場所の 1 つの行。
+//        同じ preset の行は、どの場所でも同じ中身 — 2026-11-06 の gamedata_cache.db の 45 の preset で確かめた)。星図の場所の半径 (20〜40 km) より、
+//        岩の出る箱 (ラグランジュ点のガス雲は半分で 200〜400 km) のほうがずっと広く、1 の段では当たらない所 (HUR-L5 High Course Station・Checkmate・Gaslight・
+//        PYAM-SUPVISR-3-5 など) がここで当たる。見出しの名前は箱の場所の名前 (ore_areas.place)、無ければ現在地の場所の名前 (5 と同じ引き方)。
+//        当たらなければ 1〜4 をそのまま
 //     1. 天体でない場所: 現在位置の星系の星図の場所のうち種類が Asteroid / Asteroid_ValidQT のもので、その中か付近
 //        (CurrentLocation.InsideOrNearRange = WhereaboutsOf の中・付近の距離) にあり、英語名が ore_locations.place に一致する (OreSignatureCalc.MatchPlace)、いちばん近いもの。
 //        (2026-11-05 の gamedata_cache.db で、ore_locations の場所 398 のうち天体 (Planet / Moon) の 25 を除く 373 について、368 がこの 2 つの種類の
@@ -16,7 +23,11 @@ namespace StarCitizenJapaneseTextCreater;
 //        (Aaron Halo = 小惑星の輪の内側〜外側の半径と厚み、Glaciem Ring・Keeger Belt = ガス雲を収める箱) を、ゲームデータの広がりの値そのままで決める (Contains)。
 //        表の無い DB では、この段は無い。見るのはアプリが決めた星系の広がり
 //     4. 無ければ、どの場所の中・付近でもないときに限り、ほかの星系の広がりの中にいるもの (今の星系が分かっていればその星系だけ。Resolve の説明)
-//     5. どれにも当たらなければ、場所の名前 (分かる範囲) と「ここで採掘できる物のデータはありません」
+//     5. どれにも当たらなければ、場所の名前 (分かる範囲) と、近くの採掘の場所 (2026-11-06、利用者の指示「場所を言われてもQT じゃないとどっちか方角的に無理。
+//        今いるとこ近辺提示しないと意味ない」「QT できるポイント名でないとわからない」): 同じ星系の、QT の行き先になる種類 (IsQtType) の星図の場所のうち、
+//        その場所の位置がどれかの箱の中にある (0 と同じ)、または名前で ore_locations の行がある (1・2 と同じ当て方 = OreSignatureCalc.MatchPlace) ものを、
+//        現在位置から近い順に 3 か所まで (同じ名前の場所は、いちばん近い 1 つ)。1 か所 1 行で、名前・距離・岩の名前。
+//        1 か所も無ければ「ここで採掘できる物のデータはありません」
 //   中身: 掘り方 (船 → ROC → 手) ごとに、岩 1 つを 1 行。並び・出やすさ・割合の書き方は［詳細］の【採掘できる場所】(GameDataQueryService.ResourceDetailText) と同じ、
 //     出やすさは場所に preset が 2 つ以上あれば OreSignatureCalc.ChanceText と同じ「a% / b%」、格・シグネチャーは［鉱石］タブと同じ (OreSignatureCalc)。
 //   品質 (2026-11-05、利用者の指示「品質も出るなら出してほしい」): ゲームデータの値そのまま (分布の min〜max と stddev、岩の中の行ごとの qualityScale)。
@@ -32,22 +43,37 @@ public static class OreHere
     // オーバーレイの中身: 見出し (場所の名前（星系）)・掘り方ごとの行・知らせ (行が無いときの文。あれば "")・品質の行。
     // 説明・注意の行は出さない (2026-11-06、利用者の指示「注意を勝手に入れることを固く禁止する」「画面を狭くするだけ」。
     // 前は品質の下に「品質はゲームデータの範囲で、個々の岩の値ではありません」「倍率 = …」の 2 行を出していた)
-    public sealed record Content(string Title, List<Section> Sections, string Message, List<QualityLine> Quality);
+    // Near (2026-11-06): 近くの採掘の場所の行 (どの段にも当たらないときだけ。無ければ null・空)。あるときは Message は ""
+    public sealed record Content(string Title, List<Section> Sections, string Message, List<QualityLine> Quality, List<NearLine>? Near = null);
+    // 近くの採掘の場所の 1 行 (名前・現在位置からの距離・岩の名前)
+    public sealed record NearLine(string Name, string Distance, string Rocks);
 
     public const string NoDataMessage = "ここで採掘できる物のデータはありません";
     public const string QualityHeader = "品質";
+    public const string NearHeader = "近くの採掘の場所";
+    // 近くの採掘の場所の数の上限
+    private const int NearMax = 3;
     // 列の見出し
     public static readonly string[] Columns = ["岩", "格", "出やすさ", "シグネチャー", "岩の中の資源と割合"];
 
-    // 決めた場所: Place = ore_locations の場所 (当たらなければ null)、Name = 場所の名前 (分からなければ "")、System = 星系
-    public sealed record Where(OreSignatureCalc.Place? Place, string Name, string System);
+    // 決めた場所: Place = ore_locations の場所 (当たらなければ null)、Name = 場所の名前 (分からなければ "")、System = 星系。
+    // Preset (2026-11-06): 箱で決めたとき (Resolve の 0) の、その箱の preset。Place は、その preset の行のある場所の 1 つで、中身はその preset の行だけで作る (Build)。
+    //   箱で決めていなければ null (Place のすべての preset の行で作る。今までどおり)
+    // Near (2026-11-06): 当たらなかったとき (Place が null) の、近くの採掘の場所 (近い順。無ければ null・空)
+    public sealed record Where(OreSignatureCalc.Place? Place, string Name, string System, string? Preset = null, IReadOnlyList<NearPlace>? Near = null);
+    // 近くの採掘の場所 1 つ: Name = 星図の場所の名前、Distance = 現在位置からの距離 (m)、Place / Preset = 岩の行の引き方 (Where の Place / Preset と同じ)
+    public sealed record NearPlace(string Name, double Distance, OreSignatureCalc.Place Place, string? Preset);
 
     // 天体でない場所として見る星図の種類 (実データで ore_locations.place と英語名が一致することを確かめた種類)
     private static bool IsAsteroidType(string type) => type is "Asteroid" or "Asteroid_ValidQT";
 
-    // 採掘できる場所の広がり 1 つ (ore_areas の 1 行。列の意味は GameDataExtractor.OreAreasDdl の説明)
+    // QT の行き先になる星図の種類 (近くの採掘の場所に出す種類。2026-11-06、親の決定)。アプリのソースに、QT の行き先かどうかを決めている所は無かった
+    // (QT の到着予定・目的地は Game.log の行き先の名前から引いていて、種類では決めていない)。この 5 つの種類は、ゲームで確かめた物ではない
+    private static bool IsQtType(string type) => type is "Asteroid_ValidQT" or "Manmade" or "Manmade_VisibleOnInteraction" or "Planet" or "Moon";
+
+    // 採掘できる場所の広がり 1 つ (ore_areas の 1 行。列の意味は GameDataExtractor.OreAreasDdl の説明)。Preset は ore_locations の preset と同じ文字
     public sealed record Area(string Place, string System, string Kind, double OX, double OY, double OZ, double[] Frame, double CX, double CY, double CZ,
-        double Inner, double Outer, double Depth, double MinX, double MinY, double MinZ, double MaxX, double MaxY, double MaxZ);
+        double Inner, double Outer, double Depth, double MinX, double MinY, double MinZ, double MaxX, double MaxY, double MaxZ, string Preset = "");
 
     // ore_areas を読む。DB・表・列が無ければ空 (読み取り専用)。枠の回転が 9 つの数で読めない行は入れない
     public static List<Area> LoadAreas(string gamedataDbPath)
@@ -59,14 +85,15 @@ public static class OreHere
             using var c = new SqliteConnection($"Data Source={gamedataDbPath};Mode=ReadOnly;Pooling=False");
             c.Open();
             using var cmd = c.CreateCommand();
-            cmd.CommandText = "SELECT place, system, kind, ox, oy, oz, frame, cx, cy, cz, inner_m, outer_m, depth_m, min_x, min_y, min_z, max_x, max_y, max_z FROM ore_areas";
+            cmd.CommandText = "SELECT place, system, kind, ox, oy, oz, frame, cx, cy, cz, inner_m, outer_m, depth_m, min_x, min_y, min_z, max_x, max_y, max_z, preset FROM ore_areas";
             using var r = cmd.ExecuteReader();
             while (r.Read())
             {
                 var frame = r.GetString(6).Split(',').Select(v => double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : double.NaN).ToArray();
                 if (frame.Length != 9 || !frame.All(double.IsFinite)) continue;
                 list.Add(new Area(r.GetString(0), r.GetString(1), r.GetString(2), r.GetDouble(3), r.GetDouble(4), r.GetDouble(5), frame, r.GetDouble(7), r.GetDouble(8), r.GetDouble(9),
-                    r.GetDouble(10), r.GetDouble(11), r.GetDouble(12), r.GetDouble(13), r.GetDouble(14), r.GetDouble(15), r.GetDouble(16), r.GetDouble(17), r.GetDouble(18)));
+                    r.GetDouble(10), r.GetDouble(11), r.GetDouble(12), r.GetDouble(13), r.GetDouble(14), r.GetDouble(15), r.GetDouble(16), r.GetDouble(17), r.GetDouble(18),
+                    r.GetString(19)));
             }
         }
         catch (SqliteException ex) when (IsMissingTableOrColumn(ex)) { list.Clear(); }
@@ -93,16 +120,59 @@ public static class OreHere
         return false;
     }
 
+    // 箱の真ん中 (星系の座標 = 枠の原点 + 枠の回転 · 枠の中の位置)
+    private static (double X, double Y, double Z) BoxCenter(Area a)
+    {
+        double lx = (a.MinX + a.MaxX) / 2, ly = (a.MinY + a.MaxY) / 2, lz = (a.MinZ + a.MaxZ) / 2;
+        var f = a.Frame;
+        return (a.OX + f[0] * lx + f[1] * ly + f[2] * lz, a.OY + f[3] * lx + f[4] * ly + f[5] * lz, a.OZ + f[6] * lx + f[7] * ly + f[8] * lz);
+    }
+
+    // 座標 pos を中に含む、星系 system の箱 (ore_areas の kind が box の行) のうち、箱の中心が pos にいちばん近いもの。無ければ null。
+    // preset の行が ore_locations に無い箱 (presets に無いもの) は見ない (岩の行が引けないため)
+    private static Area? BoxAt(IReadOnlyList<Area>? areas, HashSet<string> presets, string system, (double X, double Y, double Z) pos)
+    {
+        Area? best = null;
+        var bestD = double.MaxValue;
+        if (areas == null) return null;
+        foreach (var a in areas)
+        {
+            if (a.Kind != GameDataExtractor.OreAreaBox || !presets.Contains(a.Preset)) continue;
+            if (!a.System.Equals(system, StringComparison.OrdinalIgnoreCase) || !Contains(a, pos)) continue;
+            var c = BoxCenter(a);
+            var d = Math.Sqrt((pos.X - c.X) * (pos.X - c.X) + (pos.Y - c.Y) * (pos.Y - c.Y) + (pos.Z - c.Z) * (pos.Z - c.Z));
+            if (d < bestD) { bestD = d; best = a; }
+        }
+        return best;
+    }
+
+    // preset の行のある場所の 1 つ (その星系のものを優先し、名前の順で最初のもの)。同じ preset の行は、どの場所でも同じ中身。無ければ null
+    private static OreSignatureCalc.Place? PlaceOfPreset(IReadOnlyList<OreSignatureCalc.Location> locations, string preset, string system)
+    {
+        var rows = locations.Where(l => l.Preset == preset).OrderBy(l => l.Place, StringComparer.Ordinal).ToList();
+        var hit = rows.FirstOrDefault(l => l.System.Equals(system, StringComparison.OrdinalIgnoreCase)) ?? rows.FirstOrDefault();
+        return hit == null ? null : new OreSignatureCalc.Place(hit.Place, hit.System);
+    }
+
     // 座標 pos (取った時刻 utc。takenSystem は量子ジャンプの途中に取ったときの星系名。無ければ空) から場所を決める。星系が分からなければ null。
     // areas: 採掘できる場所の広がり (LoadAreas。null・空なら広がりでは決めない)
     // knownSystem: 座標とは別の手がかりで分かっている今の星系 (MapPanel.KnownSystemForOverlay。分からなければ null・空)。4 の段でだけ使う
+    // locations: ore_locations の行 (OreSignatureCalc.Load の Locations)。箱の preset の行を引くのに使う。null なら、0 の段と近くの採掘の場所は無い
     public static Where? Resolve(ShopTree tree, IReadOnlyList<OreSignatureCalc.Place> places, (double X, double Y, double Z) pos, double utc, string? takenSystem,
-        IReadOnlyList<Area>? areas = null, string? knownSystem = null)
+        IReadOnlyList<Area>? areas = null, string? knownSystem = null, IReadOnlyList<OreSignatureCalc.Location>? locations = null)
     {
         var effSystem = takenSystem is { Length: > 0 } es ? tree.Systems.FirstOrDefault(s => s.System.Equals(es, StringComparison.OrdinalIgnoreCase)) : null;
         var loc = CurrentLocation.Locate(tree, pos, utc, MapPanel.SystemNames, null, fresh: false, effSystem);
         if (loc == null) return null;
         var system = loc.System.System;
+        // 0. 箱の中 (2026-11-06): その星系の箱の中にいれば、その箱の preset。見出しの名前は箱の場所の名前、無ければ現在地の場所の名前 (5 と同じ引き方)
+        var presets = locations != null ? new HashSet<string>(locations.Select(l => l.Preset), StringComparer.Ordinal) : null;
+        if (presets != null && BoxAt(areas, presets, system, pos) is { } box && PlaceOfPreset(locations!, box.Preset, box.System) is { } boxPlace)
+        {
+            var name = box.Place.Length > 0 ? box.Place
+                : CurrentLocation.WhereaboutsOf(pos, loc, null).Place?.Name ?? CurrentLocation.NearBody(tree, loc.System, pos)?.Body.Name ?? "";
+            return new Where(boxPlace, name, box.System, box.Preset);
+        }
         // 1. 天体でない場所 (近い順。中か付近にあって名前が一致する最初のもの)
         foreach (var row in loc.All)
         {
@@ -137,8 +207,23 @@ public static class OreHere
                     return new Where(other, other.Name, other.System);
             }
         }
-        // 5. 当たらない: 分かる範囲の名前 (現在地の場所 (中・付近)、無ければ近くの天体)
-        return new Where(null, w.Place?.Name ?? nb?.Body.Name ?? "", system);
+        // 5. 当たらない: 分かる範囲の名前 (現在地の場所 (中・付近)、無ければ近くの天体) と、近くの採掘の場所 (2026-11-06)。
+        //    同じ星系の、QT の行き先になる種類の星図の場所を近い順に見て (loc.All は、その星系の座標のある場所の近い順)、その場所の位置 (その時刻の自転を入れた位置) が
+        //    箱の中にあればその箱の preset、無ければ名前で ore_locations の場所に当たるもの (1・2 と同じ MatchPlace)。NearMax か所まで。
+        //    同じ名前の場所 (Nyx の QV Breaker Station は同じ名前が 31 か所) は、いちばん近い 1 つだけ
+        var near = new List<NearPlace>();
+        if (presets != null)
+            foreach (var row in loc.All)
+            {
+                if (near.Count >= NearMax) break;
+                if (!IsQtType(row.Node.Type) || near.Any(n => n.Name.Equals(row.Node.Name, StringComparison.OrdinalIgnoreCase))) continue;
+                if (BoxAt(areas, presets, system, CurrentLocation.PlacePosition(row.Node, loc.Thetas)) is { } nearBox
+                    && PlaceOfPreset(locations!, nearBox.Preset, nearBox.System) is { } nearBoxPlace)
+                    near.Add(new NearPlace(row.Node.Name, row.Distance, nearBoxPlace, nearBox.Preset));
+                else if (OreSignatureCalc.MatchPlace(places, row.Node.Name, system) is { } nearNamed)
+                    near.Add(new NearPlace(row.Node.Name, row.Distance, nearNamed, null));
+            }
+        return new Where(null, w.Place?.Name ?? nb?.Body.Name ?? "", system, null, near);
     }
 
     // 座標から場所を決めて中身を作る (裏のスレッドで呼ぶ)。星系が分からなければ見出しは「現在位置」。knownSystem は Resolve の説明
@@ -146,7 +231,7 @@ public static class OreHere
         string? knownSystem = null)
     {
         var data = OreSignatureCalc.Load(gamedataDbPath);
-        var where = Resolve(tree, data.Places, pos, utc, takenSystem, LoadAreas(gamedataDbPath), knownSystem) ?? new Where(null, "", "");
+        var where = Resolve(tree, data.Places, pos, utc, takenSystem, LoadAreas(gamedataDbPath), knownSystem, data.Locations) ?? new Where(null, "", "");
         return Build(gamedataDbPath, translationsDbPath, data, where);
     }
 
@@ -184,13 +269,39 @@ public static class OreHere
     private static bool IsMissingTableOrColumn(SqliteException ex) =>
         ex.Message.Contains("no such table", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains("no such column", StringComparison.OrdinalIgnoreCase);
 
-    // 場所の中身を作る。場所が当たっていない・行が無い (表・列の無い DB を含む) ときは「ここで採掘できる物のデータはありません」
+    // 近くの採掘の場所の行 (2026-11-06): 1 か所 1 行で、名前・距離 (アプリの距離の書き方 = GameDataQueryService.FormatDistance)・岩の名前。
+    // 岩の並びは、中身の岩の行と同じ (掘り方の順、出やすさの大きい順、岩の名前)。同じ名前の岩は 1 つ。岩の行の無い場所は出さない
+    private static List<NearLine> NearLines(OreSignatureCalc.Data data, IReadOnlyList<NearPlace>? near)
+    {
+        var lines = new List<NearLine>();
+        if (near == null) return lines;
+        foreach (var n in near)
+        {
+            var rocks = data.Locations.Where(l => l.Place == n.Place.Name && l.System == n.Place.System && (n.Preset == null || l.Preset == n.Preset))
+                .GroupBy(l => (l.Method, l.Rock)).Select(g => (g.Key.Method, g.Key.Rock, MaxChance: g.Max(l => l.Chance)))
+                .OrderBy(x => MethodOrder(x.Method)).ThenByDescending(x => x.MaxChance).ThenBy(x => x.Rock, StringComparer.OrdinalIgnoreCase)
+                .Select(x => x.Rock).Distinct().ToList();
+            if (rocks.Count > 0) lines.Add(new NearLine(n.Name, GameDataQueryService.FormatDistance(n.Distance), string.Join("、", rocks)));
+        }
+        return lines;
+    }
+
+    // 場所の中身を作る。場所が当たっていない・行が無い (表・列の無い DB を含む) ときは、近くの採掘の場所 (where.Near。2026-11-06)、
+    // それも無ければ「ここで採掘できる物のデータはありません」。
+    // 箱で決めた場所 (where.Preset。2026-11-06) は、その preset の行だけで作る (場所にほかの preset があっても入れない)
     public static Content Build(string gamedataDbPath, string translationsDbPath, OreSignatureCalc.Data data, Where where)
     {
         var title = where.Name.Length > 0 ? (where.System.Length > 0 ? $"{where.Name}（{where.System}）" : where.Name)
             : where.System.Length > 0 ? where.System : "現在位置";
-        Content None() => new(title, [], NoDataMessage, []);
+        Content None()
+        {
+            var near = NearLines(data, where.Near);
+            return new(title, [], near.Count > 0 ? "" : NoDataMessage, [], near);
+        }
         if (where.Place is not { } place || !File.Exists(gamedataDbPath)) return None();
+        var preset = where.Preset;
+        // その場所の行か (箱で決めたときは、その preset の行だけ)
+        bool Here(OreSignatureCalc.Location l) => l.Place == place.Name && l.System == place.System && (preset == null || l.Preset == preset);
 
         var merged = new List<MergedRow>();
         var parts = new List<PartRow>();
@@ -201,9 +312,11 @@ public static class OreHere
             try
             {
                 using var cmd = c.CreateCommand();
-                cmd.CommandText = "SELECT DISTINCT method, rock, resource_uuid, resource_record, min_pct, max_pct, part_probability FROM ore_locations WHERE place = @p AND system = @s";
+                cmd.CommandText = "SELECT DISTINCT method, rock, resource_uuid, resource_record, min_pct, max_pct, part_probability FROM ore_locations WHERE place = @p AND system = @s"
+                    + (preset != null ? " AND preset = @pr" : "");
                 cmd.Parameters.AddWithValue("@p", place.Name);
                 cmd.Parameters.AddWithValue("@s", place.System);
+                if (preset != null) cmd.Parameters.AddWithValue("@pr", preset);
                 using var r = cmd.ExecuteReader();
                 while (r.Read()) merged.Add(new MergedRow(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetDouble(4), r.GetDouble(5), r.GetDouble(6)));
             }
@@ -213,10 +326,12 @@ public static class OreHere
             {
                 using var cmd = c.CreateCommand();
                 cmd.CommandText = "SELECT DISTINCT p.method, p.rock, p.composition, p.part_index, p.resource_uuid, p.resource_record, p.min_pct, p.max_pct, p.probability, p.quality_scale "
-                    + "FROM ore_rock_parts p WHERE EXISTS (SELECT 1 FROM ore_locations l WHERE l.place = @p AND l.system = @s AND l.preset = p.preset AND l.method = p.method AND l.rock = p.rock) "
+                    + "FROM ore_rock_parts p WHERE EXISTS (SELECT 1 FROM ore_locations l WHERE l.place = @p AND l.system = @s AND l.preset = p.preset AND l.method = p.method AND l.rock = p.rock"
+                    + (preset != null ? " AND l.preset = @pr" : "") + ") "
                     + "ORDER BY p.method, p.rock, p.composition, p.part_index";
                 cmd.Parameters.AddWithValue("@p", place.Name);
                 cmd.Parameters.AddWithValue("@s", place.System);
+                if (preset != null) cmd.Parameters.AddWithValue("@pr", preset);
                 using var r = cmd.ExecuteReader();
                 while (r.Read())
                     parts.Add(new PartRow(r.GetString(0), r.GetString(1), r.GetString(2), r.GetInt32(3), r.GetString(4), r.GetString(5), r.GetDouble(6), r.GetDouble(7), r.GetDouble(8),
@@ -249,8 +364,7 @@ public static class OreHere
         // 岩ごとの行。並び: 掘り方の順、出やすさの大きい順 (preset が 2 つ以上なら大きいほう)、岩の名前
         var rocks = merged.GroupBy(x => (x.Method, x.Rock)).Select(g =>
         {
-            var chances = data.Locations.Where(l => l.Place == place.Name && l.System == place.System && l.Method == g.Key.Method && l.Rock == g.Key.Rock)
-                .Select(l => l.Chance).ToList();
+            var chances = data.Locations.Where(l => Here(l) && l.Method == g.Key.Method && l.Rock == g.Key.Rock).Select(l => l.Chance).ToList();
             return (g.Key.Method, g.Key.Rock, MaxChance: chances.Count > 0 ? chances.Max() : 0, Rows: g.ToList());
         }).OrderBy(x => MethodOrder(x.Method)).ThenByDescending(x => x.MaxChance).ThenBy(x => x.Rock, StringComparer.OrdinalIgnoreCase).ToList();
 
@@ -260,7 +374,10 @@ public static class OreHere
             var sigs = data.Rocks.Where(k => k.Method == x.Method && k.Name == x.Rock).ToList();
             var signature = sigs.Count == 0 ? "—" : string.Join(" / ", sigs.Select(k => k.Signature).Distinct().OrderBy(v => v).Select(Number));
             var grade = Grade(sigs.Select(k => k.Grade).FirstOrDefault(v => v.Length > 0) ?? "");
-            var chance = OreSignatureCalc.ChanceText(data, place, x.Method, x.Rock);
+            // 箱で決めたときは、その preset の行の値だけ (書き方は OreSignatureCalc.ChanceText と同じ)
+            var chance = preset == null ? OreSignatureCalc.ChanceText(data, place, x.Method, x.Rock)
+                : string.Join(" / ", data.Locations.Where(l => Here(l) && l.Method == x.Method && l.Rock == x.Rock).Select(l => Math.Round(l.Chance, 1)).Distinct()
+                    .OrderByDescending(v => v).Select(v => v.ToString("0.0", CultureInfo.InvariantCulture) + "%"));
 
             // 岩の中の資源と割合。岩の中身の行 (ore_rock_parts) があれば行のとおりに (同じ行は 1 つ)、無ければまとめた行 (ore_locations)
             string resources;
@@ -323,6 +440,11 @@ public static class OreHere
     {
         var lines = new List<string> { c.Title };
         if (c.Message.Length > 0) lines.Add(c.Message);
+        if (c.Near is { Count: > 0 })
+        {
+            lines.Add($"■ {NearHeader}");
+            foreach (var n in c.Near) lines.Add($"  {n.Name} | {n.Distance} | {n.Rocks}");
+        }
         if (c.Sections.Count > 0) lines.Add("  " + string.Join(" | ", Columns));
         foreach (var s in c.Sections)
         {

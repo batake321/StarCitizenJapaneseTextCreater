@@ -284,7 +284,7 @@ public sealed class StationView3DView : Grid
             // ビューアが station.json を読んだ後に {type:'hangarSizesGet'} で頼み、{type:'hangarSizes', sizes} で返す。sizes は、場所の入口 (place_hangars) の大きさのうち、
             // OpenHangarAsync と同じ StationHangarCatalog.Resolve で区画が決まるもの。ハンガーの表が作れない・読めないとき (GetAsync の例外) は返さない (ビューアは place_hangars の大きさのまま)
             // 現在位置の印 (開いたとき): 今の現在位置がこの場所の中なら {type:'hereMark'} で返す
-            if (type == "hereMarkGet") { _pageReady = true; await RefreshHereMarkAsync(); if (_hereRequested) await ShowHereNoCaptureAsync(); return; }
+            if (type == "hereMarkGet") { _pageReady = true; await RefreshHereMarkAsync(); if (_hereRequested) await ShowHereNoCaptureAsync(); else if (_exteriorRequested && !_closed) PostExteriorView(); return; }
             if (type == "hangarSizesGet")
             {
                 try
@@ -989,7 +989,25 @@ public sealed class StationView3DView : Grid
     public void RequestHere()
     {
         _hereRequested = true;
+        _exteriorRequested = false;
         if (_pageReady && !_closed) _ = ShowHereNoCaptureAsync();
+    }
+    // ===== 外から見る形 (2026-11-06、利用者の指示「あとあると便利なのは、現在位置を取ったときにステーションから 50Km 以内かつそのステーションから出た後でなければ、
+    //  そのステーションの外観の 3D を map 表示して pad の場所などを分かりやすくする機能」。親の決定) =====
+    // ［マップ］の現在位置で、近くのステーションを外から見る形で出すとき (MapPanel.GoHere3DAsync): この 3D を、外から全体が見える形にする (中の行き先へは飛ばない)。
+    // ビューアへ {type:'exteriorView'} を送る (view3d.js の onExteriorView。今ある外部視点 (外から見たときの印と見出し) になる所まで引くだけで、新しい描き方は無い)。
+    // ページがまだ用意できていなければ (station.json を読んで hereMarkGet を送る前)、用意できたときに送る。後から頼まれたほう (RequestHere か、これ) だけを行う
+    private bool _exteriorRequested;
+    public void RequestExterior()
+    {
+        _exteriorRequested = true;
+        _hereRequested = false;
+        if (_pageReady && !_closed) PostExteriorView();
+    }
+    private void PostExteriorView()
+    {
+        _exteriorRequested = false;
+        Post(new { type = "exteriorView" });
     }
     private async Task ShowHereNoCaptureAsync()
     {

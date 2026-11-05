@@ -108,23 +108,27 @@ internal static class StationView3DShops
     // here: 出した後に、その 3D で現在位置の所を出す (StationView3DView.RequestHere。［マップ］の現在位置を押したとき)。同じ場所を出していれば出し直さない
     // activate: 窓を前に出すか (既定は出す)。現在位置のキーから来たとき (MapPanel.GoHere3DAsync(activate: false)) は偽: 中身の更新だけして、
     // 最小化も戻さず前にも出さない (ゲームからフォーカスを取らないため。2026-11-05)
-    public static bool ShowInOpenWindow(string record, string name, ShopTree? tree, string? focusShop, bool here = false, bool activate = true)
+    // exterior: 出した後に、その 3D を外から全体が見える形にする (StationView3DView.RequestExterior。［マップ］の現在位置で、近くのステーションを外から見る形で出すとき。
+    // MapPanel.GoHere3DAsync。2026-11-06)。同じ場所を出していれば出し直さず、外からの見え方に切り替える
+    public static bool ShowInOpenWindow(string record, string name, ShopTree? tree, string? focusShop, bool here = false, bool activate = true, bool exterior = false)
     {
         if (s_window is not { } win) return false;
-        if (here && focusShop == null && win.View.Record == record)
+        if ((here || exterior) && focusShop == null && win.View.Record == record)
         {
             if (activate)
             {
                 if (win.WindowState == WindowState.Minimized) win.WindowState = WindowState.Normal;
                 win.Activate();
             }
-            win.View.RequestHere();
+            if (here) win.View.RequestHere();
+            else win.View.RequestExterior();
             return true;
         }
         Func<string, string, string>? label = tree == null ? null : (g, e) => ShopLabel(tree, record, g, e);
         Func<string, string, object?>? sales = tree == null ? null : (g, e) => Sales(tree, record, g, e);
         win.ShowPlace(record, name, label, sales, focusShop, activate);
         if (here) win.View.RequestHere();
+        else if (exterior) win.View.RequestExterior();
         return true;
     }
 

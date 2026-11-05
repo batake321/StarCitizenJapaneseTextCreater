@@ -373,12 +373,15 @@ public sealed class GameLogVehicleClasses
 //   (2026-11-02 に足したもの。ステーションの地図の［現在位置］が座標を取れなかったときの「ハンガーにいるか」の推測に使う)
 //   InHangar: ハンガー進入の通知の後、退出がまだ無い (無統治区域の通知の出る所だけ。Stanton では出ない)、LastOwnFetch: 最後の自分の船の一覧の取得 (OnRequestFetchVehicles。ハンガーの端末)、
 //   LastSpawn: 最後の船の呼び出し (SetVehicleSpawningInformations) の時刻
+//   LeftLandingRaw: いちばん新しく居た着陸場所から出て、今は着陸場所の外にいるときの、その着陸場所のログの中の元の名前 (RR_P3_LEO など)。
+//   着陸場所の中にいる・まだどの着陸場所にも居ない・その場所の元の名前がこのファイルで分からなければ null
+//   (2026-11-06 に足したもの。［マップ］の現在位置で、近くのステーションを外から見る形で出すかどうかの「そのステーションから出た後」の判定に使う。MapPanel.GoHere3DAsync)
 public sealed record GameLogQuantumState(string? Target, DateTime? TargetTime, string? StartName, DateTime? ArrivedTime, bool Moving, DateTime? MovingSince,
     DateTime? LastLocationChange, bool TargetIsSurface = false, string? LocationId = null, DateTime? LocationChangeAtSelection = null,
     IReadOnlyList<GameLogObjectiveMarker>? ObjectiveMarkers = null, DateTime? LogStart = null, DateTime? LastDeathOrRespawn = null,
     bool Stopped = false, DateTime? LastHangarEnter = null, DateTime? LandingSince = null,
     int RouteFinalIndex = 0, DateTime? Leg1EndedAt = null, string? ShipClass = null, DateTime? WorldEnteredAt = null, DateTime? LandedAt = null,
-    DateTime? TakeoffExitAt = null, bool InHangar = false, DateTime? LastOwnFetch = null, DateTime? LastSpawn = null);
+    DateTime? TakeoffExitAt = null, bool InHangar = false, DateTime? LastOwnFetch = null, DateTime? LastSpawn = null, string? LeftLandingRaw = null);
 
 // 契約の目標の印 1 つ (Game.log の <CObjectiveMarkerComponent::AddToPlayerDataBank>): 時刻、ZonePos (x, y, z。どの天体の枠かは書かれていない)、missionId、objectiveId、
 // Entity = 印の名前 (MissionObjectiveMarker_18562。読めなければ null)、NavPoint = 組のビーコンの名前 (<CObjectiveMarkerComponent::PairWithMissionNavpoint> の NavPoint。無ければ null)
@@ -2620,7 +2623,12 @@ public sealed class GameLogParser
     public GameLogQuantumState QuantumState => new(_quantumTarget, _quantumTargetTime, _quantumStartName, _quantumArrivedTime, _quantumMoving, _quantumMovingSince, _lastLocationChange,
         _quantumTarget != null && _surfaceLocations.Contains(_quantumTarget), _currentLocationId, _locationChangeAtSelection, _objectiveMarkers.ToArray(),
         _logStartTime, _lastDeathOrRespawn, _quantumMoving && _quantumStopped, _lastHangarEnter, _landingId != "0" ? _landingSince : null,
-        _quantumRouteFinalIndex, _quantumLeg1EndedAt, _quantumShipClass, _lastWorldEnter, _lastLandedAt, _quantumTakeoffExitAt, _inHangar, _lastOwnFetchTime, _lastSpawnTime);
+        _quantumRouteFinalIndex, _quantumLeg1EndedAt, _quantumShipClass, _lastWorldEnter, _lastLandedAt, _quantumTakeoffExitAt, _inHangar, _lastOwnFetchTime, _lastSpawnTime,
+        LeftLandingRawName);
+
+    // いちばん新しく居た着陸場所 (_placeId) から出て、今は着陸場所の外 (_landingId が "0") にいるときの、その着陸場所のログの中の元の名前 (例 RR_P3_LEO)。
+    // 着陸場所の中にいる・まだどの着陸場所にも居ない・元の名前がこのファイルでまだ分からなければ null (GameLogQuantumState.LeftLandingRaw。2026-11-06)
+    private string? LeftLandingRawName => _landingId == "0" && _placeId != "0" && _placeRawNames.TryGetValue(_placeId, out var raw) ? raw : null;
 
     // 今の着陸場所のログの中の元の名前 (RequestLocationInventory の Location[…]。例 RR_P3_LEO)。着陸場所の外か、このファイルでまだ分からなければ null。
     // ［マップ］の［現在位置］が使う (読むだけ。追い読みと同じスレッドで読むこと)

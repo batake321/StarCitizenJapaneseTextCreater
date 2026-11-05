@@ -401,6 +401,33 @@ internal sealed class OreOverlayWindow : Window
         _content.Children.Clear();
         _content.Children.Add(Text(c.Title, size: 20, bold: true));
         if (c.Message.Length > 0) _content.Children.Add(Text(c.Message, margin: M(0, 6, 0, 0)));
+        // 近くの採掘の場所 (2026-11-06、利用者の指示「今いるとこ近辺提示しないと意味ない」「QT できるポイント名でないとわからない」。どの段にも当たらないときだけ):
+        // 見出しの 1 行と、1 か所 1 行 (名前 | 距離 | 岩の名前。最後の列は折り返す)。品質の行と同じ描き方
+        if (c.Near is { Count: > 0 } near)
+        {
+            _content.Children.Add(Text(OreHere.NearHeader, AccentBrush, bold: true, margin: M(0, 6, 0, 0)));
+            var grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            for (int i = 0; i < near.Count; i++)
+            {
+                grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                var name = Text(near[i].Name, bold: true, margin: M(0, 2, 14, 0));
+                var distance = Text(near[i].Distance, margin: M(0, 2, 14, 0));
+                distance.HorizontalAlignment = HorizontalAlignment.Right;
+                var rocks = Text(near[i].Rocks, margin: M(0, 2, 0, 0));
+                Grid.SetRow(name, i);
+                Grid.SetRow(distance, i);
+                Grid.SetRow(rocks, i);
+                Grid.SetColumn(distance, 1);
+                Grid.SetColumn(rocks, 2);
+                grid.Children.Add(name);
+                grid.Children.Add(distance);
+                grid.Children.Add(rocks);
+            }
+            _content.Children.Add(grid);
+        }
         if (c.Sections.Count > 0)
         {
             // 表: 岩 | 格 | 出やすさ | シグネチャー | 岩の中の資源と割合 (最後の列は折り返す)

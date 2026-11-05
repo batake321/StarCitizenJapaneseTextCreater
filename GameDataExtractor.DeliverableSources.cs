@@ -291,8 +291,9 @@ public partial class GameDataExtractor
                     else
                     {
                         WriteOreAreas(_db!, aRows);
-                        StatusChanged?.Invoke($"[採掘できる場所の広がり] {aRows.Count} 行 (場所 {aRows.Select(r => (r.Place, r.System)).Distinct().Count()} 件: "
-                            + string.Join("・", aRows.GroupBy(r => (r.Place, r.System)).Select(g => $"{g.Key.Place} {g.Count()}")) + ")");
+                        // (2026-11-06: ラグランジュ点のガス雲・クラスターも入れるようにして場所が数百になったので、場所ごとの数は並べず、数だけ出す)
+                        StatusChanged?.Invoke($"[採掘できる場所の広がり] {aRows.Count} 行 (場所 {aRows.Select(r => (r.Place, r.System)).Distinct().Count()} 件・"
+                            + $"プリセット {aRows.Select(r => r.Preset).Distinct().Count()} 件・輪 {aRows.Count(r => r.Kind == OreAreaRing)} 行・箱 {aRows.Count(r => r.Kind == OreAreaBox)} 行)");
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -639,8 +640,17 @@ public partial class GameDataExtractor
     //   kind = 'ring' (小惑星の輪。SAsteroidRingComponentParams): cx / cy / cz = 輪の中心 (枠の中の位置)、inner_m / outer_m = innerRadiusKm / outerRadiusKm × 1000、
     //     depth_m = depthKm × 1000 (厚み。枠の z の向きに中心から ± depth_m ÷ 2。Aaron Halo の socpak の箱 (minBounds / maxBounds) が x・y は ± 外側の半径、z は ± 厚み ÷ 2 だった)
     //   kind = 'box' (ガス雲。SAsteroidGasCloudComponentParams): min_x … max_z = その socpak の ObjectContainer の minBounds / maxBounds (枠の中の箱)。
-    //     箱はガス雲を収める箱で、ガス雲そのものの形ではない (箱の中でも雲の外の所がありうる)
-    // 惑星・衛星の下に置かれたもの (天体と一緒に回る)・回転のある輪・星系のどこにも置かれていない socpak (Akiro Cluster の akirocluster.socpak) は入らない。
+    //     箱はガス雲を収める箱で、ガス雲そのものの形ではない (箱の中でも雲の外の所がありうる)。cx / cy / cz = ガス雲の Entity の Pos
+    //   kind = 'box' (クラスター。SAsteroidClusterComponentParams。2026-11-06): 枠は socpak の枠でなく Entity の枠 —
+    //     ox / oy / oz = Entity の Pos を星系の座標にしたもの (箱の中心)、frame = socpak の枠の回転 × Entity の Rotate の回転、
+    //     min_x … max_z = ∓ / ± (widthKm, lengthKm, heightKm) × 500、cx / cy / cz = 0。中にいるかの決め方 (OreHere.Contains) はガス雲の箱と同じ
+    // (2026-11-06、利用者の指示「Stanton 星系の Pyrogateway HUR-5 両方とも鉱石採掘できるものの情報がないと出る」「DB でなくゲームデータから直接拾うのは？
+    //  要するに、今いる場所で集まりの箱を調べる」と、親の決定「preset を持つエンティティ（ガス雲・クラスター）の箱を、置かれた位置ごとに、全部 ore_areas に入れる」:
+    //  前は、socpak そのものから場所の名前が決まるもの (Aaron Halo・Glaciem Ring・Keeger Belt) だけだった。今は、ラグランジュ点のガス雲・小惑星の基地のガス雲・
+    //  クラスターも、置かれた所ごとに入れる。その place は、置かれた所の名前 (その socpak を置く Child か、その親の Child (近いほうから) の starMapRecord の
+    //  StarMapObject の英語名。OreHere の見出しに使う)。引けなければ ''。OreHere は preset で ore_locations の行を引く)
+    // 惑星・衛星の下に置かれたもの (天体と一緒に回る)・回転のある輪・星系のどこにも置かれていない socpak (Akiro Cluster の akirocluster.socpak・
+    // miningasteroid_004.socpak・miningasteroid_006.socpak) は入らない。
     // インデックス構築 (Step 6c) で作り直す (作れなかったときは前の行を残す)。前の版の DB には表が無いので、起動後に一度だけ作る (NeedsOreLocations → RebuildOreLocationsAsync)
     internal const string OreAreasTable = "ore_areas";
     internal const string OreAreasDdl = """
@@ -1553,7 +1563,7 @@ public partial class GameDataExtractor
 
         private static (string Rel, HashSet<string> Records, HashSet<string>? Kids, List<(string Planet, HashSet<string> Creatures)> Ale, List<(string Child, string Smo)> ChildSmo, List<SocShop> Shops, List<SocChild>? Containers, double? RotHours, double? PlanetRadius, List<(string Key, double X, double Y, double Z, double Radius)> Labels, List<SocOreArea> OreAreas) ScanOne(string rel, byte[] data, DeliverableDcb dcb)
         {
-            // 採掘の設定を持つ小惑星の広がり (SocOreArea): .soc の Entity (輪はそのまま、ガス雲は箱が決まってから) と、直下の xml の ObjectContainer の minBounds / maxBounds
+            // 採掘の設定を持つ小惑星の広がり (SocOreArea): .soc の Entity (輪・クラスターはそのまま、ガス雲は箱が決まってから) と、直下の xml の ObjectContainer の minBounds / maxBounds
             var oreRings = new List<SocOreArea>();
             var oreClouds = new List<(string PresetUuid, string Entity, double X, double Y, double Z)>();
             ((double X, double Y, double Z) Min, (double X, double Y, double Z) Max)? ocBounds = null;
@@ -1606,9 +1616,10 @@ public partial class GameDataExtractor
                     }
                     catch (System.Xml.XmlException) { }
                 }
-                // 採掘の設定を持つ小惑星の広がり: .soc の Entity (HarvestableProviderParams と小惑星の輪・ガス雲) と、直下の xml の minBounds / maxBounds
+                // 採掘の設定を持つ小惑星の広がり: .soc の Entity (HarvestableProviderParams と小惑星の輪・ガス雲・クラスター) と、直下の xml の minBounds / maxBounds
                 if (lower.EndsWith(".soc", StringComparison.Ordinal) && text.Contains("HarvestableProviderParams", StringComparison.Ordinal)
-                    && (text.Contains("SAsteroidRingComponentParams", StringComparison.Ordinal) || text.Contains("SAsteroidGasCloudComponentParams", StringComparison.Ordinal)))
+                    && (text.Contains("SAsteroidRingComponentParams", StringComparison.Ordinal) || text.Contains("SAsteroidGasCloudComponentParams", StringComparison.Ordinal)
+                        || text.Contains("SAsteroidClusterComponentParams", StringComparison.Ordinal)))
                     ReadSocOreAreas(bytes, text, oreRings, oreClouds);
                 if (lower == ownXml && text.Contains("minBounds", StringComparison.Ordinal))
                 {
@@ -1687,23 +1698,20 @@ public partial class GameDataExtractor
                 }
             }
             // ガス雲の広がり: socpak にガス雲の Entity が 1 つだけで、ObjectContainer の箱 (minBounds / maxBounds) の中心がその Entity の Pos と同じときだけ、箱を広がりにする
+            // ガス雲: 箱は、その socpak の ObjectContainer の minBounds / maxBounds (採掘の設定を持つガス雲の Entity ごとに 1 つ)。
+            // (2026-11-06、親の決定「preset を持つエンティティ（ガス雲・クラスター）の箱を、置かれた位置ごとに、全部 ore_areas に入れる。箱は、ガス雲は socpak の
+            //  ObjectContainer の minBounds / maxBounds」。前は、ガス雲の Entity が socpak に 1 つだけで、箱の中心がその Entity の Pos と同じときだけ入れていた。
+            //  その条件では、Pyro のラグランジュ点の雲 (childcloud_cool01_a・childcloud_warm01_a など。箱の中心が Entity の Pos と違う) が入らない)
             var oreAreas = oreRings;
-            if (oreClouds.Count == 1 && ocBounds is { } ob)
-            {
-                var cloud = oreClouds[0];
-                if (Math.Abs((ob.Min.X + ob.Max.X) / 2 - cloud.X) <= OreAreaCenterTolerance && Math.Abs((ob.Min.Y + ob.Max.Y) / 2 - cloud.Y) <= OreAreaCenterTolerance
-                    && Math.Abs((ob.Min.Z + ob.Max.Z) / 2 - cloud.Z) <= OreAreaCenterTolerance)
+            if (ocBounds is { } ob)
+                foreach (var cloud in oreClouds)
                     oreAreas.Add(new SocOreArea(cloud.PresetUuid, OreAreaBox, cloud.Entity, cloud.X, cloud.Y, cloud.Z, 0, 0, 0, ob.Min.X, ob.Min.Y, ob.Min.Z, ob.Max.X, ob.Max.Y, ob.Max.Z));
-            }
             return (rel, records, kids, ale, childSmo, shops, containers, rotHours, planetRadius, labels, oreAreas);
         }
 
-        // ガス雲の箱の中心と Entity の Pos を「同じ」とみなす差 (m。文字にした数の丸めの分。広がりを決める数ではない)
-        private const double OreAreaCenterTolerance = 0.01;
-
         // .soc のバイト列から、採掘の設定 (HarvestableProviderComponent の preset) と小惑星の広がり (AsteroidFieldComponent) を両方持つ Entity を読む (SocOreArea の説明)。
         // .soc には CryXmlB がいくつも埋め込まれているので ReadSocShops と同じく切り分け、"HarvestableProviderParams" を含むものだけを読む。読めない CryXmlB は飛ばす。
-        // 輪 (SAsteroidRingComponentParams) は rings に、ガス雲 (SAsteroidGasCloudComponentParams) は clouds に足す
+        // 輪 (SAsteroidRingComponentParams) とクラスター (SAsteroidClusterComponentParams) は rings に、ガス雲 (SAsteroidGasCloudComponentParams) は clouds に足す
         internal static void ReadSocOreAreas(byte[] bytes, string latin1, List<SocOreArea> rings, List<(string PresetUuid, string Entity, double X, double Y, double Z)> clouds)
         {
             var inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -1747,6 +1755,25 @@ public partial class GameDataExtractor
                     }
                     else if (type == "SAsteroidGasCloudComponentParams")
                         clouds.Add((preset, name, p.X, p.Y, p.Z));
+                    else if (type == "SAsteroidClusterComponentParams")
+                    {
+                        // クラスター (2026-11-06): 箱は Entity の Pos が中心で、Entity の向き (Rotate。w,x,y,z の四元数) の x に widthKm・y に lengthKm・z に heightKm。
+                        // (軸と四元数の並びは、2026-11-06 の Data.p4k で、クラスターが 1 つだけの socpak の ObjectContainer の minBounds / maxBounds と、
+                        //  こうして回した箱を収める箱が一致することで確かめた: miningasteroid_003・miningasteroid_005・ast_cluster_med_roundrough_a)。
+                        // Rotate が書いてあるのに読めないもの・大きさが読めないものは入れない
+                        (double W, double X, double Y, double Z)? clusterRot = null;
+                        if ((string?)ent.Attribute("Rotate") is { } rotText)
+                        {
+                            var cq = rotText.Split(',').Select(v => double.TryParse(v.Trim(), System.Globalization.NumberStyles.Float, inv, out var d) ? d : double.NaN).ToArray();
+                            var clen = cq.Length == 4 ? Math.Sqrt(cq.Sum(v => v * v)) : double.NaN;
+                            if (!double.IsFinite(clen) || !(clen > 0)) continue;
+                            clusterRot = (cq[0] / clen, cq[1] / clen, cq[2] / clen, cq[3] / clen);
+                        }
+                        if (Num(field!, "widthKm") is not { } wKm || Num(field!, "lengthKm") is not { } lKm || Num(field!, "heightKm") is not { } hKm) continue;
+                        if (!(wKm > 0) || !(lKm > 0) || !(hKm > 0)) continue;
+                        rings.Add(new SocOreArea(preset, OreAreaBox, name, p.X, p.Y, p.Z, 0, 0, 0, -wKm * 500, -lKm * 500, -hKm * 500, wKm * 500, lKm * 500, hKm * 500,
+                            OwnFrame: true, Rot: clusterRot));
+                    }
                 }
             }
         }
@@ -1942,11 +1969,14 @@ public partial class GameDataExtractor
     //   Kind = OreAreaRing: AsteroidFieldComponent が SAsteroidRingComponentParams。輪の中心 (C。Entity の Pos。socpak の枠)・
     //     内側と外側の半径・厚み (innerRadiusKm / outerRadiusKm / depthKm を m にしたもの)。Entity に回転 (Rotate) があるものは輪の向きが決められないので入れない
     //   Kind = OreAreaBox: AsteroidFieldComponent が SAsteroidGasCloudComponentParams (ガス雲)。広がりは、その socpak の直下の xml の
-    //     ObjectContainer の minBounds / maxBounds (socpak の枠の箱)。ガス雲の Entity が socpak に 1 つだけで、箱の中心がその Entity の Pos と同じときだけ入れる
-    //     (実データの 3 つ (glaciem_gascloud_gen・keeger_gascloud_gen・akirocluster) はどれもそうなっていた)
+    //     ObjectContainer の minBounds / maxBounds (socpak の枠の箱)。採掘の設定を持つガス雲の Entity ごとに 1 つ (C は Entity の Pos)
+    //   Kind = OreAreaBox で OwnFrame (2026-11-06): AsteroidFieldComponent が SAsteroidClusterComponentParams (クラスター)。箱は Entity の枠の箱:
+    //     C = Entity の Pos (socpak の枠) が箱の中心、Rot = Entity の Rotate (w,x,y,z。無ければ null = 回さない)、
+    //     Min / Max = ∓ / ± (widthKm, lengthKm, heightKm) × 500 (Entity の枠の x / y / z。m)
     internal const string OreAreaRing = "ring", OreAreaBox = "box";
     internal sealed record SocOreArea(string PresetUuid, string Kind, string Entity, double CX, double CY, double CZ,
-        double Inner, double Outer, double Depth, double MinX, double MinY, double MinZ, double MaxX, double MaxY, double MaxZ);
+        double Inner, double Outer, double Depth, double MinX, double MinY, double MinZ, double MaxX, double MaxY, double MaxZ,
+        bool OwnFrame = false, (double W, double X, double Y, double Z)? Rot = null);
 
     // .soc の中の店 1 つ (Entity の Name・EntityCryGUID、EntityComponentShop の franchise (ShopFranchise の uuid)・shopInventoryType (ITEM / COMMODITY)、
     // Entity の Pos (socpak の枠。読めなければ null。店の名札 (game_shops.area_label) を探すのに使う)、
@@ -2487,11 +2517,14 @@ public partial class GameDataExtractor
         public List<OreAreaRow> OreAreas { get; } = new();
 
         // ore_areas の行を作る: 広がりのある socpak (DeliverableSocpaks.OreAreas) が星系に置かれた所 (ShopTables.FindOreAreaPlacements) ごとに、
-        // その socpak の場所の名前を付ける。名前は、socpak そのものから決まるものだけ (OreSocpakOwnPlaceName: 小惑星帯のフォルダの帯の名前か、
-        // 星系のフォルダの直下の socpak の名前。ore_locations の場所と同じ文字)。置かれた所の親を辿って名前を決める socpak (ラグランジュ点のガス雲・小惑星の基地のガス雲など。
-        // 同じ socpak があちこちに置かれ、置かれた所ごとに名前が違う) は入れない (それらは星図の場所の名前で当たる)。
+        // 場所の名前を付ける。名前は、socpak そのものから決まるもの (OreSocpakOwnPlaceName: 小惑星帯のフォルダの帯の名前か、
+        // 星系のフォルダの直下の socpak の名前。ore_locations の場所と同じ文字) はその名前。
+        // 置かれた所の親を辿って名前を決める socpak (ラグランジュ点のガス雲・小惑星の基地のガス雲・クラスターなど。同じ socpak があちこちに置かれ、置かれた所ごとに名前が違う) は、
+        // 置かれた所の名前 (OrePlacementName)。引けなければ '' (2026-11-06、親の決定「preset を持つエンティティ（ガス雲・クラスター）の箱を、置かれた位置ごとに、
+        // 全部 ore_areas に入れる」。前は、socpak そのものから名前の決まらないものを入れていなかった)。
         // 置かれた星系 (恒星の StarMapObject の英語名) と preset の星系 (preset のファイルのパス) が同じものだけ (別の星系・テスト用の socpak の使い回しを入れない。OrePlaces と同じ考え)。
-        // preset が引けないものは入れない
+        // preset が引けないものは入れない。
+        // クラスター (SocOreArea.OwnFrame) は、枠を Entity の枠にして入れる (原点 = 置かれた所の原点 + 枠の回転 · Entity の Pos、回転 = 枠の回転 × Entity の Rotate の回転)
         private void BuildOreAreas()
         {
             OreAreas.Clear();
@@ -2507,11 +2540,27 @@ public partial class GameDataExtractor
                     if (!_d.RecordToFile.TryGetValue(hpp, out var hppRel)) continue;
                     var system = SystemFromPath(hppRel, "harvestable/providerpresets/system/");
                     if (system.Length == 0 || !system.Equals(starName, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (OreSocpakOwnPlaceName(p.Socpak, system) is not { } place) continue;
+                    var place = OreSocpakOwnPlaceName(p.Socpak, system) ?? OrePlacementName(p.Smo, system) ?? "";
+                    if (a.OwnFrame)
+                    {
+                        var (dx, dy, dz) = ShopTables.MatApply(p.Frame, a.CX, a.CY, a.CZ);
+                        var own = string.Join(",", ShopTables.MatMul(p.Frame, ShopTables.RotMatrix(a.Rot)).Select(v => v.ToString("R", inv)));
+                        OreAreas.Add(new OreAreaRow(hpp, place, system, p.Socpak, a.Entity, a.Kind, p.X + dx, p.Y + dy, p.Z + dz, own, 0, 0, 0, a.Inner, a.Outer, a.Depth,
+                            a.MinX, a.MinY, a.MinZ, a.MaxX, a.MaxY, a.MaxZ));
+                        continue;
+                    }
                     OreAreas.Add(new OreAreaRow(hpp, place, system, p.Socpak, a.Entity, a.Kind, p.X, p.Y, p.Z, frame, a.CX, a.CY, a.CZ, a.Inner, a.Outer, a.Depth,
                         a.MinX, a.MinY, a.MinZ, a.MaxX, a.MaxY, a.MaxZ));
                 }
             }
+        }
+
+        // 置かれた所の名前 (ore_areas.place。2026-11-06): その socpak を置く Child か、その親の Child (近いほうから) の starMapRecord の StarMapObject
+        // (ShopTables.FindOreAreaPlacements の Smo。恒星は入らない) の英語名。StarMapObject が無い・訳が使えない・星系そのものの名前なら null
+        private string? OrePlacementName(string smo, string system)
+        {
+            if (smo.Length == 0 || !_smoName.TryGetValue(smo, out var en) || en.StartsWith('@')) return null;
+            return OreService.EnglishText(en) is { } usable && !IsSystemName(usable, system) ? usable : null;
         }
 
         // socpak そのものから決まる場所の名前 (OreSocpakPlaceNames の初めの 2 つの決め方だけ: 小惑星帯のフォルダ (BeltFolderNameKeys) の帯の名前、
@@ -3579,8 +3628,10 @@ public partial class GameDataExtractor
         // BuildStarmap と違い、同じ socpak が何度置かれていても、その中の Child を置かれた回数だけ辿る (小惑星帯のガス雲の socpak は、
         // 何度も置かれる区画の socpak の中にあるため。輪になった参照は辿らない)。
         // 惑星・衛星 (Planet / Moon) の Child の下に置かれたものは入れない (天体と一緒に自転するので、時刻で位置が変わる。天体の近くは近くの天体で場所を決める)。
-        // 同じ恒星・同じ socpak・同じ位置 (1 m に丸めて) は 1 つ
-        internal readonly record struct OreAreaPlacement(string Socpak, string Star, double X, double Y, double Z, double[] Frame);
+        // 同じ恒星・同じ socpak・同じ位置 (1 m に丸めて) は 1 つ。
+        // Smo (2026-11-06): その socpak を置く Child か、その親の Child (近いほうから) の starMapRecord の StarMapObject の record 名 (恒星は入れない。無ければ "")。
+        // ore_areas の place (置かれた所の名前。DeliverableSourceFinder.OrePlacementName) に使う
+        internal readonly record struct OreAreaPlacement(string Socpak, string Star, double X, double Y, double Z, double[] Frame, string Smo = "");
         public static List<OreAreaPlacement> FindOreAreaPlacements(DeliverableDcb dcb, DeliverableSocpaks soc)
         {
             var list = new List<OreAreaPlacement>();
@@ -3613,21 +3664,23 @@ public partial class GameDataExtractor
             // (恒星, socpak) を最初に見つけた恒星の Child (BuildStarmap と同じく、先に辿った木のものを使う。後の木の同じ socpak は入れない)
             var firstTree = new Dictionary<(string Star, string Socpak), int>();
             var path = new HashSet<string>(StringComparer.Ordinal);
-            void Visit(SocChild node, string star, int tree, double x, double y, double z, double[] mp, bool underBody)
+            // named: 親の Child までで、いちばん近い starMapRecord の StarMapObject (恒星は入れない。無ければ "")
+            void Visit(SocChild node, string star, int tree, double x, double y, double z, double[] mp, bool underBody, string named)
             {
                 var m = MatMul(mp, RotMatrix(node.Rot));
                 var rec = RecordOfUuid(node.StarMapRecord);
                 var body = underBody || (rec != null && TypeOf(rec) is "Planet" or "Moon");
+                var smo = rec != null && TypeOf(rec) != "Star" ? rec : named;
                 if (!body && node.Socpak.Length > 0 && soc.OreAreas.ContainsKey(node.Socpak))
                 {
                     if (!firstTree.TryGetValue((star, node.Socpak), out var t0)) firstTree[(star, node.Socpak)] = t0 = tree;
                     if (t0 == tree && seen.Add((star, node.Socpak, (long)Math.Round(x), (long)Math.Round(y), (long)Math.Round(z))))
-                        list.Add(new OreAreaPlacement(node.Socpak, star, x, y, z, m));
+                        list.Add(new OreAreaPlacement(node.Socpak, star, x, y, z, m, smo));
                 }
                 void Kid(SocChild k)
                 {
                     var (dx, dy, dz) = MatApply(m, k.X, k.Y, k.Z);
-                    Visit(k, star, tree, x + dx, y + dy, z + dz, m, body);
+                    Visit(k, star, tree, x + dx, y + dy, z + dz, m, body, smo);
                 }
                 foreach (var k in node.Kids) Kid(k);
                 if (node.Socpak.Length > 0 && leads.Contains(node.Socpak) && soc.Containers.TryGetValue(node.Socpak, out var own) && path.Add(node.Socpak))
@@ -3650,7 +3703,7 @@ public partial class GameDataExtractor
             static int Count(SocChild n) => 1 + n.Kids.Sum(Count);
             int treeIndex = 0;
             foreach (var (n, star) in starNodes.Select((s, i) => (s, i)).OrderByDescending(v => Count(v.s.Node)).ThenBy(v => v.i).Select(v => v.s))
-                Visit(n, star, treeIndex++, 0, 0, 0, RotMatrix(null), false);
+                Visit(n, star, treeIndex++, 0, 0, 0, RotMatrix(null), false, "");
             return list;
         }
 
@@ -3667,7 +3720,7 @@ public partial class GameDataExtractor
             };
         }
 
-        private static double[] MatMul(double[] a, double[] b)
+        internal static double[] MatMul(double[] a, double[] b)
         {
             var c = new double[9];
             for (int i = 0; i < 3; i++)
@@ -3676,7 +3729,7 @@ public partial class GameDataExtractor
             return c;
         }
 
-        private static (double, double, double) MatApply(double[] m, double x, double y, double z) =>
+        internal static (double, double, double) MatApply(double[] m, double x, double y, double z) =>
             (m[0] * x + m[1] * y + m[2] * z, m[3] * x + m[4] * y + m[5] * z, m[6] * x + m[7] * y + m[8] * z);
 
         // 店の名前を Entity 名から作る (franchise の名前の無い店): "_" で区切り、"SCShop"・"Entity"・"Shop" の語を除いた残りの語を全部空白でつなぐ
