@@ -141,9 +141,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v2.6.7-win-x64.zip (最新 v2.6.7 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.6.7/StarCitizenJapaneseTextCreater-v2.6.7-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v2.6.8-win-x64.zip (最新 v2.6.8 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.6.8/StarCitizenJapaneseTextCreater-v2.6.8-win-x64.zip)**
 >
-> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.6.7-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
+> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.6.8-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
 >
 > **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/21 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.2.0/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
 
@@ -1057,10 +1057,19 @@ MIT License
 
 新しい版が上です。前の版の分は畳んであります（▶ を押すと開きます）。
 
-### 🚀 v2.6.7 更新内容
+### 🚀 v2.6.8 更新内容
+
+- **オーバーレイ**: 品質の下に出していた説明の 2 行を出さなくしました（出るのは中身だけです）
+- **現在位置のキー**: 既定を「右 Shift + 左 Alt + Insert」に変えました（ゲームでは左 Shift にも割り当てがあるため。前の既定のまま使っていた人は、次の起動で自動で新しい既定に替わります）
+- **マップ**: 建物の中でない所（宇宙空間など）で現在位置を取ったときに、［マップ］タブにステーションの 3D が出ていれば、星系図に戻ります（今までは 3D のままでした）
+
+<details>
+<summary>v2.6.7 更新内容</summary>
 
 - **現在位置**: `/showlocation` を送って座標が返らなかったときに、送り直すのをやめました（今までは、［現在位置］ボタンとキーでは 3 秒後にもう 1 回、自動の取得では 3 秒おきにあと 2 回まで送っていました）
 - **自動更新**: 通信の失敗（504 など）でデータベースの差分を取れなかったときに、丸ごとのダウンロードに切り替わるのをやめました。差分を取り直し（3 回まで）、それでも取れなければ更新を止めます（もう一度更新すると、差分から始めます）
+
+</details>
 
 <details>
 <summary>v2.6.6 更新内容</summary>
