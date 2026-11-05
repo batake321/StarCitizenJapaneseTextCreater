@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 600" width="900" height="600" role="img" aria-labelledby="t d">
+  <title id="t">歩くモードと重力の範囲（仮の図）</title>
+  <desc id="d">左の欄の「歩くモード」と「録画」のまとまり（歩くモード・現在位置・走る・姿勢・すり抜け、録画を始める・保存・読み込み）と、3D の中の重力の範囲の箱。水色の半分透けた箱は無重力の範囲、赤紫の箱は重力が上向き（上下が逆）の範囲です。無重力の範囲でも、床の真上で床から 1.8 m 以内はふつうの重力です。下にキーの一覧があります。</desc>
+  <style>
+    .f  { font-family: sans-serif; }
+    .h  { font-size: 13px; fill: #ddd; font-weight: 700; }
+    .bt { font-size: 12.5px; fill: #ddd; }
+    .tx { font-size: 13px; fill: #ddd; }
+    .k  { font-size: 12px; fill: #111; font-weight: 700; }
+    .kd { font-size: 12px; fill: #ddd; }
+    .lz { font-size: 13px; fill: #7fe0ff; font-weight: 700; }
+    .lu { font-size: 13px; fill: #ff8ae0; font-weight: 700; }
+    .no { font-size: 15px; fill: #fff; font-weight: 700; }
+    .cap { font-size: 12.5px; fill: #c9d6e3; }
+  </style>
+
+  <rect x="0" y="0" width="900" height="600" fill="#111"/>
+
+  <!-- 左の欄 (まとまりごとに ▼ で畳める) -->
+  <rect x="0" y="0" width="290" height="470" fill="#111" stroke="#333"/>
+  <line x1="6" y1="8" x2="284" y2="8" stroke="#333"/>
+  <text class="f h" x="10" y="28" style="font-size:14px">▼ 歩くモード</text>
+  <rect x="10" y="38" width="270" height="26" fill="#222" stroke="#444"/><text class="f bt" x="16" y="56">歩くモード: ON</text>
+  <rect x="10" y="70" width="70" height="26" fill="#222" stroke="#444"/><text class="f bt" x="16" y="88">現在位置</text>
+  <rect x="10" y="102" width="72" height="26" fill="#222" stroke="#444"/><text class="f bt" x="16" y="120">走る: OFF</text>
+  <rect x="88" y="102" width="92" height="26" fill="#264" stroke="#4a8"/><text class="f bt" x="94" y="120">姿勢: しゃがむ</text>
+  <rect x="186" y="102" width="94" height="26" fill="#222" stroke="#444"/><text class="f bt" x="191" y="120">すり抜け: OFF</text>
+  <line x1="6" y1="142" x2="284" y2="142" stroke="#333"/>
+  <text class="f h" x="10" y="162" style="font-size:14px">▼ 録画</text>
+  <rect x="10" y="172" width="270" height="26" fill="#222" stroke="#444"/><text class="f bt" x="16" y="190">録画を始める</text>
+  <rect x="10" y="204" width="270" height="26" fill="#222" stroke="#444"/><text class="f bt" x="16" y="222">保存</text>
+  <text class="f bt" x="10" y="248">読み込み</text>
+  <rect x="64" y="234" width="100" height="22" fill="#eee" stroke="#888"/><text class="f k" x="72" y="250" style="font-weight:400">ファイルの選択</text>
+  <text class="f kd" x="10" y="276">歩いた道を 0.1 秒ごとに記録する</text>
+  <line x1="6" y1="292" x2="284" y2="292" stroke="#333"/>
+  <text class="f kd" x="10" y="314">（ほかのまとまり: 飛ぶ先・読み込み・</text>
+  <text class="f kd" x="10" y="332">文字の道案内・フロア・店の入口・</text>
+  <text class="f kd" x="10" y="350">表示する形・操作の説明）</text>
+
+  <!-- 3D -->
+  <polygon points="300,440 890,440 790,330 400,330" fill="#3a352e"/>
+  <polygon points="400,330 790,330 790,40 400,40" fill="#24282c"/>
+  <!-- 無重力の箱 -->
+  <polygon points="430,330 760,330 760,70 430,70" fill="#33ccff" fill-opacity="0.12" stroke="#33ccff" stroke-opacity="0.6"/>
+  <polygon points="330,440 860,440 760,330 430,330" fill="#33ccff" fill-opacity="0.08"/>
+  <text class="f lz" x="440" y="92">水色の箱 = 無重力の範囲</text>
+  <!-- 床から 1.8 m -->
+  <line x1="470" y1="270" x2="740" y2="270" stroke="#7fe0ff" stroke-dasharray="6 4"/>
+  <line x1="462" y1="330" x2="462" y2="270" stroke="#7fe0ff" stroke-width="2"/>
+  <text class="f tx" x="476" y="262">床から 1.8 m 以内はふつうの重力（床の真上のとき）</text>
+  <!-- 浮いている人 -->
+  <g stroke="#ddd" stroke-width="3" fill="none">
+    <circle cx="640" cy="150" r="9" fill="#ddd"/>
+    <line x1="640" y1="159" x2="640" y2="190"/><line x1="640" y1="170" x2="622" y2="160"/><line x1="640" y1="170" x2="660" y2="162"/>
+    <line x1="640" y1="190" x2="628" y2="214"/><line x1="640" y1="190" x2="654" y2="212"/>
+  </g>
+  <text class="f tx" x="668" y="150">浮く</text>
+  <!-- 上下逆の箱 -->
+  <rect x="790" y="120" width="96" height="200" fill="#ff33cc" fill-opacity="0.12" stroke="#ff33cc" stroke-opacity="0.6"/>
+  <g stroke="#ddd" stroke-width="3" fill="none">
+    <line x1="838" y1="122" x2="838" y2="160"/><circle cx="838" cy="170" r="9" fill="#ddd"/>
+  </g>
+  <text class="f lu" x="796" y="206">赤紫の箱 =</text>
+  <text class="f lu" x="796" y="224">上下が逆</text>
+  <text class="f tx" x="796" y="244" style="font-size:11.5px">天井側に立つ</text>
+
+  <!-- キーの一覧 -->
+  <g class="f">
+    <rect x="300" y="470" width="590" height="96" fill="#181c22" stroke="#333"/>
+    <rect x="310" y="480" width="36" height="20" rx="3" fill="#ddd"/><text class="k" x="328" y="495" text-anchor="middle">W S</text><text class="kd" x="352" y="495">前後</text>
+    <rect x="390" y="480" width="36" height="20" rx="3" fill="#ddd"/><text class="k" x="408" y="495" text-anchor="middle">A D</text><text class="kd" x="432" y="495">左右</text>
+    <rect x="470" y="480" width="36" height="20" rx="3" fill="#ddd"/><text class="k" x="488" y="495" text-anchor="middle">Q E</text><text class="kd" x="512" y="495">向き</text>
+    <rect x="550" y="480" width="44" height="20" rx="3" fill="#ddd"/><text class="k" x="572" y="495" text-anchor="middle">Shift</text><text class="kd" x="600" y="495">走る ON・OFF</text>
+    <rect x="700" y="480" width="54" height="20" rx="3" fill="#ddd"/><text class="k" x="727" y="495" text-anchor="middle">スペース</text><text class="kd" x="760" y="495">ジャンプ</text>
+    <rect x="310" y="508" width="24" height="20" rx="3" fill="#ddd"/><text class="k" x="322" y="523" text-anchor="middle">C</text><text class="kd" x="340" y="523">しゃがむ</text>
+    <rect x="400" y="508" width="36" height="20" rx="3" fill="#ddd"/><text class="k" x="418" y="523" text-anchor="middle">Ctrl</text><text class="kd" x="442" y="523">寝そべる</text>
+    <rect x="510" y="508" width="24" height="20" rx="3" fill="#ddd"/><text class="k" x="522" y="523" text-anchor="middle">N</text><text class="kd" x="540" y="523">すり抜け ON・OFF</text>
+    <rect x="660" y="508" width="44" height="20" rx="3" fill="#ddd"/><text class="k" x="682" y="523" text-anchor="middle">Enter</text><text class="kd" x="710" y="523">コメント</text>
+    <rect x="790" y="508" width="34" height="20" rx="3" fill="#ddd"/><text class="k" x="807" y="523" text-anchor="middle">Esc</text><text class="kd" x="830" y="523">閉じる</text>
+    <text class="kd" x="310" y="552" fill="#7fe0ff">無重力の中: W・S は見ている向き（上下の傾きも）へ、スペースで上・C で下へ</text>
+  </g>
+
+  <text class="f cap" x="16" y="590">仮の図。形と位置は説明のための例です。実際の画面と細部が違うことがあります</text>
+
+  <!-- 番号 -->
+  <g class="f">
+    <circle cx="270" cy="32" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="270" y="37" text-anchor="middle">1</text>
+    <circle cx="96" cy="83" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="96" y="88" text-anchor="middle">2</text>
+    <circle cx="134" cy="142" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="134" y="147" text-anchor="middle">3</text>
+    <circle cx="270" cy="158" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="270" y="163" text-anchor="middle">4</text>
+    <circle cx="420" cy="88" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="420" y="93" text-anchor="middle">5</text>
+    <circle cx="462" cy="300" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="462" y="305" text-anchor="middle">6</text>
+    <circle cx="838" cy="108" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="838" y="113" text-anchor="middle">7</text>
+    <circle cx="300" cy="470" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="300" y="475" text-anchor="middle">8</text>
+  </g>
+</svg>

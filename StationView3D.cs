@@ -55,7 +55,9 @@ internal static class StationView3D
     // GLB を ReadGlb で読んだときと同じ部品の名前・三角形・行列にする (行列は GLB の数 (SocpakScene の Matrix) を ReadGlb と同じ順で掛ける)。
     // Data.p4k の目次・DataCore・部品の形は、アプリの中で使い回す (SocpakExporter.Shared。同じ部品の形は 1 回だけ読む。上限 SocpakExporter.MeshCacheBytes)
     // texMaxPx・texFolder: ゲームの画像を貼る (StationView3DTextures。長い辺の上限 px と PNG の置き場。texMaxPx が 0 か texFolder が null なら画像なし = 単色)
-    public static Extractor OwnExtractor(string p4kPath, Action<string>? log = null, int texMaxPx = 0, string? texFolder = null) => (socpak, ct) => Task.Factory.StartNew(() =>
+    // palette: false なら場所のパレットの色を当てない (画像の色合いはパレットが無いときと同じ決め方。2026-11-05、利用者の指示「1 で。右のスイッチに入れて自動保存にして」)。
+    //   材質の差し替え (looks の look_mtl) は false でも当てる (描く形と歩くモードの当たり・床の補いの形をそろえるため。親の決定)
+    public static Extractor OwnExtractor(string p4kPath, Action<string>? log = null, int texMaxPx = 0, string? texFolder = null, bool palette = true) => (socpak, ct) => Task.Factory.StartNew(() =>
     {
         try
         {
@@ -63,8 +65,9 @@ internal static class StationView3D
             var pattern = socpak.Replace('/', '\\');
             var list = MatchSocpaksCached(ctx.P4k, pattern);
             if (list.Count == 0) { log?.Invoke($"取り出しが失敗しました ({socpak}): no .socpak files matching '{pattern}'"); return (IReadOnlyList<SourcePart>?)null; }
-            var scene = SocpakExporter.Export(ctx, list, ct: ct);
-            Func<string, int, StationView3DTextures.TexInfo?>? tex = texMaxPx > 0 && texFolder != null ? (mtl, mat) => StationView3DTextures.Resolve(ctx.P4k, texFolder, mtl, mat, texMaxPx) : null;
+            // 場所のパレットの色と材質の差し替え (2026-11-05): 前もって view3d_layout.db の look_* 表に入れたものを引いて渡す (LooksOf)
+            var scene = SocpakExporter.Export(ctx, list, ct: ct, looks: LooksOf(Path.Combine(StationPlaces.Folder, LayoutDbName), p4kPath));
+            TexResolver? tex = texMaxPx > 0 && texFolder != null ? (mtl, mat, pal, image) => StationView3DTextures.Resolve(ctx.P4k, texFolder, mtl, mat, texMaxPx, palette ? pal : null, image) : null;
             // 粗い形で抜けた床の面を補う (StationFill)。歩くモードの裏の補い (view3d_fill_walk.db) のうち、形の印が今と同じ行も足す
             var parts = StationFill.Augment(PartsOf(scene, tex), StationFill.Table(Path.Combine(StationPlaces.Folder, LayoutDbName), StationFill.WalkDbPath, ctx.P4k));
             GravityCache[socpak] = GravityOf(scene);
@@ -136,22 +139,34 @@ internal static class StationView3D
         return res;
     }
 
+    // 画像の引き当て: (材質の .mtl のパス, 材質の番号, 置き方のパレット (無ければ null), 画像を使うか (形に UV があるか)) → 画像 (StationView3DTextures.Resolve)
+    public delegate StationView3DTextures.TexInfo? TexResolver(string mtl, int matId, SocpakScene.Tint? pal, bool image);
+    // (形の参照, パレットの鍵) の比べ (形は参照で比べる)
+    private sealed class MeshPalComparer : IEqualityComparer<(SocpakScene.Mesh, string)>
+    {
+        public bool Equals((SocpakScene.Mesh, string) a, (SocpakScene.Mesh, string) b) => ReferenceEquals(a.Item1, b.Item1) && string.Equals(a.Item2, b.Item2, StringComparison.Ordinal);
+        public int GetHashCode((SocpakScene.Mesh, string) k) => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(k.Item1), StringComparer.Ordinal.GetHashCode(k.Item2));
+    }
+
     // SocpakScene → 部品の並び (ReadGlb と同じ: 区画の子の順、三角形は primitive ごとに索引 3 つずつ、同じ形は同じ配列)。
     // tex: 材質 (.mtl のパス, 材質の番号) → 画像 (null なら画像も UV も付けない = 画像なしのときの出来るものは前と同じ)。画像の戻しは、場面に出てくる材質ごとに 1 回、並べて行う
-    public static List<SourcePart> PartsOf(SocpakScene scene, Func<string, int, StationView3DTextures.TexInfo?>? tex = null)
+    // (2026-11-05) 置き方に場所のパレット (Placement.Palette) があれば、材質・パレットの組ごとに引く (同じ形でもパレットが違えば画像の鍵の並びは別。三角形・UV の配列は形ごとに共有)。
+    //   UV の無い形でも、画像なしの色だけの項目を引く (パレットの色を指す材質とガラスだけ。ほかは今までどおり画像なし。ガラスは 2026-11-05 から)
+    public static List<SourcePart> PartsOf(SocpakScene scene, TexResolver? tex = null)
     {
         var res = new List<SourcePart>();
-        var tris = new Dictionary<SocpakScene.Mesh, (float[] T, float[]? Uv, string[]? Keys, int[]? Tex)>(ReferenceEqualityComparer.Instance);
-        // 画像: 出てくる材質 (mtl, 番号) を先に集めて並べて戻す (StationView3DTextures.Resolve は 1 回だけ戻して覚える)
-        var texOf = new Dictionary<(string, int), StationView3DTextures.TexInfo?>();
+        var geom = new Dictionary<SocpakScene.Mesh, (float[] T, float[]? Uv)>(ReferenceEqualityComparer.Instance);
+        var tris = new Dictionary<(SocpakScene.Mesh, string), (string[]? Keys, int[]? Tex)>(new MeshPalComparer());
+        // 画像: 出てくる材質 (mtl, 番号, パレット, 画像を使うか) を先に集めて並べて戻す (StationView3DTextures.Resolve は 1 回だけ戻して覚える)
+        var texOf = new Dictionary<(string, int, string, bool), StationView3DTextures.TexInfo?>();
         if (tex != null)
         {
-            var pairs = new HashSet<(string, int)>();
+            var pairs = new Dictionary<(string, int, string, bool), SocpakScene.Tint?>();
             foreach (var c in scene.Containers) foreach (var pl in c.Placements)
-                if (pl.Mesh.Uvs != null && pl.Mesh.Mtl.Length > 0) foreach (var mid in pl.Mesh.SubMaterials) pairs.Add((pl.Mesh.Mtl, mid));
+                if (pl.Mesh.Mtl.Length > 0) foreach (var mid in pl.Mesh.SubMaterials) pairs.TryAdd((pl.Mesh.Mtl, mid, pl.Palette?.Key ?? "", pl.Mesh.Uvs != null), pl.Palette);
             var arr = pairs.ToArray(); var got = new StationView3DTextures.TexInfo?[arr.Length];
-            Parallel.For(0, arr.Length, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 2) }, i => { got[i] = tex(arr[i].Item1, arr[i].Item2); });
-            for (int i = 0; i < arr.Length; i++) texOf[arr[i]] = got[i];
+            Parallel.For(0, arr.Length, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 2) }, i => { got[i] = tex(arr[i].Key.Item1, arr[i].Key.Item2, arr[i].Value, arr[i].Key.Item4); });
+            for (int i = 0; i < arr.Length; i++) texOf[arr[i].Key] = got[i];
         }
         double[] I = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
         // 列優先 (GLB の matrix) → 行優先
@@ -168,33 +183,44 @@ internal static class StationView3D
             foreach (var pl in c.Placements)
             {
                 var M2 = Mul(M, LMat(pl.Matrix));
-                if (!tris.TryGetValue(pl.Mesh, out var T))
+                if (!geom.TryGetValue(pl.Mesh, out var G))
                 {
                     var outl = new List<float>();
                     var P = pl.Mesh.Positions; var U = tex != null ? pl.Mesh.Uvs : null;
                     var uvl = U != null ? new List<float>() : null;
-                    // 画像: primitive (submesh) ごとの材質の番号 → 画像の鍵 (この形で使う鍵の一覧の番号)。無い三角形は -1
-                    var keys = new List<string>(); var keyIx = new Dictionary<string, int>(StringComparer.Ordinal);
-                    var texl = tex != null && U != null ? new List<int>() : null;
                     for (int pi = 0; pi < pl.Mesh.Primitives.Count; pi++)
                     {
                         var ix = pl.Mesh.Primitives[pi];
                         int nt = ix.Length / 3 * 3;
-                        int ti = -1;
-                        if (texl != null && pi < pl.Mesh.SubMaterials.Count && pl.Mesh.Mtl.Length > 0 && texOf.TryGetValue((pl.Mesh.Mtl, pl.Mesh.SubMaterials[pi]), out var info) && info != null)
-                        {
-                            if (!keyIx.TryGetValue(info.Key, out ti)) { ti = keys.Count; keys.Add(info.Key); keyIx[info.Key] = ti; }
-                        }
                         for (int i = 0; i < nt; i++)
                         {
                             long v = ix[i]; outl.Add(P[v * 3]); outl.Add(P[v * 3 + 1]); outl.Add(P[v * 3 + 2]);
                             if (uvl != null) { uvl.Add(U![v * 2]); uvl.Add(U[v * 2 + 1]); }
                         }
-                        if (texl != null) for (int i = 0; i < nt / 3; i++) texl.Add(ti);
                     }
-                    tris[pl.Mesh] = T = (outl.ToArray(), uvl?.ToArray(), keys.Count > 0 ? keys.ToArray() : null, keys.Count > 0 ? texl!.ToArray() : null);
+                    geom[pl.Mesh] = G = (outl.ToArray(), uvl?.ToArray());
                 }
-                if (T.T.Length > 0 && M2.All(double.IsFinite)) res.Add(new SourcePart(pl.Mesh.Name, T.T, M2, pl.Mesh.CgfPath, null, T.Uv, T.Keys, T.Tex));
+                var palKey = pl.Palette?.Key ?? "";
+                if (!tris.TryGetValue((pl.Mesh, palKey), out var T))
+                {
+                    // 画像: primitive (submesh) ごとの材質の番号 → 画像の鍵 (この形で使う鍵の一覧の番号)。無い三角形は -1
+                    var keys = new List<string>(); var keyIx = new Dictionary<string, int>(StringComparer.Ordinal);
+                    var hasUv = pl.Mesh.Uvs != null;
+                    var texl = tex != null ? new List<int>() : null;
+                    if (texl != null)
+                        for (int pi = 0; pi < pl.Mesh.Primitives.Count; pi++)
+                        {
+                            int nt = pl.Mesh.Primitives[pi].Length / 3 * 3;
+                            int ti = -1;
+                            if (pi < pl.Mesh.SubMaterials.Count && pl.Mesh.Mtl.Length > 0 && texOf.TryGetValue((pl.Mesh.Mtl, pl.Mesh.SubMaterials[pi], palKey, hasUv), out var info) && info != null)
+                            {
+                                if (!keyIx.TryGetValue(info.Key, out ti)) { ti = keys.Count; keys.Add(info.Key); keyIx[info.Key] = ti; }
+                            }
+                            for (int i = 0; i < nt / 3; i++) texl.Add(ti);
+                        }
+                    tris[(pl.Mesh, palKey)] = T = (keys.Count > 0 ? keys.ToArray() : null, keys.Count > 0 ? texl!.ToArray() : null);
+                }
+                if (G.T.Length > 0 && M2.All(double.IsFinite)) res.Add(new SourcePart(pl.Mesh.Name, G.T, M2, pl.Mesh.CgfPath, null, G.Uv, T.Keys, T.Tex));
             }
         }
         return res;
@@ -306,7 +332,12 @@ internal static class StationView3D
     {
         // 場所の中身 (乗り場・店・端末・ハンガーの入口)。2D の地図の JSON の代わり (PlaceOf)。中身を読まずに作った一覧 (contents: false の木) では null
         public PlaceData? Place { get; init; }
+        // 屋根の扉の板を探す区画 (Instances の中の位置。旧方式の書き出す範囲 = 深さ 0・1 と、socpak のパスに /ext/ を含むもの。LayoutOf が木から入れる。DB から読んだ一覧では null)
+        public List<int>? RoofRange { get; init; }
+        // 屋根の扉の候補 (RoofDoorsOf。DB の place_roofdoors。無ければ null = 印を動かさない)
+        public List<RoofDoor>? RoofDoors { get; init; }
     }
+    public sealed record RoofDoor(double[] Origin, double[] Center);
     // 場所の中身 (2026-11-04、利用者の決定「名前を 2d からとるのをやめるだけの話」): 2D の地図の JSON から取っていたもののうち、Data.p4k (区画の .soc の Entity・metadata) から取れるもの。
     // 2D の地図と同じ作り方 (StationTree の中身と StationRouteGraph.TransitLines・TransitList。階は使わない) で作る:
     //   Transit = 乗り場と行き先 [種類 (elevator・elevator-noride・tram・destination), 位置, 路線, 行き先の鍵]、Shops = .soc の SCShop、
@@ -315,10 +346,14 @@ internal static class StationView3D
     public sealed record PlaceShop(string Entity, string Guid, double[] Pos);
     public sealed record PlaceTerm(string Kind, double[] Pos, double? Yaw, string Entity, string Class, string ShopGuid, string ShopEntity);
     public sealed record PlaceHangar(string Class, string Size, double[] Pos);
+    // 外の設備 (exterior の pad・dock・freight。旧方式 4bfc288:Station3DExports.WriteScene の markers の pads・docks・freight と同じもの)。Key は HUDDisplayName の鍵 (freight は "")
+    public sealed record PlaceExt(string Kind, double[] Pos, string Key);
     public sealed record PlaceData(List<PlaceTransit> Transit, List<PlaceShop> Shops, List<PlaceTerm> Terms, List<PlaceHangar> Hangars)
     {
         // 外の貨物エレベーターの台の数 (exterior の freight。［詳細］・星系図の施設の手がかり AmenityMapHints の「積載ドック」)
         public int Freight { get; init; }
+        // 外の設備 (着陸パッド pad・外部のドッキングポート dock・外部貨物エレベーター freight。木の Exteriors の順。DB の place_exts。版 8 から)
+        public List<PlaceExt> Exts { get; init; } = new();
     }
     private static double[] V3((double X, double Y, double Z) p) => [p.X, p.Y, p.Z];
     internal static PlaceData PlaceOf(StationTree tree)
@@ -334,7 +369,9 @@ internal static class StationView3D
         }
         var terms = tree.Terminals.Select(t => new PlaceTerm(t.Kind, V3(t.Pos), Yaw(t.Rot), t.EntityName, t.EntityClass, t.ShopGuid, t.ShopEntity)).ToList();
         var hangars = tree.Exteriors.Where(x => x.Kind == "hangar").Select(x => new PlaceHangar(x.EntityClass, x.GatewaySize switch { 2 => "S", 4 => "M", 5 => "L", 6 => "XL", _ => "" }, V3(x.Pos))).ToList();
-        return new PlaceData(transit, shops, terms, hangars) { Freight = tree.Exteriors.Count(x => x.Kind == "freight") };
+        // 外の設備: 旧方式の scene.json の markers と同じく、木の Exteriors のうち pad・dock・freight (AI 専用の着陸パッド・ドッキングポートは StationTree が外してある)
+        var exts = tree.Exteriors.Where(x => x.Kind is "pad" or "dock" or "freight").Select(x => new PlaceExt(x.Kind, V3(x.Pos), x.NameKey)).ToList();
+        return new PlaceData(transit, shops, terms, hangars) { Freight = tree.Exteriors.Count(x => x.Kind == "freight"), Exts = exts };
     }
     public const string LayoutFormat = "scjt-view3d-layout-2";
     public static string LayoutPathOf(string mapJsonPath) => Path.ChangeExtension(mapJsonPath, null) + ".layout.json";
@@ -343,9 +380,12 @@ internal static class StationView3D
     public static Layout LayoutOf(StationIndex index, StationTree tree, System.Collections.Concurrent.ConcurrentDictionary<string, List<(string, string, (double, double, double))>>? fineCache = null)
     {
         var res = new List<LayoutInst>();
+        var roofRange = new List<int>();
         foreach (var inst in tree.Instances)
         {
             if (inst.Socpak.Length == 0) continue;
+            // 旧方式の書き出す範囲 (4bfc288:Station3DExports.MakePlan。Depth > MaxPartDepth (1) で socpak に /ext/ を含まないものと、見つからない socpak (!Found) は入れない)
+            if ((inst.Depth <= RoofMaxPartDepth || inst.Socpak.Contains(RoofExtPathPart, StringComparison.OrdinalIgnoreCase)) && inst.Found) roofRange.Add(res.Count);
             double[]? lo = null, hi = null;
             if (inst.MinBounds is { } a && inst.MaxBounds is { } b)
             {
@@ -373,7 +413,7 @@ internal static class StationView3D
         }
         // 中身を読んだ木 (contents: true) なら、場所の中身も (PlaceOf)
         var loaded = tree.Points.Count > 0 || tree.Shops.Count > 0 || tree.Terminals.Count > 0 || tree.Exteriors.Count > 0;
-        return new Layout(res, fines) { Place = loaded ? PlaceOf(tree) : null };
+        return new Layout(res, fines) { Place = loaded ? PlaceOf(tree) : null, RoofRange = roofRange };
     }
 
     // 案内するものにする Entity の見分け (EntityClass。2026-11-04、利用者の指示「行先で必要な場所 … クエストの扉、クエストの扉を開ける赤などのカードを取るとこ
@@ -474,7 +514,9 @@ internal static class StationView3D
     public const string LayoutDbName = "view3d_layout.db";
     // 一括で作るときに、1 か所を始めてよいプロセスのメモリの上限 (バイト。BuildLayoutDb の説明)
     public const long LayoutMemGate = 2L << 30;
-    public const string LayoutDbFormat = "scjt-view3d-layoutdb-5";   // 2: クエストの扉・カードやヒューズを取る所・クエストのパネルを terminals に足した。3: 場所の中身 (place_*) を足した。4: 外の貨物エレベーターの数 (place_has.freight) を足した。5: 抜けた床の補い part_fill を足した
+    // (版 7 では、ほかに店の端末の結び先 (place_terms の shop_guid・shop_entity) が、SCShop の ShopKioskGUIDs に載っている店で決まるようになった
+    //  (載っていない端末は今までどおり同じ socpak のいちばん近い店。StationMapData の SocpakContents.ReadTerminals。2026-11-05))
+    public const string LayoutDbFormat = "scjt-view3d-layoutdb-8";   // 2: クエストの扉・カードやヒューズを取る所・クエストのパネルを terminals に足した。3: 場所の中身 (place_*) を足した。4: 外の貨物エレベーターの数 (place_has.freight) を足した。5: 抜けた床の補い part_fill を足した。6: 屋根の扉の候補 place_roofdoors を足した。7: 場所のパレットの色と材質の差し替え look_* を足した。8: 外の設備 (着陸パッド・ドッキングポート・外部貨物エレベーター) place_exts を足した
 
     private static byte[] Doubles(double[] v) { var b = new byte[v.Length * 8]; Buffer.BlockCopy(v, 0, b, 0, b.Length); return b; }
     private static double[] DoublesOf(byte[] b) { var v = new double[b.Length / 8]; Buffer.BlockCopy(b, 0, v, 0, b.Length); return v; }
@@ -568,8 +610,14 @@ internal static class StationView3D
             using (var r = cmd.ExecuteReader()) while (r.Read()) place.Terms.Add(new PlaceTerm(r.GetString(0), DoublesOf((byte[])r[1]), r.IsDBNull(2) ? null : r.GetDouble(2), r.GetString(3), r.GetString(4), r.GetString(5), r.GetString(6)));
             cmd.CommandText = "SELECT class, size, pos FROM place_hangars WHERE record = $r ORDER BY n";
             using (var r = cmd.ExecuteReader()) while (r.Read()) place.Hangars.Add(new PlaceHangar(r.GetString(0), r.GetString(1), DoublesOf((byte[])r[2])));
+            cmd.CommandText = "SELECT kind, pos, key FROM place_exts WHERE record = $r ORDER BY n";
+            using (var r = cmd.ExecuteReader()) while (r.Read()) place.Exts.Add(new PlaceExt(r.GetString(0), DoublesOf((byte[])r[1]), r.GetString(2)));
         }
-        return new Layout(insts, terms) { Place = place };
+        // 屋根の扉の候補 (版 6 から。行が無ければ空 = 印を動かさない)
+        var roof = new List<RoofDoor>();
+        cmd.CommandText = "SELECT origin, center FROM place_roofdoors WHERE record = $r ORDER BY n";
+        using (var r = cmd.ExecuteReader()) while (r.Read()) roof.Add(new RoofDoor(DoublesOf((byte[])r[0]), DoublesOf((byte[])r[1])));
+        return new Layout(insts, terms) { Place = place, RoofDoors = roof };
     }
 
     private static void CreateTables(Microsoft.Data.Sqlite.SqliteConnection c)
@@ -587,7 +635,12 @@ internal static class StationView3D
         Exec(c, "CREATE TABLE IF NOT EXISTS place_shops(record TEXT NOT NULL, n INTEGER NOT NULL, entity TEXT NOT NULL, guid TEXT NOT NULL, pos BLOB NOT NULL, PRIMARY KEY(record, n)) WITHOUT ROWID");
         Exec(c, "CREATE TABLE IF NOT EXISTS place_terms(record TEXT NOT NULL, n INTEGER NOT NULL, kind TEXT NOT NULL, pos BLOB NOT NULL, yaw REAL, entity TEXT NOT NULL, class TEXT NOT NULL, shop_guid TEXT NOT NULL, shop_entity TEXT NOT NULL, PRIMARY KEY(record, n)) WITHOUT ROWID");
         Exec(c, "CREATE TABLE IF NOT EXISTS place_hangars(record TEXT NOT NULL, n INTEGER NOT NULL, class TEXT NOT NULL, size TEXT NOT NULL, pos BLOB NOT NULL, PRIMARY KEY(record, n)) WITHOUT ROWID");
+        // 外の設備 (PlaceExt。kind = pad・dock・freight、pos は場所の座標の double 3 個、key は HUDDisplayName の鍵 (freight は ""))
+        Exec(c, "CREATE TABLE IF NOT EXISTS place_exts(record TEXT NOT NULL, n INTEGER NOT NULL, kind TEXT NOT NULL, pos BLOB NOT NULL, key TEXT NOT NULL, PRIMARY KEY(record, n)) WITHOUT ROWID");
         StationFill.CreateTable(c);   // part_fill: 粗い形で抜けた床の面（部品の種類ごと）
+        CreateLookTables(c);          // look_*: 場所のパレットの色と材質の差し替え
+        // 屋根の扉の候補 (RoofDoorsOf。origin・center は場所の座標の double 3 個)。ハンガーのある場所だけ行がある
+        Exec(c, "CREATE TABLE IF NOT EXISTS place_roofdoors(record TEXT NOT NULL, n INTEGER NOT NULL, origin BLOB NOT NULL, center BLOB NOT NULL, PRIMARY KEY(record, n)) WITHOUT ROWID");
     }
 
     // 1 か所を書く (同じ record があれば消してから)。socpaks の使い回しの数は WriteCounts で数え直す
@@ -595,7 +648,7 @@ internal static class StationView3D
     {
         using var cmd = c.CreateCommand(); cmd.Transaction = tx;
         cmd.Parameters.AddWithValue("$r", record);
-        foreach (var t in new[] { "instances", "terminals", "places", "place_has", "place_transit", "place_shops", "place_terms", "place_hangars" }) { cmd.CommandText = $"DELETE FROM {t} WHERE record = $r"; cmd.ExecuteNonQuery(); }
+        foreach (var t in new[] { "instances", "terminals", "places", "place_has", "place_transit", "place_shops", "place_terms", "place_hangars", "place_exts", "place_roofdoors" }) { cmd.CommandText = $"DELETE FROM {t} WHERE record = $r"; cmd.ExecuteNonQuery(); }
         using var sp = c.CreateCommand(); sp.Transaction = tx;
         sp.CommandText = "INSERT INTO socpaks(path) VALUES($p) ON CONFLICT(path) DO NOTHING; SELECT id FROM socpaks WHERE path = $p";
         var pp = sp.Parameters.Add("$p", Microsoft.Data.Sqlite.SqliteType.Text);
@@ -641,6 +694,16 @@ internal static class StationView3D
             });
             Rows("INSERT INTO place_hangars(record, n, class, size, pos) VALUES($r, $n, $c, $s, $p)", pl.Hangars.Count, (q, n) =>
             { var t = pl.Hangars[n]; q.Parameters.AddWithValue("$c", t.Class); q.Parameters.AddWithValue("$s", t.Size); q.Parameters.AddWithValue("$p", Doubles(t.Pos)); });
+            Rows("INSERT INTO place_exts(record, n, kind, pos, key) VALUES($r, $n, $k, $p, $y)", pl.Exts.Count, (q, n) =>
+            { var t = pl.Exts[n]; q.Parameters.AddWithValue("$k", t.Kind); q.Parameters.AddWithValue("$p", Doubles(t.Pos)); q.Parameters.AddWithValue("$y", t.Key); });
+        }
+        if (layout.RoofDoors is { Count: > 0 } rd)
+        {
+            using var q = c.CreateCommand(); q.Transaction = tx;
+            q.CommandText = "INSERT INTO place_roofdoors(record, n, origin, center) VALUES($r, $n, $o, $c)";
+            q.Parameters.AddWithValue("$r", record);
+            var qn = q.Parameters.Add("$n", Microsoft.Data.Sqlite.SqliteType.Integer); var qo = q.Parameters.Add("$o", Microsoft.Data.Sqlite.SqliteType.Blob); var qc = q.Parameters.Add("$c", Microsoft.Data.Sqlite.SqliteType.Blob);
+            for (int n = 0; n < rd.Count; n++) { qn.Value = n; qo.Value = Doubles(rd[n].Origin); qc.Value = Doubles(rd[n].Center); q.ExecuteNonQuery(); }
         }
         cmd.CommandText = "INSERT INTO places(record, socpaks, instances) VALUES($r, $s, $n)";
         cmd.Parameters.AddWithValue("$s", layout.Instances.Select(i => i.Socpak).Distinct(StringComparer.Ordinal).Count());
@@ -669,12 +732,14 @@ internal static class StationView3D
     // (2026-11-04、利用者の指示「この取り込みも並列処理を入れて」)。wait: 1 か所を始める前に呼ぶ (CPU 使用率が高い間は待つ、など。呼ぶ側が決める)
     public static (int Places, int Instances, int Socpaks, long Bytes, double Seconds, List<string> Failed) BuildLayoutDb(string path, string stampKey, StationIndex index,
         IReadOnlyDictionary<string, StationRoot> roots, Action<int, int>? progress = null, CancellationToken ct = default, int parallel = 1, Action<CancellationToken>? wait = null,
-        Action<double>? weightProgress = null, Action<int, int>? fillProgress = null, Action<string>? fillLog = null)
+        Action<double>? weightProgress = null, Action<int, int>? fillProgress = null, Action<string>? fillLog = null, Action<string>? roofLog = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var tmp = path + ".tmp";
         if (File.Exists(tmp)) File.Delete(tmp);
-        var prevFill = StationFill.ReadPrev(path);   // 前の DB の補う面と印 (印が同じ場所は比べ直さない)
+        // 前の DB の補う面と印 (印が同じ場所は比べ直さない)。補う面を材質の差し替え (look_*) と同じ形で求めた DB (meta の fill_looks = 1) のものだけ使う
+        // (2026-11-05: それより前の DB の補う面は、差し替える前の材質の形で求めたもので、形の印 (CRC) が同じでも中身が合わないため。1 回だけ全部求め直す)
+        var prevFill = LayoutDbMeta(path, "fill_looks") == "1" ? StationFill.ReadPrev(path) : new StationFill.PrevData();
         var failed = new List<string>();
         int places = 0, insts = 0, socs;
         using (var c = OpenDb(tmp, true))
@@ -695,6 +760,8 @@ internal static class StationView3D
             var order = Enumerable.Range(0, list.Count).OrderByDescending(i => weight[i]).ThenBy(i => i).ToArray();
             // 同じ socpak の中身・端末の Entity は 1 回だけ読んで、場所どうしで使い回す (2026-11-04、親の指示)。終わったら捨てる
             var fineCache = new System.Collections.Concurrent.ConcurrentDictionary<string, List<(string, string, (double, double, double))>>(StringComparer.Ordinal);
+            // 屋根の扉の候補を探す部品 (socpak ごと。RoofParts) も場所どうしで使い回し、終わったら捨てる
+            var roofCache = new System.Collections.Concurrent.ConcurrentDictionary<string, List<(double[] M, double[] Min, double[] Max)>?>(StringComparer.Ordinal);
             var oldShared = index.SharedContents;
             index.SharedContents = new System.Collections.Concurrent.ConcurrentDictionary<string, SocpakContents?>(StringComparer.Ordinal);
             int k = 0;
@@ -715,7 +782,22 @@ internal static class StationView3D
                 Interlocked.Increment(ref running);
                 try {
                 var swP = System.Diagnostics.Stopwatch.StartNew();
-                try { made[i] = (LayoutOf(index, StationTree.Load(index, list[i].Value, contents: true, ct: ct), fineCache), null); }
+                try
+                {
+                    var lay = LayoutOf(index, StationTree.Load(index, list[i].Value, contents: true, ct: ct), fineCache);
+                    // 屋根の扉の候補 (RoofDoorsOf。ハンガーのある場所だけ。無ければ動かす印が無いので形を読まない)
+                    // 板を集める途中で失敗しても場所は落とさない: その場所の屋根の扉を空にして (印を動かさない = v2.6.2 と同じ見え方) 場所は入れ、場所の名前と例外の文を roofLog に残す
+                    if (lay.Place is { Hangars.Count: > 0 })
+                    {
+                        try { lay = lay with { RoofDoors = RoofDoorsOf(SocpakExporter.Shared(index.P4kPath, 1), lay, roofCache, ct) }; }
+                        catch (Exception rex) when (rex is InvalidOperationException or IOException or InvalidDataException or KeyNotFoundException)
+                        {
+                            lay = lay with { RoofDoors = new() };
+                            roofLog?.Invoke($"{list[i].Key}: 屋根の扉の候補を集められませんでした ({rex.GetType().Name}: {rex.Message})。この場所はハンガーの印を動かしません");
+                        }
+                    }
+                    made[i] = (lay, null);
+                }
                 catch (Exception ex) when (ex is InvalidOperationException or IOException or InvalidDataException or KeyNotFoundException) { made[i] = (null, ex.Message); }
                 secs[i] = swP.Elapsed.TotalSeconds;
                 progress?.Invoke(Interlocked.Increment(ref k), list.Count);
@@ -724,6 +806,7 @@ internal static class StationView3D
             });
             index.SharedContents = oldShared;
             fineCache.Clear();
+            roofCache.Clear();
             for (int i = 0; i < list.Count; i++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -731,12 +814,23 @@ internal static class StationView3D
                 else failed.Add($"{list[i].Key}: {made[i].Error}");
             }
             WriteCounts(c, tx);
+            // 場所のパレットの色と材質の差し替え (BuildLooks)。入れた場所の socpak の全部を、毎回全部求める (BuildLooks の説明)。
+            // 補う面 (StationFill) を描く形と同じ材質の形で求めるため、補う面より先に求める
+            LookData lookData;
+            {
+                var sps = new List<string>();
+                for (int i = 0; i < list.Count; i++)
+                    if (made[i].Layout is { } lay) sps.AddRange(lay.Instances.Select(x => x.Socpak));
+                lookData = BuildLooks(index.P4kPath, sps, parallel, ct);
+                WriteLooks(c, tx, lookData);
+                LookStats = lookData.Stats;
+            }
             // 粗い形 (LOD1) で抜けた床の面を細かい形 (LOD0) から求めて、場所ごとに入れる (StationFill)。前の DB に同じ印の場所があれば比べない
             {
                 var fplaces = new Dictionary<string, List<string>>(StringComparer.Ordinal);
                 for (int i = 0; i < list.Count; i++)
                     if (made[i].Layout is { } lay) fplaces[list[i].Key] = lay.Instances.Select(x => x.Socpak).Distinct(StringComparer.Ordinal).ToList();
-                var fr = StationFill.Run(index.P4kPath, fplaces, prevFill, parallel, (d, n) => fillProgress?.Invoke(d, n), ct, fillLog);
+                var fr = StationFill.Run(index.P4kPath, fplaces, prevFill, parallel, (d, n) => fillProgress?.Invoke(d, n), ct, fillLog, LooksOf(lookData));
                 StationFill.Write(c, tx, fr.Fill, fr.PlaceSrc, fr.PlaceKinds);
                 FillStats = fr.Stats;
             }
@@ -752,7 +846,7 @@ internal static class StationView3D
             using (var m = c.CreateCommand())
             {
                 m.Transaction = tx;
-                m.CommandText = "INSERT OR REPLACE INTO meta(key, value) VALUES('format', $f), ('stamp', $s), ('built_utc', $u), ('places', $p), ('seconds', $t), ('failed', $x)";
+                m.CommandText = "INSERT OR REPLACE INTO meta(key, value) VALUES('format', $f), ('stamp', $s), ('built_utc', $u), ('places', $p), ('seconds', $t), ('failed', $x), ('fill_looks', '1')";
                 m.Parameters.AddWithValue("$x", failed.Count.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 m.Parameters.AddWithValue("$f", LayoutDbFormat); m.Parameters.AddWithValue("$s", stampKey); m.Parameters.AddWithValue("$u", DateTime.UtcNow.ToString("o"));
                 m.Parameters.AddWithValue("$p", places.ToString(System.Globalization.CultureInfo.InvariantCulture)); m.Parameters.AddWithValue("$t", sw.Elapsed.TotalSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture));
@@ -809,7 +903,8 @@ internal static class StationView3D
     }
 
     // 1 か所を足す (ハンガーの中など、一括に入っていない場所)。DB が今の印でなければ何もしない (false)
-    public static bool PutLayoutDb(string path, string stampKey, string record, Layout layout)
+    // p4kPath: あれば、場所のパレットの色・材質の差し替え (look_*) のうち、まだ行の無い socpak の分を足す (BuildLooks の existing。2026-11-05)
+    public static bool PutLayoutDb(string path, string stampKey, string record, Layout layout, string? p4kPath = null)
     {
         if (!LayoutDbIsCurrent(path, stampKey)) return false;
         using (var c = OpenDb(path, true))
@@ -819,10 +914,296 @@ internal static class StationView3D
             using (var q = c.CreateCommand()) { q.Transaction = tx; q.CommandText = "SELECT path, id FROM socpaks"; using var r = q.ExecuteReader(); while (r.Read()) ids[r.GetString(0)] = r.GetInt64(1); }
             PutPlace(c, tx, record, layout, ids);
             WriteCounts(c, tx);
+            if (p4kPath != null)
+            {
+                // (表は版 7 の DB なら CreateTables で作ってある。LayoutDbIsCurrent で版を見ている)
+                var looks = BuildLooks(p4kPath, layout.Instances.Select(i => i.Socpak), 1, default, ReadLookExisting(c, tx));
+                WriteLooks(c, tx, looks, replace: false);
+            }
             tx.Commit();
         }
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         return true;
+    }
+
+    // ===== 場所のパレットの色と材質の差し替え (2026-11-05、利用者の指示「”色の決め方” これも事前調査して DB にリンクとしてでも入れとくのは？」
+    //   「差し替えも同じように DB に予め入れておくのがいいんじゃない？」) =====
+    // 表 (view3d_layout.db。一括で作るとき BuildLayoutDb が全部入れ直す。PutLayoutDb (ハンガーの中を 1 か所足す) は、まだ行の無い socpak の分だけ足す):
+    //   look_pal(id, file, rgb) … パレットの鍵 (SocpakScene.PaletteKey: TintPaletteTree の record のファイル名の小文字、子を指すときは + "|" + 子の名前の小文字)。
+    //                             rgb は [A, B, C, glass] の linear の r,g,b (float32 12 個。SocpakExporter.Context.PaletteColors)。record・子が無い・色が読めない名前は NULL (今の色のまま)
+    //   look_mtl(id, path)      … 差し替えの材質 (.mtl の Data.p4k の中のパス)。Data.p4k に無い材質は入れない (形の読み取りは CGF の材質に落ちるので、入れても結果は同じ)
+    //   look_soc(path, data)    … socpak (Data.p4k の中のパスの小文字) ごとの、置き方の通し番号 (SocpakExporter.Export の looks の番号) ごとの指定。
+    //                             data = Brotli( int32 版 LookVersion, int32 数 n, int32 パレット[n] (look_pal.id。0 = 無し), int16 スウィズル[n] (0 = 無し), int32 材質[n] (look_mtl.id。0 = 無し) )。
+    //                             指定が 1 つも無い socpak は行を作らない
+    // 置き方ごとの決め方 (調査担当の調べ。+172・+170 の意味とスウィズルの向きは推測):
+    //   区画の .soc の IncludedObjects のオブジェクト (184 バイト版): パレット = +172 の番号のパレットの名前、材質 = +170 の番号の材質の名前に .mtl を付けたもの。
+    //   Entity: パレット = 子の RenderProxy の Palette、無ければ EntityClassGUID の record の Components[SGeometryResourceParams].Geometry.Geometry.Palette (RootRecord・ChildPath・SwizzleOverride)。
+    //   名前の末尾の <xyz> はスウィズル (primary・secondary・tertiary が entry x・y・z を取る)、「|」の後ろは子のパレットの名前 (SocpakScene.PaletteName)
+    public const int LookVersion = 1;
+    public sealed class LookBuildStats
+    {
+        public int Socpaks, SocpaksFailed, SocpaksWithLooks, Placements, WithPalette, WithMtl, Palettes, PalettesMissing, Mtls, MtlsMissing; public long Bytes; public double Seconds;
+    }
+    public sealed class LookData
+    {
+        public List<(int Id, string File, float[]? Rgb)> Pals = new();   // look_pal に足す行
+        public List<(int Id, string Path)> Mtls = new();                  // look_mtl に足す行
+        public List<(string Path, byte[] Data)> Socs = new();             // look_soc に足す行
+        public List<string> MissingMtls = new();                          // Data.p4k に無かった差し替えの材質 (入れていない)
+        public LookBuildStats Stats = new();
+    }
+    // DB にすでにある行 (PutLayoutDb で足すとき。番号はこれに続ける)
+    public sealed class LookExisting
+    {
+        public Dictionary<string, int> Pal = new(StringComparer.Ordinal);
+        public Dictionary<string, int> Mtl = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> Socs = new(StringComparer.Ordinal);
+    }
+    public static LookBuildStats? LookStats { get; private set; }   // 直近の一括で求めた数
+
+    internal static void CreateLookTables(Microsoft.Data.Sqlite.SqliteConnection c)
+    {
+        Exec(c, "CREATE TABLE IF NOT EXISTS look_pal(id INTEGER PRIMARY KEY, file TEXT NOT NULL UNIQUE, rgb BLOB)");
+        Exec(c, "CREATE TABLE IF NOT EXISTS look_mtl(id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE)");
+        Exec(c, "CREATE TABLE IF NOT EXISTS look_soc(path TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID");
+    }
+
+    // socpaks: 場所の socpak (ObjectContainers の下の相対パスの小文字。LayoutInst.Socpak)。それに当たる .socpak を全部読む。
+    // 一括では前の DB は使わず、毎回全部求める (担当が決めたもの): パレットの色とエンティティの record のパレットは Game2.dcb で決まり、socpak のファイルが同じでもパッチで変わりうるため。
+    // existing: DB にすでにある行 (null なら空の DB に全部書く)。あれば、行のある socpak は求めず、パレット・材質の番号はすでにあるものを使ってその後に続ける。
+    // socpak の読み取りは並べる (parallel)。DataCore を引く所 (パレットの色・エンティティの record) は 1 本で順に
+    internal static LookData BuildLooks(string p4kPath, IEnumerable<string> socpaks, int parallel, CancellationToken ct, LookExisting? existing = null)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var ctx = SocpakExporter.Shared(p4kPath, 1);
+        var p4k = ctx.P4k;
+        var files = socpaks.Distinct(StringComparer.Ordinal).SelectMany(sp => MatchSocpaksCached(p4k, sp.Replace('/', '\\')))
+            .Distinct(StringComparer.OrdinalIgnoreCase).Where(f => existing == null || !existing.Socs.Contains(f.ToLowerInvariant()))
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+        var raws = new List<SocpakExporter.RawLook>?[files.Count];
+        Parallel.For(0, files.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, parallel), CancellationToken = ct }, i =>
+        {
+            try { raws[i] = SocpakExporter.LoadRawLooks(p4k, files[i]); }
+            catch (Exception e) when (e is InvalidDataException or IOException or SocpakExporter.SocpakException or ZstdSharp.ZstdException) { raws[i] = null; }
+        });
+        var d = new LookData(); var st = d.Stats; st.Socpaks = files.Count;
+        var palId = new Dictionary<string, int>(existing?.Pal ?? new Dictionary<string, int>(), StringComparer.Ordinal);
+        int nextPal = palId.Count > 0 ? palId.Values.Max() + 1 : 1;
+        int Pal(string key)
+        {
+            if (palId.TryGetValue(key, out var id)) return id;
+            float[]? flat = null;
+            if (ctx.PaletteColors(key) is { Length: 4 } c4 && c4.All(x => x is { Length: 3 })) flat = c4.SelectMany(x => x).ToArray();
+            else st.PalettesMissing++;
+            id = nextPal++; d.Pals.Add((id, key, flat)); palId[key] = id;
+            return id;
+        }
+        var mtlId = new Dictionary<string, int>(existing?.Mtl ?? new Dictionary<string, int>(), StringComparer.OrdinalIgnoreCase);
+        int nextMtl = mtlId.Count > 0 ? mtlId.Values.Max() + 1 : 1;
+        var mtlRaw = new Dictionary<string, int>(StringComparer.Ordinal);
+        int Mtl(string raw)
+        {
+            if (mtlRaw.TryGetValue(raw, out var id)) return id;
+            var p = SocpakExporter.DataCorePathToP4k(raw);
+            if (!p.EndsWith(".mtl", StringComparison.OrdinalIgnoreCase)) p += ".mtl";
+            int e = p4k.Find(p);
+            if (e < 0) { id = 0; st.MtlsMissing++; d.MissingMtls.Add(raw); }
+            else
+            {
+                var name = p4k.Name(e);
+                if (!mtlId.TryGetValue(name, out id)) { id = nextMtl++; d.Mtls.Add((id, name)); mtlId[name] = id; }
+            }
+            return mtlRaw[raw] = id;
+        }
+        for (int i = 0; i < files.Count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (raws[i] is not { } r) { st.SocpaksFailed++; continue; }
+            int n = r.Count;
+            var pal = new int[n]; var swz = new short[n]; var mt = new int[n];
+            bool any = false;
+            for (int k = 0; k < n; k++)
+            {
+                var x = r[k];
+                if (x.Palette is string pn) { var (f, s) = SocpakScene.PaletteName(pn); pal[k] = Pal(f); swz[k] = (short)s; }
+                else if (x.EntityGuid is string g && ctx.GuidPalette(g) is { } gp) { pal[k] = Pal(gp.File); swz[k] = (short)gp.Swz; }
+                if (x.Mtl is string mp) mt[k] = Mtl(mp);
+                if (pal[k] != 0) st.WithPalette++;
+                if (mt[k] != 0) st.WithMtl++;
+                if (pal[k] != 0 || mt[k] != 0) any = true;
+            }
+            st.Placements += n;
+            if (!any) continue;
+            using var ms = new MemoryStream();
+            using (var z = new System.IO.Compression.BrotliStream(ms, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+            using (var bw = new BinaryWriter(z))
+            {
+                bw.Write(LookVersion); bw.Write(n);
+                foreach (var v in pal) bw.Write(v);
+                foreach (var v in swz) bw.Write(v);
+                foreach (var v in mt) bw.Write(v);
+            }
+            d.Socs.Add((files[i].ToLowerInvariant(), ms.ToArray()));
+        }
+        st.SocpaksWithLooks = d.Socs.Count; st.Palettes = d.Pals.Count; st.Mtls = d.Mtls.Count;
+        st.Bytes = d.Socs.Sum(x => (long)x.Data.Length + x.Path.Length) + d.Pals.Sum(x => (long)x.File.Length + 48) + d.Mtls.Sum(x => (long)x.Path.Length);
+        st.Seconds = sw.Elapsed.TotalSeconds;
+        return d;
+    }
+
+    // replace: true なら look_* を全部消してから書く (一括)。false なら足すだけ (PutLayoutDb。同じ socpak の行は置き換える)
+    internal static void WriteLooks(Microsoft.Data.Sqlite.SqliteConnection c, Microsoft.Data.Sqlite.SqliteTransaction tx, LookData d, bool replace = true)
+    {
+        if (replace)
+            foreach (var t in new[] { "look_pal", "look_mtl", "look_soc" })
+            { using var del = c.CreateCommand(); del.Transaction = tx; del.CommandText = $"DELETE FROM {t}"; del.ExecuteNonQuery(); }
+        using (var cmd = c.CreateCommand())
+        {
+            cmd.Transaction = tx; cmd.CommandText = "INSERT INTO look_pal(id, file, rgb) VALUES($i, $f, $b)";
+            var pi = cmd.Parameters.Add("$i", Microsoft.Data.Sqlite.SqliteType.Integer); var pf = cmd.Parameters.Add("$f", Microsoft.Data.Sqlite.SqliteType.Text); var pb = cmd.Parameters.Add("$b", Microsoft.Data.Sqlite.SqliteType.Blob);
+            foreach (var (id, file, rgb) in d.Pals)
+            {
+                pi.Value = id; pf.Value = file;
+                if (rgb != null) { var b = new byte[rgb.Length * 4]; Buffer.BlockCopy(rgb, 0, b, 0, b.Length); pb.Value = b; } else pb.Value = DBNull.Value;
+                cmd.ExecuteNonQuery();
+            }
+        }
+        using (var cmd = c.CreateCommand())
+        {
+            cmd.Transaction = tx; cmd.CommandText = "INSERT INTO look_mtl(id, path) VALUES($i, $p)";
+            var pi = cmd.Parameters.Add("$i", Microsoft.Data.Sqlite.SqliteType.Integer); var pp = cmd.Parameters.Add("$p", Microsoft.Data.Sqlite.SqliteType.Text);
+            foreach (var (id, path) in d.Mtls) { pi.Value = id; pp.Value = path; cmd.ExecuteNonQuery(); }
+        }
+        using (var cmd = c.CreateCommand())
+        {
+            cmd.Transaction = tx; cmd.CommandText = "INSERT OR REPLACE INTO look_soc(path, data) VALUES($p, $d)";
+            var pp = cmd.Parameters.Add("$p", Microsoft.Data.Sqlite.SqliteType.Text); var pd = cmd.Parameters.Add("$d", Microsoft.Data.Sqlite.SqliteType.Blob);
+            foreach (var (p, b) in d.Socs) { pp.Value = p; pd.Value = b; cmd.ExecuteNonQuery(); }
+        }
+    }
+
+    // DB にすでにある look_* の行 (PutLayoutDb で足すとき)
+    internal static LookExisting ReadLookExisting(Microsoft.Data.Sqlite.SqliteConnection c, Microsoft.Data.Sqlite.SqliteTransaction tx)
+    {
+        var e = new LookExisting();
+        using var cmd = c.CreateCommand(); cmd.Transaction = tx;
+        cmd.CommandText = "SELECT id, file FROM look_pal";
+        using (var r = cmd.ExecuteReader()) while (r.Read()) e.Pal[r.GetString(1)] = r.GetInt32(0);
+        cmd.CommandText = "SELECT id, path FROM look_mtl";
+        using (var r = cmd.ExecuteReader()) while (r.Read()) e.Mtl[r.GetString(1)] = r.GetInt32(0);
+        cmd.CommandText = "SELECT path FROM look_soc";
+        using (var r = cmd.ExecuteReader()) while (r.Read()) e.Socs.Add(r.GetString(0));
+        return e;
+    }
+
+    // look_* の中身 → socpak のパス (SocpakScene.Container.SocpakPath と同じ Data.p4k の中のパス) → 置き方の通し番号ごとの見た目 (無い socpak は null)
+    private static Func<string, SocpakScene.Look[]?> LooksFrom(Dictionary<int, float[][]> pals, Dictionary<int, string> pkey, Dictionary<int, string> mtls, Dictionary<string, byte[]> socs)
+    {
+        var tints = new System.Collections.Concurrent.ConcurrentDictionary<(int, int), SocpakScene.Tint?>();
+        SocpakScene.Tint? TintOf(int id, int swz) => id == 0 ? null : tints.GetOrAdd((id, swz), k => pals.TryGetValue(k.Item1, out var c) ? SocpakScene.MakeTint(c, k.Item2, pkey[k.Item1]) : null);
+        SocpakScene.Look[]? Decode(byte[] b)
+        {
+            try
+            {
+                using var ms = new MemoryStream(b); using var z = new System.IO.Compression.BrotliStream(ms, System.IO.Compression.CompressionMode.Decompress);
+                using var o = new MemoryStream(); z.CopyTo(o); o.Position = 0;
+                using var br = new BinaryReader(o);
+                if (br.ReadInt32() != LookVersion) return null;
+                int n = br.ReadInt32();
+                if (n < 0 || (long)n * 10 + 8 != o.Length) throw new LooksReadException($"look_soc の中身の長さが合いません ({o.Length} バイト・置き方 {n})", null);
+                var pal = new int[n]; var swz = new short[n];
+                for (int k = 0; k < n; k++) pal[k] = br.ReadInt32();
+                for (int k = 0; k < n; k++) swz[k] = br.ReadInt16();
+                var res = new SocpakScene.Look[n];
+                for (int k = 0; k < n; k++) { int m = br.ReadInt32(); res[k] = new SocpakScene.Look(TintOf(pal[k], swz[k]), m != 0 && mtls.TryGetValue(m, out var mp) ? mp : null); }
+                return res;
+            }
+            catch (Exception e) when (e is InvalidDataException or EndOfStreamException or IOException) { throw new LooksReadException($"look_soc を読めませんでした: {e.Message}", e); }
+        }
+        return sp => socs.TryGetValue(sp.ToLowerInvariant(), out var b) ? Decode(b) : null;
+    }
+
+    // 一括の途中 (DB に書く前) の look_* の中身から (補う面を求めるときに、描く形と同じ材質で形を作るため)
+    internal static Func<string, SocpakScene.Look[]?> LooksOf(LookData d)
+    {
+        var pals = new Dictionary<int, float[][]>(); var pkey = new Dictionary<int, string>();
+        foreach (var (id, file, rgb) in d.Pals) { pkey[id] = file; if (rgb is { Length: 12 } f) pals[id] = [f[0..3], f[3..6], f[6..9], f[9..12]]; }
+        return LooksFrom(pals, pkey, d.Mtls.ToDictionary(x => x.Id, x => x.Path), d.Socs.ToDictionary(x => x.Path, x => x.Data, StringComparer.Ordinal));
+    }
+
+    // LooksOf が DB を読もうとして失敗した (2026-11-05、親の決定: 「表が無い・版が古い」(null = パレット・差し替えなし) と分け、その地点の取り出しを失敗にする。
+    // OwnExtractor の catch (IOException など → 区画なし) に当たらない型なので、BuildRegionAsync から出て「地点を作れませんでした」になり、region-cache に保存されない)
+    public sealed class LooksReadException(string message, Exception? inner) : Exception(message, inner);
+
+    // Data.p4k (p4kPath) の今の印 (区画の置き方の一覧の DB の stamp と比べるもの。StationView3DLayout.GameKey と同じ。P4kStamp は Ship3DExports.CurrentStamp と同じ作り)。読めなければ null
+    internal static string? LayoutKeyOf(string p4kPath)
+    {
+        try
+        {
+            var fi = new FileInfo(p4kPath);
+            return fi.Exists ? StationView3DLayout.GameKey(new Ship3DExports.P4kStamp(fi.FullName, fi.Length, fi.LastWriteTimeUtc.Ticks)) : null;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return null; }
+    }
+
+    // 描くとき: DB (dbPath) の look_* 表から (LooksFrom)。
+    // DB が無い・表が無い (版 6 以前の DB)・今の版 (LayoutDbFormat) でない・今の Data.p4k (p4kPath) の印 (LayoutKeyOf) で作った DB でなければ null (パレット・差し替えなし = 今の色のまま)。
+    // (2026-11-05、親の決定「DB が今の版・今のパッチのものかを見る」。LayoutDbIsCurrent と同じ確かめ。PutLayoutDb は今の印の DB にだけ足すので、足した行はそのまま使う)
+    // 読もうとして例外が出たら LooksReadException (null にしない)。表は DB のファイルの更新時刻と大きさ・Data.p4k の印が変わるまでメモリに持つ (socpak ごとの中身は引くたびに戻す)
+    private static readonly object LooksLock = new();
+    private static string _looksStamp = "";
+    private static Func<string, SocpakScene.Look[]?>? _looks;
+    public static Func<string, SocpakScene.Look[]?>? LooksOf(string dbPath, string p4kPath)
+    {
+        lock (LooksLock)
+        {
+            try
+            {
+                var fi = new FileInfo(dbPath);
+                if (!fi.Exists) { _looksStamp = ""; return _looks = null; }
+                var key = LayoutKeyOf(p4kPath) ?? "";
+                var stamp = dbPath + "|" + fi.LastWriteTimeUtc.Ticks + "|" + fi.Length + "|" + key;
+                if (stamp == _looksStamp) return _looks;
+                var pals = new Dictionary<int, float[][]>();
+                var pfile = new Dictionary<int, string>();
+                var mtls = new Dictionary<int, string>();
+                var socs = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+                using (var c = OpenDb(dbPath, false))
+                using (var cmd = c.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('look_pal', 'look_mtl', 'look_soc', 'meta')";
+                    if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) < 4) { _looksStamp = stamp; return _looks = null; }
+                    // 版と Data.p4k の印 (LayoutDbIsCurrent と同じ。meta の format・stamp)
+                    cmd.CommandText = "SELECT key, value FROM meta WHERE key IN ('format', 'stamp')";
+                    string fm = "", sm = "";
+                    using (var r = cmd.ExecuteReader()) while (r.Read()) { if (r.GetString(0) == "format") fm = r.GetString(1); else sm = r.GetString(1); }
+                    if (fm != LayoutDbFormat || key.Length == 0 || sm != key) { _looksStamp = stamp; return _looks = null; }
+                    cmd.CommandText = "SELECT id, file, rgb FROM look_pal";
+                    using (var r = cmd.ExecuteReader())
+                        while (r.Read())
+                        {
+                            pfile[r.GetInt32(0)] = r.GetString(1);
+                            if (r.IsDBNull(2)) continue;
+                            var b = (byte[])r[2];
+                            if (b.Length != 48) continue;
+                            var f = new float[12]; Buffer.BlockCopy(b, 0, f, 0, 48);
+                            pals[r.GetInt32(0)] = [f[0..3], f[3..6], f[6..9], f[9..12]];
+                        }
+                    cmd.CommandText = "SELECT id, path FROM look_mtl";
+                    using (var r = cmd.ExecuteReader()) while (r.Read()) mtls[r.GetInt32(0)] = r.GetString(1);
+                    cmd.CommandText = "SELECT path, data FROM look_soc";
+                    using (var r = cmd.ExecuteReader()) while (r.Read()) socs[r.GetString(0)] = (byte[])r[1];
+                }
+                _looks = LooksFrom(pals, pfile, mtls, socs);
+                _looksStamp = stamp;
+                return _looks;
+            }
+            catch (Exception e) when (e is Microsoft.Data.Sqlite.SqliteException or IOException or UnauthorizedAccessException or InvalidCastException)
+            {
+                _looksStamp = ""; _looks = null;
+                throw new LooksReadException($"view3d_layout.db の場所のパレット・材質の差し替え (look_*) を読めませんでした: {e.Message}", e);
+            }
+        }
     }
 
     // ===== 作る (2026-11-04、利用者の決定「Data.p4k から見る所の区域だけを、開いたときにその場で取り出して描く（前もってデータを作らない）」) =====
@@ -914,7 +1295,7 @@ internal static class StationView3D
         // extract: 区画の取り出し (OwnExtractor)。取り出せない・形が無ければ null。
         // acquire: 取り出しを 1 本始めてよいか (同時数の上限。返した IDisposable で返す)。progress: (済んだ socpak, 全部の socpak)
         public async Task<Stats> BuildRegionAsync(double[] center, double r, string outDir,
-            Extractor extract, Func<CancellationToken, Task<IDisposable>> acquire, IProgress<(int Done, int Total)>? progress, CancellationToken ct)
+            Extractor extract, Func<CancellationToken, Task<IDisposable>> acquire, IProgress<(int Done, int Total)>? progress, CancellationToken ct, bool palette = true)
         {
             var st = new Stats();
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -958,7 +1339,8 @@ internal static class StationView3D
                 {
                     var g = bySoc[gi];
                     var geoIdx = gi;
-                    var gkey = "g:" + g.Key;
+                    // 区画の形 (画像の番号を含む) は、色付けを切った取り出し (palette: false。extract も色付けなしのもの) を別の鍵で持つ (形・箱・判定は同じなので b:・i: は共通)
+                    var gkey = (palette ? "g:" : "g:nopal:") + g.Key;
                     var geo = CacheGet<GeoCalc>(gkey);
                     // 部品の箱しか持っていない区画 (前の地点で、どの部品も地点に掛からなかったもの) で、この地点でもどの部品も掛からなければ、取り出さない
                     var bkey = "b:" + g.Key;
@@ -1057,11 +1439,12 @@ internal static class StationView3D
                 var counters = Counters(shops, pbox);
                 st.ComputeSeconds += swN.Elapsed.TotalSeconds;
                 // 画像の一覧 (区画のファイルの parts の画像の番号 → ここの番号)。url は仮想ホストの PNG、w・h は画素、repeat は UV の繰り返し (材質の UVTiling。u・v 同じ)、
-                // tint は材質の色合い (層 1 の TintColor。0〜1 の r,g,b。ビューアは map × color)
+                // tint は材質の色合い (層 1 の TintColor。場所のパレットの色を指す材質はパレットの色。0〜1 の r,g,b。ビューアは map × color)。
+                // color: true は画像なしの色だけの項目 (url は ""。パレットの色を指す、画像の無い面。ビューアは tint の色で描く) (2026-11-05)
                 List<string> texKeys; lock (_texLock) texKeys = _texKeys.ToList();
                 var textures = texKeys.Select(k => StationView3DTextures.InfoOf(k) is { } ti
-                    ? new { url = _texUrlBase + ti.File, w = ti.W, h = ti.H, repeat = new[] { ti.Tiling, ti.Tiling }, tint = ti.Tint }
-                    : new { url = "", w = 0, h = 0, repeat = new[] { 1f, 1f }, tint = new[] { 1f, 1f, 1f } }).ToList();
+                    ? new { url = ti.File.Length > 0 ? _texUrlBase + ti.File : "", w = ti.W, h = ti.H, repeat = new[] { ti.Tiling, ti.Tiling }, tint = ti.Tint, color = ti.File.Length == 0 }
+                    : new { url = "", w = 0, h = 0, repeat = new[] { 1f, 1f }, tint = new[] { 1f, 1f, 1f }, color = false }).ToList();
                 var json = JsonSerializer.SerializeToUtf8Bytes(new
                 {
                     format = Format,
@@ -1112,12 +1495,13 @@ internal static class StationView3D
         {
             public readonly HashSet<string> Seen = new(StringComparer.Ordinal);                        // 調べた (インスタンス, 部品, 升)
             public readonly Dictionary<string, float[]?> Lod0 = new(StringComparer.Ordinal);           // 形 (Norm) → 細かい形の三角形 (局所。読めなければ null)
+            public readonly Dictionary<string, string> Lod0Mtl = new(StringComparer.Ordinal);          // 形 (Norm) → その細かい形の材質 (Mesh.Mtl。補いの印 WalkSig に入れる。2026-11-05)
             public readonly Dictionary<string, bool> HasLod = new(StringComparer.Ordinal);             // 形 (Norm) → 細かい形と粗い形の両方があるか
             public readonly Dictionary<string, WalkPart[]?> Parts = new(StringComparer.Ordinal);       // socpak → 部品 (置き場に GeoCalc が無いときに出したもの。出せなければ null)
         }
         // 部品 1 つ (名前・形のパス・ノードの行列 (4×4 行優先)・socpak の枠の箱 [下 x,y,z, 上 x,y,z])
         public sealed record WalkPart(string Name, string CgfPath, double[] M, double[] Box);
-        // 見つかったもの: インスタンスの番号・部品の名前・形 (StationFill.Norm)・形の印 (StationFill.KindSig)・部品の局所座標の三角形 (x9)・場所の座標の三角形 (x9)
+        // 見つかったもの: インスタンスの番号・部品の名前・形 (StationFill.Norm)・補いの印 (StationFill.WalkSig = 形の印 + 細かい形の材質の印。2026-11-05 までは KindSig)・部品の局所座標の三角形 (x9)・場所の座標の三角形 (x9)
         public sealed record WalkFillItem(int Inst, string Name, string Kind, string Sig, float[] LocalTris, float[] WorldTris);
 
         public List<WalkFillItem> WalkCheck(string p4kPath, double[] pos, double zTol, IReadOnlyList<double[]> cells, WalkFillState state, Action<string>? log, CancellationToken ct)
@@ -1160,7 +1544,7 @@ internal static class StationView3D
                     if (!state.HasLod.TryGetValue(kind, out var has)) state.HasLod[kind] = has = StationFill.HasLodVariant(ctx1.P4k, part.CgfPath, 1);
                     if (!has) continue;
                     // 4. 細かい形 (形ごとに 1 回)
-                    if (!state.Lod0.TryGetValue(kind, out var t0)) state.Lod0[kind] = t0 = WalkLod0(p4kPath, inst.Socpak, part.Name, kind, ctx1, log, ct);
+                    if (!state.Lod0.TryGetValue(kind, out var t0)) { state.Lod0[kind] = t0 = WalkLod0(p4kPath, inst.Socpak, part.Name, kind, ctx1, log, ct, out var lm); state.Lod0Mtl[kind] = lm; }
                     if (t0 == null) continue;
                     // 5. 場所の座標にして、物体の無い升と z 帯に掛かる三角形だけ
                     var M = part.M;
@@ -1184,7 +1568,7 @@ internal static class StationView3D
                         for (int k = 0; k < 3; k++) { world.Add((float)wx[k]); world.Add((float)wy[k]); world.Add((float)wz[k]); }
                     }
                     // 6. 1 つでもあれば返す
-                    if (local.Count > 0) res.Add(new WalkFillItem(inst.Index, part.Name, kind, StationFill.KindSig(ctx1.P4k, kind), local.ToArray(), world.ToArray()));
+                    if (local.Count > 0) res.Add(new WalkFillItem(inst.Index, part.Name, kind, StationFill.WalkSig(ctx1.P4k, kind, state.Lod0Mtl.GetValueOrDefault(kind, "")), local.ToArray(), world.ToArray()));
                 }
             }
             return res;
@@ -1193,7 +1577,7 @@ internal static class StationView3D
         // インスタンスの socpak の部品 (名前・形のパス・行列・箱)。置き場 ("g:<socpak>") の GeoCalc があればその Parts と PartBoxes。無ければ粗い形を Export して部品と箱だけ出す (state に持つ)
         private WalkPart[]? WalkPartsOf(string socpak, SocpakExporter.Context ctx1, WalkFillState state, Action<string>? log, CancellationToken ct)
         {
-            if (CacheGet<GeoCalc>("g:" + socpak) is { } geo)
+            if ((CacheGet<GeoCalc>("g:" + socpak) ?? CacheGet<GeoCalc>("g:nopal:" + socpak)) is { } geo)   // 部品・行列・箱は色付けの有無で同じ
             {
                 var arr = new WalkPart[geo.Parts.Count];
                 for (int i = 0; i < arr.Length; i++) arr[i] = new WalkPart(geo.Parts[i].Name, geo.Parts[i].CgfPath, geo.Parts[i].M, geo.PartBoxes[i]);
@@ -1207,7 +1591,8 @@ internal static class StationView3D
                 if (list.Count == 0) log?.Invoke($"区画が見つかりません ({socpak})");
                 else
                 {
-                    var src = PartsOf(SocpakExporter.Export(ctx1, list, ct: ct));
+                    // 材質の差し替えは、描く形 (OwnExtractor) と同じにする (差し替えた材質で隠す submesh が変わるため)
+                    var src = PartsOf(SocpakExporter.Export(ctx1, list, ct: ct, looks: LooksOf(Path.Combine(StationPlaces.Folder, LayoutDbName), ctx1.P4k.Path)));
                     var boxes = PartBoxesLocal(src);
                     res = new WalkPart[src.Count];
                     for (int i = 0; i < res.Length; i++) res[i] = new WalkPart(src[i].Name, src[i].CgfPath, src[i].M, boxes[i]);
@@ -1222,17 +1607,19 @@ internal static class StationView3D
         }
 
         // 細かい形 (LOD0) の三角形 (部品の局所座標、x9)。その socpak のその部品 (名前と形のパス) だけを読む (StationFill.Build と同じやり方)。読めない・形が無ければ null
-        private static float[]? WalkLod0(string p4kPath, string socpak, string name, string kind, SocpakExporter.Context ctx1, Action<string>? log, CancellationToken ct)
+        private static float[]? WalkLod0(string p4kPath, string socpak, string name, string kind, SocpakExporter.Context ctx1, Action<string>? log, CancellationToken ct, out string mtl)
         {
+            mtl = "";
             try
             {
                 var list = MatchSocpaksCached(ctx1.P4k, socpak.Replace('/', '\\'));
                 if (list.Count == 0) { log?.Invoke($"区画が見つかりません ({socpak})"); return null; }
                 var ctx0 = SocpakExporter.Shared(p4kPath, 0);
-                var scene0 = SocpakExporter.Export(ctx0, list, wantMesh: n => n == name, ct: ct, wantCgf: p => StationFill.Norm(p) == kind);
+                // 材質の差し替えは描く形と同じ (looks)
+                var scene0 = SocpakExporter.Export(ctx0, list, wantMesh: n => n == name, ct: ct, wantCgf: p => StationFill.Norm(p) == kind, looks: LooksOf(Path.Combine(StationPlaces.Folder, LayoutDbName), p4kPath));
                 foreach (var c in scene0.Containers)
                     foreach (var pl in c.Placements)
-                        if (StationFill.Norm(pl.Mesh.CgfPath) == kind) return StationFill.TrisOf(pl.Mesh);
+                        if (StationFill.Norm(pl.Mesh.CgfPath) == kind) { mtl = pl.Mesh.Mtl; return StationFill.TrisOf(pl.Mesh); }
                 var fail = scene0.FailedMeshes.FirstOrDefault(f => StationFill.Norm(f.CgfPath) == kind);
                 log?.Invoke($"細かい形が無い ({name} / {kind} / {socpak}){(fail.Reason is { Length: > 0 } rs ? ": " + rs : "")}");
                 return null;
@@ -2393,6 +2780,9 @@ internal static class StationView3D
             transit = map.Transit.Select(t => new object[] { t.Kind, t.Pos, t.Floor, t.Line, loc.Get(t.Stop), t.Stop, hangarLines.Contains(t.Line) ? 1 : 0 }).ToList(),
             // この地図のハンガーの入口の大きさ (S・M・L・XL の順。マイハンガーの行に使う。アプリの地図のビューアの openElevator と同じ)
             hangarSizes = new[] { "S", "M", "L", "XL" }.Where(z => map.Hangars.Any(h => h.Size == z)).ToList(),
+            // ハンガー行きのエレベーターの路線のタグ (2026-11-05、利用者の指示「3D でのハンガーのエレベーターで移動先がないのは困る」。親の決定: 路線のタグで見分ける)。
+            // 路線 (transit の 4 番目) がこのどれかの乗り場は、ビューアでハンガーのエレベーターとして「マイハンガー」の行を出す (hangarSizes が空の地図では出ない)
+            hangarLineTags = HangarLineTags,
             // 区画を置いた所の真ん中 (地図の無いハンガーの始める所に使う)
             center,
             // 前の地図の階 [Id, 名前 (鍵の所を訳したもの), 高さ, 元の名前 (並べる順に使う)]
@@ -2401,104 +2791,138 @@ internal static class StationView3D
         return JsonSerializer.SerializeToUtf8Bytes(o, JsonOpts);
     }
 
-    // ===== 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート) =====
-    // (2026-11-05、利用者の指示「Seraphim なんか引いて行って外部視点になったときパッドなんかは引き出し線とか前にさんざんやったのを表示するように」「一度作ってんだから、今回入れてよ。外部になったときだけ出して」)
-    // v2.5.3 の旧方式のステーションの 3D (Station3DExports.WriteScene の markers。pads・hangars・docks) の移植。ビューア (view3d.js) が station.json を読んだ後に
-    // {type:'exteriorGet'} で頼み、アプリが {type:'exterior', pads, hangars, docks} で返す (StationView3DWindow)。pos は場所の座標 (z 上)。
-    //   pads  = 着陸パッド: 区画 (socpak) の .soc の Entity のうち EntityClass「LandingArea」。key は LandingArea の HUDDisplayName (@ui_interactor_pad_NN・@landing_pad_NN)。
-    //   docks = 外部のドッキングポート: EntityClass「Station_DockingTube」。key は SCItemDockingTube の HUDDisplayName (@dockingport_NN・@ui_interactor_dockingport_NN・@ui_interactor_secdock_a_dockingport)。
-    //   AI 専用の印の付いた着陸パッド・ドッキングポートは出さない (旧方式 StationMapData.StationTree.ReadTerminals の AiOnly と同じ: LandingArea は canBeUsedBy="AI"、
-    //   SCItemDockingTube は CanBeUsedBy="AI"。属性の名前の大文字・小文字が部品で違うので、どちらも見る)。同じ socpak の中は EntityCryGUID で 1 回だけ。
-    //   text = 鍵のゲームの訳 (Loc。無ければ鍵の「@」を除いたもの。旧方式 Station3DWeb.Labels と同じ)。
-    //   hangars = ハンガーの入口 (区画の置き方の一覧の DB の place_hangars = exterior の hangar。size は GatewaySize の区分 S・M・L・XL、無ければ "")。
-    // 区画の .soc は、一覧の socpak ごとに 1 回だけ読み (Data.p4k の目次 P4kArchive.Shared)、置かれた所ごとに行列 A (LayoutInst。3 行 4 列) で場所の座標にする
-    // (旧方式の StationTree が c.Exteriors を xf.Apply で場所の座標にしていたのと同じ)
+    // ===== 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート・外部貨物エレベーター) =====
+    // (2026-11-05、利用者の指示「Seraphim なんか引いて行って外部視点になったときパッドなんかは引き出し線とか前にさんざんやったのを表示するように」「一度作ってんだから、今回入れてよ。外部になったときだけ出して」
+    //  「外部の着陸パッド(番号必要)が引き出し線とキャプションが出てない。ドッキングポート(番号必要)や貨物エレベーターなど外部の施設の場所はわからないといけない」)
+    // v2.5.3 の旧方式のステーションの 3D (4bfc288:Station3DExports.WriteScene の markers。pads・hangars・docks・freight) の移植。ビューア (view3d.js) が station.json を読んだ後に
+    // {type:'exteriorGet'} で頼み、アプリが {type:'exterior', pads, hangars, docks, freight, roofDoors} で返す (StationView3DWindow)。pos は場所の座標 (z 上)。
+    // 中身は、区画の置き方の一覧の DB を作るとき (BuildLayoutDb の PlaceOf) に木 (StationTree。contents: true) の Exteriors から入れたもの (place_exts・place_hangars・place_roofdoors)。
+    // 表示のたびには .soc を読まない (2026-11-05、親の決定。利用者の「DB に予め入れておくのがいいんじゃない？」の考え方)。DB にその場所の行が無ければ空 (出さない)。
+    //   pads  = 着陸パッド (exterior の pad = EntityClass「LandingArea」。LandingArea の canBeUsedBy="AI" は StationTree が外してある)。key は LandingArea の HUDDisplayName。
+    //   docks = 外部のドッキングポート (exterior の dock = EntityClass「Station_DockingTube」。SCItemDockingTube の CanBeUsedBy="AI" は外してある)。key は SCItemDockingTube の HUDDisplayName。
+    //   freight = 外部貨物エレベーター (exterior の freight = LoadingPlatformManager ごと。位置は platform の Entity の Pos、無ければ manager の Pos)。
+    //     text は旧方式の Station3DWeb.Labels の ["freight"] = FreightWord「外部貨物EV」(2026-11-02、利用者の決定「外部貨物EV ×6」)。
+    //   text = 鍵のゲームの訳 (Loc。無ければ鍵の「@」を除いたもの。旧方式 Station3DWeb.Labels と同じ)。鍵が空なら ""。
+    //   hangars = ハンガーの入口 (place_hangars = exterior の hangar。size は GatewaySize の区分 S・M・L・XL、無ければ "")。
+    //   roofDoors = 屋根の扉の候補 [{origin, center}] (DB の place_roofdoors。RoofDoorsOf。ハンガーの印を動かすのはビューア)。
+    //   pos は旧方式の scene.json と同じく小数 3 桁。p4kPath・ct は使わない (前の形の呼び出しのまま)
+    public const string FreightWord = "外部貨物EV";
+    // ハンガー行きのエレベーターの路線のタグ (station.json の hangarLineTags)。DataCore の tagdatabase の名前:
+    //   37d8b7b6-58df-48d9-ad06-bcc0885a81b8 = Spaceport_Hangar (StationRouteGraph.HangarLiftTag。Orison・Lorville・New Babbage・Levski などの路線の管理)
+    //   3906bff7-aa71-4aa3-94b8-3164ece13ea2 = TransportManager_Generic_Hangar (Area18・GrimHEX の路線の管理)
+    public static readonly string[] HangarLineTags = [StationRouteGraph.HangarLiftTag, "3906bff7-aa71-4aa3-94b8-3164ece13ea2"];
     public static object ExteriorMarks(string p4kPath, Layout layout, Loc loc, CancellationToken ct = default)
     {
-        var p4k = P4kArchive.Shared(p4kPath);
-        string[] needles = ["LandingArea", "DockingTube"];
-        // socpak → [(種類 pad・dock, 局所の位置, 鍵)]
-        var bySoc = new Dictionary<string, List<(string Kind, (double X, double Y, double Z) Pos, string Key)>>(StringComparer.Ordinal);
-        foreach (var socpak in layout.Instances.Select(i => i.Socpak).Where(s => s.Length > 0).Distinct(StringComparer.Ordinal))
-        {
-            ct.ThrowIfCancellationRequested();
-            var list = new List<(string, (double, double, double), string)>();
-            bySoc[socpak] = list;
-            try
-            {
-                var norm = socpak.Replace('/', '\\');
-                var path = norm.StartsWith(@"data\", StringComparison.OrdinalIgnoreCase) ? norm : @"Data\" + norm;
-                int e = p4k.Find(path);
-                if (e < 0) continue;
-                using var inner = P4kArchive.FromBytes(p4k.Read(e));
-                var exDone = new HashSet<string>(StringComparer.Ordinal);
-                for (int i = 0; i < inner.Count; i++)
-                {
-                    if (!inner.Name(i).EndsWith(".soc", StringComparison.OrdinalIgnoreCase)) continue;
-                    var bytes = inner.Read(i);
-                    var latin1 = Encoding.Latin1.GetString(bytes);
-                    if (!needles.Any(k => latin1.Contains(k, StringComparison.OrdinalIgnoreCase))) continue;
-                    var starts = new List<int>();
-                    for (int at = latin1.IndexOf("CryXmlB", StringComparison.Ordinal); at >= 0; at = latin1.IndexOf("CryXmlB", at + 7, StringComparison.Ordinal)) starts.Add(at);
-                    for (int s = 0; s < starts.Count; s++)
-                    {
-                        var a = starts[s]; var z = s + 1 < starts.Count ? starts[s + 1] : bytes.Length;
-                        if (!needles.Any(k => latin1.IndexOf(k, a, z - a, StringComparison.OrdinalIgnoreCase) >= 0)) continue;
-                        System.Xml.Linq.XDocument doc;
-                        try { doc = CryXmlParser.ParseBinaryBytes(bytes[a..z]); } catch { continue; }
-                        static string Hud(System.Xml.Linq.XElement en, string comp) => (string?)en.Descendants(comp).FirstOrDefault()?.Attribute("HUDDisplayName") ?? "";
-                        static bool AiOnly(System.Xml.Linq.XElement en, string comp)
-                        {
-                            var c = en.Descendants(comp).FirstOrDefault();
-                            var v = (string?)c?.Attribute("canBeUsedBy") ?? (string?)c?.Attribute("CanBeUsedBy");
-                            return string.Equals(v, "AI", StringComparison.OrdinalIgnoreCase);
-                        }
-                        foreach (var en in doc.Descendants("Entity"))
-                        {
-                            var cls = (string?)en.Attribute("EntityClass") ?? "";
-                            if (cls != "LandingArea" && cls != "Station_DockingTube") continue;
-                            var guid = ((string?)en.Attribute("EntityCryGUID") ?? "").Trim().ToLowerInvariant();
-                            if (guid.Length == 0 || exDone.Contains(guid)) continue;
-                            if (StationIndex.ParseVec((string?)en.Attribute("Pos")) is not { } pos) continue;
-                            exDone.Add(guid);
-                            if (cls == "LandingArea")
-                            {
-                                if (AiOnly(en, "LandingArea")) continue;
-                                list.Add(("pad", pos, Hud(en, "LandingArea")));
-                            }
-                            else
-                            {
-                                if (AiOnly(en, "SCItemDockingTube")) continue;
-                                list.Add(("dock", pos, Hud(en, "SCItemDockingTube")));
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex) when (ex is InvalidDataException or IOException or SocpakExporter.SocpakException) { }
-        }
-        var pads = new List<object>();
-        var docks = new List<object>();
         string Text(string key)
         {
             if (key.Length == 0) return "";
             var t = loc.Get(key);
             return t == key ? key.TrimStart('@') : t;
         }
-        foreach (var inst in layout.Instances)
+        static double[] R3(double[] p) => [Math.Round(p[0], 3), Math.Round(p[1], 3), Math.Round(p[2], 3)];
+        var exts = layout.Place?.Exts ?? new();
+        var pads = exts.Where(x => x.Kind == "pad").Select(x => (object)new { pos = R3(x.Pos), key = x.Key, text = Text(x.Key) }).ToList();
+        var docks = exts.Where(x => x.Kind == "dock").Select(x => (object)new { pos = R3(x.Pos), key = x.Key, text = Text(x.Key) }).ToList();
+        var freight = exts.Where(x => x.Kind == "freight").Select(x => (object)new { pos = R3(x.Pos), text = FreightWord }).ToList();
+        var hangars = (layout.Place?.Hangars ?? new()).Select(h => new { pos = R3(h.Pos), size = h.Size }).ToList();
+        // 屋根の扉の候補 (区画の置き方の一覧の DB の place_roofdoors。RoofDoorsOf)。印を動かすのはビューア (view3d.js の onExterior。旧方式と同じく buildMarks の後) で、ここでは pos を動かさない。
+        // DB にその場所の行が無ければ空 (印は動かさない)
+        var roofDoors = (layout.RoofDoors ?? new()).Select(r => new { origin = r.Origin, center = r.Center }).ToList();
+        return new { type = "exterior", pads, hangars, docks, freight, roofDoors };
+    }
+
+    // ===== 屋根の扉の候補 (旧方式 v2.5.4 wwwroot/station3d/viewer.html の roofDoors の移植。2026-11-05、利用者の指示「一度作ってんだから、今回入れてよ。外部になったときだけ出して」) =====
+    // 旧方式はビューアが読み込んだステーション全体の形 (GLB) の全部の部品 × 置いた所から、水平の板 (高さが ROOF_DOOR_THIN 未満、横がどちらも ROOF_DOOR_WIDE より大きい) を集め、
+    // その「置いた原点」と「箱の中心」を持っていた (viewer.html 1063〜1088 行)。今のビューアは地点の ±R m の形しか持たないので、同じ集め方を区画の置き方の一覧の DB を作るとき
+    // (BuildLayoutDb。場所ごと) に行い、place_roofdoors に入れておく (表示のたびには探さない。2026-11-05、親の決定)。ExteriorMarks は DB の分 (Layout.RoofDoors) を返す。
+    //   探す区画: 旧方式の GLB に入れていた範囲 (Layout.RoofRange = 深さ 0・1 と、socpak のパスに /ext/ を含むもの。4bfc288:Station3DExports の MaxPartDepth・ExtPathPart)。
+    //   形: SocpakExporter.Export (OwnExtractor と同じ SocpakExporter.Shared(p4kPath, 1))。行列は PartsOf と同じ掛け方 M = LMat(区画の子の Matrix) × LMat(置き方の Matrix) に、
+    //   インスタンスの行列 A (3 行 4 列・行優先) を掛けた W = A·M (場所の座標、z 上)。
+    //   箱: 旧と同じく形の箱 (Mesh.Min/Max = accessor の min・max。three.js の geometry.boundingBox) の 8 隅を W で移した箱 (Box3.applyMatrix4)。
+    //   旧の画面は y 上なので、旧の「高さ (y) < 10、横 (x・z) > 30」は、z 上の今の座標では「高さ (z) < 10、横 (x・y) > 30」。
+    //   origin = W の平行移動 (旧の setFromMatrixPosition(m))、center = 箱の中心 (旧の tmp.getCenter)。どちらも場所の座標 (m)。
+    // 旧の定数 (viewer.html 412〜413 行): 写しの扉の部品は、屋根の扉 XL が 202 × 320 × 4 m の板 (GrimHEX)、正面の扉は高さ 42〜66 m・厚さ 4 m の縦の板
+    private const double RoofDoorThin = 10, RoofDoorWide = 30;   // 旧の ROOF_DOOR_THIN・ROOF_DOOR_WIDE (ROOF_DOOR_JOIN = 2 は動かす側の view3d.js)
+    private const int RoofMaxPartDepth = 1;            // 旧の Station3DExports.MaxPartDepth
+    private const string RoofExtPathPart = "/ext/";    // 旧の Station3DExports.ExtPathPart
+    // 置き場 (cache) に持つ部品の下限: 箱の 8 隅を M で移した形のいちばん長い対角線 (m)。区画を置く行列 A の行の長さが RoofCacheRowMax 以下なら、
+    // 場所の座標の箱の横の広がりは「対角線 × 行の長さ」以下なので、これより短い部品は横 30 m を超えられない (結果は変わらない。メモリを減らすため)
+    private const double RoofCacheRowMax = 2, RoofCacheMinDiag = RoofDoorWide / RoofCacheRowMax;
+    // socpak → 部品 (区画の子の順・置き方の順) の行列 M と形の箱 (minDiag 以下の部品は入れない)。読めなければ null
+    private static List<(double[] M, double[] Min, double[] Max)>? RoofParts(SocpakExporter.Context ctx, string socpak, double minDiag, CancellationToken ct)
+    {
+        static double[] LMat(double[] m) { var M = new double[16]; for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) M[r * 4 + c] = m[c * 4 + r]; return M; }
+        static double[] Mul(double[] a, double[] b)
         {
-            if (!bySoc.TryGetValue(inst.Socpak, out var list) || list.Count == 0) continue;
-            var A = inst.A;
-            foreach (var (kind, p, key) in list)
+            var c = new double[16];
+            for (int r = 0; r < 4; r++) for (int k = 0; k < 4; k++) { double s = 0; for (int j = 0; j < 4; j++) s += a[r * 4 + j] * b[j * 4 + k]; c[r * 4 + k] = s; }
+            return c;
+        }
+        try
+        {
+            var list = MatchSocpaksCached(ctx.P4k, socpak.Replace('/', '\\'));
+            if (list.Count == 0) return null;
+            var scene = SocpakExporter.Export(ctx, list, ct: ct);
+            var parts = new List<(double[] M, double[] Min, double[] Max)>();
+            foreach (var c in scene.Containers)
             {
-                double[] pos = [
-                    Math.Round(A[0] * p.X + A[1] * p.Y + A[2] * p.Z + A[3], 3),
-                    Math.Round(A[4] * p.X + A[5] * p.Y + A[6] * p.Z + A[7], 3),
-                    Math.Round(A[8] * p.X + A[9] * p.Y + A[10] * p.Z + A[11], 3)];
-                (kind == "pad" ? pads : docks).Add(new { pos, key, text = Text(key) });
+                var C = LMat(c.Matrix);
+                foreach (var pl in c.Placements)
+                {
+                    // 形の無い部品は見ない。旧方式の GLB (StarBreaker の socpak export。移植の SocpakGlb.Builder.PackMesh) は、隠す submesh (ShouldHide・IsDecal) を primitives に書かず、
+                    // primitives が空の mesh は three.js の GLTFLoader.loadMesh で中身の無い Group になり (isMesh でない)、旧のビューアは o.isMesh だけを集めていた (viewer.html 1037 行)。
+                    // SocpakScene の Primitives は同じ条件 (CryMtl.HideWithoutTextures) で入れているので、Primitives が空 = 旧で Mesh にならない部品。頂点が 0 の部品も面を持たない (SocpakScene の LoadCgf)
+                    if (pl.Mesh.Positions.Length == 0 || pl.Mesh.Primitives.Count == 0) continue;
+                    var M = Mul(C, LMat(pl.Matrix));
+                    double[] mn = pl.Mesh.Min, mx = pl.Mesh.Max;
+                    double dx = mx[0] - mn[0], dy = mx[1] - mn[1], dz = mx[2] - mn[2], diag = 0;
+                    foreach (var (sx, sy) in new[] { (1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0) })
+                    {
+                        double ux = M[0] * dx + M[1] * sx * dy + M[2] * sy * dz, uy = M[4] * dx + M[5] * sx * dy + M[6] * sy * dz, uz = M[8] * dx + M[9] * sx * dy + M[10] * sy * dz;
+                        diag = Math.Max(diag, Math.Sqrt(ux * ux + uy * uy + uz * uz));
+                    }
+                    if (diag <= minDiag) continue;
+                    parts.Add((M, mn, mx));
+                }
+            }
+            return parts;
+        }
+        catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or ZstdSharp.ZstdException or SocpakExporter.SocpakException) { return null; }
+    }
+    // 1 か所の屋根の扉の候補 (Layout.RoofRange の区画。並びは区画の順 → 区画の子の順 → 置き方の順)。cache: socpak ごとの部品 (場所どうしで使い回す。RoofCacheMinDiag で絞ったもの)
+    internal static List<RoofDoor> RoofDoorsOf(SocpakExporter.Context ctx, Layout layout, System.Collections.Concurrent.ConcurrentDictionary<string, List<(double[] M, double[] Min, double[] Max)>?> cache, CancellationToken ct = default)
+    {
+        var res = new List<RoofDoor>();
+        foreach (var ii in layout.RoofRange ?? Enumerable.Range(0, layout.Instances.Count).ToList())
+        {
+            ct.ThrowIfCancellationRequested();
+            var inst = layout.Instances[ii];
+            if (inst.Socpak.Length == 0) continue;
+            var A = inst.A;
+            // 行の長さが RoofCacheRowMax を超える置き方 (未確認。ふつうは回転だけで 1) は、置き場の絞りが効かないので、絞らずに読み直す
+            var rowMax = Math.Max(Math.Sqrt(A[0] * A[0] + A[1] * A[1] + A[2] * A[2]), Math.Sqrt(A[4] * A[4] + A[5] * A[5] + A[6] * A[6]));
+            var parts = rowMax <= RoofCacheRowMax ? cache.GetOrAdd(inst.Socpak, s => RoofParts(ctx, s, RoofCacheMinDiag, ct)) : RoofParts(ctx, inst.Socpak, -1, ct);
+            if (parts == null) continue;
+            var W = new double[12];
+            foreach (var (M, mn, mx) in parts)
+            {
+                // W = A (3×4) · M (4×4)
+                for (int r = 0; r < 3; r++) for (int k = 0; k < 4; k++)
+                    W[r * 4 + k] = A[r * 4] * M[k] + A[r * 4 + 1] * M[4 + k] + A[r * 4 + 2] * M[8 + k] + A[r * 4 + 3] * M[12 + k];
+                double lx = double.MaxValue, ly = double.MaxValue, lz = double.MaxValue, hx = double.MinValue, hy = double.MinValue, hz = double.MinValue;
+                for (int cn = 0; cn < 8; cn++)
+                {
+                    double x = (cn & 1) != 0 ? mx[0] : mn[0], y = (cn & 2) != 0 ? mx[1] : mn[1], z = (cn & 4) != 0 ? mx[2] : mn[2];
+                    double vx = W[0] * x + W[1] * y + W[2] * z + W[3], vy = W[4] * x + W[5] * y + W[6] * z + W[7], vz = W[8] * x + W[9] * y + W[10] * z + W[11];
+                    if (vx < lx) lx = vx; if (vx > hx) hx = vx;
+                    if (vy < ly) ly = vy; if (vy > hy) hy = vy;
+                    if (vz < lz) lz = vz; if (vz > hz) hz = vz;
+                }
+                // 屋根の扉の候補: 水平の板 (高さ (z) が RoofDoorThin 未満、横 (x・y) がどちらも RoofDoorWide より大きい) の部品の、置いた原点と箱
+                if (hz - lz < RoofDoorThin && hx - lx > RoofDoorWide && hy - ly > RoofDoorWide)
+                    res.Add(new RoofDoor([W[3], W[7], W[11]], [(lx + hx) / 2, (ly + hy) / 2, (lz + hz) / 2]));
             }
         }
-        var hangars = (layout.Place?.Hangars ?? new()).Select(h => new { pos = h.Pos, size = h.Size }).ToList();
-        return new { type = "exterior", pads, hangars, docks };
+        return res;
     }
 }

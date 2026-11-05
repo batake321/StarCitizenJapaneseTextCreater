@@ -2655,16 +2655,19 @@ public class HangarService
         InitDb(db);
 
         var rows = new List<(string Key, string Port)>();
+        var items = new Dictionary<(string, string), string>();   // 塗装の口の行の item_record (塗装の判定に使う)
         using (var cmd = db.CreateCommand())
         {
-            cmd.CommandText = "SELECT ship_key, port_name FROM ship_loadouts";
+            cmd.CommandText = "SELECT ship_key, port_name, item_record FROM ship_loadouts";
             using var r = cmd.ExecuteReader();
             while (r.Read())
             {
                 if (r.IsDBNull(0) || r.IsDBNull(1)) continue;
                 rows.Add((r.GetString(0), r.GetString(1)));
+                if (r.GetString(1) == ShipPaints.PortName && !r.IsDBNull(2)) items[(r.GetString(0), r.GetString(1))] = r.GetString(2);
             }
         }
+        string? itemOf(string key, string port) => items.TryGetValue((key, port), out var v) ? v : null;
         if (rows.Count == 0) return 0;
 
         var instances = new Dictionary<string, HangarShipInstance>(StringComparer.Ordinal);
@@ -2706,8 +2709,29 @@ public class HangarService
             if (ports.Count == 0) continue;
             var validKeys = new HashSet<string>(BuildShipLoadout(g.Key, ports, equip).Select(p => p.PortKey), StringComparer.Ordinal);
 
+            // 塗装の口 (ShipPaints.PortName) は ship_ports に無いので、口の一覧 (validKeys) ではなく、今その船に付けられる塗装かで決める
+            // (2026-11-05、利用者の指示「所持船のリストでも自分の持っている塗装をリスト選択で自動保存して」)。付けられない塗装 (パッチで無くなった等) の行は片付ける。
+            // 塗装の一覧を用意できない (ゲームが見つからない等) ときは判定できないので残す
+            HashSet<string>? paints = null;
+            bool paintsKnown = false, paintsTried = false;
             foreach (var (key, port) in g)
             {
+                if (port == ShipPaints.PortName)
+                {
+                    if (!paintsTried)
+                    {
+                        paintsTried = true;
+                        paintsKnown = ShipPaints.TryListFor(record, out var pl);
+                        paints = new HashSet<string>(pl.Select(p => "EntityClassDefinition." + p.Record), StringComparer.OrdinalIgnoreCase);
+                    }
+                    if (!paintsKnown) continue;
+                    var item = itemOf(key, port);
+                    if (item != null && paints!.Contains(item)) continue;
+                    WriteLoadoutTombstones(db, null, key, [port]);
+                    Exec(db, "DELETE FROM ship_loadouts WHERE ship_key = @k AND port_name = @p", ("@k", key), ("@p", port));
+                    deleted++;
+                    continue;
+                }
                 if (validKeys.Contains(port)) continue;
                 WriteLoadoutTombstones(db, null, key, [port]);
                 Exec(db, "DELETE FROM ship_loadouts WHERE ship_key = @k AND port_name = @p", ("@k", key), ("@p", port));

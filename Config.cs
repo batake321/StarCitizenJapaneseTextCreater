@@ -40,6 +40,11 @@ public class AppConfig
     public bool BlueprintMissionMarks { get; set; } = true;
     // ミッション名の後ろに派閥と貢献度 (BP) を付けるか
     public bool MissionReputationMarks { get; set; } = false;
+    // 日本語化の適応範囲 (［日本語化］の最初のダイアログ。2026-11-05): false なら「全て翻訳」、true なら「一部翻訳」。
+    // 一部翻訳のとき、PartialTranslationUnchecked に入っている種類 (TranslationScope.Categories の Id) は訳さない (英語の ini の原文のまま)。
+    // チェックを外した種類を持つのは、初めての状態 (空) を「チェックは全部付き」にするため
+    public bool PartialTranslation { get; set; } = false;
+    public List<string> PartialTranslationUnchecked { get; set; } = new();
 
     // UEX Capture
     public string UexApiKey { get; set; } = "";
@@ -95,11 +100,18 @@ public class AppConfig
     public long Ship3DMaxMB { get; set; } = 0;
     // (2026-11-04、利用者の決定「設定で取り込み可能」「デフォルトは保存」) true なら 3D モデルを保存しない (表示のたびに Data.p4k から直接読む)
     public bool Ship3DNoSave { get; set; } = false;
+    // 船・装備・武器の 3D の色付け (2026-11-05、利用者の指示「"船・装備・武器の 3D は常に色付け" これは設定で切れるようにしてください。」):
+    // true (既定) ならパレットの色 (本体のパレットの A・B・C、塗装のパレット) を当てた姿、false なら当てない姿 (材質そのものの色) で出し、塗装の一覧は出さない。
+    // ステーションの 3D の「色付け」スイッチ (view3d の view3d.pal) とは別。次に 3D を開いたときから効く (Ship3DWeb)
+    public bool Ship3DPalette { get; set; } = true;
     // ステーションの 3D (新しい方式) の、地点ごとの取り出し結果の保存 (StationView3DCache) の上限 (GB)。負なら未設定で、初期値 = 置き場所のドライブの残りの 1/3、ただし最大 10 GB。
     // 0 なら保存しない (先読みもしない)
     public double Station3DCacheMaxGB { get; set; } = -1;
     // ステーションの 3D (新しい方式) に貼るゲームの画像 (テクスチャ) の長い辺の上限 (px。既定 512。0 なら画像を貼らない = 単色) (2026-11-05)
     public int Station3DTextureMaxPx { get; set; } = StationView3DTextures.DefaultMaxPx;
+    // マップのデバッグ表示 (2026-11-05、利用者の指示「この3D の下部の細かいテキストも設定でデフォルトでオフのマップのデバッグ表示という設定を付けてほしい」):
+    // true ならステーションの 3D (view3d.html) の下部の枠 (#pick。押した部品の名前・判定の面・押した所の高さなど) を出す。既定は出さない
+    public bool Station3DDebugView { get; set; } = false;
 
     // 自動更新: 起動したときと毎日 AutoUpdateTime (HH:mm) に、新しい版を確かめる (AppUpdater)
     public bool AutoUpdateEnabled { get; set; } = true;

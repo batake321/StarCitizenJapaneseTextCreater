@@ -24,13 +24,15 @@ internal static class StationView3DTextures
 
     // 画像 1 つ (材質の繰り返し・色合いごと)。Key = ファイル名の頭 + "|" + 繰り返し + "|" + 色合い (区画のファイルに書く画像の番号は、Session がこの Key に付ける)。
     // Tint: 材質の層 1 の TintColor (層が無ければ材質の Diffuse。どちらも無ければ白) (0〜1 の r,g,b)。hardsurface/layerblend 系は灰色の下地の画像に層の色を掛けて色を出すので、
-    // ビューアは map × color で描く (2026-11-05、利用者の報告「かなり灰色になった」)
+    // ビューアは map × color で描く (2026-11-05、利用者の報告「かなり灰色になった」)。
+    // 場所のパレットの色を指す材質は、Tint がパレットの色 (Resolve の pal)。File が "" (W・H = 0) の項目は画像なしの色だけ (Key = "color|" + 色合い) (2026-11-05)
     public sealed record TexInfo(string Key, string File, int W, int H, float Tiling, float[] Tint);
 
     private static readonly object Lock = new();
     private static P4kArchive? s_p4k;
     private static ConcurrentDictionary<string, Lazy<TexInfo?>> s_resolved = new(StringComparer.Ordinal);   // "mtl|材質の番号|上限|置き場" → 結果
     private static ConcurrentDictionary<string, SocpakGlb.MtlFile?> s_mtls = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, object> s_pngLocks = new(StringComparer.OrdinalIgnoreCase);   // PNG のパス → 書くときのロック
     private static readonly ConcurrentDictionary<string, TexInfo> s_registry = new(StringComparer.Ordinal);   // Key → 画像
     public static int RegistryCount => s_registry.Count;
     public static TexInfo? InfoOf(string key) => s_registry.TryGetValue(key, out var t) ? t : null;
@@ -39,7 +41,10 @@ internal static class StationView3DTextures
     private static readonly HashSet<string> NoDiffuseShaders = new(StringComparer.Ordinal) { "organic" };
 
     // 材質 (mtlPath = .mtl の p4k の中のパス、matId = submesh の材質の番号) の色の画像。無い・戻せない・上限 0 なら null
-    public static TexInfo? Resolve(P4kArchive p4k, string folder, string mtlPath, int matId, int maxPx)
+    // pal: 置き方の場所のパレット (SocpakScene.Placement.Palette。null なら今までと同じ)。材質がパレットの色を指していれば、色合いをその色にする (TextureOf)。
+    // image: false なら画像を使わない (形に UV が無いとき)。
+    // 画像が無い・戻せない面でも、材質がパレットの色を指していれば、画像なしの色だけの項目 (File = ""、W・H = 0) を返す (2026-11-05、親の決定「画像の無い面でも…その色で描く」)
+    public static TexInfo? Resolve(P4kArchive p4k, string folder, string mtlPath, int matId, int maxPx, SocpakScene.Tint? pal = null, bool image = true)
     {
         if (maxPx <= 0 || mtlPath.Length == 0 || matId < 0) return null;
         lock (Lock)
@@ -47,8 +52,8 @@ internal static class StationView3DTextures
             // Data.p4k が替わったら (パッチ) 覚えたものを捨てる
             if (!ReferenceEquals(s_p4k, p4k)) { s_p4k = p4k; s_resolved = new(StringComparer.Ordinal); s_mtls = new(StringComparer.OrdinalIgnoreCase); }
         }
-        var ck = FormattableString.Invariant($"{mtlPath.ToLowerInvariant()}|{matId}|{maxPx}|{folder}");
-        var lazy = s_resolved.GetOrAdd(ck, _ => new Lazy<TexInfo?>(() => ResolveCore(p4k, folder, mtlPath, matId, maxPx), LazyThreadSafetyMode.ExecutionAndPublication));
+        var ck = FormattableString.Invariant($"{mtlPath.ToLowerInvariant()}|{matId}|{maxPx}|{folder}") + (pal != null ? "|pal:" + pal.Key : "") + (image ? "" : "|noimage");
+        var lazy = s_resolved.GetOrAdd(ck, _ => new Lazy<TexInfo?>(() => ResolveCore(p4k, folder, mtlPath, matId, maxPx, pal, image), LazyThreadSafetyMode.ExecutionAndPublication));
         return lazy.Value;
     }
 
@@ -60,16 +65,27 @@ internal static class StationView3DTextures
         catch (Exception ex) when (ex is not OutOfMemoryException) { return null; }   // CryXmlB でない・壊れている .mtl は材質なし (単色)
     });
 
-    // 材質 → .dds のパス・繰り返し・色合い (前のステーションの 3D の決まり + 層 1 の TintColor)。無ければ null。
-    // 色合い: 層 (MatLayers) があれば層 1 の TintColor (ParseMtl は属性が無ければ白)、層が無ければ材質の Diffuse (無ければ白)。0〜1 に収める
-    internal static (string Dds, float Tiling, float[] Tint)? TextureOf(P4kArchive p4k, string mtlPath, int matId)
+    // 材質 → .dds のパス (画像が無ければ null)・繰り返し・色合い (前のステーションの 3D の決まり + 層 1 の TintColor)・色合いがパレットの色かガラスの色か (画像が無くても色だけの項目にするか)。材質が無ければ null。
+    // 色合い: 層 (MatLayers) があれば層 1 の TintColor (ParseMtl は属性が無ければ白)、層が無ければ材質の Diffuse (無ければ白)。0〜1 に収める。
+    // pal (場所のパレット) があれば、船の 3D (ShipGlb・SocpakGlb の Builder.Material) と同じ決まりで、材質の PaletteTint (層のうち PaletteTint が 0 でない最初のもの) が
+    // 1・2・3 なら A・B・C、それ以外でガラス (Shader が GlassPBR) なら Glass を、層の色の代わりに使う (2026-11-05)
+    internal static (string? Dds, float Tiling, float[] Tint, bool FromPalette)? TextureOf(P4kArchive p4k, string mtlPath, int matId, SocpakScene.Tint? pal = null)
     {
         var mtl = Mtl(p4k, mtlPath);
         if (mtl == null || matId >= mtl.Materials.Count) return null;
         var m = mtl.Materials[matId];
         var shader = m.Shader.ToLowerInvariant().Replace("_", "");
         string? tex = null; float tiling = 1;
-        float[] tint = m.Layers.Count > 0 ? m.Layers[0].Tint : m.Diffuse;
+        float[]? palColor = pal == null ? null : m.PaletteTint switch { 1 => pal.A, 2 => pal.B, 3 => pal.C, _ => m.IsGlass ? pal.Glass : null };
+        float[] tint = palColor ?? (m.Layers.Count > 0 ? m.Layers[0].Tint : m.Diffuse);
+        // ガラス (GlassPBR) は、色の出どころ (パレットの A・B・C・Glass、パレットが無ければ層 1 の TintColor・Diffuse) によらず、
+        // 決まった色が白なら着色していないガラスの色 (GlassTint。船の 3D と同じ決まり) (2026-11-05、利用者の指示「ガラスは薄い水色がいいんじゃない？透明でなく着色しているものはその色を使った方がいいけど」)。
+        // 画像が無くても、その色の色だけの項目にする (FromPalette と同じ扱い)
+        // 色だけの項目にするのは、パレットの色を指す材質・パレットの Glass を使う所のガラス (PaletteTint が 1〜3 でない)・白だったガラス (薄い水色にしたもの) (2026-11-05)
+        bool glassPath = m.IsGlass && m.PaletteTint is not (1 or 2 or 3);
+        bool whiteGlass = m.IsGlass && GlassTint.IsWhite(tint);
+        if (m.IsGlass) tint = GlassTint.OrUntinted(tint);
+        bool colored = palColor != null || glassPath || whiteGlass;
         if (m.Layers.Count > 0)
         {
             if (Layered.Contains(shader))
@@ -80,26 +96,30 @@ internal static class StationView3DTextures
             if (m.Layers[0].UvTiling > 0 && float.IsFinite(m.Layers[0].UvTiling)) tiling = m.Layers[0].UvTiling;
         }
         if (string.IsNullOrEmpty(tex) && !string.IsNullOrEmpty(m.DiffuseTex) && !NoDiffuseShaders.Contains(shader)) tex = m.DiffuseTex;
-        if (string.IsNullOrEmpty(tex) || tex.StartsWith('$')) return null;
-        var dds = tex.EndsWith(".tif", StringComparison.OrdinalIgnoreCase) ? tex[..^4] + ".dds" : tex;
         var tn = new float[3];
         for (int k = 0; k < 3; k++) { var v = tint != null && tint.Length > k && float.IsFinite(tint[k]) ? tint[k] : 1f; tn[k] = Math.Clamp(v, 0f, 1f); }
-        return (SocpakExporter.DataCorePathToP4k(dds), tiling, tn);
+        if (string.IsNullOrEmpty(tex) || tex.StartsWith('$')) return (null, tiling, tn, colored);
+        var dds = tex.EndsWith(".tif", StringComparison.OrdinalIgnoreCase) ? tex[..^4] + ".dds" : tex;
+        return (SocpakExporter.DataCorePathToP4k(dds), tiling, tn, colored);
     }
 
-    private static TexInfo? ResolveCore(P4kArchive p4k, string folder, string mtlPath, int matId, int maxPx)
+    private static TexInfo? ResolveCore(P4kArchive p4k, string folder, string mtlPath, int matId, int maxPx, SocpakScene.Tint? pal, bool image)
     {
-        if (TextureOf(p4k, mtlPath, matId) is not { } t) return null;
-        var (ddsP4k, tiling, tint) = t;
+        if (TextureOf(p4k, mtlPath, matId, pal) is not { } t) return null;
+        var (ddsOrNull, tiling, tint, fromPal) = t;
+        var inv0 = System.Globalization.CultureInfo.InvariantCulture;
+        // 画像なしの色だけの項目 (パレットの色を指す材質だけ。それ以外は今までどおり null = 灰色)
+        TexInfo? Plain() => fromPal ? Register(new TexInfo("color|" + string.Join(",", tint.Select(v => v.ToString("R", inv0))), "", 0, 0, 1, tint)) : null;
+        if (ddsOrNull is not string ddsP4k || !image) return Plain();
         int e = p4k.Find(ddsP4k);
-        if (e < 0) return null;
+        if (e < 0) return Plain();
         // 分けたファイル (.dds.8〜.1。大きい番号が細かい)。並びは FromSplit と同じ (8 → 1 の順にあるもの)
         var sibs = new List<(int N, int Idx)>();
         for (int n = 8; n >= 1; n--) { int j = p4k.Find($"{ddsP4k}.{n}"); if (j >= 0) sibs.Add((n, j)); }
         byte[] baseData;
         try { baseData = p4k.Read(e); }
-        catch (Exception ex) when (ex is InvalidDataException or IOException or ZstdSharp.ZstdException) { return null; }
-        if (baseData.Length < 128 || baseData[0] != 'D' || baseData[1] != 'D' || baseData[2] != 'S' || baseData[3] != ' ') return null;
+        catch (Exception ex) when (ex is InvalidDataException or IOException or ZstdSharp.ZstdException) { return Plain(); }
+        if (baseData.Length < 128 || baseData[0] != 'D' || baseData[1] != 'D' || baseData[2] != 'S' || baseData[3] != ' ') return Plain();
         uint h = BinaryPrimitives.ReadUInt32LittleEndian(baseData.AsSpan(12)), w = BinaryPrimitives.ReadUInt32LittleEndian(baseData.AsSpan(16));
         int total = (int)Math.Max(1, BinaryPrimitives.ReadUInt32LittleEndian(baseData.AsSpan(28)));
         // 長い辺が maxPx 以下になる細かさ (いちばん細かい側から数えて L 段目)。無ければいちばん粗いもの
@@ -114,6 +134,11 @@ internal static class StationView3DTextures
         var path = Path.Combine(folder, file);
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         var rkey = key + "|" + tiling.ToString("R", inv) + "|" + string.Join(",", tint.Select(v => v.ToString("R", inv)));
+        // 同じ PNG (同じ .dds・細かさ) を、繰り返し・色合いの違う項目が並べて引くことがある。置き場に PNG がまだ無いとき、
+        // 並べて書くと File.Move がぶつかって片方が画像なしになっていた (2026-11-05、担当が確かめた: Orison の 2 区画で 272 項目が 271 になる回がある)。
+        // PNG のパスごとに 1 本ずつにし、後の方は先に書かれた PNG を使う
+        lock (s_pngLocks.GetOrAdd(path, _ => new object()))
+        {
         if (PngSize(path) is { } sz) return Register(new TexInfo(rkey, file, sz.W, sz.H, tiling, tint));
         // 戻す: 要る細かさの分けたファイルだけ読む (ほかの分けたファイルは空にして数だけ合わせる。alpha の分けたファイルは読まない)
         DdsImage img;
@@ -131,10 +156,10 @@ internal static class StationView3DTextures
             (dw, dh) = img.Dimensions(L);
             rgba = img.DecodeRgba(L);
         }
-        catch (Exception ex) when (ex is not OutOfMemoryException) { return null; }   // BC6H・読めない・足りない → 画像なし (単色)
+        catch (Exception ex) when (ex is not OutOfMemoryException) { return Plain(); }   // BC6H・読めない・足りない → 画像なし (単色。パレットの色を指す材質はその色)
         byte[] png;
         try { png = RustPng.EncodeRgba8(dw, dh, rgba); }
-        catch (ArgumentException) { return null; }
+        catch (ArgumentException) { return Plain(); }
         try
         {
             Directory.CreateDirectory(folder);
@@ -142,8 +167,9 @@ internal static class StationView3DTextures
             File.WriteAllBytes(tmp, png);
             File.Move(tmp, path, true);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Plain(); }
         return Register(new TexInfo(rkey, file, dw, dh, tiling, tint));
+        }
     }
 
     private static TexInfo Register(TexInfo t) { s_registry[t.Key] = t; return t; }

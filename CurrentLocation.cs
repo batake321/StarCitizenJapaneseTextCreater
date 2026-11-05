@@ -110,6 +110,80 @@ internal static class CurrentLocation
         // 近い順に 10 か所と、いちばん近い場所までの距離 (場所が無ければ 0)
         public required List<NearRow> Near { get; init; }
         public double NearestDistance { get; init; }
+        // 星系の座標のある場所すべて (近い順。Near はこの先頭 10 か所)。【現在位置の近く】の一覧を親子でまとめる (GroupNear) のに使う
+        public List<NearRow> All { get; init; } = new();
+    }
+
+    // ===== 近くの一覧のまとめ (2026-11-05、利用者の指示「重複してる」と、一覧に似たものを並べず ▼ でまとめる決まり) =====
+    // まとめた 1 行: Head = 出す行 (親、またはまとめた中でいちばん近いもの)、HeadCount = Head と同じ行にまとめた数 (同じ名前・同じ種類・同じ所。×N)、
+    // Kids = ▼ で開くと出る子の行 (近い順。それぞれ同じ名前・同じ種類・同じ所のものをまとめた数つき)
+    public sealed record NearGroup(NearRow Head, int HeadCount, List<(NearRow Row, int Count)> Kids);
+
+    // 親と同じ所とみなす距離 (メートル): 子と親 (星図の parent_record。惑星・衛星・恒星は除く) の間がこれ以内なら、子を親の行の下 (▼) にまとめる。
+    // 星図の親子 (親が惑星・衛星・恒星でないもの) の間の距離は、ステーション・街とその中のクリニック・病院・Contested Zone・Vision Center が 35 m〜10.0 km
+    // (MIC-L2 Long Forest Clinic 6.0 km、Lorville の Maria Pure of Heart 10.0 km がいちばん離れたもの)、その次は小惑星帯と採掘場所の 26.6 km、
+    // ステーションとジャンプポイントの 38.8 km、Orison と Vision Center の 49.9 km (2026-11-05 の gamedata_cache.db で確かめた)
+    private const double SamePlaceDistance = 10500;
+    // 同じ行とみなす距離 (メートル): 名前と種類が同じで、間がこれ以内なら 1 行にまとめる (×N)。
+    // 同じ名前・同じ種類の場所の間の距離は、Vision Center 104 m・Contested Zone 335 m と 571 m (同じステーションの 2 つ)、その次は Pyro の Derelict Outpost どうしの 10.7 km (別の場所)
+    private const double SameRowDistance = 2000;
+
+    // 近い順の行 (rows) を、親子と同じ行でまとめる (近い順。まとめた 1 行を 1 つと数えて先頭から limit 個まで)。位置は thetas で回したもの (PlacePosition)。
+    //   親子: 行の場所の祖先をたどり、祖先が rows にあり、惑星・衛星・恒星でなく、行の場所からの距離が SamePlaceDistance 以内のあいだ上がる。
+    //     いちばん上まで上がった祖先を、その行のまとめ先 (親の行) にする。上がれなければ自分がまとめ先
+    //   同じ行: まとめ先どうしで名前・種類が同じ (大文字小文字は区別しない) で間が SameRowDistance 以内なら、1 つのまとめ先にする (近いほうへ)。
+    //     まとめ先の中では、親と名前・種類が同じで間が SameRowDistance 以内の子は親の行に数え (×N。出す行はその中でいちばん近いもの)、
+    //     子どうしも同じ決まりで 1 行にする (いちばん近いものを出す)
+    //   並び: 出す行 (親) の距離の近い順 (同じなら名前の順)。子は近い順
+    public static List<NearGroup> GroupNear(IReadOnlyList<NearRow> rows, IReadOnlyDictionary<ShopTreeNode, double> thetas, int limit)
+    {
+        var rowOf = new Dictionary<ShopTreeNode, NearRow>();
+        foreach (var r in rows) rowOf.TryAdd(r.Node, r);
+        var posCache = new Dictionary<ShopTreeNode, (double X, double Y, double Z)>();
+        (double X, double Y, double Z) P(ShopTreeNode n) => posCache.TryGetValue(n, out var p) ? p : posCache[n] = PlacePosition(n, thetas);
+        static bool SameRow(ShopTreeNode a, ShopTreeNode b) =>
+            string.Equals(a.Name, b.Name, StringComparison.OrdinalIgnoreCase) && string.Equals(a.Type, b.Type, StringComparison.Ordinal);
+        // まとめ先 (親の行) を決める
+        ShopTreeNode AnchorOf(ShopTreeNode n)
+        {
+            var a = n;
+            for (var p = n.Parent; p != null && !p.IsStar && p.Type is not ("Planet" or "Moon") && rowOf.ContainsKey(p) && Dist(P(n), P(p)) <= SamePlaceDistance; p = p.Parent)
+                a = p;
+            return a;
+        }
+        var members = new Dictionary<ShopTreeNode, List<NearRow>>();
+        var anchors = new List<ShopTreeNode>();
+        foreach (var r in rows)
+        {
+            var a = AnchorOf(r.Node);
+            if (!members.TryGetValue(a, out var list)) { members[a] = list = new List<NearRow>(); anchors.Add(a); }
+            list.Add(r);
+        }
+        // 同じ行のまとめ先どうしを 1 つにする (近いほうのまとめ先へ。まとめ先の距離で比べる)
+        var merged = new List<(ShopTreeNode Anchor, List<NearRow> Rows)>();
+        foreach (var a in anchors.OrderBy(a => rowOf[a].Distance))
+        {
+            var into = merged.FindIndex(m => SameRow(m.Anchor, a) && Dist(P(m.Anchor), P(a)) <= SameRowDistance);
+            if (into >= 0) merged[into].Rows.AddRange(members[a]);
+            else merged.Add((a, new List<NearRow>(members[a])));
+        }
+        var groups = new List<NearGroup>();
+        foreach (var (anchor, list) in merged)
+        {
+            var head = rowOf[anchor];
+            var headCount = 1;
+            var kids = new List<(NearRow Row, int Count)>();
+            foreach (var r in list.Where(r => r.Node != anchor).OrderBy(r => r.Distance).ThenBy(r => r.Node.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                // 親と同じ行: 親の行に数え、出す行 (距離・リンク) は近いほう
+                if (SameRow(r.Node, anchor) && Dist(P(r.Node), P(anchor)) <= SameRowDistance) { headCount++; if (r.Distance < head.Distance) head = r; continue; }
+                var k = kids.FindIndex(x => SameRow(x.Row.Node, r.Node) && Dist(P(x.Row.Node), P(r.Node)) <= SameRowDistance);
+                if (k >= 0) kids[k] = (kids[k].Row, kids[k].Count + 1);
+                else kids.Add((r, 1));
+            }
+            groups.Add(new NearGroup(head, headCount, kids));
+        }
+        return groups.OrderBy(g => g.Head.Distance).ThenBy(g => g.Head.Node.Name, StringComparer.OrdinalIgnoreCase).Take(limit).ToList();
     }
 
     // 惑星の近くとみなす距離: その惑星の子 (自転の親がその惑星) のいちばん遠いものの距離 × この倍
@@ -118,8 +192,8 @@ internal static class CurrentLocation
     private const double MatchTolerance = 5000;
     // Game.log の居場所で θ を実測するときの、現在位置とその場所の距離の上限 (メートル。超えたら居場所が古いとみなして使わない)
     private const double LogPlaceMaxDistance = 50000;
-    // 一覧の数
-    private const int NearCount = 10;
+    // 一覧の数 (【現在位置の近く】は、まとめた 1 行 (GroupNear) を 1 つと数えてこの数)
+    public const int NearCount = 10;
     // 地表の子から θ を求めるとき、合う子どうしの θ の差がこれ (度) 以上なら、どれか決められないとみなして使わない
     private const double SurfaceThetaAgreeDegrees = 1;
     // 地表の場所とみなす高さ: 自転の親の中心からの距離が、天体の半径 + これ以内 (メートル)
@@ -298,6 +372,7 @@ internal static class CurrentLocation
             RefNode = refNode,
             Near = rows.Take(NearCount).ToList(),
             NearestDistance = rows.Count > 0 ? rows[0].Distance : 0,
+            All = rows,
         };
     }
 

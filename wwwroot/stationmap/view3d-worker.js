@@ -376,8 +376,9 @@ self.onmessage = async e => {
     const labs = {}, wlab = {};
     for (const k of OCOLK) { labs[k] = new Uint32Array(overN[k]); wlab[k] = 0; }
     // UV・画像の番号の列は buf とは別の ArrayBuffer (uvbuf・texbuf。buf は位置・ioffs・OCOLK・輪郭だけで、前と同じ中身)。1 つの ArrayBuffer が 2 GB (postMessage の上限) を超えないため。
-    // どの部品にも UV が無い (画像なしの設定) なら作らない (null。長さ 0)
-    const anyUv = sel.some(s => s[1].parts[s[2]][10] >= 0);
+    // どの部品にも UV も画像の番号も無い (画像なしの設定) なら作らない (null。長さ 0)。
+    // (2026-11-05) UV の無い部品でも画像の番号 (場所のパレットの色だけの項目) があれば作る (その部品の UV は 0 のまま)
+    const anyUv = sel.some(s => s[1].parts[s[2]][10] >= 0 || s[1].parts[s[2]][11] >= 0);
     let upos = 0, tpos = 0;
     for (const k of COLK) { uoffs[k] = [upos, anyUv ? baseN[k] * 6 : 0]; upos += uoffs[k][1]; }
     for (const k of COLK) { toffs[k] = [tpos, anyUv ? baseN[k] : 0]; tpos += toffs[k][1]; }

@@ -10,7 +10,9 @@ body{margin:0;display:flex;height:100vh;font:13px "Yu Gothic UI","Segoe UI",sans
 #side input[type=text]{width:100%;box-sizing:border-box;background:#222;color:#ddd;border:1px solid #444;padding:3px}
 #side input[type=number]{background:#222;color:#ddd;border:1px solid #444}
 #view{flex:1;position:relative}#info{font-size:12px;white-space:pre-wrap;margin-top:8px}
-#pick{position:absolute;left:8px;bottom:8px;right:8px;max-height:30%;overflow:auto;background:rgba(0,0,0,.75);color:#fff;font-size:12px;white-space:pre-wrap;padding:6px;display:none}
+#pick{position:absolute;left:8px;bottom:8px;right:8px;max-height:30%;overflow:auto;background:rgba(0,0,0,.75);color:#fff;font-size:12px;white-space:pre-wrap;padding:6px;display:none;z-index:5}
+/* 設定「マップのデバッグ表示」が切ってあるとき (body に dbg が無い。view3d.js の DEBUG) は下部の枠を出さない (店の入口のボタンで強調したときも) */
+body:not(.dbg) #pick{display:none !important}
 #msg{position:absolute;left:50%;top:45%;transform:translate(-50%,-50%);font-size:15px;color:#ddd;pointer-events:none}
 /* 取り出し中の表示 (画面の中央。文字 32px・バー 480×18) */
 /* (2026-11-05、利用者の指示「右下に表示されることがあるが、ここに取り込みや作画中は同じように出してほしい」) 取り出し中・作画中は、どの場合も右下の小さな形 */
@@ -22,10 +24,35 @@ body{margin:0;display:flex;height:100vh;font:13px "Yu Gothic UI","Segoe UI",sans
 #prog.small{left:auto;top:auto;right:12px;bottom:12px;transform:none;padding:6px 10px}
 #prog.small #progText{font-size:14px;margin-bottom:4px}
 #prog.small #progOuter{width:200px;height:8px}
-.lg span{display:inline-block;width:10px;height:10px;margin-right:4px}
 label{display:block}
+/* 「この高さより上を消す」の数字: 前に凡例の色の見本 (.lg span) と同じ形が当たっていたので、見本を消した後も同じ見た目のままにする */
+#cutv{display:inline-block;width:10px;height:10px;margin-right:4px}
+/* 右上のスイッチの欄 (テクスチャ・印・キャプション。2026-11-05、利用者の指示「右上にスライドスイッチを入れる感じにして、エレベーターなどの印、キャプション(引き出し線を含む) も同様に縦に並べてほしい」)。
+   中身は今までのチェック (input type=checkbox) のまま、つまみが左右に動く形に見せる (押し方・キーの扱いはチェックと同じ) */
+#swPanel{position:absolute;right:8px;top:8px;z-index:4;background:rgba(17,17,17,.88);border:1px solid #444;padding:4px 8px 6px;font-size:13px}
+#swPanel label{display:flex;align-items:center;margin:4px 0;cursor:pointer;white-space:nowrap}
+#swPanel input{position:absolute;opacity:0;width:1px;height:1px;margin:0}
+#swPanel .tg{flex:none;position:relative;width:30px;height:16px;border-radius:9px;background:#222;border:1px solid #444;margin-right:6px;transition:background .15s,border-color .15s}
+#swPanel .tg::after{content:"";position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#888;transition:left .15s,background .15s}
+#swPanel input:checked+.tg{background:#264;border-color:#4a8}
+#swPanel input:checked+.tg::after{left:16px;background:#ddd}
+#swPanel input:focus-visible+.tg{outline:1px solid #9cf}
+#swPanel label:has(input:disabled){opacity:.4;cursor:default}
+#swPanel .swh{font-size:11px;color:#aaa;margin-top:6px;padding-top:4px;border-top:1px solid #333}
 h4{margin:10px 0 4px}
-/* 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート) の見出しと引き出し線 (v2.5.3 の旧方式 wwwroot/station3d/viewer.html の .cap・#lines の移植。view3d.js の「外から見たときの印と見出し」) */
+/* 左の欄のまとまり (▼ で畳める。view3d.js が開いた・畳んだ状態を覚える)・操作の説明の表・文字の道案内 (2026-11-05、利用者の指示「左がごちゃごちゃしすぎ」) */
+details.sec{border-top:1px solid #333;margin-top:6px;padding-top:2px}
+details.sec>summary{font-weight:bold;font-size:14px;cursor:pointer;margin:4px 0;color:#ddd}
+.sub{font-weight:normal;font-size:12px;color:#aaa}
+table.ops{border-collapse:collapse;width:100%;font-size:13px}
+table.ops th{text-align:left;font-weight:normal;color:#9cf;white-space:nowrap;padding:3px 10px 3px 0;vertical-align:top}
+table.ops td{padding:3px 0;vertical-align:top}
+.hh{font-weight:bold;margin:8px 0 2px}
+.note{font-size:12px;color:#bbb;line-height:1.6}
+details.more>summary{cursor:pointer;color:#9cf;font-size:12px;margin:4px 0}
+#guideSel{width:100%;box-sizing:border-box;background:#222;color:#ddd;border:1px solid #444;padding:3px;font-size:13px}
+#guide{white-space:pre-wrap;font-size:14px;line-height:1.7;margin-top:6px}
+/* 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート・外部貨物エレベーター) の見出しと引き出し線 (v2.5.3 の旧方式 wwwroot/station3d/viewer.html の .cap・#lines の移植。view3d.js の「外から見たときの印と見出し」) */
 #extOverlay{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:3}
 #extLines{position:absolute;left:0;top:0;width:100%;height:100%}
 /* パッドの見出し (Pad01 の形): 「Pad」は小さめの淡い灰色、番号は大きめの太字でパッドの印と同じ黄色 (利用者の指示「数字は大きめにして色を変えてわかるように」) */
@@ -42,34 +69,110 @@ h4{margin:10px 0 4px}
 <script type="importmap">{"imports":{"three":"../three/build/three.module.js"}}</script>
 </head><body>
 <div id="side">
+<!-- 左の欄 (2026-11-05、利用者の指示「左がごちゃごちゃしすぎ」「真ん中のボタンの説明は、ずらずら並べるんでなくて、操作ごとに縦に並べて文字も大きくして見やすいように工夫してほしい」):
+     まとまりごとに ▼ で畳める欄 (details.sec)。開いた・畳んだ状態は localStorage (view3d.side) に覚える (view3d.js)。初めは飛ぶ先・歩くモード・文字の道案内が開く -->
 <h4 id="title"></h4><div id="hangarBar" style="display:none;margin-bottom:6px"><div id="hangarHow" style="font-size:12px;color:#aaa"></div><button id="hangarLeave">ステーションへ戻る</button></div>
-<h4>行き先 (押すとそのまわりを読み込む)</h4>
+<!-- 現在位置がハンガーの所のときの知らせとボタン (畳めるまとまりの外。view3d.js の showHangarNote) -->
+<div id="hereNote" class="note" style="display:none;margin-bottom:4px;font-size:13px;color:#bff8ff"></div>
+<details class="sec" id="secGo" open><summary>飛ぶ先 <span class="sub">(押すとそのまわりを読み込む)</span></summary>
 <input type="text" id="tfilter" placeholder="名前・種類の一部で絞り込み">
 <div id="tlist" style="max-height:220px;overflow:auto"></div>
-<div style="margin-top:4px">読み込む範囲: 中心から ± <input type="number" id="regionR" value="150" step="10" min="10" style="width:60px"> m の立方体 <button id="reloadHere" style="display:inline;width:auto">今の中心で読み込み直す</button></div>
-<div style="margin-top:6px"><b>表示</b>: <label style="display:inline"><input type="checkbox" class="mk" data-cat="shop" checked>店</label> <label style="display:inline"><input type="checkbox" class="mk" data-cat="terminal" checked>端末</label> <label style="display:inline"><input type="checkbox" class="mk" data-cat="transit" checked>エレベーター・トラム</label> <label style="display:inline"><input type="checkbox" class="mk" data-cat="quest" checked>クエストの扉・パネル</label> <label style="display:inline"><input type="checkbox" class="mk" data-cat="comment" checked>コメント</label></div>
-<div style="margin-top:4px"><b>外から見たとき</b> (引いて全体を見ているときだけ): <label style="display:inline"><input type="checkbox" id="chkExtPad" checked><span class="sw" style="background:#ffcc33"></span>着陸パッド <span id="nExtPad"></span></label> <label style="display:inline"><input type="checkbox" id="chkExtHangar" checked><span class="sw" style="background:#6cb6ff"></span>ハンガー <span id="nExtHangar"></span></label> <label style="display:inline"><input type="checkbox" id="chkExtDock" checked><span class="sw" style="background:#ff8ad8"></span>ドッキングポート <span id="nExtDock"></span></label></div>
-<h4>歩くモード</h4><div><button id="walkBtn">歩くモード: OFF</button> <button id="hereBtn" style="display:inline;width:auto">現在位置</button> <span id="walkInfo"></span><div id="elevBtns"></div><div><button id="runBtn" style="display:inline;width:auto">走る: OFF</button> <button id="stBtn" style="display:inline;width:auto">姿勢: 立つ</button> <button id="ncBtn" style="display:inline;width:auto">すり抜け: OFF</button></div>
-<div><button id="recBtn">録画を始める</button> <button id="saveBtn">保存</button> <label style="display:inline">読み込み <input type="file" id="loadF" accept=".json"></label> <span id="recInfo"></span></div><div style="font-size:12px">W・S 前後 / A・D 左右 / Q・E 向き / ドラッグで向き / Shift 走る ON・OFF / スペース ジャンプ (前 0.7 m に 2.52 m までの段があれば、よじ登る) / C しゃがむ / Ctrl 寝そべる / N すり抜け ON・OFF (床の判定だけ残す。録画にも入る) / はしご: そばで W / 録画中に Enter でコメント (欄を開いたまま形を押すとその所に付く。押さなければ今の目線の高さ)。立つ 1.8 m (目 1.7)・しゃがむ 1.2 m (目 1.05・速さ半分)・寝そべる 0.5 m (目 0.35・速さ 1/4)。体の高さより低い所は通れない。上り下りできる段 0.6 m、歩く 2.8 m/秒・走る 10 m/秒、ジャンプ 4.43 m/秒 (高さ 1.0 m)。ドアはすり抜け (壁で止まることもしない)。エレベーターの 2 m 以内でボタンが出る</div></div>
-<h4>文字の道案内</h4><div id="guide" style="white-space:pre-wrap;font-size:12px"></div>
-<h4>フロア (床の高さを 2 m ごとに区切ったもの。押すとそのフロアを表示)</h4><div>床から <input type="number" id="cutH" value="2" step="0.5" style="width:50px"> m より上を消す・ほかの階の濃さ <input type="number" id="ghostA" value="20" step="5" min="0" max="100" style="width:50px"> %</div><div id="flist2" style="max-height:260px;overflow:auto"></div>
-<h4>店の入口 (押すと部品を水色で強調)</h4><div id="shopforms"></div>
-<div class="lg" style="margin-top:8px">
-<label><input type="checkbox" data-k="floor2" checked><span style="background:#3c3"></span>床 (まとめた形の傾きが 10° 以内)</label>
-<label><input type="checkbox" data-k="slope2" checked><span style="background:#39f"></span>坂・階段 (まとめた形の傾きが 46° 以内。名前に stair のある部品は歩ける面をまるごと)</label>
-<label><input type="checkbox" data-k="tube2" checked><span style="background:#f90"></span>筒の底面 (同じ部品の真上の面まで 2 m 以上ある上向きの面)</label>
-<label><input type="checkbox" data-k="counter2" checked><span style="background:#963"></span>カウンター (名前の語に counter のある部品の歩ける面。床・坂にしない)</label>
-<label><input type="checkbox" data-k="other" checked><span style="background:#888"></span>部品</label>
-<label><input type="checkbox" data-k="door" checked><span style="background:#ee3"></span>ドア (名前の語に door・doors のある部品)</label>
-<label><input type="checkbox" data-k="counterpart" checked><span style="background:#6b4423"></span>カウンターの部品 (名前に counter)</label>
-<label><input type="checkbox" data-k="excluded" checked><span style="background:#444"></span>除外 (light_attachment。床・階段・坂・壁のどれにもしない)</label>
+</details>
+<details class="sec" id="secLoad"><summary>読み込み</summary>
+<div>読み込む範囲: 中心から ± <input type="number" id="regionR" value="150" step="10" min="10" style="width:60px"> m の立方体</div>
+<button id="reloadHere" style="display:inline;width:auto">今の中心で読み込み直す</button>
+</details>
+<details class="sec" id="secWalk" open><summary>歩くモード</summary>
+<div><button id="walkBtn">歩くモード: OFF</button> <button id="hereBtn" style="display:inline;width:auto">現在位置</button> <span id="walkInfo"></span><div><button id="runBtn" style="display:inline;width:auto">走る: OFF</button> <button id="stBtn" style="display:inline;width:auto">姿勢: 立つ</button> <button id="ncBtn" style="display:inline;width:auto">すり抜け: OFF</button></div></div>
+</details>
+<details class="sec" id="secRec"><summary>録画</summary>
+<div><button id="recBtn">録画を始める</button> <button id="saveBtn">保存</button> <label style="display:inline">読み込み <input type="file" id="loadF" accept=".json"></label> <span id="recInfo"></span></div>
+<div class="note">歩いた道を 0.1 秒ごとに記録する。録画中に Enter で付けたコメントは録画にも入り、再生するとその時刻に出る。すり抜けの ON・OFF も録画に入る</div>
+</details>
+<details class="sec" id="secGuide" open><summary>文字の道案内</summary>
+<select id="guideSel"><option value="">（選ぶ）</option></select>
+<div id="guide"></div>
+</details>
+<details class="sec" id="secFloor"><summary>フロア <span class="sub">(床の高さを 2 m ごとに区切ったもの。押すとそのフロアを表示)</span></summary>
+<div>床から <input type="number" id="cutH" value="2" step="0.5" style="width:50px"> m より上を消す・ほかの階の濃さ <input type="number" id="ghostA" value="20" step="5" min="0" max="100" style="width:50px"> %</div><div id="flist2" style="max-height:260px;overflow:auto"></div>
+</details>
+<details class="sec" id="secShopIn"><summary>店の入口 <span class="sub">(押すと部品を水色で強調)</span></summary><div id="shopforms"></div></details>
+<details class="sec" id="secShow"><summary>表示する形</summary>
+<div class="lg">
+<label><input type="checkbox" data-k="other" checked>部品</label>
+<label><input type="checkbox" data-k="door" checked>ドア (名前の語に door・doors のある部品)</label>
+<label><input type="checkbox" data-k="counterpart" checked>カウンターの部品 (名前に counter)</label>
+<label><input type="checkbox" data-k="excluded" checked>除外 (light_attachment。床・階段・坂・壁のどれにもしない)</label>
 <label><input type="checkbox" id="shp" checked>玉 (案内するもの)</label>
-<label><input type="checkbox" id="texOn" checked>テクスチャ (ゲームの画像を貼る。切ると灰色の単色)</label>
 <div>この高さより上を消す (中心から): <input type="range" id="cut" min="-25" max="25" step="0.25" value="25" style="width:150px"> <span id="cutv">25</span> m</div>
 </div>
-<div style="margin-top:6px"><b>線と玉</b>: 白い柱と灰の玉 = 店 (今の地図で乗り場から行ける店は緑・行けない店は赤)・桃の玉 = admin・緑の小さい玉 = 薬局・橙の玉 = 端末・黄の玉 = エレベーター・トラムの乗り口 (hangar_lobby を含む)・青の玉 = 階段の下の端・緑の線 = 店の入口を探した直線で、障害物に当たらなかったもの (入口)・赤の線 = 店の入口を探した直線で、障害物に当たったもの・水色の線 = 強調した部品の縁取り・白い線 = まとめた形の輪郭</div>
-<div>左ドラッグ: 回す・傾ける / 右ドラッグ (Shift+左): 動かす / ホイール: 近づく・遠ざかる (中心の 2 m より近くは見ている向きへ進む) / キー W・S 見ている向きへ前後・A・D 左右・Q・E 上下 (Shift で速く) / 形を押す: そこを回る中心にして部品の名前と判定</div>
+</details>
+<details class="sec" id="secHelp"><summary>操作の説明</summary>
+<div class="hh">歩くモード</div>
+<table class="ops">
+<tr><th>W・S</th><td>前後に歩く</td></tr>
+<tr><th>A・D</th><td>左右に歩く</td></tr>
+<tr><th>Q・E・ドラッグ</th><td>向きを変える</td></tr>
+<tr><th>Shift</th><td>走る ON・OFF</td></tr>
+<tr><th>スペース</th><td>ジャンプ (前に段があれば、よじ登る)</td></tr>
+<tr><th>C</th><td>しゃがむ</td></tr>
+<tr><th>Ctrl</th><td>寝そべる</td></tr>
+<tr><th>N</th><td>すり抜け ON・OFF</td></tr>
+<tr><th>はしごのそばで W</th><td>はしごを上る</td></tr>
+<tr><th>Enter</th><td>コメントを付ける (録画中でなくても)</td></tr>
+<tr><th>コメントの札を押す</th><td>確かめてから消す (保存したコメント)</td></tr>
+<tr><th>乗り場に近づく</th><td>エレベーター・トラムの行き先の窓 (選ぶと移る。Esc で閉じる)</td></tr>
+<tr><th>操作盤・黄色の玉を押す</th><td>行き先の窓を開く</td></tr>
+<tr><th>マイハンガー</th><td>ハンガーのエレベーターの窓から入る・戻る</td></tr>
+<tr><th>［現在位置］</th><td>現在位置を取り直して、その所に立つ (ハンガーの所なら、そのハンガーを開く)</td></tr>
+<tr><th>［マップ］の現在位置</th><td>［マップ］タブの［現在位置］・星系図の現在位置の印・現在地の文を押すと、建物の中ならこの 3D でその所に立つ</td></tr>
+</table>
+<details class="more"><summary>くわしい説明</summary><div class="note">
+・姿勢: 立つ 1.8 m (目 1.7)・しゃがむ 1.2 m (目 1.05・速さ半分)・寝そべる 0.5 m (目 0.35・速さ 1/4)。体の高さより低い所は通れない<br>
+・上り下りできる段 0.6 m、歩く 2.8 m/秒・走る 10 m/秒、ジャンプ 4.43 m/秒 (高さ 1.0 m)。前 0.7 m に 2.52 m までの段があれば、ジャンプでよじ登る<br>
+・ドアはすり抜け (壁で止まることもしない)。すり抜け (N) は床の判定だけ残す。録画にも入る<br>
+・コメント (Enter): 録画中でなくても付けられ、保存して次に開いたときも出す。録画中は録画にも入る。欄を開いたまま形を押すとその所に付く。押さなければ今の目線の高さ。保存したコメントの札を押すと、確かめてから消す (読み込んだ録画を再生したときのコメントは消えない)<br>
+・エレベーターの乗り場の 2 m 以内 (トラムの乗り場は 10 m 以内) で行き先の窓が出る (選ぶと移る。Esc で閉じる)。エレベーターの操作盤・乗り場の黄色の玉を押しても窓が開く (着いた直後でも)<br>
+・ハンガーのエレベーター (着陸パッド・外部ポートのある路線と、ハンガー行きの路線) の窓には「マイハンガー」(その場所にある大きさ) が出る。マイハンガーの中のエレベーターの窓には、入るときに乗った本体のエレベーターの行き先 (選ぶと本体のその乗り場へ戻る)・ほかの大きさのマイハンガー・「ステーションへ戻る」(乗った乗り場) が出る
+</div></details>
+<div class="hh">見るとき</div>
+<table class="ops">
+<tr><th>左ドラッグ</th><td>回す・傾ける</td></tr>
+<tr><th>右ドラッグ (Shift+左)</th><td>動かす</td></tr>
+<tr><th>ホイール</th><td>近づく・遠ざかる</td></tr>
+<tr><th>W・S / A・D / Q・E</th><td>見ている向きへ前後・左右・上下 (Shift で速く)</td></tr>
+<tr><th>形を押す</th><td>そこを回る中心にする</td></tr>
+<tr><th>店の端末を押す</th><td>販売品の枠</td></tr>
+<tr><th>右上の「色付け」</th><td>場所ごとの色 (パレット) を付けるか</td></tr>
+<tr><th>右上の「現在位置」</th><td>現在位置の印 (水色の玉と札) を出すか</td></tr>
+</table>
+<details class="more"><summary>くわしい説明</summary><div class="note">
+・トラムのある場所 (Orison・Lorville など) は、今の現在位置がその場所の中なら、開いたときに現在位置のまわりだけを読み込んで、そこを中心に始める<br>
+・ホイール: 中心の 2 m より近くは、見ている向きへ進む<br>
+・形を押す: 設定「マップのデバッグ表示」を入れたときは、下部に部品の名前と判定<br>
+・販売品の枠: 品名の一部で絞り込み・表示する種類のチェック・並び替え。外した種類と並びは次も同じ<br>
+・色付け: 切ると描く材質が減る (性能の低い PC 向け)。切り替えると今の地点を読み直し、どの場所でも次も同じ<br>
+・線と玉: 赤の玉 = 店・桃の玉 = admin・緑の小さい玉 = 薬局・橙の玉 = 端末・黄の玉 = エレベーター・トラムの乗り口 (hangar_lobby を含む)・水色の線 = 強調した部品の縁取り<br>
+・外から引いて全体を見ているとき (歩くモードでなく、中心から地点の半径より遠いとき) は、玉・札・コメントの印を出さない (部品の形は出す)<br>
+・現在位置の印: ［マップ］タブ・3D の［現在位置］で現在位置を取ると、この場所の区画のそば (200 m 以内) の点なら、水色の玉と札「現在位置 時刻」を出す (取るたびに置き直す。見ている所は動かさない)。読み込んでいる地点 (±読み込む範囲) の中の点だけ出す。外から見ているときも出す。マイハンガーの中では出さない。取った点がハンガーの所 (入口から水平に 150 m 以内・入口の高さから 150 m 下まで。前の版の 2D の地図と同じ決まり) なら、［現在位置］でそのハンガーを開き、［マップ］タブで取ったときは歩くモードの欄に知らせと［ハンガー（S）を開く］［本体のこの位置を見る］を出す。自転する場所 (Seraphim Station など) では、場所の中の位置が大きくずれることがある
+</div></details>
+</details>
 <div id="info"></div></div>
-<div id="view"><div id="extOverlay"><svg id="extLines"></svg><div id="extCaps"></div></div><div id="msg"></div><div id="prog"><div id="progText"></div><div id="progOuter"><div id="progBar"></div></div></div><div id="pick"></div><div id="tbox" style="position:absolute;right:24px;top:80px;width:340px;display:none;background:#1b1f24;border:2px solid #9ab;padding:8px;z-index:5"><div id="tboxHead" style="font-weight:bold;margin-bottom:6px"></div><div id="tboxList" style="height:300px;overflow-y:auto;border:1px solid #567;background:#11151a"></div><div style="font-size:12px;color:#aaa;margin-top:4px">選ぶと移ります。Esc で閉じます</div></div><div id="sbox" style="position:absolute;left:50%;top:60px;transform:translateX(-50%);width:min(760px,90%);max-height:calc(100% - 80px);overflow:auto;display:none;background:#1b1f24;border:2px solid #9ab;padding:8px;z-index:6"></div><div id="cbox" style="position:absolute;left:50%;top:40%;transform:translateX(-50%);display:none;background:#222;padding:8px;border:1px solid #888">コメント (Enter で決める・Esc でやめる。欄を開いたまま形を押すと、その所に付ける): <br><input id="ctext" style="width:420px"> <span id="cpos"></span></div></div>
+<div id="view"><div id="extOverlay"><svg id="extLines"></svg><div id="extCaps"></div></div><div id="swPanel">
+<label title="ゲームの画像を貼る。切ると灰色の単色"><input type="checkbox" id="texOn" checked><span class="tg"></span>テクスチャ</label>
+<label title="場所ごとの色 (パレット) を付ける。切ると色の違いで分かれる材質が減り、描く回数が減る。切り替えると今の地点を読み直す (どの場所でも共通。テクスチャを切っている間は押せない)"><input type="checkbox" id="palOn" checked><span class="tg"></span>色付け</label>
+<label title="現在位置 (［マップ］タブ・3D の［現在位置］で取った所) の印を出す。外から見ているときも出す。自転する場所ではずれることがある"><input type="checkbox" id="hereOn" checked><span class="tg"></span>現在位置</label>
+<div class="swh" title="中で見ているときだけ出す (外から引いて全体を見ているときは出さず、スイッチも押せない)">印</div>
+<label><input type="checkbox" class="mk" data-cat="shop" checked><span class="tg"></span>店</label>
+<label><input type="checkbox" class="mk" data-cat="terminal" checked><span class="tg"></span>端末</label>
+<label><input type="checkbox" class="mk" data-cat="transit" checked><span class="tg"></span>エレベーター・トラム</label>
+<label><input type="checkbox" class="mk" data-cat="quest" checked><span class="tg"></span>クエストの扉・パネル</label>
+<label><input type="checkbox" class="mk" data-cat="comment" checked><span class="tg"></span>コメント</label>
+<div class="swh" title="外から引いて全体を見ているときだけ出す (中で見ているときはスイッチも押せない)。切ると引き出し線も一緒に消える">キャプション</div>
+<label><input type="checkbox" id="chkExtPad" checked><span class="tg"></span><span class="sw" style="background:#ffcc33"></span>着陸パッド&nbsp;<span id="nExtPad"></span></label>
+<label><input type="checkbox" id="chkExtDock" checked><span class="tg"></span><span class="sw" style="background:#ff8ad8"></span>ドッキングポート&nbsp;<span id="nExtDock"></span></label>
+<label><input type="checkbox" id="chkExtFreight" checked><span class="tg"></span><span class="sw" style="background:#6fdc8c"></span>外部貨物エレベーター&nbsp;<span id="nExtFreight"></span></label>
+<label><input type="checkbox" id="chkExtHangar" checked><span class="tg"></span><span class="sw" style="background:#6cb6ff"></span>ハンガー&nbsp;<span id="nExtHangar"></span></label>
+</div><div id="msg"></div><div id="prog"><div id="progText"></div><div id="progOuter"><div id="progBar"></div></div></div><div id="pick"></div><div id="tbox" style="position:absolute;right:24px;top:80px;width:340px;display:none;background:#1b1f24;border:2px solid #9ab;padding:8px;z-index:5"><div id="tboxHead" style="font-weight:bold;margin-bottom:6px"></div><div id="tboxList" style="height:300px;overflow-y:auto;border:1px solid #567;background:#11151a"></div><div style="font-size:12px;color:#aaa;margin-top:4px">選ぶと移ります。Esc で閉じます</div></div><div id="sbox" style="position:absolute;left:50%;top:60px;transform:translateX(-50%);width:min(760px,90%);max-height:calc(100% - 80px);overflow:auto;display:none;background:#1b1f24;border:2px solid #9ab;padding:8px;z-index:6"></div><div id="cbox" style="position:absolute;left:50%;top:40%;transform:translateX(-50%);display:none;background:#222;padding:8px;border:1px solid #888;z-index:7">コメント (Enter で決める・Esc でやめる。欄を開いたまま形を押すと、その所に付ける): <br><input id="ctext" style="width:420px"> <span id="cpos"></span></div></div>
 <script type="module" src="view3d.js"></script>
 </body></html>

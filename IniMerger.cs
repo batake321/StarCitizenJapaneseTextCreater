@@ -16,9 +16,30 @@ public static class IniMerger
         string? gamedataDbPath = null,
         bool missionReputationMarks = false,
         bool equipmentClassMarks = true,
-        bool blueprintMissionMarks = true)
+        bool blueprintMissionMarks = true,
+        IReadOnlyCollection<string>? untranslatedCategories = null,
+        string? categoryDbPath = null)
     {
         var forceRegex = forceEnglishPatterns.Select(p => new Regex(p)).ToList();
+
+        // 日本語化の適応範囲 (一部翻訳): untranslatedCategories は訳さない種類 (TranslationScope.Categories の Id)。
+        // null か空なら「全て翻訳」で、今までと同じ処理 (ここから下の isUntranslated の分かれ目を通らない)。
+        // 訳さない種類のキーは英語の ini の原文のままにする (DB の訳・公式の日本語訳・用語集を当てない)。印 (軍1C など) は今までどおり付く。
+        // 種類の判定に使うゲームデータの表は categoryDbPath (無ければ gamedataDbPath) から読む
+        Func<string, bool>? isUntranslated = null;
+        int enUntranslated = 0;
+        if (untranslatedCategories != null && untranslatedCategories.Count > 0)
+        {
+            var untranslatedSet = new HashSet<string>(untranslatedCategories, StringComparer.Ordinal);
+            var tables = TranslationScope.LoadTables(categoryDbPath ?? gamedataDbPath);
+            var cache = new Dictionary<string, bool>(StringComparer.Ordinal);
+            isUntranslated = key =>
+            {
+                if (!cache.TryGetValue(key, out var u))
+                    cache[key] = u = untranslatedSet.Contains(TranslationScope.Classify(key, tables));
+                return u;
+            };
+        }
 
         // Load translations: DB takes priority over JSONL
         var translations = new Dictionary<string, string>();
@@ -62,6 +83,12 @@ public static class IniMerger
                 merged[key] = enVal;
                 enForced++;
             }
+            else if (isUntranslated != null && isUntranslated(key))
+            {
+                // 一部翻訳で訳さない種類: 英語の ini の原文
+                merged[key] = enVal;
+                enUntranslated++;
+            }
             else if (translations.TryGetValue(key, out var trVal) && !string.IsNullOrWhiteSpace(trVal))
             {
                 merged[key] = trVal;
@@ -82,7 +109,11 @@ public static class IniMerger
         foreach (var (key, val) in japanese)
         {
             if (!merged.ContainsKey(key))
+            {
+                // 一部翻訳で訳さない種類のキーは、英語の ini に無いものを公式の日本語訳から足さない
+                if (isUntranslated != null && isUntranslated(key)) continue;
                 merged[key] = val;
+            }
         }
 
         // Clean up "TRANSLATION NOT FOUND" errors from official Japanese file
@@ -108,6 +139,8 @@ public static class IniMerger
             var keys = merged.Keys.ToList();
             foreach (var key in keys)
             {
+                // 一部翻訳で訳さない種類のキーには用語集を当てない
+                if (isUntranslated != null && isUntranslated(key)) continue;
                 var val = merged[key];
                 var newVal = val;
                 foreach (var (en, ja) in glossary)
@@ -125,6 +158,8 @@ public static class IniMerger
         Console.WriteLine($"    Translated (AI/manual/CSV): {jaTranslated}");
         Console.WriteLine($"    Official Japanese: {jaOfficial}");
         Console.WriteLine($"    English fallback: {enFallback}");
+        if (isUntranslated != null)
+            Console.WriteLine($"    English (partial translation, untranslated categories): {enUntranslated}");
         if (cleaned > 0)
             Console.WriteLine($"    TRANSLATION NOT FOUND cleaned: {cleaned}");
         if (glossaryFixed > 0)
@@ -137,6 +172,8 @@ public static class IniMerger
         {
             if (!merged.ContainsKey(key) && !string.IsNullOrWhiteSpace(val))
             {
+                // 一部翻訳で訳さない種類のキーは、英語の ini に無いものを DB の訳から足さない
+                if (isUntranslated != null && isUntranslated(key)) continue;
                 merged[key] = val;
                 dbExtras++;
             }
@@ -241,7 +278,7 @@ public static class IniMerger
         // ",P" 複製のあと ("port_NameJDrive,P" から作った素のキーを引くため)、"@" 前置複製の前 (足したキーにも "@" 版を付けるため) に行う
         if (!string.IsNullOrEmpty(gamedataDbPath))
         {
-            var portNames = AddItemPortNames(english, merged, gamedataDbPath);
+            var portNames = AddItemPortNames(english, merged, gamedataDbPath, isUntranslated);
             if (portNames > 0)
                 Console.WriteLine($"    itemPort_ keys added from port display names: {portNames}");
         }
@@ -316,10 +353,14 @@ public static class IniMerger
 
         var english = GlobalIniParser.Parse(enPath);
         var japanese = GlobalIniParser.Parse(jaPath);
+        // 日本語化の適応範囲 (一部翻訳) も［日本語化］と同じものを渡す (ゲームとアプリで名前の言語をそろえる)。
+        // 種類の判定に使う表 (契約名・地名など) は gamedata_cache.db から読む (印の gamedataDbPath とは別に渡す)
         return Merge(english, japanese, Path.Combine(workDir, "translated.jsonl"),
             App.Config.ForceEnglishPatterns, dbPath, glossary,
             null, App.Config.MissionReputationMarks,
-            App.Config.EquipmentClassMarks, App.Config.BlueprintMissionMarks);
+            App.Config.EquipmentClassMarks, App.Config.BlueprintMissionMarks,
+            TranslationScope.UntranslatedCategories(App.Config),
+            Path.Combine(workDir, "gamedata_cache.db"));
     }
 
     // Merge の結果から、ゲーム用 ini を書き出して読み直したときのキー locKey の値を引く (GlobalIniParser.Write の改行の書き方を通す)。
@@ -338,7 +379,9 @@ public static class IniMerger
     // 機体ロードアウトマネージャーは枠の名前を "@itemPort_<枠の名前>" で引き、キーが無いと生のキーが出る (利用者がゲームで確認)。
     // 枠の名前の綴りが大文字小文字だけ違って複数あるときは、使っている品目の多い綴り 1 つで足す。
     // 表示名が品目によって違うときは、使っている品目の多い順に試し、最初に値が引けたものを使う。足した件数を返す
-    internal static int AddItemPortNames(Dictionary<string, string> english, Dictionary<string, string> merged, string gamedataDbPath)
+    // isUntranslated: 一部翻訳で訳さない種類のキーか (null なら「全て翻訳」)。足すキー "itemPort_<枠の名前>" が訳さない種類なら、値は english だけから引く
+    internal static int AddItemPortNames(Dictionary<string, string> english, Dictionary<string, string> merged, string gamedataDbPath,
+        Func<string, bool>? isUntranslated = null)
     {
         if (!File.Exists(gamedataDbPath)) return 0;
         // 枠の名前 (小文字) → 綴りごとの品目数・表示名ごとの品目数
@@ -370,9 +413,9 @@ public static class IniMerger
             return 0;
         }
 
-        string? Lookup(string key)
+        string? Lookup(string key, bool englishOnly)
         {
-            foreach (var dict in new[] { merged, english })
+            foreach (var dict in englishOnly ? new[] { english } : new[] { merged, english })
                 foreach (var k in new[] { key, key + ",P" })
                     if (dict.TryGetValue(k, out var v) && !string.IsNullOrWhiteSpace(v)) return v;
             return null;
@@ -386,10 +429,11 @@ public static class IniMerger
             var key = "itemPort_" + name;
             if (existing.Contains(key) || existing.Contains(key + ",P")) continue;
             string? value = null;
+            var englishOnly = isUntranslated != null && isUntranslated(key);
             foreach (var (display, _) in displays[lower].OrderByDescending(x => x.Value).ThenBy(x => x.Key, StringComparer.Ordinal))
             {
                 if (display.Length < 2 || display[0] != '@') continue;
-                value = Lookup(display[1..]);
+                value = Lookup(display[1..], englishOnly);
                 if (value != null) break;
             }
             if (value == null) continue;
@@ -627,5 +671,149 @@ public static class IniMerger
         }
         catch { }
         return annotated;
+    }
+}
+
+// 日本語化の適応範囲 (一部翻訳) の種類と、キーがどの種類に入るかの判定 (2026-11-05、利用者の指示「全て翻訳／一部翻訳」とチェックボックス)。
+// 並びと名前は［日本語化］の適応範囲のダイアログ (TranslationScopeDialog) のチェックボックスと同じ。
+// キーは上の並び (品の名前 → 派閥名) で先に当たった 1 つの種類に入り、どれにも当たらないものは「その他」。
+// 判定は ",P" と前の "@" を外し、大文字小文字を区別しない。契約名・契約の説明・地名・派閥名は gamedata_cache.db の表に入っているキーで決める
+// (表が無い・空のとき (構築前など) は、その種類に入るキーは無いものとして「その他」に入る)
+public static class TranslationScope
+{
+    public sealed record Category(string Id, string Label);
+
+    public const string ItemName = "ItemName";
+    public const string ItemDesc = "ItemDesc";
+    public const string CommodityName = "CommodityName";
+    public const string CommodityDesc = "CommodityDesc";
+    public const string VehicleDesc = "VehicleDesc";
+    public const string MissionTitle = "MissionTitle";
+    public const string MissionDesc = "MissionDesc";
+    public const string Location = "Location";
+    public const string MissionLocationItem = "MissionLocationItem";
+    public const string Human = "Human";
+    public const string Dialogue = "Dialogue";
+    public const string Ui = "Ui";
+    public const string Faction = "Faction";
+    public const string Other = "Other";
+
+    public static readonly IReadOnlyList<Category> Categories = new List<Category>
+    {
+        new(ItemName, "品の名前"),
+        new(ItemDesc, "品の説明"),
+        new(CommodityName, "コモディティの名前"),
+        new(CommodityDesc, "コモディティの説明"),
+        new(VehicleDesc, "船の説明"),
+        new(MissionTitle, "契約名"),
+        new(MissionDesc, "契約の説明"),
+        new(Location, "地名"),
+        new(MissionLocationItem, "契約の中の場所・品"),
+        new(Human, "人名・肩書き"),
+        new(Dialogue, "台詞・字幕"),
+        new(Ui, "画面の文字"),
+        new(Faction, "派閥名"),
+        new(Other, "その他"),
+    };
+
+    // 台詞・字幕のキーの先頭
+    private static readonly string[] DialoguePrefixes = { "pu_", "ph_", "dlg_", "dxsh_", "dxsm_", "sc_" };
+    // 画面の文字のキーの先頭
+    private static readonly string[] UiPrefixes =
+    {
+        "ui_", "mobiglas_", "hud_", "pause_", "input_", "hints_", "frontend_", "notification_", "ea_ui",
+        "shop_ui", "text_ui", "dfm_ui", "chat_", "crafting_ui", "refueling_ui", "asd_", "interaction_",
+    };
+
+    // 種類の判定に使う gamedata_cache.db の表のキー (前の "@" を外して小文字にしたもの)
+    public sealed class KeyTables
+    {
+        // missions.title / missions.title_hud / mission_reputation.title_key
+        public HashSet<string> MissionTitles { get; } = new(StringComparer.Ordinal);
+        // missions.description
+        public HashSet<string> MissionDescs { get; } = new(StringComparer.Ordinal);
+        // starmap_names.name_key
+        public HashSet<string> Locations { get; } = new(StringComparer.Ordinal);
+        // faction_reputation.display_key
+        public HashSet<string> Factions { get; } = new(StringComparer.Ordinal);
+    }
+
+    // gamedata_cache.db から種類の判定に使う表を読む (読み取り専用で開く)。DB が無い・表が無いものは空のまま
+    public static KeyTables LoadTables(string? gamedataDbPath)
+    {
+        var t = new KeyTables();
+        if (string.IsNullOrEmpty(gamedataDbPath) || !File.Exists(gamedataDbPath)) return t;
+        try
+        {
+            using var db = new SqliteConnection($"Data Source={gamedataDbPath};Mode=ReadOnly");
+            db.Open();
+            void Read(string sql, params HashSet<string>[] sets)
+            {
+                try
+                {
+                    using var cmd = db.CreateCommand();
+                    cmd.CommandText = sql;
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read())
+                        for (int i = 0; i < sets.Length; i++)
+                        {
+                            if (r.IsDBNull(i)) continue;
+                            var k = Normalize(r.GetString(i), stripParam: false);
+                            if (k.Length > 0) sets[i].Add(k);
+                        }
+                }
+                catch (SqliteException ex)
+                {
+                    // インデックスの構築前の DB には表が無いことがある
+                    Console.WriteLine($"    Translation scope: 表を読めません ({ex.Message})");
+                }
+            }
+            Read("SELECT title, title_hud, description FROM missions", t.MissionTitles, t.MissionTitles, t.MissionDescs);
+            Read("SELECT title_key FROM mission_reputation", t.MissionTitles);
+            Read("SELECT name_key FROM starmap_names", t.Locations);
+            Read("SELECT display_key FROM faction_reputation", t.Factions);
+        }
+        catch (SqliteException ex)
+        {
+            Console.WriteLine($"    Translation scope: gamedata_cache.db を開けません ({ex.Message})");
+        }
+        return t;
+    }
+
+    // キーの前の "@" と (stripParam なら) 後ろの ",P" を外して小文字にする
+    private static string Normalize(string key, bool stripParam)
+    {
+        var k = key.TrimStart('@');
+        if (stripParam && k.EndsWith(",P", StringComparison.Ordinal)) k = k[..^2];
+        return k.ToLowerInvariant();
+    }
+
+    // キーの種類 (Categories の Id) を返す
+    public static string Classify(string key, KeyTables tables)
+    {
+        var k = Normalize(key, stripParam: true);
+        if (k.StartsWith("item_name", StringComparison.Ordinal)) return ItemName;
+        if (k.StartsWith("item_desc", StringComparison.Ordinal)
+            || (k.StartsWith("item_", StringComparison.Ordinal) && k.EndsWith("_desc", StringComparison.Ordinal))) return ItemDesc;
+        if (k.StartsWith("items_commodities_", StringComparison.Ordinal))
+            return k.EndsWith("_desc", StringComparison.Ordinal) ? CommodityDesc : CommodityName;
+        if (k.StartsWith("vehicle_desc", StringComparison.Ordinal)) return VehicleDesc;
+        if (tables.MissionTitles.Contains(k)) return MissionTitle;
+        if (tables.MissionDescs.Contains(k)) return MissionDesc;
+        if (tables.Locations.Contains(k)) return Location;
+        if (k.StartsWith("mission_location", StringComparison.Ordinal) || k.StartsWith("mission_item", StringComparison.Ordinal)) return MissionLocationItem;
+        if (k.StartsWith("human_", StringComparison.Ordinal)) return Human;
+        if (DialoguePrefixes.Any(p => k.StartsWith(p, StringComparison.Ordinal))) return Dialogue;
+        if (UiPrefixes.Any(p => k.StartsWith(p, StringComparison.Ordinal))) return Ui;
+        if (tables.Factions.Contains(k)) return Faction;
+        return Other;
+    }
+
+    // 設定から、Merge に渡す「訳さない種類」を作る。「全て翻訳」なら null (今までと同じ出力)
+    public static IReadOnlyCollection<string>? UntranslatedCategories(AppConfig config)
+    {
+        if (!config.PartialTranslation) return null;
+        var unchecked_ = new HashSet<string>(config.PartialTranslationUnchecked, StringComparer.Ordinal);
+        return Categories.Select(c => c.Id).Where(unchecked_.Contains).ToList();
     }
 }

@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" width="900" height="520" role="img" aria-labelledby="t d">
+  <title id="t">ステーションの 3D の現在位置（仮の図）</title>
+  <desc id="d">左: 3D の中の現在位置の印（水色の玉と、札「現在位置 時:分:秒」。自転する場所では「自転する場所のため、ずれることがあります」も出る）と、右上の「現在位置」のスイッチ。右: 現在位置がハンガーの所のとき、左の欄の上に出る知らせ「ハンガー（S）の所にいます…」と、［ハンガー（S）を開く］［本体のこの位置を見る］のボタン。</desc>
+  <style>
+    .f  { font-family: sans-serif; }
+    .sw { font-size: 13px; fill: #ddd; }
+    .hl { font-size: 15px; fill: #bff8ff; font-weight: 700; }
+    .hs { font-size: 12.5px; fill: #bff8ff; }
+    .h  { font-size: 14px; fill: #ddd; font-weight: 700; }
+    .tx { font-size: 13px; fill: #ddd; }
+    .sb { font-size: 12px; fill: #aaa; }
+    .t2 { font-size: 13px; fill: #c9d6e3; font-weight: 700; }
+    .no { font-size: 15px; fill: #fff; font-weight: 700; }
+    .cap { font-size: 12.5px; fill: #c9d6e3; }
+  </style>
+  <defs>
+    <g id="on"><rect x="0" y="-12" width="30" height="16" rx="8" fill="#264" stroke="#4a8"/><circle cx="22" cy="-4" r="6" fill="#ddd"/></g>
+  </defs>
+
+  <rect x="0" y="0" width="900" height="520" rx="8" fill="#1b222c"/>
+  <text class="f t2" x="20" y="24">現在位置の印（3D の表示）</text>
+  <text class="f t2" x="600" y="24">ハンガーの所にいるとき（左の欄の上）</text>
+
+  <!-- 3D -->
+  <rect x="20" y="34" width="560" height="440" fill="#111"/>
+  <polygon points="30,470 570,470 430,320 170,320" fill="#3a352e"/>
+  <polygon points="170,320 430,320 430,110 170,110" fill="#24282c"/>
+  <circle cx="300" cy="340" r="10" fill="#00e5ff"/>
+  <rect x="150" y="250" width="300" height="60" fill="rgba(20,20,20,0.85)" stroke="#00e5ff" stroke-width="2"/>
+  <text class="f hl" x="162" y="274">現在位置 14:32:05</text>
+  <text class="f hs" x="162" y="296">（自転する場所のため、ずれることがあります）</text>
+  <!-- 右上のスイッチ (一部) -->
+  <rect x="430" y="42" width="142" height="84" fill="rgba(17,17,17,0.92)" stroke="#444"/>
+  <g class="f sw">
+    <use href="#on" x="438" y="66"/><text x="474" y="66">テクスチャ</text>
+    <use href="#on" x="438" y="90"/><text x="474" y="90">色付け</text>
+    <use href="#on" x="438" y="114"/><text x="474" y="114">現在位置</text>
+  </g>
+  <text class="f sb" x="440" y="140">（この下に印など）</text>
+
+  <!-- 左の欄の上 -->
+  <rect x="600" y="34" width="280" height="440" fill="#111" stroke="#333"/>
+  <text class="f h" x="610" y="58">Seraphim Station</text>
+  <text class="f hs" x="610" y="84">ハンガー（S）の所にいます（ハンガーの</text>
+  <text class="f hs" x="610" y="102">入口 2 から水平に 35 m）。</text>
+  <rect x="610" y="112" width="260" height="26" fill="#222" stroke="#444"/><text class="f tx" x="616" y="130">ハンガー（S）を開く</text>
+  <rect x="610" y="142" width="260" height="26" fill="#222" stroke="#444"/><text class="f tx" x="616" y="160">本体のこの位置を見る</text>
+  <line x1="606" y1="182" x2="874" y2="182" stroke="#333"/>
+  <text class="f h" x="610" y="202">▼ 飛ぶ先 <tspan class="sb">(押すとそのまわりを…)</tspan></text>
+  <text class="f sb" x="610" y="226">（この下は左の欄のまとまり）</text>
+  <text class="f sb" x="610" y="270">ハンガーを開いた後は、知らせが</text>
+  <text class="f sb" x="610" y="288">「…ハンガーの中での位置は、まだ</text>
+  <text class="f sb" x="610" y="306">出せません」になり、</text>
+  <text class="f sb" x="610" y="324">［本体のこの位置を見る］だけが残ります</text>
+
+  <text class="f cap" x="20" y="500">仮の図。場所の名前・入口の番号・距離・時刻は例です。実際の画面と細部が違うことがあります</text>
+
+  <!-- 番号 -->
+  <g class="f">
+    <circle cx="280" cy="368" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="280" y="373" text-anchor="middle">1</text>
+    <circle cx="136" cy="262" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="136" y="267" text-anchor="middle">2</text>
+    <circle cx="414" cy="110" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="414" y="115" text-anchor="middle">3</text>
+    <circle cx="862" cy="78" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="862" y="83" text-anchor="middle">4</text>
+    <circle cx="862" cy="125" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="862" y="130" text-anchor="middle">5</text>
+    <circle cx="862" cy="155" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="862" y="160" text-anchor="middle">6</text>
+  </g>
+</svg>

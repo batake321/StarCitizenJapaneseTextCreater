@@ -498,16 +498,17 @@ public partial class GameDataExtractor
         cmd.Parameters.AddWithValue("@a", ShopTables.StarmapLocationsTable);
         cmd.Parameters.AddWithValue("@b", ShopTables.GameShopsTable);
         if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0) return true;
-        // 前の形の game_shops (franchise_name・area_label の列が無い)・starmap_locations (座標・自転の列が無い)・starmap_entities が無い
-        if (!ShopTables.ShopsTableLacksFranchiseNameColumn(_db) && !ShopTables.ShopsTableLacksAreaLabelColumn(_db) && !ShopTables.StarmapTableLacksCoordinateColumns(_db)
-            && !ShopTables.EntitiesTableMissing(_db)) return false;
+        // 前の形の game_shops (franchise_name・area_label・rack_count・kiosk_guids の列が無い。行があるのに rack_count が全部 0)・starmap_locations (座標・自転の列が無い)・starmap_entities が無い
+        if (!ShopTables.ShopsTableLacksFranchiseNameColumn(_db) && !ShopTables.ShopsTableLacksAreaLabelColumn(_db) && !ShopTables.ShopsTableLacksRackColumns(_db)
+            && !ShopTables.ShopsTableRacksAllZero(_db) && !ShopTables.StarmapTableLacksCoordinateColumns(_db) && !ShopTables.EntitiesTableMissing(_db)) return false;
         return true;
     }
 
     // 店・星図の表の形の番号。表・列を足したら上げる (作った印の値に入る。前の形の表が残っている DB は、印にかかわらず NeedsShopTables が作り直す)。
     // 2: starmap_entities を足した (実データで、番号の無い前の印のために starmap_entities が作られなかった)。3: starmap_locations に planet_radius を足した。
-    // 4: starmap_locations に frame_matrix を足した。5: game_shops に area_label (店の案内図の名札) を足した
-    private const string ShopTablesFormat = "5";
+    // 4: starmap_locations に frame_matrix を足した。5: game_shops に area_label (店の案内図の名札) を足した。
+    // 6: game_shops に rack_count・kiosk_guids (店の棚の数・端末の GUID) を足し、星系の木から辿れない置き場所の店を入れないようにした (2026-11-05)
+    private const string ShopTablesFormat = "6";
 
     // 作ろうとした印の値 (build_p4_change_num と表の形の番号)
     private string ShopTablesAttemptValue() => (ReadMetaValue(BuildChangeNumMetaKey) ?? "") + "|" + ShopTablesFormat;
@@ -519,11 +520,11 @@ public partial class GameDataExtractor
     // 店・星図の表を作ったことを記録する (表が今の形でできたときだけ呼ぶ。0 行で今の形の空の表ができたときも含む)
     private void MarkShopTablesAttempt() => SetMeta(_db!, ShopTablesAttemptMetaKey, ShopTablesAttemptValue());
 
-    // 店・星図の表が前の形か (game_shops に franchise_name・area_label の列が無い・starmap_locations に座標・自転の列が無い・starmap_entities が無い)。
-    // NeedsShopTables の前の形の判定と同じ
+    // 店・星図の表が前の形か (game_shops に franchise_name・area_label・rack_count・kiosk_guids の列が無い・行があるのに rack_count が全部 0・
+    // starmap_locations に座標・自転の列が無い・starmap_entities が無い)。NeedsShopTables の前の形の判定と同じ
     private bool ShopTablesHaveOldForm() =>
-        ShopTables.ShopsTableLacksFranchiseNameColumn(_db!) || ShopTables.ShopsTableLacksAreaLabelColumn(_db!) || ShopTables.StarmapTableLacksCoordinateColumns(_db!)
-        || ShopTables.EntitiesTableMissing(_db!);
+        ShopTables.ShopsTableLacksFranchiseNameColumn(_db!) || ShopTables.ShopsTableLacksAreaLabelColumn(_db!) || ShopTables.ShopsTableLacksRackColumns(_db!)
+        || ShopTables.ShopsTableRacksAllZero(_db!) || ShopTables.StarmapTableLacksCoordinateColumns(_db!) || ShopTables.EntitiesTableMissing(_db!);
 
     // gamedata_meta の値 (表・行が無ければ null)
     private string? ReadMetaValue(string key)
@@ -1370,7 +1371,7 @@ public partial class GameDataExtractor
 
         // .soc のバイト列から店を読む。.soc には CryXmlB がいくつも埋め込まれているので、"CryXmlB" の位置で切り分け、
         // "SShopComponentParams" を含むものだけを CryXmlParser で読んで、Entity (EntityClass="SCShop") の名前・EntityCryGUID と、
-        // その中の EntityComponentShop (__type="SShopComponentParams") の franchise・shopInventoryType を取る。読めない CryXmlB は飛ばす
+        // その中の EntityComponentShop (__type="SShopComponentParams") の franchise・shopInventoryType、棚 (ShopRackGUIDs) の数・端末 (ShopKioskGUIDs) の GUID を取る。読めない CryXmlB は飛ばす
         internal static List<SocShop> ReadSocShops(byte[] bytes, string latin1)
         {
             var list = new List<SocShop>();
@@ -1389,8 +1390,12 @@ public partial class GameDataExtractor
                 {
                     if ((string?)ent.Attribute("EntityClass") != "SCShop") continue;
                     var comp = ent.Descendants("EntityComponentShop").FirstOrDefault(c => (string?)c.Attribute("__type") == "SShopComponentParams");
+                    // 店の棚 (<EntityComponentShop><ShopRackGUIDs><ShopRackGUID entityCryGUID=…/>) の数と、店の端末 (<ShopKioskGUIDs><ShopKioskGUID entityCryGUID=…/>) の GUID
+                    var racks = ent.Descendants("ShopRackGUID").Count();
+                    var kiosks = string.Join(",", ent.Descendants("ShopKioskGUID").Select(k => ((string?)k.Attribute("entityCryGUID") ?? "").Trim().ToLowerInvariant())
+                        .Where(g => g.Length > 0).Distinct(StringComparer.Ordinal));
                     list.Add(new SocShop((string?)ent.Attribute("Name") ?? "", (string?)ent.Attribute("EntityCryGUID") ?? "",
-                        (string?)comp?.Attribute("franchise") ?? "", (string?)comp?.Attribute("shopInventoryType") ?? "", ParseVec3((string?)ent.Attribute("Pos"))));
+                        (string?)comp?.Attribute("franchise") ?? "", (string?)comp?.Attribute("shopInventoryType") ?? "", ParseVec3((string?)ent.Attribute("Pos")), racks, kiosks));
                 }
             }
             // Pos の無い店は、バイト列の並び「SCShop_… | x,y,z | SCShop | GUID | GUID」から取れれば使う (StationMapData の SocpakContents.ReadShops と同じ)
@@ -1483,8 +1488,10 @@ public partial class GameDataExtractor
         (double W, double X, double Y, double Z)? Rot = null, string EntityName = "");
 
     // .soc の中の店 1 つ (Entity の Name・EntityCryGUID、EntityComponentShop の franchise (ShopFranchise の uuid)・shopInventoryType (ITEM / COMMODITY)、
-    // Entity の Pos (socpak の枠。読めなければ null。店の名札 (game_shops.area_label) を探すのに使う))
-    internal readonly record struct SocShop(string EntityName, string Guid, string Franchise, string InventoryType, (double X, double Y, double Z)? Pos = null);
+    // Entity の Pos (socpak の枠。読めなければ null。店の名札 (game_shops.area_label) を探すのに使う)、
+    // 棚 (EntityComponentShop の ShopRackGUIDs の ShopRackGUID) の数、端末 (ShopKioskGUIDs の ShopKioskGUID の entityCryGUID。小文字を「,」でつないだもの。無ければ ""))
+    internal readonly record struct SocShop(string EntityName, string Guid, string Franchise, string InventoryType, (double X, double Y, double Z)? Pos = null,
+        int RackCount = 0, string KioskGuids = "");
 
     // ── 照合 (調査の t11_all.py。ルート表の評価は t2b_eval.py、出現の設定は t8_spawn.py) ──
     internal sealed class DeliverableSourceFinder
@@ -2749,6 +2756,9 @@ public partial class GameDataExtractor
         // franchise_name: franchise の英語名 (無ければ '')。画面の店の名前を決めるのに使う (GameDataQueryService.BuildShopTree)。
         // inventory_type: shopInventoryType (ITEM / COMMODITY)。location_record: ショップ socpak から親の socpak を辿って最初に当たる StarMapObject。socpak: ショップ socpak
         // area_label: 店の案内図の名札の鍵 (例 @area_name_WaterStall。ゲームの地図に出る名前。無ければ '')。決め方は ShopTables.AreaLabelOf。画面の店の名前に使う (GameDataQueryService.BuildShopTree)
+        // rack_count: 店の棚 (SCShop の EntityComponentShop の ShopRackGUIDs) の数。価格の売り場の紐づけ (RebuildLinks の MatchShop の 6) に使う。
+        // kiosk_guids: 店の端末 (ShopKioskGUIDs) の EntityCryGUID (小文字を「,」でつないだもの。無ければ '')。店の端末の記録で、今は読む所が無い
+        //   (3D の端末と店の結び付けは StationMapData の SocpakContents.ReadTerminals が .soc の ShopKioskGUIDs を直接読む)
         internal const string GameShopsDdl = """
 
             CREATE TABLE IF NOT EXISTS game_shops (
@@ -2760,7 +2770,9 @@ public partial class GameDataExtractor
                 inventory_type TEXT NOT NULL,
                 location_record TEXT NOT NULL,
                 socpak TEXT NOT NULL,
-                area_label TEXT NOT NULL DEFAULT ''
+                area_label TEXT NOT NULL DEFAULT '',
+                rack_count INTEGER NOT NULL DEFAULT 0,
+                kiosk_guids TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_game_shops_location ON game_shops(location_record);
             """;
@@ -2784,7 +2796,8 @@ public partial class GameDataExtractor
             double? X = null, double? Y = null, double? Z = null, double? Radius = null,
             string SpinParent = "", double? LX = null, double? LY = null, double? LZ = null, double? RotHours = null, double? PlanetRadius = null,
             string? FrameMatrix = null);
-        internal readonly record struct ShopRow(string ShopId, string EntityName, string Name, string FranchiseRecord, string FranchiseName, string InventoryType, string Location, string Socpak, string AreaLabel = "");
+        internal readonly record struct ShopRow(string ShopId, string EntityName, string Name, string FranchiseRecord, string FranchiseName, string InventoryType, string Location, string Socpak, string AreaLabel = "",
+            int RackCount = 0, string KioskGuids = "");
 
         private static string ShortRecord(string rn) { var dot = rn.IndexOf('.'); return dot >= 0 ? rn[(dot + 1)..] : rn; }
 
@@ -3075,11 +3088,41 @@ public partial class GameDataExtractor
             return result;
         }
 
+        // 星系の木の socpak: 恒星 (starmap の Star) の StarMapObject に結ばれる Child (xml の ChildObjectContainers の Child の starMapRecord。入れ子も見る) を持つ socpak
+        // (例 nyxsystem.socpak) を根にし、子の socpak (soc.Parents の逆。xml・entxml・.soc・.ale の中の ObjectContainers/….socpak) を下へ辿った socpak の全部 (根を含む)。
+        // (2026-11-05) 今の星系に置かれていない古い置き場所の店を game_shops に入れないのに使う (BuildShops)。実データ: 古い Levski の店
+        // (pu/system/nyx/delamar/delamar.socpak → levski.socpak → levski_int.socpak の下の cordrys_levski_b など) は、delamar.socpak がどの星系の木からも辿れないので入らない
+        internal static HashSet<string> SystemTreeSocpaks(DeliverableDcb dcb, DeliverableSocpaks soc, List<StarmapRow> starmap)
+        {
+            var stars = new HashSet<string>(starmap.Where(r => r.Type == "Star").Select(r => r.Record), StringComparer.Ordinal);
+            bool HasStar(IEnumerable<SocChild> nodes) => nodes.Any(n =>
+                n.StarMapRecord.Length > 0 && dcb.IdToRecord.TryGetValue(n.StarMapRecord, out var rn) && stars.Contains(rn) || HasStar(n.Kids));
+            var children = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            foreach (var (child, parents) in soc.Parents)
+                foreach (var p in parents)
+                {
+                    if (!children.TryGetValue(p, out var list)) children[p] = list = new List<string>();
+                    list.Add(child);
+                }
+            var reach = new HashSet<string>(StringComparer.Ordinal);
+            var stack = new Stack<string>(soc.Containers.Where(kv => HasStar(kv.Value)).Select(kv => kv.Key).OrderBy(k => k, StringComparer.Ordinal));
+            while (stack.Count > 0)
+            {
+                var x = stack.Pop();
+                if (!reach.Add(x) || !children.TryGetValue(x, out var ks)) continue;
+                foreach (var k in ks) stack.Push(k);
+            }
+            return reach;
+        }
+
         // ゲームの店。ショップ socpak から親の socpak を辿り、子の socpak を置く Entity に書かれた StarMapObject (ChildStarMapFrom の、その親の中の組) に当たったら、
-        // その道はそこで止めて場所にする。場所が星図の場所 (starmap) に無い・どの道でも当たらない店は入れない (件数を返す)
+        // その道はそこで止めて場所にする。場所が星図の場所 (starmap) に無い・どの道でも当たらない店は入れない (件数を返す)。
+        // 親の socpak は星系の木の socpak (SystemTreeSocpaks) だけを辿る (2026-11-05。星系の木から辿れない親は、そこから上も星系の木に届かないので辿らない)
         public static (List<ShopRow> Rows, string Stats) BuildShops(DeliverableDcb dcb, DeliverableSocpaks soc, List<StarmapRow> starmap, Dictionary<string, string>? loc)
         {
             var known = new HashSet<string>(starmap.Select(r => r.Record), StringComparer.Ordinal);
+            var tree = SystemTreeSocpaks(dcb, soc, starmap);
+            var offTree = new HashSet<string>(StringComparer.Ordinal);   // 星系の木から辿れないので辿らなかった親の socpak
             var franchiseCache = new Dictionary<string, (string Record, string? Name)>(StringComparer.OrdinalIgnoreCase);
             (string Record, string? Name) Franchise(string uuid)
             {
@@ -3116,6 +3159,7 @@ public partial class GameDataExtractor
                     soc.ChildStarMapFrom.TryGetValue(x, out var placed);
                     foreach (var p in parents.OrderBy(v => v, StringComparer.Ordinal))
                     {
+                        if (!tree.Contains(p)) { offTree.Add(p); continue; }
                         var smos = placed?.Where(t => t.Parent == p && known.Contains(t.Smo)).Select(t => t.Smo).Distinct().OrderBy(v => v, StringComparer.Ordinal).ToList();
                         if (smos is { Count: > 0 }) { foreach (var smo in smos) if (!result.Contains(smo)) result.Add(smo); }
                         else stack.Push(p);
@@ -3140,11 +3184,12 @@ public partial class GameDataExtractor
                     foreach (var l in locs)
                     {
                         var id = $"{l}|{socpak}|{(shop.Guid.Length > 0 ? shop.Guid : shop.EntityName)}";
-                        rows.TryAdd(id, new ShopRow(id, shop.EntityName, name, frRec, frName ?? "", shop.InventoryType, l, socpak, label));
+                        rows.TryAdd(id, new ShopRow(id, shop.EntityName, name, frRec, frName ?? "", shop.InventoryType, l, socpak, label, shop.RackCount, shop.KioskGuids));
                     }
                 }
             }
-            var stats = $"店のある socpak {soc.Shops.Count} 件・店 {soc.Shops.Values.Sum(v => v.Count)} 件 (場所の分からない店 {unlocated} 件 / socpak {socpaksUnlocated} 件。franchise の名前の無い店 {noFranchise} 件・名札の分かった店 {labeled} 件)";
+            var stats = $"店のある socpak {soc.Shops.Count} 件・店 {soc.Shops.Values.Sum(v => v.Count)} 件 (場所の分からない店 {unlocated} 件 / socpak {socpaksUnlocated} 件。franchise の名前の無い店 {noFranchise} 件・名札の分かった店 {labeled} 件。"
+                        + $"星系の木の socpak {tree.Count} 件、星系の木から辿れないので辿らなかった親の socpak {offTree.Count} 件)";
             return (rows.Values.OrderBy(r => r.ShopId, StringComparer.Ordinal).ToList(), stats);
         }
 
@@ -3219,14 +3264,39 @@ public partial class GameDataExtractor
             return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0;
         }
 
+        // game_shops に棚・端末の列 (rack_count・kiosk_guids) が無い (前の形の表) か
+        internal static bool ShopsTableLacksRackColumns(SqliteConnection db)
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('game_shops')";
+            if (Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) == 0) return false;   // 表が無い
+            cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('game_shops') WHERE name IN ('rack_count', 'kiosk_guids')";
+            return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) < 2;
+        }
+
+        // game_shops に行があるのに rack_count が全部 0 か (前の形として扱う。2026-11-05: この版より前のバックアップを戻すと、DatabaseBackupService の ReplaceTable が
+        // 両方にある列だけを写すので、列はあるが rack_count が全部 0 (kiosk_guids が全部 '') の表になる。作り直せば棚のある店が必ずある)。
+        // 表・列が無い・行が 1 つも無いときは false (今までどおりの扱い)
+        internal static bool ShopsTableRacksAllZero(SqliteConnection db)
+        {
+            if (ShopsTableLacksRackColumns(db)) return false;
+            try
+            {
+                using var cmd = db.CreateCommand();
+                cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM game_shops) AND NOT EXISTS (SELECT 1 FROM game_shops WHERE rack_count > 0)";
+                return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L) != 0;
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode == 1) { return false; }   // 表が無い
+        }
+
         public static void WriteShops(SqliteConnection db, List<ShopRow> rows)
         {
-            var dropOld = ShopsTableLacksFranchiseNameColumn(db) || ShopsTableLacksAreaLabelColumn(db);
+            var dropOld = ShopsTableLacksFranchiseNameColumn(db) || ShopsTableLacksAreaLabelColumn(db) || ShopsTableLacksRackColumns(db);
             using var tx = db.BeginTransaction();
             using (var del = db.CreateCommand())
             {
                 del.Transaction = tx;
-                // 前の形の表 (franchise_name・area_label の列が無い) は作り直す
+                // 前の形の表 (franchise_name・area_label・rack_count・kiosk_guids の列が無い) は作り直す
                 if (dropOld) { del.CommandText = "DROP TABLE game_shops;"; del.ExecuteNonQuery(); }
                 del.CommandText = GameShopsDdl + "DELETE FROM game_shops;";
                 del.ExecuteNonQuery();
@@ -3234,16 +3304,20 @@ public partial class GameDataExtractor
             using (var ins = db.CreateCommand())
             {
                 ins.Transaction = tx;
-                ins.CommandText = "INSERT OR IGNORE INTO game_shops(shop_id,entity_name,name,franchise_record,franchise_name,inventory_type,location_record,socpak,area_label) VALUES(@i,@e,@n,@f,@fn,@t,@l,@s,@al)";
+                ins.CommandText = "INSERT OR IGNORE INTO game_shops(shop_id,entity_name,name,franchise_record,franchise_name,inventory_type,location_record,socpak,area_label,rack_count,kiosk_guids) VALUES(@i,@e,@n,@f,@fn,@t,@l,@s,@al,@rc,@kg)";
                 var pI = ins.Parameters.Add("@i", SqliteType.Text); var pE = ins.Parameters.Add("@e", SqliteType.Text); var pN = ins.Parameters.Add("@n", SqliteType.Text);
                 var pF = ins.Parameters.Add("@f", SqliteType.Text); var pT = ins.Parameters.Add("@t", SqliteType.Text); var pL = ins.Parameters.Add("@l", SqliteType.Text);
                 var pS = ins.Parameters.Add("@s", SqliteType.Text);
                 var pFn = ins.Parameters.Add("@fn", SqliteType.Text);
                 var pAl = ins.Parameters.Add("@al", SqliteType.Text);
+                var pRc = ins.Parameters.Add("@rc", SqliteType.Integer);
+                var pKg = ins.Parameters.Add("@kg", SqliteType.Text);
                 foreach (var r in rows)
                 {
                     pFn.Value = r.FranchiseName;
                     pAl.Value = r.AreaLabel;
+                    pRc.Value = r.RackCount;
+                    pKg.Value = r.KioskGuids;
                     pI.Value = r.ShopId; pE.Value = r.EntityName; pN.Value = r.Name; pF.Value = r.FranchiseRecord; pT.Value = r.InventoryType; pL.Value = r.Location; pS.Value = r.Socpak;
                     ins.ExecuteNonQuery();
                 }
@@ -3308,7 +3382,9 @@ public partial class GameDataExtractor
         //     (候補が複数でも、そのうち 1 つがほかの候補全部の祖先なら、その祖先)
         //   店: その場所と子孫の場所の店を、店の名前の部分と正規化して、名前が完全一致 → Entity 名の語が完全一致 → 名前が含む → Entity 名が含む
         //     → (item だけ) Entity 名の語を売り場の名前が含む (含んだ語がいちばん長い店) の順に照らし、1 つに決まった店 (MatchShop)。trade は COMMODITY の店だけを見る
-        //   item で名前では店が 1 つに決まらないものは、販売内容 (売っている品目の種類) で店に結ぶ (MatchByContents)
+        //     5 で同点のまま決まらない店は、棚のある店 → 種類の合う店の順に 1 つに決まればその店 (TieBreak。MatchShop の 6・7)
+        //   item で名前では店が 1 つに決まらないものは、販売内容 (売っている品目の種類) で店に結ぶ (MatchByContents)。
+        //     それでも決まらないものは、場所と店の間の段の語を Entity 名に持つ店が 1 つならその店 (MatchByMids)
         //   場所は決まったが店が 1 つに決まらないものは、場所で結ぶ (shop_id は ''、location_record に場所、match は 'location')
         // 紐づけの表は最初に新しい形にする (下の早い return でも、次の起動で NeedsShopPriceLinks が真にならないように)。
         // trade_cache.db が無い・読めないときは trade の行だけ前を残し、作れた紐づけが全体で 0 行なら前を全部残す
@@ -3317,6 +3393,8 @@ public partial class GameDataExtractor
             MigrateLinksTable(db);
             var locs = new Dictionary<string, (string Name, string Type, string Parent, string System)>(StringComparer.Ordinal);
             var shops = new List<(string Id, string Name, string Inv, string Loc, string Entity)>();
+            // 店の棚の数 (game_shops.rack_count) と franchise (franchise_record)。MatchShop の 6・7 に使う (前の形の表で列が無ければ、棚の数は 0)
+            var shopExtra = new Dictionary<string, (int Racks, string Franchise)>(StringComparer.Ordinal);
             try
             {
                 using (var cmd = db.CreateCommand())
@@ -3325,11 +3403,16 @@ public partial class GameDataExtractor
                     using var r = cmd.ExecuteReader();
                     while (r.Read()) locs[r.GetString(0)] = (r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4));
                 }
+                var hasRacks = !ShopsTableLacksRackColumns(db);
                 using (var cmd = db.CreateCommand())
                 {
-                    cmd.CommandText = "SELECT shop_id, name, inventory_type, location_record, entity_name FROM game_shops";
+                    cmd.CommandText = "SELECT shop_id, name, inventory_type, location_record, entity_name, franchise_record, " + (hasRacks ? "rack_count" : "0") + " FROM game_shops";
                     using var r = cmd.ExecuteReader();
-                    while (r.Read()) shops.Add((r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4)));
+                    while (r.Read())
+                    {
+                        shops.Add((r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4)));
+                        shopExtra[r.GetString(0)] = (Convert.ToInt32(r.GetValue(6)), r.GetString(5));
+                    }
                 }
             }
             catch (SqliteException ex) when (ex.SqliteErrorCode == 1) { }   // 表が無い
@@ -3430,8 +3513,10 @@ public partial class GameDataExtractor
             //      (例 "Refinery Shop" は SCShop_RefineryAdmin_ITEM {refineryadmin, refinery, admin} と SCShop_Refinery_Rentals {refinery, rentals} のどちらの語も片方に収まらない)
             //      (2026-11-05、利用者の報告「売ってるものがもっと大量にあるのに表示が少なすぎる」: Orison の Kel-To の売り場 "… - Cloudview Center - Stratus - Kel-To ConStore" (63 品) が
             //      1〜4 のどれにも当たらず場所だけに結ばれ、店には "… - August Dunlow Spaceport - Kel-To" (4 品) だけが結ばれていた)
-            (string Id, string How)? MatchShop(List<(string Id, string Name, string Inv, string Loc, string Entity)> cands, string label, bool wordInLabel = false)
+            //   tie: 5 で同じ長さの語の店が 2 つ以上あり、語の少ない店でも決まらなかったときの、その店の shop_id (ほかは null)。MatchShop の 6・7 (下の TieBreak) に使う
+            (string Id, string How)? MatchShop(List<(string Id, string Name, string Inv, string Loc, string Entity)> cands, string label, out List<string>? tie, bool wordInLabel = false)
             {
+                tie = null;
                 var n = Norm(label);
                 if (n.Length == 0 || cands.Count == 0) return null;
                 static bool Contains(string field, string n) => Norm(field) is { Length: > 0 } cn && (cn.Contains(n, StringComparison.Ordinal) || n.Contains(cn, StringComparison.Ordinal));
@@ -3465,8 +3550,44 @@ public partial class GameDataExtractor
                     // 同じ長さの語で当たった店が複数: 語が少なく、その語が全部ほかの候補の語に入っている店が 1 つならその店
                     var shorter = best.Where(x => best.All(y => y.Id == x.Id || x.Words.Count < y.Words.Count && x.Words.IsSubsetOf(y.Words))).ToList();
                     if (shorter.Count == 1) return (shorter[0].Id, "店:Entity 名の語を売り場の名前が含む(語の少ない店)");
+                    tie = best.Select(x => x.Id).ToList();
                 }
                 return null;
+            }
+            // MatchShop の 5 で同点のまま決まらなかった店 (tie) から、次の順に 1 つに決まった店 (2026-11-05):
+            //   6. ゲームデータで棚 (game_shops.rack_count。SCShop の ShopRackGUIDs) を持つ店が 1 つならその店
+            //      (例 "Refinery Shop" は SCShop_RefineryAdmin_ITEM (棚 34) と SCShop_Refinery_Rentals (棚 0) → 前者、
+            //       Pyro の "Cargo Shop" は SCShop_CargoOfficePyroStation (棚 14) と SCShop_Cargo_Office_Rentals-004 (棚 0) → 前者)
+            //   7. 店の種類 (TieShopKind。Entity 名・店の名前・franchise の record 名) が売り場の種類 (販売内容。SaleKinds) と同じ店が 1 つならその店
+            //      (例 MIC-L1 の "Casaba Outlet" (服 39 品) は Entity 名が同じ SCShop_lt_a_casaba_small_base_a-001 の Armor (SF_armor) と Clothing (SF_clothing) → 後者)
+            (string Id, string How)? TieBreak(List<string> tie, string? saleKind)
+            {
+                var racked = tie.Where(id => shopExtra.TryGetValue(id, out var x) && x.Racks > 0).ToList();
+                if (racked.Count == 1) return (racked[0], "店:Entity 名の語を売り場の名前が含む(棚のある店)");
+                if (saleKind == null) return null;
+                var byName = shops.Where(s => tie.Contains(s.Id, StringComparer.Ordinal)).ToDictionary(s => s.Id, StringComparer.Ordinal);
+                var kinded = tie.Where(id => byName.TryGetValue(id, out var s) && TieShopKind(s.Entity, s.Name, shopExtra.TryGetValue(id, out var x) ? x.Franchise : "") == saleKind).ToList();
+                return kinded.Count == 1 ? (kinded[0], "店:Entity 名の語を売り場の名前が含む(種類の合う店)") : null;
+            }
+            // 名前・同点の決め方・販売内容のどれでも決まらなかった売り場 (item の cstone) は、場所と店の間の段 (mids。例 "Nyx - Levski - Refinery 03 - Supplies" の
+            // "Levski"・"Refinery 03") の語 (英数字の塊を正規化して 4 文字以上。EntityNameGenericWords と、店を探す場所 (Narrow) とその祖先の場所の名前に入っている語 (例 "levski") を除く) を、
+            // Entity 名の語 (EntityNameWords。店の場所の名前を除く。MatchShop の 5 と同じ) に持つ店 (店を探す場所の下の、コモディティでない店) が 1 つならその店に結ぶ
+            // (2026-11-05。例 "Refinery 03 - Supplies" → SCShop_Levski_Refinery_Store)
+            (string Id, string How)? MatchByMids(List<string> mids, string shopPlace)
+            {
+                var placeNames = new List<string>();
+                var seenPlace = new HashSet<string>(StringComparer.Ordinal);
+                for (var cur = shopPlace; cur.Length > 0 && seenPlace.Add(cur); cur = locs.TryGetValue(cur, out var cl) ? cl.Parent : "")
+                    if (locs.TryGetValue(cur, out var pl)) placeNames.Add(Norm(pl.Name));
+                var words = mids.SelectMany(m => Regex.Split(m, "[^A-Za-z0-9]+")).Select(Norm)
+                    .Where(w => w.Length >= 4 && !EntityNameGenericWords.Contains(w) && !placeNames.Any(pn => pn.Contains(w, StringComparison.Ordinal))).ToHashSet(StringComparer.Ordinal);
+                if (words.Count == 0) return null;
+                var hits = ShopsUnder(shopPlace).Where(s => !s.Inv.Equals("COMMODITY", StringComparison.OrdinalIgnoreCase)).Where(s =>
+                {
+                    var placeNorm = Norm(locs.TryGetValue(s.Loc, out var sl) ? sl.Name : "");
+                    return EntityNameWords(s.Entity).Any(w => w != placeNorm && words.Contains(w));
+                }).ToList();
+                return hits.Count == 1 ? (hits[0].Id, "店:途中の段の語") : null;
             }
 
             var links = new List<(string ShopId, string Source, string Key, string Match, string Location)>();
@@ -3490,6 +3611,8 @@ public partial class GameDataExtractor
             // 場所は決まったが名前で店が決まらなかった売り場 (売り場の名前・場所・場所の決め方・店の名前の部分・場所と店の間の段)
             // ShopPlace は店を探す場所 (Narrow)、ShopPlaceType はその星図の種類
             var pendingItems = new List<(string Location, string Place, string How, string Label, List<string> Mids, string ShopPlace, string ShopPlaceType)>();
+            // そのうち MatchShop の 5 で同点のまま決まらなかった売り場 → 同点の店 (shop_id)
+            var ties = new Dictionary<string, List<string>>(StringComparer.Ordinal);
             foreach (var (location, source) in itemKeys)
             {
                 if (!itemDone.Add(location)) continue;
@@ -3523,22 +3646,38 @@ public partial class GameDataExtractor
                 // 店は、深い段が指す場所 (Narrow) の下だけで探す
                 var shopPlace = Narrow(place.Value.Record, segsDeep);
                 var cands = ShopsUnder(shopPlace).Where(s => !s.Inv.Equals("COMMODITY", StringComparison.OrdinalIgnoreCase)).ToList();
-                var hitShop = MatchShop(cands, label, wordInLabel: true);
+                var hitShop = MatchShop(cands, label, out var tie, wordInLabel: true);
                 if (hitShop != null) { links.Add((hitShop.Value.Id, "item", location, place.Value.How + "," + hitShop.Value.How, place.Value.Record)); itemShop++; }
                 else
                 {
-                    // 名前で店が決まらなかったもの: 下の販売内容の照らし (MatchByContents) に回す (cstone は場所と店の間の段も渡す)
+                    // 名前で店が決まらなかったもの: 下の同点の決め方 (TieBreak)・販売内容の照らし (MatchByContents) に回す (cstone は場所と店の間の段も渡す)
                     var mids = new List<string>();
                     if (source == "cstone") { var tt = location.Split(" - ").Select(x => x.Trim()).ToList(); mids = tt.Skip(1).Take(tt.Count - 2).ToList(); }
                     pendingItems.Add((location, place.Value.Record, place.Value.How, label, mids, shopPlace, locs.TryGetValue(shopPlace, out var spl) ? spl.Type : ""));
+                    if (tie != null) ties[location] = tie;
                 }
             }
-            // 名前で店まで結べなかった売り場は、販売内容 (売っている品目の種類) で店に結ぶ (MatchByContents)。結べなかったものは今までどおり場所で結ぶ
+            // MatchShop の 5 で同点のまま決まらなかった売り場は、棚・店の種類で 1 つに決まれば結ぶ (TieBreak)。結んだものは販売内容の照らしに回さない
+            if (ties.Count > 0)
+            {
+                var tieKinds = SaleKinds(db, ties.Keys.ToHashSet(StringComparer.Ordinal)) ?? new Dictionary<string, string?>(StringComparer.Ordinal);
+                var decided = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var p in pendingItems)
+                {
+                    if (!ties.TryGetValue(p.Location, out var tie) || TieBreak(tie, tieKinds.TryGetValue(p.Location, out var k) ? k : null) is not { } hit) continue;
+                    links.Add((hit.Id, "item", p.Location, p.How + "," + hit.How, p.Place)); itemShop++;
+                    decided.Add(p.Location);
+                }
+                pendingItems.RemoveAll(p => decided.Contains(p.Location));
+            }
+            // 名前で店まで結べなかった売り場は、販売内容 (売っている品目の種類) で店に結ぶ (MatchByContents)
             var byContents = MatchByContents(db, pendingItems, links.Where(l => l.ShopId.Length > 0).Select(l => l.ShopId).ToHashSet(StringComparer.Ordinal),
                 ShopsUnder, rn => locs.TryGetValue(rn, out var l) ? l.Name : "", rn => locs.TryGetValue(rn, out var l) ? l.Parent : "");
+            // それでも結べなかった売り場は、場所と店の間の段 (Mids) の語で店に結ぶ (MatchByMids)。結べなかったものは今までどおり場所で結ぶ
             foreach (var p in pendingItems)
             {
                 if (byContents.TryGetValue(p.Location, out var hit)) { links.Add((hit.Id, "item", p.Location, p.How + "," + hit.How, p.Place)); itemShop++; }
+                else if (MatchByMids(p.Mids, p.ShopPlace) is { } mh) { links.Add((mh.Id, "item", p.Location, p.How + "," + mh.How, p.Place)); itemShop++; }
                 else { links.Add(("", "item", p.Location, MatchLocation, p.Place)); itemLoc++; }
             }
 
@@ -3570,7 +3709,7 @@ public partial class GameDataExtractor
                 var place = ResolvePlace(t.System, segs);
                 if (place == null) { unmatched.Add(("trade", t.Terminal, "場所が 1 つに決まらない")); continue; }
                 var cands = ShopsUnder(place.Value.Record).Where(s => s.Inv.Equals("COMMODITY", StringComparison.OrdinalIgnoreCase)).ToList();
-                var shop = MatchShop(cands, label);
+                var shop = MatchShop(cands, label, out _);
                 if (shop != null) { links.Add((shop.Value.Id, "trade", t.Terminal, place.Value.How + "," + shop.Value.How, place.Value.Record)); tradeShop++; }
                 else { links.Add(("", "trade", t.Terminal, MatchLocation, place.Value.Record)); tradeLoc++; }
             }
@@ -3614,7 +3753,9 @@ public partial class GameDataExtractor
         // 2: 販売内容で店に結ぶ (MatchByContents) を足した (2026-11-02、利用者の指示「名前は拾えるはず　そもそも場所と販売内容が決まってるし同種の店複数はそうない」)
         // 3: 売り場の名前が店の Entity 名の語を含むものを店に結ぶ (MatchShop の 5) を足した (2026-11-05、Orison の Kel-To ConStore の 63 品が場所だけに結ばれていた)
         // 4: 5 で同じ長さの語の店が複数のとき、語の少ない店 (ほかの候補がその店の語 + 余分の語のもの) に結ぶのを足した (2026-11-05。Cousin Crows・Cargo Shop)
-        internal const string LinksRuleMetaKey = "shop_price_links_rule", LinksRuleVersion = "4";
+        // 5: 5 で同点のまま決まらない店から、棚のある店 (6)・種類の合う店 (7) に結ぶのと、名前・販売内容で決まらない売り場を場所と店の間の段の語で結ぶ (MatchByMids) のを足した
+        //    (2026-11-05。Refinery Shop・Pyro の Cargo Shop・MIC-L1 の Casaba Outlet・Levski の Refinery 03 Supplies)
+        internal const string LinksRuleMetaKey = "shop_price_links_rule", LinksRuleVersion = "5";
 
         // ── 販売内容で店に結ぶ ──
         // 売り場の種類 (売っている品目のうち半分より多いものの種類。どれも半分以下なら決まらない):
@@ -3652,6 +3793,44 @@ public partial class GameDataExtractor
             return kinds.Count == 1 ? kinds[0] : null;
         }
 
+        // MatchShop の 7 (同点の店から種類の合う店を選ぶ) に使う店の種類: ShopContentsKind と同じ決め方で、Entity 名・店の名前に、franchise の record 名
+        // (game_shops.franchise_record。例 ShopFranchise.SF_clothing) を足した文字を見る (2 つ以上の種類に当たる店は種類なし)。
+        // MatchByContents は今までどおり ShopContentsKind を使う
+        private static string? TieShopKind(string entity, string name, string franchiseRecord)
+        {
+            var t = Norm(entity) + " " + Norm(name) + " " + Norm(franchiseRecord);
+            var kinds = ContentsShopWords.Where(k => k.Words.Any(w => t.Contains(w, StringComparison.Ordinal))).Select(k => k.Kind).ToList();
+            return kinds.Count == 1 ? kinds[0] : null;
+        }
+
+        // 売り場 (item_shop_prices の購入・レンタルの location。keys のもの) ごとの種類: 価格のある品目 (重複は 1 つ) のうち、半分より多い品目の種類 (ItemContentsKind)。
+        // 決まらない売り場は null。表・列が無ければ全体が null。MatchByContents と MatchShop の 7 で使う
+        private static Dictionary<string, string?>? SaleKinds(SqliteConnection db, HashSet<string> keys)
+        {
+            var items = new Dictionary<string, Dictionary<string, string?>>(StringComparer.Ordinal);
+            try
+            {
+                using var cmd = db.CreateCommand();
+                cmd.CommandText = "SELECT p.location, p.uuid, COALESCE(x.item_type, ''), COALESCE(x.sub_type, '') FROM item_shop_prices p LEFT JOIN item_index x ON x.uuid = p.uuid " +
+                                  "WHERE p.kind IN (@b, @r) AND p.price IS NOT NULL AND p.location <> ''";
+                cmd.Parameters.AddWithValue("@b", ShopPriceStore.KindBuy);
+                cmd.Parameters.AddWithValue("@r", ShopPriceStore.KindRent);
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    var loc = r.GetString(0);
+                    if (!keys.Contains(loc)) continue;
+                    if (!items.TryGetValue(loc, out var d)) items[loc] = d = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+                    d.TryAdd(r.GetString(1), ItemContentsKind(r.GetString(2), r.GetString(3)));
+                }
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode == 1) { return null; }   // 表・列が無い
+            var res = new Dictionary<string, string?>(StringComparer.Ordinal);
+            foreach (var (loc, d) in items)
+                res[loc] = d.Count == 0 ? null : d.Values.Where(k => k != null).GroupBy(k => k!).FirstOrDefault(g => g.Count() * 2 > d.Count)?.Key;
+            return res;
+        }
+
         // Entity 名の語 (小文字。区切りの塊を、さらに大文字の始まり・数字の境で区切る。ShopTree.EntityWords と同じ区切り方)
         private static IEnumerable<string> EntityWordsLower(string entity) =>
             Regex.Matches(entity, @"[A-Za-z0-9]+").SelectMany(t => Regex.Matches(t.Value, @"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+").Select(w => w.Value.ToLowerInvariant()));
@@ -3685,31 +3864,10 @@ public partial class GameDataExtractor
         {
             var result = new Dictionary<string, (string Id, string How)>(StringComparer.Ordinal);
             if (pending.Count == 0) return result;
-            // 売り場ごとの品目の種類 (品目の重複は 1 つ)
-            var keys = pending.Select(p => p.Location).ToHashSet(StringComparer.Ordinal);
-            var items = new Dictionary<string, Dictionary<string, string?>>(StringComparer.Ordinal);
-            try
-            {
-                using var cmd = db.CreateCommand();
-                cmd.CommandText = "SELECT p.location, p.uuid, COALESCE(x.item_type, ''), COALESCE(x.sub_type, '') FROM item_shop_prices p LEFT JOIN item_index x ON x.uuid = p.uuid " +
-                                  "WHERE p.kind IN (@b, @r) AND p.price IS NOT NULL AND p.location <> ''";
-                cmd.Parameters.AddWithValue("@b", ShopPriceStore.KindBuy);
-                cmd.Parameters.AddWithValue("@r", ShopPriceStore.KindRent);
-                using var r = cmd.ExecuteReader();
-                while (r.Read())
-                {
-                    var loc = r.GetString(0);
-                    if (!keys.Contains(loc)) continue;
-                    if (!items.TryGetValue(loc, out var d)) items[loc] = d = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-                    d.TryAdd(r.GetString(1), ItemContentsKind(r.GetString(2), r.GetString(3)));
-                }
-            }
-            catch (SqliteException ex) when (ex.SqliteErrorCode == 1) { return result; }   // 表・列が無い
-            string? KindOf(string loc)
-            {
-                if (!items.TryGetValue(loc, out var d) || d.Count == 0) return null;
-                return d.Values.Where(k => k != null).GroupBy(k => k!).FirstOrDefault(g => g.Count() * 2 > d.Count)?.Key;
-            }
+            // 売り場ごとの種類 (SaleKinds)
+            var kinds = SaleKinds(db, pending.Select(p => p.Location).ToHashSet(StringComparer.Ordinal));
+            if (kinds == null) return result;   // 表・列が無い
+            string? KindOf(string loc) => kinds.TryGetValue(loc, out var k) ? k : null;
             // 1. 種類が決まり、名前がほかの種類の店を指していない売り場
             var open = new List<(string Location, string Place, string Label, List<string> Mids, string Kind, string ShopPlace)>();
             foreach (var p in pending)

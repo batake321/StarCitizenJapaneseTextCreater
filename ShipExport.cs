@@ -543,7 +543,17 @@ internal static partial class ShipExport
                     rgb[i] = SrgbToLinear(v / 255.0f);
             return rgb;
         }
-        return [Rgb("entryA"), Rgb("entryB"), Rgb("entryC"), Rgb("glassColor")];
+        // glassColor は SRGB8 そのもの (r・g・b が欄)。前は「glassColor.tintColor.r」を引いていて引けず、いつも 0.5 だった (2026-11-05、利用者の指示で直した。欄が無ければ前と同じ 0.5)
+        float[] Glass()
+        {
+            var rgb = new float[] { 0.5f, 0.5f, 0.5f };
+            string[] ch = ["r", "g", "b"];
+            for (int i = 0; i < 3; i++)
+                if (TryCompile(db, record.StructIndex, $"{basePath}.glassColor.{ch[i]}", [DataCoreDb.DT.Byte]) is { } c && TryByte(db, c, record) is byte v)
+                    rgb[i] = SrgbToLinear(v / 255.0f);
+            return rgb;
+        }
+        return [Rgb("entryA"), Rgb("entryB"), Rgb("entryC"), Glass()];
     }
 
     private static float[][]? QueryTintPalette(DataCoreDb db, DataCoreDb.Record record)
@@ -567,11 +577,18 @@ internal static partial class ShipExport
     // resolve_paint_override
     private static (float[][]? Palette, SocpakGlb.MtlFile? Mtl) PaintOverride(Ctx ctx, DataCoreDb.Record entity, LoadoutNode root, float[][]? pal, SocpakGlb.MtlFile? mtl)
     {
-        var db = ctx.Db;
         var paint = root.Children.FirstOrDefault(c => c.ItemPortName.ToLowerInvariant().Contains("paint", StringComparison.Ordinal));
         if (paint == null) return (pal, mtl);
-        var tc = TryCompile(db, paint.Record.StructIndex, "Components[SAttachableComponentParams].AttachDef.Tags", DataCoreDb.StringLeaf);
-        var tags = (tc == null ? null : TryString(db, tc, paint.Record)) ?? "";
+        return ApplyPaint(ctx, entity, paint.Record, pal, mtl);
+    }
+
+    // 塗装の品 (paintRecord) の AttachDef.Tags の最初の「@」の語と同じ Tags の、船の SubGeometry のパレットと材質ファイルを当てる (resolve_paint_override の後半。
+    // 既定のロードアウトの塗装のほか、3D の画面で選んだ塗装にも使う (2026-11-05、利用者の指示「船の 3D はオプション塗装を適応させることができる？」))
+    internal static (float[][]? Palette, SocpakGlb.MtlFile? Mtl) ApplyPaint(Ctx ctx, DataCoreDb.Record entity, DataCoreDb.Record paintRecord, float[][]? pal, SocpakGlb.MtlFile? mtl)
+    {
+        var db = ctx.Db;
+        var tc = TryCompile(db, paintRecord.StructIndex, "Components[SAttachableComponentParams].AttachDef.Tags", DataCoreDb.StringLeaf);
+        var tags = (tc == null ? null : TryString(db, tc, paintRecord)) ?? "";
         string? tag = null;
         foreach (var t in tags.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)) if (t.StartsWith('@')) { tag = t[1..]; break; }
         if (tag == null) return (pal, mtl);
@@ -602,7 +619,16 @@ internal static partial class ShipExport
                         byte b = (tint == null ? null : DcValue.U8Field(tint, "b")) ?? 128;
                         return [SrgbToLinear(r / 255.0f), SrgbToLinear(g / 255.0f), SrgbToLinear(b / 255.0f)];
                     }
-                    p2 = [Read("entryA"), Read("entryB"), Read("entryC"), Read("glassColor")];
+                    // glassColor は SRGB8 そのもの (r・g・b が欄)。前は Read と同じく「glassColor.tintColor」を見ていて、いつも 128 だった (2026-11-05、利用者の指示で直した。欄が無ければ前と同じ 128)
+                    float[] Glass()
+                    {
+                        var gc = DcValue.Field(rootv, "glassColor");
+                        byte r = (gc == null ? null : DcValue.U8Field(gc, "r")) ?? 128;
+                        byte g = (gc == null ? null : DcValue.U8Field(gc, "g")) ?? 128;
+                        byte b = (gc == null ? null : DcValue.U8Field(gc, "b")) ?? 128;
+                        return [SrgbToLinear(r / 255.0f), SrgbToLinear(g / 255.0f), SrgbToLinear(b / 255.0f)];
+                    }
+                    p2 = [Read("entryA"), Read("entryB"), Read("entryC"), Glass()];
                 }
                 var mp = gd == null ? null : DcValue.Field(gd, "Material") is { } mm ? NonEmpty(DcValue.StrField(mm, "path")) : null;
                 var m2 = mtl;
@@ -908,6 +934,27 @@ internal static partial class ShipExport
     // outPath に GLB を書く (失敗したときの書きかけのファイルは呼ぶ側で消す)
     public static Result Export(P4kArchive p4k, DataCoreDb db, string name, string outPath, Action<string>? log = null, CancellationToken ct = default)
     {
+        long len = 0;
+        var res = ExportCore(p4k, db, name, log, ct, null, false, () => new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20), s => len = s.Length);
+        res.GlbBytes = len;
+        return res;
+    }
+
+    // 塗装の切り替えの材質の表を作るための書き出し (ShipPaints。2026-11-05、利用者の指示「船の 3D はオプション塗装を適応させることができる？」・
+    // 「"船・装備・武器の 3D は常に色付け" これは設定で切れるようにしてください。」)。GLB は書かず、GLB の JSON の部分 (UTF-8) だけを返す (形・画像の塊は数えて捨てる)。
+    //   paint: null なら Export と同じ (既定のロードアウトの塗装)。"" なら塗装を当てない (既定で塗装の入った船の塗装なしの姿)。それ以外は当てる塗装の品の短い名前 (例 Paint_Gladius_Valiant)。
+    //   noPalette: パレットの色 (本体・子・船内のパレット、塗装のパレット) を材質に当てない (色は材質そのものの色。ShipGlb.Input.NoPalette)
+    public static (Result Result, byte[] Json) ExportJson(P4kArchive p4k, DataCoreDb db, string name, string? paint, bool noPalette, CancellationToken ct = default)
+    {
+        var cap = new GlbJsonCapture();
+        var res = ExportCore(p4k, db, name, null, ct, paint, noPalette, () => cap, _ => { });
+        res.GlbBytes = cap.Length;
+        return (res, cap.Json ?? throw new InvalidDataException("GLB の JSON を取り出せませんでした"));
+    }
+
+    // Export の本体。open は GLB を書く先 (Export と同じく、組み立ての直前に開く)、done は書き終えた先 (閉じる前) を渡す
+    private static Result ExportCore(P4kArchive p4k, DataCoreDb db, string name, Action<string>? log, CancellationToken ct, string? paint, bool noPalette, Func<Stream> open, Action<Stream> done)
+    {
         var ctx = new Ctx { P4k = p4k, Db = db, Log = log, Ct = ct };
         var record = FindRecord(db, name, out int cands) ?? throw new ExportException($"no EntityClassDefinition records matching '{name}'");
         var rname = db.String2(record.NameOffset);
@@ -918,7 +965,10 @@ internal static partial class ShipExport
 
         var resolved = ResolveLoadoutMeshes(ctx, record, tree);
         var root = EntityPayload(ctx, record, true, true);
-        var (rootPal, rootMtl) = PaintOverride(ctx, record, tree, root.Palette, root.Mtl);
+        // 塗装: 指定が無ければ既定のロードアウトの塗装 (今までどおり)、"" なら当てない、それ以外はその塗装の品
+        var (rootPal, rootMtl) = paint == null ? PaintOverride(ctx, record, tree, root.Palette, root.Mtl)
+            : paint.Length == 0 ? (root.Palette, root.Mtl)
+            : ApplyPaint(ctx, record, idx.Find(paint) ?? throw new ExportException($"no paint record '{paint}'"), root.Palette, root.Mtl);
         ct.ThrowIfCancellationRequested();
 
         var payloads = new List<Payload>();
@@ -937,16 +987,66 @@ internal static partial class ShipExport
         var interiors = ShipInteriors.Load(ctx, record);
         log?.Invoke($"Assembling: root + {payloads.Count} child meshes + {interiors.Containers.Sum(c => c.Placements.Count)} interior meshes ({interiors.Cgfs.Count} unique CGFs)");
 
-        long len;
-        using (var fs = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20))
+        using (var fs = open())
         {
             ShipGlb.Write(ctx, new ShipGlb.Input
             {
             RootMesh = root.Mesh, RootMtl = rootMtl, RootTex = root.Tex, RootNmc = resolved.Nmc, RootPalette = rootPal, RootBones = root.Bones,
                 Children = payloads, Interiors = interiors, EntityName = resolved.EntityName, GeometryPath = root.PrimaryPath, MaterialPath = root.MaterialPath,
+                NoPalette = noPalette,
             }, fs);
-            len = fs.Length;
+            done(fs);
         }
-        return new Result { GlbBytes = len, ResolvedName = rname, GeometryPath = root.PrimaryPath, MaterialPath = root.MaterialPath, Candidates = cands };
+        return new Result { ResolvedName = rname, GeometryPath = root.PrimaryPath, MaterialPath = root.MaterialPath, Candidates = cands };
+    }
+
+    // GLB の書き先の代わり: 頭 (12 バイト)・JSON の塊の頭 (8 バイト) と JSON の中身だけを取っておき、残り (形・画像の塊) は数えて捨てる (ExportJson)
+    private sealed class GlbJsonCapture : Stream
+    {
+        private readonly byte[] _head = new byte[20];
+        private long _pos;
+        private byte[]? _json;
+        private int _jsonLen = -1;
+        // JSON の中身 (塊の詰め物の空白を含む。書き終わる前は null)
+        public byte[]? Json => _json != null && _pos >= 20 + _jsonLen ? _json : null;
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            int i = 0;
+            while (i < buffer.Length)
+            {
+                if (_pos < 20)
+                {
+                    int n = (int)Math.Min(20 - _pos, buffer.Length - i);
+                    buffer.Slice(i, n).CopyTo(_head.AsSpan((int)_pos));
+                    _pos += n; i += n;
+                    if (_pos == 20)
+                    {
+                        _jsonLen = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(_head.AsSpan(12));
+                        _json = new byte[_jsonLen];
+                    }
+                    continue;
+                }
+                if (_json != null && _pos < 20 + _jsonLen)
+                {
+                    int n = (int)Math.Min(20 + _jsonLen - _pos, buffer.Length - i);
+                    buffer.Slice(i, n).CopyTo(_json.AsSpan((int)(_pos - 20)));
+                    _pos += n; i += n;
+                    continue;
+                }
+                _pos += buffer.Length - i;
+                break;
+            }
+        }
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+        public override void WriteByte(byte value) => Write([value]);
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => _pos;
+        public override long Position { get => _pos; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
     }
 }

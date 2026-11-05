@@ -33,7 +33,49 @@ internal sealed class SocpakScene
     }
 
     // 置き方 1 つ (GLB の子のノード)。Matrix は列優先 16 (GLB に書いた f32 を読んだ double)
-    public readonly record struct Placement(Mesh Mesh, double[] Matrix);
+    // Palette: 場所のパレットの色 (Export に looks を渡したときだけ。無ければ null = 材質の層の TintColor のまま) (2026-11-05)
+    public readonly record struct Placement(Mesh Mesh, double[] Matrix)
+    {
+        public Tint? Palette { get; init; }
+    }
+
+    // ===== 場所のパレットの色と材質の差し替え (2026-11-05、利用者の指示「”色の決め方” これも事前調査して DB にリンクとしてでも入れとくのは？」
+    //   「差し替えも同じように DB に予め入れておくのがいいんじゃない？」) =====
+    // パレット 1 組。A・B・C: 材質の層の PaletteTint 1・2・3 (primary・secondary・tertiary) に当てる色 (スウィズル済み)、Glass: ガラスの色。
+    // どれも linear の r,g,b (SocpakExporter.Context.PaletteColors)。Key: パレットの鍵 (PaletteKey) + スウィズル (画像の鍵に使う)
+    public sealed record Tint(float[] A, float[] B, float[] C, float[] Glass, string Key);
+    // 置き方 1 つの見た目 (view3d_layout.db の look_* 表から)。Palette: パレット (無ければ null)、Mtl: 差し替えの材質 (.mtl の Data.p4k の中のパス。無ければ null)
+    public readonly record struct Look(Tint? Palette, string? Mtl);
+
+    // パレット (record の色 [A, B, C, glass]) にスウィズル (百・十・一の位 = primary・secondary・tertiary が取る entry。1 = A、2 = B、3 = C。0 = 無し) を当てる
+    public static Tint MakeTint(float[][] c, int swz, string file)
+    {
+        if (swz == 0) return new Tint(c[0], c[1], c[2], c[3], file);
+        float[] E(int d) => d switch { 1 => c[0], 2 => c[1], 3 => c[2], _ => c[0] };
+        return new Tint(E(swz / 100), E(swz / 10 % 10), E(swz % 10), c[3], file + "<" + swz.ToString(CultureInfo.InvariantCulture) + ">");
+    }
+
+    // パレットの名前 (IncludedObjects・RenderProxy の Palette。例 "Libs/Foundry/Records/TintPalettes/generic/gen_white_lightgreen_darkgreen<231>"、
+    // 子を指すもの "Libs/Foundry/Records/TintPalettes/Brand/Lorville/Lorville_Skyl_Root|Building") →
+    // パレットの鍵 (record のファイル名 = 小文字 + ".xml"。TintPaletteTree の record の String1(FileNameOffset) と比べる。子があれば + "|" + 子の名前の小文字) と
+    // スウィズル (末尾の <xyz>。各桁が 1〜3 の 3 桁でなければ 0)。子は「|」の後ろ全部 (2 段以上の「a|b|c」は子の名前が「b|c」になり、引けない)
+    public static (string File, int Swz) PaletteName(string name)
+    {
+        var core = name.Trim(); int swz = 0;
+        int lt = core.IndexOf('<');
+        if (lt >= 0)
+        {
+            var inside = core[(lt + 1)..].TrimEnd('>');
+            if (inside.Length == 3 && inside.All(ch => ch >= '1' && ch <= '3')) swz = int.Parse(inside, CultureInfo.InvariantCulture);
+            core = core[..lt];
+        }
+        int bar = core.IndexOf('|');
+        string? child = bar >= 0 ? core[(bar + 1)..] : null;
+        if (bar >= 0) core = core[..bar];
+        return (PaletteKey(core.Replace('\\', '/').ToLowerInvariant() + ".xml", child), swz);
+    }
+    // パレットの鍵 (record のファイル名 (小文字) + 子があれば "|" + 子の名前の小文字)
+    public static string PaletteKey(string file, string? child) => string.IsNullOrEmpty(child) ? file : file + "|" + child.ToLowerInvariant();
 
     // 区画 1 つ (GLB のルートの下の子「interior_<名前>」)。Matrix は列優先 16 (socpak export では単位行列)
     public sealed class Container
@@ -242,16 +284,120 @@ internal static class SocpakExporter
             var mtl = Q(_mtlPath, "Components[SGeometryResourceParams].Geometry.Geometry.Material.path") ?? "";
             return (geom, mtl);
         });
+
+        // ===== 場所のパレット (DB を作るとき。StationView3D.BuildLooks) =====
+        // エンティティの record (EntityClassGUID) の Components[SGeometryResourceParams].Geometry.Geometry.Palette (TintPaletteRef) →
+        // (パレットの鍵 = RootRecord の record のファイル名 (小文字) + ChildPath が空でなければ "|" + ChildPath の小文字 (SocpakScene.PaletteKey),
+        //  SwizzleOverride (primary・secondary・tertiary を百・十・一の位。どれかが 1〜3 でなければ 0))。RootRecord が無い (null)・引けなければ null。
+        // (2026-11-05、親の決定: ChildPath も名前の「|子」と同じ引き方で使う)
+        private readonly ConcurrentDictionary<string, (string File, int Swz)?> _guidPal = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<int, DataCoreDb.CompiledPath?> _palPath = new();
+        public (string File, int Swz)? GuidPalette(string guid) => _guidPal.GetOrAdd(guid, g =>
+        {
+            if (DataCoreDb.Guid128.Parse(g) is not { } id) return null;
+            var db = Db();
+            if (db.RecordById(id) is not DataCoreDb.Record rec) return null;
+            var cp = _palPath.GetOrAdd(rec.StructIndex, si =>
+            {
+                try { return db.CompilePath(si, "Components[SGeometryResourceParams].Geometry.Geometry.Palette", DataCoreDb.AnyLeaf); }
+                catch (DataCoreDb.QueryException) { return null; }
+            });
+            if (cp == null) return null;
+            DcValue.Obj? pal;
+            try { pal = db.QueryValues(cp, rec, true).OfType<DcValue.Obj>().FirstOrDefault(); }
+            catch (Exception e) when (e is DataCoreDb.QueryException or InvalidDataException) { return null; }
+            if (pal == null || DcValue.GuidField(pal, "RootRecord") is not { } rid || rid.IsEmpty) return null;
+            if (db.RecordById(rid) is not DataCoreDb.Record pr) return null;
+            int swz = 0;
+            if (DcValue.Field(pal, "SwizzleOverride") is DcValue.Obj so)
+            {
+                int? I(string k) => DcValue.Field(so, k) is DcValue.Int32 v ? v.V : null;
+                if (I("primary") is int p && I("secondary") is int s && I("tertiary") is int t && p is >= 1 and <= 3 && s is >= 1 and <= 3 && t is >= 1 and <= 3) swz = p * 100 + s * 10 + t;
+            }
+            return (SocpakScene.PaletteKey(db.String1(pr.FileNameOffset).ToLowerInvariant(), DcValue.StrField(pal, "ChildPath")), swz);
+        });
+
+        // パレットの鍵 (SocpakScene.PaletteKey) の色 [A, B, C, glass] (linear の r,g,b)。record・子が無い・色が読めなければ null。
+        //   record: TintPaletteTree をファイル名 (小文字) で引く。子: root の children (TintPalette) から name が子の名前と同じもの (大文字小文字を無視)。
+        //   (実データで確かめた 2026-11-05: TintPaletteTree 2,423 件のうち子のあるもの 81 件・子 526。子の深さは 1 段だけ、子の inheritsParams は全部 false、
+        //    兄弟で同じ名前 (大文字小文字を無視) は無い。子の entryA・B・C・glassColor は子が自分で持つ (型で決まった欄))
+        //   A・B・C: entryA・B・C の tintColor の r,g,b (Byte) を船の 3D (ShipExport.QueryTintFromPath) と同じに SrgbToLinear (欄が無ければ 0.5)。entryA の r が無ければ null (船と同じ)。
+        //   glass: glassColor (型は SRGB8。r,g,b がそのまま欄) の r,g,b。船の 3D は「glassColor.tintColor.r」を引いていて引けず 0.5 になっているが、
+        //   ステーションでは型どおりに読む (2026-11-05、親の決定「ステーションの経路だけ、glassColor を実物の型どおりに読んだ色を使う」。船の側は変えない)
+        private readonly object _palLock = new();
+        private DataCoreDb? _palDb;
+        private Dictionary<string, DataCoreDb.Record>? _palByFile;
+        private readonly ConcurrentDictionary<string, float[][]?> _palColors = new(StringComparer.Ordinal);
+        private static float SrgbToLinear(float c) => c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f);   // 船の 3D (ShipExport) と同じ式
+        public float[][]? PaletteColors(string key) => _palColors.GetOrAdd(key, k =>
+        {
+            var db = Db();
+            Dictionary<string, DataCoreDb.Record> map;
+            lock (_palLock)
+            {
+                if (_palByFile == null || !ReferenceEquals(_palDb, db))
+                {
+                    var m = new Dictionary<string, DataCoreDb.Record>(StringComparer.Ordinal);
+                    if (db.StructIndexByName("TintPaletteTree") is int tpt)
+                        foreach (var r in db.Records) if (r.StructIndex == tpt) m.TryAdd(db.String1(r.FileNameOffset).ToLowerInvariant(), r);
+                    _palByFile = m; _palDb = db;
+                }
+                map = _palByFile;
+            }
+            int bar = k.IndexOf('|');
+            var file = bar >= 0 ? k[..bar] : k; var child = bar >= 0 ? k[(bar + 1)..] : null;
+            if (!map.TryGetValue(file, out var rec)) return null;
+            DcValue.Obj? node;
+            try { node = db.QueryValues(db.CompilePath(rec.StructIndex, "root", DataCoreDb.AnyLeaf), rec, true).OfType<DcValue.Obj>().FirstOrDefault(); }
+            catch (Exception e) when (e is DataCoreDb.QueryException or InvalidDataException) { return null; }
+            if (node != null && child != null)
+                node = (DcValue.ArrField(node, "children") ?? new()).OfType<DcValue.Obj>().FirstOrDefault(c => string.Equals(DcValue.StrField(c, "name"), child, StringComparison.OrdinalIgnoreCase));
+            if (node == null) return null;
+            float[]? Rgb(DcValue? srgb, bool need)
+            {
+                var c = new float[] { 0.5f, 0.5f, 0.5f };
+                string[] ch = ["r", "g", "b"];
+                for (int i = 0; i < 3; i++)
+                {
+                    if (srgb != null && DcValue.U8Field(srgb, ch[i]) is byte v) c[i] = SrgbToLinear(v / 255.0f);
+                    else if (need && i == 0) return null;
+                }
+                return c;
+            }
+            DcValue? Tc(string entry) => DcValue.Field(node, entry) is { } e ? DcValue.Field(e, "tintColor") : null;
+            if (Rgb(Tc("entryA"), true) is not { } a) return null;
+            return [a, Rgb(Tc("entryB"), false)!, Rgb(Tc("entryC"), false)!, Rgb(DcValue.Field(node, "glassColor"), false)!];
+        });
     }
 
     // socpak の中の置き方 (InteriorMesh)。Transform は列優先 16 の f32
-    private sealed record InteriorMesh(string CgfPath, string? MaterialPath, float[] Transform, string? Guid);
+    // Palette・MtlOverride・EntityGuid は場所のパレットと材質の差し替えの DB を作るためだけに読む (形・GLB の書き出しには使わない。2026-11-05):
+    //   Palette: パレットの名前 (IncludedObjects のオブジェクトの +172 の番号のもの・Entity の子の RenderProxy の Palette)、
+    //   MtlOverride: IncludedObjects のオブジェクトの +170 の番号の材質のパス (拡張子なしのまま)、EntityGuid: Entity の EntityClassGUID
+    private sealed record InteriorMesh(string CgfPath, string? MaterialPath, float[] Transform, string? Guid)
+    {
+        public string? Palette { get; init; }
+        public string? MtlOverride { get; init; }
+        public string? EntityGuid { get; init; }
+    }
+
+    // 置き方ごとの見た目の指定 (StationView3D.BuildLooks が DB に入れる前のもの)。並びは Export の置き方の通し番号 (LoadSocpak の並び) と同じ
+    internal sealed record RawLook(string? Palette, string? Mtl, string? EntityGuid);
+    internal static List<RawLook> LoadRawLooks(P4kArchive p4k, string socpakPath)
+    {
+        var (_, _, meshes) = LoadSocpak(p4k, socpakPath);
+        return meshes.Select(m => new RawLook(m.Palette, m.MtlOverride, m.EntityGuid)).ToList();
+    }
 
     // ===== 書き出し (socpaks_to_glb) =====
     // socpakPaths: p4k の中のパス (starbreaker に渡すのと同じ並び)。wantContainer: 部品の形を読む区画 (null なら全部)。
     //   読まない区画も置き方は読む (同じ CGF の材質は、並びで最初に出てきた区画のものになるため。starbreaker と同じ結果にする)。
     // wantMesh: 形を読む部品の名前 (null なら全部)。読まない部品は置き方にも入れない (呼ぶ側が名前で捨てるもの)
-    public static SocpakScene Export(Context ctx, IReadOnlyList<string> socpakPaths, Func<string, bool>? wantContainer = null, Func<string, bool>? wantMesh = null, CancellationToken ct = default, Func<string, bool>? wantCgf = null)
+    // looks: socpak のパス (socpakPaths のもの) → 置き方の通し番号 (区画の .soc の置き方の並び。読めなかった置き方も数える) ごとの見た目 (2026-11-05、ステーションの 3D だけが渡す)。
+    //   null (既定) なら今までと同じ結果。渡したときは、Palette を置き方 (Placement.Palette) に付け、Mtl (材質の差し替え) が形の材質と違う置き方は、
+    //   その材質で形を読み直す (同じ CGF のパス + 材質のパスで 1 回だけ)。並びの数が置き方の数と違う socpak (DB が古い) は使わない
+    public static SocpakScene Export(Context ctx, IReadOnlyList<string> socpakPaths, Func<string, bool>? wantContainer = null, Func<string, bool>? wantMesh = null, CancellationToken ct = default, Func<string, bool>? wantCgf = null,
+        Func<string, SocpakScene.Look[]?>? looks = null)
     {
         var scene = new SocpakScene();
         // 1) 区画ごとの置き方 (load_interior_from_socpak)
@@ -268,13 +414,16 @@ internal static class SocpakExporter
         // 2) 同じ CGF を 1 つにまとめる (build_interiors_from_payloads)。名前・材質は最初に出てきたもの
         var cgfIndex = new Dictionary<string, int>(StringComparer.Ordinal);
         var cgfs = new List<(string Path, string? Mtl, string Name)>();
-        var containers = new List<(string Name, string Path, List<(int Cgf, float[] T)> Placements, List<RawGravity> Gravity)>();
+        var containers = new List<(string Name, string Path, List<(int Cgf, float[] T, SocpakScene.Look L)> Placements, List<RawGravity> Gravity)>();
         for (int pi = 0; pi < payloads.Count; pi++)
         {
             var (name, path, meshes) = payloads[pi];
-            var placements = new List<(int, float[])>();
-            foreach (var im in meshes)
+            var placements = new List<(int, float[], SocpakScene.Look)>();
+            var la = looks?.Invoke(path);
+            if (la != null && la.Length != meshes.Count) la = null;
+            for (int mi = 0; mi < meshes.Count; mi++)
             {
+                var im = meshes[mi];
                 string cgf; string? mtl;
                 if (im.CgfPath.Length > 0) { cgf = im.CgfPath; mtl = im.MaterialPath; }
                 else if (im.Guid != null)
@@ -290,7 +439,7 @@ internal static class SocpakExporter
                     var nm = last.EndsWith(".cgf", StringComparison.Ordinal) ? last[..^4] : cgf;
                     cgfs.Add((cgf, mtl ?? im.MaterialPath, nm));
                 }
-                placements.Add((ix, im.Transform));
+                placements.Add((ix, im.Transform, la != null ? la[mi] : default));
             }
             containers.Add((name, path, placements, gravity[pi]));
         }
@@ -303,7 +452,7 @@ internal static class SocpakExporter
         foreach (var (name, _, placements, _) in containers)
         {
             if (wantContainer != null && !wantContainer("interior_" + name)) continue;
-            foreach (var (ix, _) in placements)
+            foreach (var (ix, _, _) in placements)
                 if ((wantMesh == null || wantMesh(cgfs[ix].Name)) && (wantCgf == null || wantCgf(cgfs[ix].Path)) && !tried[ix]) { tried[ix] = true; order.Add(ix); }
         }
         var errs = new string?[cgfs.Count];
@@ -313,18 +462,44 @@ internal static class SocpakExporter
             errs[ix] = err;
         });
         foreach (var ix in order) if (errs[ix] is string e1) scene.FailedMeshes.Add((cgfs[ix].Path, e1));
+        // 材質の差し替え (looks を渡したときだけ): 差し替えの材質が、読んだ形の材質 (Mesh.Mtl) と違う置き方の (CGF, 材質) を 1 回ずつ読む。
+        // 形は同じ CGF なので、読めなかった (null) ときは差し替えずに読んだ形を使う
+        var variants = new Dictionary<(int, string), SocpakScene.Mesh?>();
+        if (looks != null)
+        {
+            static string NormMtl(string p) => p.Replace('/', '\\').ToLowerInvariant();
+            var need = new List<(int Ix, string Mtl)>();
+            var seen = new HashSet<(int, string)>();
+            foreach (var (name, _, placements, _) in containers)
+            {
+                if (wantContainer != null && !wantContainer("interior_" + name)) continue;
+                foreach (var (ix, _, l) in placements)
+                {
+                    if (l.Mtl is not string lm || meshObjs[ix] is not { } m0 || (wantMesh != null && !wantMesh(cgfs[ix].Name))) continue;
+                    if (NormMtl(m0.Mtl) == NormMtl(lm) || !seen.Add((ix, lm))) continue;
+                    need.Add((ix, lm));
+                }
+            }
+            var got = new SocpakScene.Mesh?[need.Count];
+            Parallel.For(0, need.Count, new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 2) }, i =>
+            {
+                got[i] = LoadMesh(ctx, cgfs[need[i].Ix].Path, need[i].Mtl, cgfs[need[i].Ix].Name, out _, inner);
+            });
+            for (int i = 0; i < need.Count; i++) variants[need[i]] = got[i];
+        }
         foreach (var (name, path, placements, grav) in containers)
         {
             if (wantContainer != null && !wantContainer("interior_" + name)) continue;
             var c = new SocpakScene.Container { Name = "interior_" + name, SocpakPath = path };
             foreach (var rg in grav) c.Gravity.Add(ctx.ResolveGravity(rg));
-            foreach (var (ix, t) in placements)
+            foreach (var (ix, t, l) in placements)
             {
                 if (wantMesh != null && !wantMesh(cgfs[ix].Name)) continue;
                 if (meshObjs[ix] is not { } m) continue;
+                if (l.Mtl is string lm2 && variants.TryGetValue((ix, lm2), out var vm) && vm != null) m = vm;
                 var mat = new double[16];
                 for (int k = 0; k < 16; k++) mat[k] = SocpakScene.JsonFloat(t[k]);
-                c.Placements.Add(new SocpakScene.Placement(m, mat));
+                c.Placements.Add(new SocpakScene.Placement(m, mat) { Palette = l.Palette });
             }
             scene.Containers.Add(c);
         }
@@ -475,7 +650,8 @@ internal static class SocpakExporter
         int numMat = U16(), numPal = U16();
         var matPaths = new List<string>();
         for (int i = 0; i < numMat; i++) matPaths.Add(Str(data));
-        for (int i = 0; i < numPal; i++) { var ps = Str(data); paletteNames?.Add(ps); }
+        var palList = new List<string>();
+        for (int i = 0; i < numPal; i++) { var ps = Str(data); paletteNames?.Add(ps); palList.Add(ps); }
         if (off + 28 > data.Length) throw new InvalidDataException("IncludedObjects が切れています");
         off += 28;
         long objEnd = off + (long)U32();
@@ -502,7 +678,17 @@ internal static class SocpakExporter
                 int size = u3 == 0 ? 184 : 168;
                 long end = off + size;
                 while (end + 4 <= objEnd && BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan((int)end)) == 0) end += 4;
-                if (id < cgfPaths.Count) res.Add(new InteriorMesh(cgfPaths[id], mtl, t, null));
+                // 場所のパレット・材質の差し替え (2026-11-05): 184 バイト版だけ、+172 の u16 = パレットの一覧の番号、+170 の u16 = 材質の一覧の番号 (0xFFFF = 指定なし)。
+                // (実データで確かめた: Orison・Area18・Lorville・New Babbage・RR_ の 917 socpak の 184 バイト版 395,610 件で、どちらも全部が一覧の範囲内か 0xFFFF。
+                //  168 バイト版は +170・+172 がオブジェクトの外になるので読まない = 指定なし)
+                string? palName = null, mtlOver = null;
+                if (size == 184 && off + 174 <= data.Length)
+                {
+                    int mi = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(off + 170)), pi = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(off + 172));
+                    if (pi != 0xFFFF && pi < palList.Count) palName = palList[pi];
+                    if (mi != 0xFFFF && mi < matPaths.Count) mtlOver = matPaths[mi];
+                }
+                if (id < cgfPaths.Count) res.Add(new InteriorMesh(cgfPaths[id], mtl, t, null) { Palette = palName, MtlOverride = mtlOver });
                 off = (int)end;
             }
             else if (type == 7) off += 152;
@@ -551,8 +737,13 @@ internal static class SocpakExporter
                 (float)G(pos, 0, 0), (float)G(pos, 1, 0), (float)G(pos, 2, 0));
             attrs.TryGetValue("Material", out var mtl);
             var geom = EntityGeometry(x, ent);
-            if (geom != null) res.Add(new InteriorMesh(geom, mtl, t, null));
-            else if (attrs.TryGetValue("EntityClassGUID", out var guid)) res.Add(new InteriorMesh("", mtl, t, guid));
+            // 場所のパレット (2026-11-05): 子の RenderProxy の Palette (無ければ DB を作るときに EntityClassGUID の record の Palette を引く)
+            string? pal = null;
+            foreach (var c in x.Children(ent))
+                if (x.Tag(c) == "RenderProxy" && x.AttributeMap(c).TryGetValue("Palette", out var pv) && pv.Length > 0) { pal = pv; break; }
+            attrs.TryGetValue("EntityClassGUID", out var eguid);
+            if (geom != null) res.Add(new InteriorMesh(geom, mtl, t, null) { Palette = pal, EntityGuid = eguid });
+            else if (eguid != null) res.Add(new InteriorMesh("", mtl, t, eguid) { Palette = pal, EntityGuid = eguid });
         }
         return res;
     }

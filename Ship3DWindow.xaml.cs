@@ -32,9 +32,15 @@ public partial class Ship3DWindow : Window
     private Task? _webInit;
     private bool _webFailed;
 
-    public Ship3DWindow(string? record, string name)
+    // 初めの船がどの所持船か (ship_loadouts のキー。［所持船］の行から開いた［詳細］から開いたとき。分からなければ null)。
+    // 初めの船の 3D だけに使い、一覧で別の船に替えたら使わない (初めの塗装をその所持船の塗装にする。2026-11-05)
+    private readonly string? _firstRecord, _firstShipKey;
+
+    public Ship3DWindow(string? record, string name, string? shipKey = null)
     {
         InitializeComponent();
+        _firstRecord = record;
+        _firstShipKey = shipKey;
         _searchTimer.Tick += (_, _) => { _searchTimer.Stop(); RefreshList(); };
         var ex = Ship3DExports.Instance;
         ex.StateChanged += OnStateChanged;
@@ -246,7 +252,7 @@ public partial class Ship3DWindow : Window
         var shortName = Ship3DExports.ShortName(record);
         Ship3DExports.Instance.AcquireView(shortName);
         _shownShort = shortName;
-        try { Ship3DWeb.Show(web3D, shortName, _name, glbPath, isItem: Ship3DExports.IsItemRecord(record)); }
+        try { Ship3DWeb.Show(web3D, shortName, _name, glbPath, isItem: Ship3DExports.IsItemRecord(record), shipKey: string.Equals(record, _firstRecord, StringComparison.OrdinalIgnoreCase) ? _firstShipKey : null); }
         catch (Exception ex)
         {
             App.AppendStartupLog(App.Config.WorkingDirectory, $"[3D モデル] 別ウィンドウで表示できませんでした: {ex}");

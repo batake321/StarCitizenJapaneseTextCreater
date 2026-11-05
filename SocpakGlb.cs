@@ -615,7 +615,15 @@ internal static class SocpakGlb
             for (int i = 0; i < 3; i++) if (Q($"root.{entry}.tintColor.{ch[i]}") is byte v) c[i] = SrgbToLinear(v / 255.0f);
             return c;
         }
-        return [Rgb("entryA"), Rgb("entryB"), Rgb("entryC"), Rgb("glassColor")];
+        // glassColor は SRGB8 そのもの (r・g・b が欄)。前は「glassColor.tintColor.r」を引いていて引けず、いつも 0.5 だった (2026-11-05、利用者の指示で直した)
+        float[] Glass()
+        {
+            var c = new float[] { 0.5f, 0.5f, 0.5f };
+            string[] ch = ["r", "g", "b"];
+            for (int i = 0; i < 3; i++) if (Q($"root.glassColor.{ch[i]}") is byte v) c[i] = SrgbToLinear(v / 255.0f);
+            return c;
+        }
+        return [Rgb("entryA"), Rgb("entryB"), Rgb("entryC"), Glass()];
     }
 
     // ===== 書き出し (socpaks_to_glb → write_glb) =====
@@ -784,6 +792,8 @@ internal static class SocpakGlb
                 float[]? pal = palette == null ? null : m.PaletteTint switch { 1 => palette[0], 2 => palette[1], 3 => palette[2], _ => m.IsGlass ? palette[3] : null };
                 float[]? layerColor = m.Layers.Count > 0 && !(m.Layers[0].Tint[0] == 1 && m.Layers[0].Tint[1] == 1 && m.Layers[0].Tint[2] == 1) ? m.Layers[0].Tint : null;
                 var c = pal ?? m.MetalBaseColor() ?? layerColor ?? m.Diffuse;
+                // ガラス (GlassPBR) は、色の出どころ (パレットの A・B・C・glassColor、材質の色) によらず、決まった色が白なら着色していないガラスの色 (GlassTint) (2026-11-05、利用者の指示)
+                if (m.IsGlass) c = GlassTint.OrUntinted(c);
                 baseColor = [c[0], c[1], c[2], m.Opacity];
                 doubleSided = m.DoubleSided;
             }
@@ -893,4 +903,18 @@ internal static class SocpakGlb
             return o;
         }
     }
+}
+
+// 着色していないガラスの色 (2026-11-05、利用者の指示「ガラスは薄い水色がいいんじゃない？透明でなく着色しているものはその色を使った方がいいけど」)。
+// 船・品の 3D (ShipGlb・SocpakGlb の Builder.Material) とステーションの 3D (StationView3DTextures.TextureOf) で使う。
+// UntintedSrgb: sRGB (191, 227, 242) = #BFE3F2 (薄い水色。値は親が決めたもの。色を変えるときはここだけ)。パレットの色と同じく linear にして使う (UntintedLinear)。
+// 着色していない = 色が白 (linear の r・g・b がどれも 1 以上。sRGB の 255,255,255 は linear で 1)
+internal static class GlassTint
+{
+    public static readonly byte[] UntintedSrgb = [191, 227, 242];
+    private static float SrgbToLinear(float c) => c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f);   // パレットの色と同じ式
+    public static readonly float[] UntintedLinear = [SrgbToLinear(UntintedSrgb[0] / 255.0f), SrgbToLinear(UntintedSrgb[1] / 255.0f), SrgbToLinear(UntintedSrgb[2] / 255.0f)];
+    public static bool IsWhite(float[] c) => c.Length >= 3 && c[0] >= 1f && c[1] >= 1f && c[2] >= 1f;
+    // 白なら着色していないガラスの色 (新しい配列)、それ以外はそのまま
+    public static float[] OrUntinted(float[] c) => IsWhite(c) ? (float[])UntintedLinear.Clone() : c;
 }

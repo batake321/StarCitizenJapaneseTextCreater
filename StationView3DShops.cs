@@ -104,13 +104,22 @@ internal static class StationView3DShops
         Open(record, name, tree, focusShop, owner);
     }
 
-    // 開いている別ウィンドウに出す。開いていなければ false
-    public static bool ShowInOpenWindow(string record, string name, ShopTree? tree, string? focusShop)
+    // 開いている別ウィンドウに出す。開いていなければ false。
+    // here: 出した後に、その 3D で現在位置の所を出す (StationView3DView.RequestHere。［マップ］の現在位置を押したとき)。同じ場所を出していれば出し直さない
+    public static bool ShowInOpenWindow(string record, string name, ShopTree? tree, string? focusShop, bool here = false)
     {
         if (s_window is not { } win) return false;
+        if (here && focusShop == null && win.View.Record == record)
+        {
+            if (win.WindowState == WindowState.Minimized) win.WindowState = WindowState.Normal;
+            win.Activate();
+            win.View.RequestHere();
+            return true;
+        }
         Func<string, string, string>? label = tree == null ? null : (g, e) => ShopLabel(tree, record, g, e);
         Func<string, string, object?>? sales = tree == null ? null : (g, e) => Sales(tree, record, g, e);
         win.ShowPlace(record, name, label, sales, focusShop);
+        if (here) win.View.RequestHere();
         return true;
     }
 

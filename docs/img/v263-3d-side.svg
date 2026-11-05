@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 640" width="900" height="640" role="img" aria-labelledby="t d">
+  <title id="t">ステーションの 3D の左の欄（仮の図）</title>
+  <desc id="d">左の欄は、飛ぶ先・読み込み・歩くモード・録画・文字の道案内・フロア・店の入口・表示する形・操作の説明のまとまりに分かれ、見出しの ▼ で畳めます。文字の道案内はドロップダウンで選んだ 1 つだけを出します。操作の説明は操作ごとに 1 行の表と、くわしい説明です。図は、上の部分（左）と下の部分（右）に分けて描いています。</desc>
+  <style>
+    .f  { font-family: sans-serif; }
+    .h  { font-size: 14px; fill: #ddd; font-weight: 700; }
+    .sb { font-size: 12px; fill: #aaa; }
+    .tx { font-size: 13px; fill: #ddd; }
+    .gy { font-size: 12.5px; fill: #777; }
+    .op { font-size: 13px; fill: #9cf; }
+    .hh { font-size: 13px; fill: #ddd; font-weight: 700; }
+    .mo { font-size: 12px; fill: #9cf; }
+    .gd { font-size: 14px; fill: #ddd; }
+    .no { font-size: 15px; fill: #fff; font-weight: 700; }
+    .cap { font-size: 12.5px; fill: #c9d6e3; }
+  </style>
+
+  <rect x="0" y="0" width="900" height="640" rx="8" fill="#1b222c"/>
+
+  <!-- 上の部分 -->
+  <rect x="20" y="20" width="380" height="580" fill="#111" stroke="#333"/>
+  <text class="f h" x="30" y="44">Seraphim Station</text>
+  <line x1="26" y1="54" x2="394" y2="54" stroke="#333"/>
+  <text class="f h" x="30" y="74">▼ 飛ぶ先 <tspan class="sb">(押すとそのまわりを読み込む)</tspan></text>
+  <rect x="30" y="84" width="360" height="22" fill="#222" stroke="#444"/><text class="f gy" x="36" y="100">名前・種類の一部で絞り込み</text>
+  <g class="f tx">
+    <rect x="30" y="110" width="360" height="26" fill="#222"/><text x="38" y="128">店: Armor（装備の店）</text>
+    <rect x="30" y="138" width="360" height="26" fill="#222"/><text x="38" y="156">店: Burritos</text>
+    <rect x="30" y="166" width="360" height="26" fill="#222"/><text x="38" y="184">店: Cargo Supplies</text>
+    <rect x="30" y="194" width="360" height="26" fill="#222"/><text x="38" y="212" fill="#9cf">店: Casaba Outlet（装備の店）</text>
+  </g>
+  <line x1="26" y1="232" x2="394" y2="232" stroke="#333"/>
+  <text class="f h" x="30" y="252">▶ 読み込み</text>
+  <line x1="26" y1="264" x2="394" y2="264" stroke="#333"/>
+  <text class="f h" x="30" y="284">▼ 歩くモード</text>
+  <rect x="30" y="292" width="360" height="24" fill="#222" stroke="#444"/><text class="f tx" x="36" y="309">歩くモード: OFF</text>
+  <rect x="30" y="320" width="70" height="24" fill="#222" stroke="#444"/><text class="f tx" x="36" y="337">現在位置</text>
+  <rect x="30" y="348" width="72" height="24" fill="#222" stroke="#444"/><text class="f tx" x="36" y="365">走る: OFF</text>
+  <rect x="108" y="348" width="82" height="24" fill="#222" stroke="#444"/><text class="f tx" x="114" y="365">姿勢: 立つ</text>
+  <rect x="196" y="348" width="100" height="24" fill="#222" stroke="#444"/><text class="f tx" x="202" y="365">すり抜け: OFF</text>
+  <line x1="26" y1="384" x2="394" y2="384" stroke="#333"/>
+  <text class="f h" x="30" y="404">▶ 録画</text>
+  <line x1="26" y1="416" x2="394" y2="416" stroke="#333"/>
+  <text class="f h" x="30" y="436">▼ 文字の道案内</text>
+  <rect x="30" y="446" width="360" height="24" fill="#222" stroke="#444"/><text class="f tx" x="36" y="463">店: Casaba Outlet（装備の店）</text><text class="f tx" x="376" y="463">▾</text>
+  <text class="f gd" x="30" y="496">（選んだ所への案内の文。いちばん近い</text>
+  <text class="f gd" x="30" y="520">乗り口などを、文字で出します）</text>
+  <text class="f sb" x="30" y="556">部品の名前などの細かい部分は、設定</text>
+  <text class="f sb" x="30" y="574">「マップのデバッグ表示」がオンのときだけ</text>
+
+  <!-- 下の部分 -->
+  <rect x="470" y="20" width="410" height="580" fill="#111" stroke="#333"/>
+  <text class="f sb" x="480" y="42">（上の続き）</text>
+  <line x1="476" y1="52" x2="874" y2="52" stroke="#333"/>
+  <text class="f h" x="480" y="72">▶ フロア <tspan class="sb">(床の高さを 2 m ごとに区切ったもの…)</tspan></text>
+  <line x1="476" y1="84" x2="874" y2="84" stroke="#333"/>
+  <text class="f h" x="480" y="104">▶ 店の入口 <tspan class="sb">(押すと部品を水色で強調)</tspan></text>
+  <line x1="476" y1="116" x2="874" y2="116" stroke="#333"/>
+  <text class="f h" x="480" y="136">▶ 表示する形</text>
+  <line x1="476" y1="148" x2="874" y2="148" stroke="#333"/>
+  <text class="f h" x="480" y="168">▼ 操作の説明</text>
+  <text class="f hh" x="480" y="192">歩くモード</text>
+  <g class="f">
+    <text class="op" x="480" y="214">W・S</text><text class="tx" x="640" y="214">前後に歩く</text>
+    <text class="op" x="480" y="236">A・D</text><text class="tx" x="640" y="236">左右に歩く</text>
+    <text class="op" x="480" y="258">Q・E・ドラッグ</text><text class="tx" x="640" y="258">向きを変える</text>
+    <text class="op" x="480" y="280">Shift</text><text class="tx" x="640" y="280">走る ON・OFF</text>
+    <text class="op" x="480" y="302">スペース</text><text class="tx" x="640" y="302">ジャンプ (前に段があれば…)</text>
+    <text class="op" x="480" y="324">Enter</text><text class="tx" x="640" y="324">コメントを付ける (録画中でなくても)</text>
+    <text class="op" x="480" y="346">乗り場に近づく</text><text class="tx" x="640" y="346">エレベーター・トラムの行き先の窓</text>
+    <text class="op" x="480" y="368">［現在位置］</text><text class="tx" x="640" y="368">現在位置を取り直して、その所に立つ</text>
+    <text class="sb" x="480" y="388">（ほかの行は省いています）</text>
+  </g>
+  <text class="f mo" x="480" y="412">▶ くわしい説明</text>
+  <text class="f hh" x="480" y="442">見るとき</text>
+  <g class="f">
+    <text class="op" x="480" y="464">左ドラッグ</text><text class="tx" x="640" y="464">回す・傾ける</text>
+    <text class="op" x="480" y="486">右ドラッグ (Shift+左)</text><text class="tx" x="640" y="486">動かす</text>
+    <text class="op" x="480" y="508">ホイール</text><text class="tx" x="640" y="508">近づく・遠ざかる</text>
+    <text class="op" x="480" y="530">店の端末を押す</text><text class="tx" x="640" y="530">販売品の枠</text>
+    <text class="op" x="480" y="552">右上の「現在位置」</text><text class="tx" x="640" y="552">現在位置の印を出すか</text>
+  </g>
+  <text class="f mo" x="480" y="580">▶ くわしい説明</text>
+
+  <text class="f cap" x="20" y="624">仮の図。場所・店の名前は例です（Seraphim Station）。実際の画面と細部が違うことがあります</text>
+
+  <!-- 番号 -->
+  <g class="f">
+    <circle cx="384" cy="70" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="384" y="75" text-anchor="middle">1</text>
+    <circle cx="384" cy="150" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="384" y="155" text-anchor="middle">2</text>
+    <circle cx="384" cy="436" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="384" y="441" text-anchor="middle">3</text>
+    <circle cx="384" cy="508" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="384" y="513" text-anchor="middle">4</text>
+    <circle cx="864" cy="192" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="864" y="197" text-anchor="middle">5</text>
+    <circle cx="864" cy="412" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="864" y="417" text-anchor="middle">6</text>
+  </g>
+</svg>

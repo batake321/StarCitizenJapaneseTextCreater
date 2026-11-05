@@ -20,8 +20,10 @@ public partial class MainWindow
         txtShip3DFolder.Text = Ship3DExports.Folder;
         txtShip3DMaxMB.Text = Ship3DExports.MaxMb.ToString();
         chkShip3DNoSave.IsChecked = App.Config.Ship3DNoSave;
+        chkShip3DPalette.IsChecked = App.Config.Ship3DPalette;
         txtStation3DCacheMaxGB.Text = Station3DCacheMaxGbText();
         txtStation3DTextureMaxPx.Text = App.Config.Station3DTextureMaxPx.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        chkStation3DDebugView.IsChecked = App.Config.Station3DDebugView;
         UpdateStation3DCacheUsageText();
         UpdateShip3DDriveText();
         UpdateShip3DUsageText();
@@ -253,6 +255,8 @@ public partial class MainWindow
             txtStation3DTextureMaxPx.Text = App.Config.Station3DTextureMaxPx.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
         else App.Config.Station3DTextureMaxPx = px;
+        // マップのデバッグ表示 (ステーションの 3D の下部の枠。既定は出さない。2026-11-05)。次にページを開いたときから効く (StationView3DWindow が URL の debug=1 で渡す)
+        App.Config.Station3DDebugView = chkStation3DDebugView.IsChecked == true;
         StationView3DCache.NotifySettingsChanged();
         var cache = StationView3DCache.Current;
         _ = Task.Run(() => { cache.Evict(); }).ContinueWith(_ => UpdateStation3DCacheUsageText(), TaskScheduler.FromCurrentSynchronizationContext());
@@ -305,6 +309,8 @@ public partial class MainWindow
         }
         else App.Config.Ship3DMaxMB = maxMb;
         App.Config.Ship3DNoSave = chkShip3DNoSave.IsChecked == true;
+        // 船・装備・武器の 3D の色付け (既定は付ける。2026-11-05)。次に 3D を開いたときから効く (Ship3DWeb がビューアに渡す)
+        App.Config.Ship3DPalette = chkShip3DPalette.IsChecked == true;
         SaveStation3DCacheSettings();
         UpdateShip3DDriveText();
         UpdateShip3DBatchButton();

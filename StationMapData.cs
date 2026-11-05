@@ -700,7 +700,7 @@ internal sealed record StationRoomRoute(int Instance, string A, string B, string
 
 // 端末 1 つ (2026-11-02、利用者の指示「端末の場所がわかる？ … マークは端末のところがいい」)。.soc の Entity の Pos・Rotate を局所に直したもの。
 // Kind は StationTerminalKinds の鍵 (fleet・clinic・pharmacy・clone・shop・commodity・cargo・refinery・freight)。Basis は判定の根拠 (例 "metadata:entitycomponentshipinsuranceprovider"、"class:CloneLocationAdmin")。
-// ShopGuid・ShopEntity は店の端末のとき、同じ socpak のいちばん近い SCShop (EntityCryGUID・Name)。無ければ ""
+// ShopGuid・ShopEntity は店の端末のとき、その端末を ShopKioskGUIDs に載せている SCShop (どれにも載っていなければ同じ socpak のいちばん近い SCShop) の EntityCryGUID・Name。無ければ ""
 internal sealed record StationTerminal(int Instance, string Kind, string Guid, string EntityClass, string EntityName,
     (double X, double Y, double Z) Pos, (double W, double X, double Y, double Z)? Rot, string Basis)
 {
@@ -1258,7 +1258,7 @@ internal sealed class SocpakContents
     //   ⑥ 店の端末: EntityClass に「ShoppingKiosk」「Shop_Terminal」があるもの、または metadata entitycomponentshoppingprovider の CryGUID
     //      (EntityClass に「screen」のあるもの (精製所の画面 MASTER_screen_16x9_MiningKiosk) は除く。理由: 精製所の受付の壁の高い所 (床から約 5 m) にある画面で、
     //      人が前に立って使う端末ではない (RR_HUR_L1 の util_a_refinery_admin_lge_001 で、Pos の高さ 5.27 m、端末 SoftLock_Terminal_Standard_Refinery は 4.27 m の床の上。推測を含む))。
-    //      同じ socpak のいちばん近い SCShop を店にし、その SCShop の Name に「Pharmacy」があれば pharmacy (薬局)、「Cargo_Office」があり「Rental」が無ければ cargo (貨物センター)、ほかは shop
+    //      その端末を ShopKioskGUIDs に載せている SCShop (無ければ同じ socpak のいちばん近い SCShop) を店にし、その SCShop の Name に「Pharmacy」があれば pharmacy (薬局)、「Cargo_Office」があり「Rental」が無ければ cargo (貨物センター)、ほかは shop
     //      (「Rental」を除く理由: Cargo Center の socpak (cargo_office_001) には、貨物の店 SCShop_Cargo_Office と、乗り物の貸し出しの店 SCShop_Cargo_Office_Rentals
     //      (ShopKiosk_Rentals の端末) の 2 つがあり、貸し出しの端末は Cargo Center の端末ではないため。RR_HUR_LEO で確かめた)
     // Pos の無い Entity は使わない
@@ -1316,6 +1316,14 @@ internal sealed class SocpakContents
         }
         var freightKiosks = managers.Select(m => m.Kiosk).Where(k => k.Length > 0).ToHashSet(StringComparer.Ordinal);
         var shops = ents.Where(e => e.Cls == "SCShop" && e.Pos != null).ToList();
+        // 店の端末の一覧 (SCShop の <EntityComponentShop><ShopKioskGUIDs><ShopKioskGUID entityCryGUID=…/>): 端末の CryGUID → それを載せている店 (2026-11-05)
+        var kioskShops = new Dictionary<string, List<SocEnt>>(StringComparer.Ordinal);
+        foreach (var s in ents.Where(e => e.Cls == "SCShop"))
+            foreach (var g in s.E.Descendants("ShopKioskGUID").Select(k => ((string?)k.Attribute("entityCryGUID") ?? "").Trim().ToLowerInvariant()).Where(g => g.Length > 0).Distinct(StringComparer.Ordinal))
+            {
+                if (!kioskShops.TryGetValue(g, out var l)) kioskShops[g] = l = new List<SocEnt>();
+                l.Add(s);
+            }
         var done = new HashSet<string>(StringComparer.Ordinal);
         foreach (var e in ents)
         {
@@ -1333,9 +1341,15 @@ internal sealed class SocpakContents
             if (kind == null) continue;
             done.Add(e.Guid);
             var t = new StationTerminal(-1, kind, e.Guid, e.Cls, e.Name, pos, e.Rot, basis!);
-            if (kind == "shop" && shops.Count > 0)
+            // 店: その端末を ShopKioskGUIDs に載せている店 (2 つ以上の店に載っていれば、そのうちいちばん近い店。位置の無い店は距離を最大として扱う)。
+            // どの店にも載っていなければ、同じ socpak のいちばん近い店
+            // (2026-11-05。Pyro の cargo_office_002_rund_001 の端末 ShoppingKiosk_cargo_1_a-032〜-035 は SCShop_CargoOfficePyroStation の ShopKioskGUIDs に載っているが、
+            //  いちばん近い店は SCShop_Cargo_Office_Rentals-004 (端末も棚も無い店) だった)
+            if (kind == "shop" && (kioskShops.TryGetValue(e.Guid, out var listed) || shops.Count > 0))
             {
-                var sh = shops.MinBy(s => Dist(s.Pos!.Value, pos))!;
+                var sh = listed != null
+                    ? listed.MinBy(s => s.Pos is { } sp ? Dist(sp, pos) : double.MaxValue)!
+                    : shops.MinBy(s => Dist(s.Pos!.Value, pos))!;
                 var nm = sh.Name;
                 var sub = nm.Contains("Pharmacy", StringComparison.OrdinalIgnoreCase) ? "pharmacy"
                     : nm.Contains("Cargo_Office", StringComparison.OrdinalIgnoreCase) && !nm.Contains("Rental", StringComparison.OrdinalIgnoreCase) ? "cargo" : "shop";

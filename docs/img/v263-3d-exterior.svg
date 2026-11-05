@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" width="900" height="560" role="img" aria-labelledby="t d">
+  <title id="t">ステーションの 3D を外から見たとき（仮の図）</title>
+  <desc id="d">外から引いて全体を見ているときは、店・端末などの内部の印と札、コメントの印、重力の範囲の箱を出さず、着陸パッド（Pad01 の形）・ドッキングポート（番号つき）・外部貨物エレベーター（外部貨物EV）・ハンガー（大きさ S・M・L・XL でまとめる）の引き出し線と見出しを出します。現在位置の印は外から見ているときも出ます。右上の印のスイッチは押せなくなり、キャプションのスイッチが押せます。</desc>
+  <style>
+    .f  { font-family: sans-serif; }
+    .sw { font-size: 13px; fill: #ddd; }
+    .hd { font-size: 11px; fill: #aaa; }
+    .w  { font-size: 17px; fill: #c8d0dc; }
+    .pn { font-size: 23px; font-weight: 700; fill: #ffcc33; }
+    .dn { font-size: 23px; font-weight: 700; fill: #ff8ad8; }
+    .hs { font-size: 23px; font-weight: 700; fill: #6cb6ff; }
+    .fe { font-size: 18px; fill: #fff; }
+    .no { font-size: 15px; fill: #fff; font-weight: 700; }
+    .cap { font-size: 12.5px; fill: #c9d6e3; }
+  </style>
+  <defs>
+    <g id="on"><rect x="0" y="-12" width="30" height="16" rx="8" fill="#264" stroke="#4a8"/><circle cx="22" cy="-4" r="6" fill="#ddd"/></g>
+  </defs>
+
+  <rect x="0" y="0" width="900" height="560" fill="#111"/>
+
+  <!-- ステーション (それらしい形) -->
+  <g fill="none" stroke="#4b4a44" stroke-width="6">
+    <ellipse cx="560" cy="300" rx="28" ry="120"/>
+    <ellipse cx="300" cy="300" rx="22" ry="90"/>
+  </g>
+  <rect x="160" y="286" width="470" height="28" fill="#35332e"/>
+  <rect x="380" y="250" width="120" height="100" fill="#3d3a33"/>
+  <rect x="420" y="350" width="16" height="70" fill="#2f2d29"/>
+
+  <!-- 着陸パッド -->
+  <g stroke="#ffcc33" stroke-width="2.5" fill="#ffcc33">
+    <line x1="430" y1="420" x2="300" y2="470"/><circle cx="430" cy="420" r="5"/>
+    <line x1="500" y1="350" x2="560" y2="470"/><circle cx="500" cy="350" r="5"/>
+  </g>
+  <rect x="226" y="452" width="98" height="36" rx="3" fill="rgba(24,30,42,0.88)" stroke="#ffcc33"/>
+  <text class="f" x="234" y="479"><tspan class="w">Pad</tspan><tspan class="pn">01</tspan></text>
+  <rect x="520" y="452" width="98" height="36" rx="3" fill="rgba(24,30,42,0.88)" stroke="#ffcc33"/>
+  <text class="f" x="528" y="479"><tspan class="w">Pad</tspan><tspan class="pn">02</tspan></text>
+
+  <!-- ドッキングポート -->
+  <g stroke="#ff8ad8" stroke-width="2.5" fill="#ff8ad8">
+    <line x1="560" y1="420" x2="700" y2="470"/><circle cx="560" cy="420" r="5"/>
+  </g>
+  <rect x="650" y="470" width="200" height="36" rx="3" fill="rgba(24,30,42,0.88)" stroke="#ff8ad8"/>
+  <text class="f" x="658" y="497"><tspan class="w">ドッキングポート</tspan><tspan class="dn">01</tspan></text>
+
+  <!-- 外部貨物エレベーター -->
+  <g stroke="#6fdc8c" stroke-width="2.5" fill="#6fdc8c">
+    <line x1="170" y1="300" x2="120" y2="380"/><circle cx="170" cy="300" r="5"/>
+  </g>
+  <rect x="40" y="380" width="118" height="34" rx="3" fill="rgba(24,30,42,0.88)" stroke="#6fdc8c"/>
+  <text class="f fe" x="50" y="404">外部貨物EV</text>
+
+  <!-- ハンガー (屋根の扉の上) -->
+  <g stroke="#6cb6ff" stroke-width="2.5" fill="#6cb6ff">
+    <line x1="400" y1="250" x2="330" y2="150"/><circle cx="400" cy="250" r="5"/>
+    <line x1="430" y1="250" x2="335" y2="150"/><circle cx="430" cy="250" r="5"/>
+    <line x1="470" y1="250" x2="520" y2="110"/><circle cx="470" cy="250" r="5"/>
+    <line x1="300" y1="212" x2="200" y2="190"/><circle cx="300" cy="212" r="5"/>
+  </g>
+  <rect x="250" y="116" width="124" height="36" rx="3" fill="rgba(24,30,42,0.88)" stroke="#6cb6ff"/>
+  <text class="f" x="258" y="143"><tspan class="w">ハンガー </tspan><tspan class="hs">L</tspan></text>
+  <rect x="470" y="76" width="130" height="36" rx="3" fill="rgba(24,30,42,0.88)" stroke="#6cb6ff"/>
+  <text class="f" x="478" y="103"><tspan class="w">ハンガー </tspan><tspan class="hs">M</tspan></text>
+  <rect x="86" y="172" width="118" height="36" rx="3" fill="rgba(24,30,42,0.88)" stroke="#6cb6ff"/>
+  <text class="f" x="94" y="199"><tspan class="w">ハンガー </tspan><tspan class="hs">S</tspan></text>
+
+  <!-- 現在位置の印 (外から見ているときも出る) -->
+  <circle cx="240" cy="300" r="8" fill="#00e5ff"/>
+  <rect x="170" y="322" width="160" height="34" fill="rgba(20,20,20,0.85)" stroke="#00e5ff" stroke-width="2"/>
+  <text class="f" x="180" y="345" style="font-size:15px;fill:#bff8ff;font-weight:700">現在位置 14:32:05</text>
+
+  <!-- 右上のスイッチの欄 -->
+  <rect x="650" y="10" width="240" height="330" fill="rgba(17,17,17,0.92)" stroke="#444"/>
+  <g class="f sw">
+    <use href="#on" x="660" y="34"/><text x="696" y="34">テクスチャ</text>
+    <use href="#on" x="660" y="58"/><text x="696" y="58">色付け</text>
+    <use href="#on" x="660" y="82"/><text x="696" y="82">現在位置</text>
+  </g>
+  <line x1="658" y1="96" x2="882" y2="96" stroke="#333"/>
+  <text class="f hd" x="660" y="110">印</text>
+  <g class="f sw" opacity="0.4">
+    <use href="#on" x="660" y="132"/><text x="696" y="132">店</text>
+    <use href="#on" x="660" y="154"/><text x="696" y="154">端末</text>
+    <use href="#on" x="660" y="176"/><text x="696" y="176">エレベーター・トラム</text>
+    <use href="#on" x="660" y="198"/><text x="696" y="198">クエストの扉・パネル</text>
+    <use href="#on" x="660" y="220"/><text x="696" y="220">コメント</text>
+  </g>
+  <line x1="658" y1="232" x2="882" y2="232" stroke="#333"/>
+  <text class="f hd" x="660" y="246">キャプション</text>
+  <g class="f sw">
+    <use href="#on" x="660" y="268"/><circle cx="701" cy="264" r="5" fill="#ffcc33"/><text x="712" y="268">着陸パッド (2)</text>
+    <use href="#on" x="660" y="290"/><circle cx="701" cy="286" r="5" fill="#ff8ad8"/><text x="712" y="290">ドッキングポート (1)</text>
+    <use href="#on" x="660" y="312"/><circle cx="701" cy="308" r="5" fill="#6fdc8c"/><text x="712" y="312">外部貨物エレベーター (1)</text>
+    <use href="#on" x="660" y="334"/><circle cx="701" cy="330" r="5" fill="#6cb6ff"/><text x="712" y="334">ハンガー (4)</text>
+  </g>
+
+  <text class="f cap" x="16" y="548">外から引いて全体を見ているとき（仮の図。形・数・番号・時刻は例です。実際の画面と細部が違うことがあります）</text>
+
+  <!-- 番号 -->
+  <g class="f">
+    <circle cx="630" cy="174" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="630" y="179" text-anchor="middle">1</text>
+    <circle cx="630" cy="299" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="630" y="304" text-anchor="middle">2</text>
+    <circle cx="212" cy="470" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="212" y="475" text-anchor="middle">3</text>
+    <circle cx="866" cy="488" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="866" y="493" text-anchor="middle">4</text>
+    <circle cx="40" cy="364" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="40" y="369" text-anchor="middle">5</text>
+    <circle cx="236" cy="116" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="236" y="121" text-anchor="middle">6</text>
+    <circle cx="156" cy="339" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="156" y="344" text-anchor="middle">7</text>
+  </g>
+</svg>

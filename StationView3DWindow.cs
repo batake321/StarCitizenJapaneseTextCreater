@@ -61,6 +61,12 @@ public sealed class StationView3DView : Grid
     private readonly Dictionary<string, StationView3D.Session> _hangarSessions = new(StringComparer.Ordinal);
     private StationView3D.Loc? _loc;
     private StationView3D.Extractor? _extract;
+    // 色付け (場所のパレットの色) を切った取り出し (OwnExtractor の palette: false)。ビューアの地点の頼み ({type:'region', …, pal}) の pal が false のときに使う
+    // (2026-11-05、利用者の指示「1 で。右のスイッチに入れて自動保存にして」)。_palette は最後に頼まれた地点の色付け (先読みもそれで作る)
+    private StationView3D.Extractor? _extractPlain;
+    private bool _palette = true;
+    // 保存の鍵に入れる区画の置き方の一覧の印 (色付けを切ったときは後ろに StationView3DCache.NoPaletteSuffix)
+    private string LayoutIdOf(bool palette) => palette ? _layoutId : _layoutId + StationView3DCache.NoPaletteSuffix;
     private string _tempDir = "";
     private bool _ownInUse;
 
@@ -95,6 +101,7 @@ public sealed class StationView3DView : Grid
     public StationView3DView(string record, string name, Func<string, string, string>? shopLabel = null, Func<string, string, object?>? shopSales = null, string? focusShop = null)
     {
         Interlocked.Increment(ref s_open);
+        lock (s_views) s_views.Add(this);
         _record = record; _shopLabel = shopLabel; _shopSales = shopSales; _focusShop = focusShop;
         _shortName = StationPlaces.ShortName(record);
         _title = string.IsNullOrWhiteSpace(name) ? _shortName : name;
@@ -117,6 +124,7 @@ public sealed class StationView3DView : Grid
     {
         if (_closed) return;
         _closed = true;
+        lock (s_views) s_views.Remove(this);
         _cts.Cancel();
         _regionCts?.Cancel();
         _idleTimer?.Dispose(); _idleTimer = null;
@@ -127,6 +135,7 @@ public sealed class StationView3DView : Grid
         _session = null;
         _hangarSessions.Clear();
         _extract = null;
+        _extractPlain = null;
         _loc = null;
         if (Interlocked.Decrement(ref s_open) <= 0)
         {
@@ -179,6 +188,9 @@ public sealed class StationView3DView : Grid
             _extract = StationView3D.OwnExtractor(stamp.Path,
                 m => App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」 {m}"),
                 texMaxPx: TexMaxPx, texFolder: Path.Combine(Ship3DExports.Folder, StationView3DTextures.FolderName));
+            _extractPlain = StationView3D.OwnExtractor(stamp.Path,
+                m => App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」 {m}"),
+                texMaxPx: TexMaxPx, texFolder: Path.Combine(Ship3DExports.Folder, StationView3DTextures.FolderName), palette: false);
             await Ship3DWeb.InitAsync(_web);
         }
         catch (OperationCanceledException) { return; }
@@ -195,7 +207,8 @@ public sealed class StationView3DView : Grid
         try { core.ClearVirtualHostNameToFolderMapping(Ship3DExports.CacheHost); } catch { }
         core.SetVirtualHostNameToFolderMapping(Ship3DExports.CacheHost, folder, CoreWebView2HostResourceAccessKind.Allow);
         Overlay("");
-        core.Navigate($"https://{Ship3DWeb.ViewerHost}/stationmap/view3d.html?data={Uri.EscapeDataString(UrlOf(_tempDir))}&title={Uri.EscapeDataString(_title)}&app=1" + (InTab ? "&tab=1" : "") + (_focusShop is { Length: > 0 } fs ? $"&goto={Uri.EscapeDataString(fs)}" : ""));
+        // URL の debug=1: 設定「マップのデバッグ表示」(App.Config.Station3DDebugView。既定オフ) が入っているとき。ビューアは下部の枠 (#pick) をこのときだけ出す (2026-11-05)
+        core.Navigate($"https://{Ship3DWeb.ViewerHost}/stationmap/view3d.html?data={Uri.EscapeDataString(UrlOf(_tempDir))}&title={Uri.EscapeDataString(_title)}&app=1" + (InTab ? "&tab=1" : "") + (App.Config.Station3DDebugView ? "&debug=1" : "") + (_focusShop is { Length: > 0 } fs ? $"&goto={Uri.EscapeDataString(fs)}" : ""));
     }
 
     // ゲームの画像 (テクスチャ) の長い辺の上限 (px。設定「ステーションのテクスチャ (px)」。0 なら画像なし) と、ビューアが PNG を読む URL の頭 (2026-11-05)
@@ -262,6 +275,25 @@ public sealed class StationView3DView : Grid
                 await HereAsync();
                 return;
             }
+            // マイハンガーの大きさのうち、ハンガーの区画が決まるもの (2026-11-05、利用者の指示「ないものはエレベーターの行き先に出さない」。親の決定):
+            // ビューアが station.json を読んだ後に {type:'hangarSizesGet'} で頼み、{type:'hangarSizes', sizes} で返す。sizes は、場所の入口 (place_hangars) の大きさのうち、
+            // OpenHangarAsync と同じ StationHangarCatalog.Resolve で区画が決まるもの。ハンガーの表が作れない・読めないとき (GetAsync の例外) は返さない (ビューアは place_hangars の大きさのまま)
+            // 現在位置の印 (開いたとき): 今の現在位置がこの場所の中なら {type:'hereMark'} で返す
+            if (type == "hereMarkGet") { _pageReady = true; await RefreshHereMarkAsync(); if (_hereRequested) await ShowHereNoCaptureAsync(); return; }
+            if (type == "hangarSizesGet")
+            {
+                try
+                {
+                    if (Ship3DExports.CurrentStamp() is not { } hstamp) return;
+                    var cat = await StationHangarCatalog.GetAsync(hstamp, _cts.Token);
+                    var entrances = (_stationLayout?.Place?.Hangars ?? new()).Select(h => (h.Class, h.Size)).ToList();
+                    var sizes = new[] { "S", "M", "L", "XL" }.Where(z => entrances.Any(e => e.Size == z) && cat.Resolve(_shortName, z, entrances, out _) != null).ToList();
+                    if (!_closed) Post(new { type = "hangarSizes", sizes });
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」のマイハンガーの大きさを決められませんでした (入口の大きさのまま出します): {ex.Message}"); }
+                return;
+            }
             if (type == "hangar")
             {
                 await OpenHangarAsync(r.TryGetProperty("size", out var zv) ? zv.GetString() ?? "" : "");
@@ -290,7 +322,11 @@ public sealed class StationView3DView : Grid
                 await NoteMessageAsync(type, r);
                 return;
             }
-            if (type != "region" || _session == null || _extract == null) return;
+            if (type != "region" || _session == null || _extract == null || _extractPlain == null) return;
+            // pal: 色付け (場所のパレットの色) を当てるか (ビューアの右上のスイッチ「色付け」。無ければ当てる)
+            var palette = !(r.TryGetProperty("pal", out var pv) && pv.ValueKind == JsonValueKind.False);
+            _palette = palette;
+            var layoutId = LayoutIdOf(palette);
             var site = r.TryGetProperty("site", out var sv) ? sv.GetString() ?? "" : "";
             var siteSession = site.Length == 0 ? _session : _hangarSessions.GetValueOrDefault(site);
             if (siteSession == null) { Post(new { type = "regionError", id = r.GetProperty("id").GetInt32(), message = "マイハンガーの用意が終わっていません" }); return; }
@@ -309,12 +345,12 @@ public sealed class StationView3DView : Grid
             ReleaseLeases();
             try
             {
-                var session = siteSession; var extract = _extract;
+                var session = siteSession; var extract = palette ? _extract : _extractPlain;
                 var cache = StationView3DCache.Current;
                 var siteKey = site.Length == 0 ? _record : site;
-                var key = cache.Enabled ? StationView3DCache.KeyOf(siteKey, _p4kKey, _layoutId, c, rad) : "";
+                var key = cache.Enabled ? StationView3DCache.KeyOf(siteKey, _p4kKey, layoutId, c, rad) : "";
                 // 保存したものがあれば、それをそのままビューアに渡す (取り出し・計算をしない)
-                if (key.Length > 0 && cache.TryGet(key, siteKey, _p4kKey, _layoutId, c, rad) is { } hit)
+                if (key.Length > 0 && cache.TryGet(key, siteKey, _p4kKey, layoutId, c, rad) is { } hit)
                 {
                     _leases[id] = new Lease(key, null);
                     Post(WithWorkerCache(new { type = "regionReady", id, @base = UrlOf(hit.Dir), extractSeconds = 0.0, computeSeconds = 0.0, seconds = 0.0, socpaks = hit.Socpaks, missing = hit.Missing, cached = true }, cache, key));
@@ -322,11 +358,11 @@ public sealed class StationView3DView : Grid
                 }
                 // 保存できそうなら、保存先の書きかけの場所に作る (できたら名前を替えて保存にする。ビューアはそのまま読む)
                 var stage = key.Length > 0 && cache.CanStore(PrefetchEstimateBytes) ? cache.BeginStage(key) : null;
-                var st = await Task.Run(() => session.BuildRegionAsync(c, rad, stage ?? dir, extract, AcquireAsync, progress, cts.Token), cts.Token);
+                var st = await Task.Run(() => session.BuildRegionAsync(c, rad, stage ?? dir, extract, AcquireAsync, progress, cts.Token, palette), cts.Token);
                 var served = stage ?? dir; var stored = false;
                 if (stage != null)
                 {
-                    if (cache.Commit(stage, key, siteKey, _p4kKey, _layoutId, c, rad, st.Socpaks, st.Missing) is { } saved) { served = saved.Dir; _leases[id] = new Lease(key, null); stored = true; }
+                    if (cache.Commit(stage, key, siteKey, _p4kKey, layoutId, c, rad, st.Socpaks, st.Missing) is { } saved) { served = saved.Dir; _leases[id] = new Lease(key, null); stored = true; }
                     else _leases[id] = new Lease(null, stage);   // 保存できなかった (上限・空き): 読み終えたら消す
                 }
                 Post(WithWorkerCache(new { type = "regionReady", id, @base = UrlOf(served), extractSeconds = st.ExportSeconds, computeSeconds = st.ComputeSeconds, seconds = st.BuildSeconds, socpaks = st.Socpaks, missing = st.Missing }, cache, stored ? key : ""));
@@ -500,13 +536,15 @@ public sealed class StationView3DView : Grid
 
     private void StartPrefetch()
     {
-        if (_closed || _viewerBusy || _prefetchTask != null || _session == null || _extract == null || _lastCenter == null || _radii.Count == 0) return;
+        if (_closed || _viewerBusy || _prefetchTask != null || _session == null || _extract == null || _extractPlain == null || _lastCenter == null || _radii.Count == 0) return;
         if (_prefetchBuilt >= PrefetchMaxBuilds || !StationView3DCache.Current.Enabled) return;
-        var center = _lastCenter; var radii = _radii.ToList(); var session = _session; var extract = _extract;
+        // 先読みは、最後に頼まれた地点と同じ色付け (_palette) で作る
+        var palette = _palette;
+        var center = _lastCenter; var radii = _radii.ToList(); var session = _session; var extract = palette ? _extract : _extractPlain;
         var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
         _prefetchCts = cts;
         // ビューアが頼んだ site "" (ステーション本体) の行き先だけ。ハンガーの中は先読みしない
-        _prefetchTask = Task.Run(() => PrefetchAsync(session, extract, center, radii, cts.Token));
+        _prefetchTask = Task.Run(() => PrefetchAsync(session, extract, center, radii, palette, cts.Token));
     }
 
     // 解析の結果 (ビューアの WC) の先読み: ビューアに別の糸で解析して保存だけしてもらう。
@@ -538,8 +576,9 @@ public sealed class StationView3DView : Grid
 
     // 近い行き先から順に、ビューアが使った半径 (小さい方から) で作って保存する。1 本ずつ。次の場合は止める:
     //   ビューアが頼んだ (取り消し)・CPU 使用率が 90% 以上・空きメモリが PrefetchMinFreeMemory 未満・保存の上限を超えそう (古いものを消してまで先読みしない)・空きが足りない
-    private async Task PrefetchAsync(StationView3D.Session session, StationView3D.Extractor extract, double[] from, List<double> radii, CancellationToken ct)
+    private async Task PrefetchAsync(StationView3D.Session session, StationView3D.Extractor extract, double[] from, List<double> radii, bool palette, CancellationToken ct)
     {
+        var layoutId = LayoutIdOf(palette);
         var cache = StationView3DCache.Current;
         try
         {
@@ -563,16 +602,16 @@ public sealed class StationView3DView : Grid
                     // CPU が高い間は待つ (ゲームを動かしているとき)。長く続くなら諦める
                     for (int w = 0; Ship3DExports.CpuHighNow; w++) { if (w >= 12) return; await Task.Delay(5000, ct); }
                     if (Ship3DExports.AvailablePhysicalMemory() is long free && free < PrefetchMinFreeMemory) return;
-                    var key = StationView3DCache.KeyOf(_record, _p4kKey, _layoutId, c, r);
-                    var hit = cache.TryGet(key, _record, _p4kKey, _layoutId, c, r);
+                    var key = StationView3DCache.KeyOf(_record, _p4kKey, layoutId, c, r);
+                    var hit = cache.TryGet(key, _record, _p4kKey, layoutId, c, r);
                     if (hit == null)
                     {
                         // 古いものを消してまで先読みしない
                         if (!cache.CanStore(PrefetchEstimateBytes) || cache.UsedBytes() + PrefetchEstimateBytes > StationView3DCache.MaxBytesSetting) return;
                         var stage = cache.BeginStage(key);
-                        var st = await session.BuildRegionAsync(c, r, stage, extract, AcquireAsync, null, ct);
+                        var st = await session.BuildRegionAsync(c, r, stage, extract, AcquireAsync, null, ct, palette);
                         ct.ThrowIfCancellationRequested();
-                        hit = cache.Commit(stage, key, _record, _p4kKey, _layoutId, c, r, st.Socpaks, st.Missing);
+                        hit = cache.Commit(stage, key, _record, _p4kKey, layoutId, c, r, st.Socpaks, st.Missing);
                         if (hit == null) StationView3DCache.TryDelete(stage);
                         Interlocked.Increment(ref _prefetchBuilt);
                         App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」を先読みして保存しました: 中心 {string.Join(",", c.Select(v => v.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)))} ±{r} m ({st.BuildSeconds:F1} 秒)");
@@ -649,6 +688,15 @@ public sealed class StationView3DView : Grid
     // ビューアには {type:'here', ok, pos, note} を返す (pos は場所の座標)
     private const double HereFitSeconds = 1.5, HereFitStep = 0.02, HereBoxMax = 500;
     private StationRoot? _root;
+    // 場所のルートを探す 1 本 (場所の record と Data.p4k の印ごと。結果が null でも作り直さない。3D と［マップ］タブの現在地の文で共有)
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task<StationRoot?>> s_rootTasks = new(StringComparer.Ordinal);
+    private static Task<StationRoot?> RootOfAsync(string record, Ship3DExports.P4kStamp stamp) => s_rootTasks.GetOrAdd(stamp.Key + "|" + record, _ => Task.Run(() =>
+    {
+        if (StationHangars.IsRecord(record)) return StationHangars.RootOf(record);
+        using var index = StationIndex.Build(stamp.Path);
+        var places = StationPlaces.LoadPlaces(DetailPanel.DbPath()).Select(p => p.Place).ToList();
+        return index.FindRoots(places).Roots.TryGetValue(record, out var r) ? r : null;
+    }));
     private async Task HereAsync()
     {
         try
@@ -660,42 +708,12 @@ public sealed class StationView3DView : Grid
                 status = st;
                 if (!ok) { Post(new { type = "here", ok = false, note = $"現在位置を取れませんでした: {st}" }); return; }
             }
-            var cur = App.Config.MapCurrent;
-            if (cur.Utc <= 0) { Post(new { type = "here", ok = false, note = "現在位置がまだありません (［マップ］タブの［現在位置］で取ってください)" }); return; }
-            if (Ship3DExports.CurrentStamp() is not { } stamp) { Post(new { type = "here", ok = false, note = "ゲームの Data.p4k が見つかりません" }); return; }
-            var record = _record; var ct = _cts.Token;
-            _root ??= await Task.Run(() =>
-            {
-                if (StationHangars.IsRecord(record)) return StationHangars.RootOf(record);
-                using var index = StationIndex.Build(stamp.Path, ct);
-                var places = StationPlaces.LoadPlaces(DetailPanel.DbPath()).Select(p => p.Place).ToList();
-                return index.FindRoots(places, ct: ct).Roots.TryGetValue(record, out var r) ? r : null;
-            }, ct);
-            if (_root is not { } root) { Post(new { type = "here", ok = false, note = "ゲームデータの中にこの場所のルートが見つかりませんでした" }); return; }
-            var global = (cur.X, cur.Y, cur.Z);
-            var note = "";
-            (double X, double Y, double Z) local;
-            if (!root.Spins) local = root.ToLocal(global);
-            else
-            {
-                var body = BodyRecordOfUuid(root.SpinUuid);
-                if (body == null) { Post(new { type = "here", ok = false, note = "自転する天体が星図に見つからないので、現在位置を出せません" }); return; }
-                var corr = App.Config.MapSpinCorrections;
-                var boxes = (_stationLayout?.Instances ?? new()).Where(i => i.Lo != null && i.Hi != null && i.Hi[0] - i.Lo[0] < HereBoxMax && i.Hi[1] - i.Lo[1] < HereBoxMax && i.Hi[2] - i.Lo[2] < HereBoxMax).ToList();
-                bool InBox((double X, double Y, double Z) q) => boxes.Any(i => q.X >= i.Lo![0] && q.X <= i.Hi![0] && q.Y >= i.Lo[1] && q.Y <= i.Hi[1] && q.Z >= i.Lo[2] && q.Z <= i.Hi[2]);
-                (double X, double Y, double Z)? best = null; double bestDt = 0;
-                for (double k = 0; k <= HereFitSeconds + 1e-9 && best == null; k += HereFitStep)
-                    foreach (var dt in k == 0 ? new[] { 0.0 } : new[] { -k, k })
-                    {
-                        if (root.CorrectedTheta(cur.Utc + dt, body, corr) is not { } th) continue;
-                        var q = root.ToLocal(global, StationIndex.DefaultRule, th);
-                        if (InBox(q)) { best = q; bestDt = dt; break; }
-                    }
-                if (best is { } b) { local = b; if (bestDt != 0) note = $"（取った時刻を {bestDt:+0.00;-0.00} 秒ずらして区画の中に合わせました）"; }
-                else if (root.CorrectedTheta(cur.Utc, body, corr) is { } th0) { local = root.ToLocal(global, StationIndex.DefaultRule, th0); note = "（区画の中に合わせられませんでした。取った時刻のままの位置です）"; }
-                else { Post(new { type = "here", ok = false, note = "自転の角度が分からないので、現在位置を出せません" }); return; }
-            }
-            Post(new { type = "here", ok = true, pos = new[] { local.X, local.Y, local.Z }, note = (status.Length > 0 ? status + " " : "") + note });
+            var r = await LocalOfCurrentAsync();
+            if (r.Error != null) { Post(new { type = "here", ok = false, note = r.Error }); return; }
+            var local = r.Pos!.Value; var note = r.Note;
+            Post(new { type = "here", ok = true, pos = new[] { local.X, local.Y, local.Z }, utc = r.Utc, note = (status.Length > 0 ? status + " " : "") + note,
+                hangar = r.Hangar is { } hs ? new { size = hs.Size, index = hs.Index, dist = Math.Round(hs.Dist) } : null });
+            PostHereMark(r);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -704,6 +722,231 @@ public sealed class StationView3DView : Grid
             Post(new { type = "here", ok = false, note = $"現在位置を出せませんでした: {ex.Message}" });
         }
     }
+
+    // 今の現在位置 (App.Config.MapCurrent) を、この場所の座標にする (前の HereAsync の直し方のまま)。Error が null でなければ出せない理由。Spins: 自転する場所 (自転の補正を当てた)
+    private sealed record HereLocal((double X, double Y, double Z)? Pos, string Note, string? Error, bool Spins, double Utc, HangarHit? Hangar = null);
+    private async Task<HereLocal> LocalOfCurrentAsync()
+    {
+            var cur = App.Config.MapCurrent;
+            if (cur.Utc <= 0) return new HereLocal(null, "", "現在位置がまだありません (［マップ］タブの［現在位置］で取ってください)", false, 0);
+            if (Ship3DExports.CurrentStamp() is not { } stamp) return new HereLocal(null, "", "ゲームの Data.p4k が見つかりません", false, cur.Utc);
+            // 場所のルートを探すのは、場所と Data.p4k の印ごとに 1 回だけ (RootOfAsync。見つからなかったことも覚える。走っている最中に頼まれたら、その 1 本を待つ)
+            _root = await RootOfAsync(_record, stamp);
+            if (_root is not { } root) return new HereLocal(null, "", "ゲームデータの中にこの場所のルートが見つかりませんでした", false, cur.Utc);
+            var fx = FixHere(root, _stationLayout, cur, await SameSystemAsync(_record, cur), out var err);
+            if (fx == null) return new HereLocal(null, "", err ?? "現在位置を出せませんでした", root.Spins, cur.Utc);
+            return new HereLocal(fx.Local, fx.Note, null, root.Spins, cur.Utc, fx.Hangar);
+    }
+
+    // ===== 現在位置の印 (2026-11-05、利用者の指示「3D でも現在位置が欲しい」「これでハンガーの中の位置が 3D で出ると最高」。親の決定 3・4) =====
+    // ビューアへ {type:'hereMark', pos, utc, spin, note} (pos はこの場所の座標)。点がこの場所の外 (区画の置き方の一覧の箱のうち、一辺が HereMarkBoxMax m 未満の
+    // どの箱も、HereMarkMargin m 広げた中に点が無い) なら {type:'hereMark', pos: null} (印を消す)。spin: 自転する場所 (位置が大きくずれることがある)。
+    // (2026-11-05、検証の指摘: 合わせた 1 つの箱にすると Orison は遠くの区画のため 157 × 164 × 12,531 km になった。1 つずつの箱で見る)。
+    // HereAsync が自転する場所で合わせる区画の箱 (HereBoxMax 500 m 未満) は、どれもこの箱 (5,000 m 未満・200 m 広げたもの) に入るので、HereAsync が区画の中に合わせた点には印も出る
+    private const double HereMarkBoxMax = 5000, HereMarkMargin = 200;
+    private void PostHereMark(HereLocal r)
+    {
+        if (_closed) return;
+        if (r.Pos is not { } p) { Post(new { type = "hereMark", pos = (double[]?)null }); return; }
+        // ハンガーの中と判定した点は、本体の側に印を出さない (知らせとボタンだけ。2026-11-05、親の決定)
+        if (r.Hangar is { } hh) { Post(new { type = "hereMark", pos = (double[]?)null, at = new[] { p.X, p.Y, p.Z }, utc = r.Utc, spin = r.Spins, hangar = new { size = hh.Size, index = hh.Index, dist = Math.Round(hh.Dist) } }); return; }
+        var boxes = (_stationLayout?.Instances ?? new()).Where(i => i.Lo != null && i.Hi != null && i.Hi[0] - i.Lo[0] < HereMarkBoxMax && i.Hi[1] - i.Lo[1] < HereMarkBoxMax && i.Hi[2] - i.Lo[2] < HereMarkBoxMax).ToList();
+        bool inside = boxes.Any(i => p.X >= i.Lo![0] - HereMarkMargin && p.X <= i.Hi![0] + HereMarkMargin
+            && p.Y >= i.Lo[1] - HereMarkMargin && p.Y <= i.Hi[1] + HereMarkMargin
+            && p.Z >= i.Lo[2] - HereMarkMargin && p.Z <= i.Hi[2] + HereMarkMargin);
+        // at: 直した点 (印を出さないときも、ハンガーの中のときの知らせ・ハンガーを開くボタンに使う)
+        if (!inside) { Post(new { type = "hereMark", pos = (double[]?)null, at = new[] { p.X, p.Y, p.Z }, utc = r.Utc, hangar = r.Hangar is { } h0 ? new { size = h0.Size, index = h0.Index, dist = Math.Round(h0.Dist) } : null }); return; }
+        Post(new { type = "hereMark", pos = new[] { p.X, p.Y, p.Z }, at = new[] { p.X, p.Y, p.Z }, utc = r.Utc, spin = r.Spins, note = r.Note,
+            hangar = r.Hangar is { } hs ? new { size = hs.Size, index = hs.Index, dist = Math.Round(hs.Dist) } : null });
+    }
+    // 今の現在位置で印を置き直す (取り直さない)。ビューアの {type:'hereMarkGet'} (開いたとき) と、現在位置を取ったとき (NotifyCurrentChanged) から
+    private async Task RefreshHereMarkAsync()
+    {
+        try { var r = await LocalOfCurrentAsync(); PostHereMark(r); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」の現在位置の印を出せませんでした: {ex.Message}"); }
+    }
+    // ===== 現在位置を場所の座標に直す・ハンガーの中か (2026-11-05、利用者の指示「さっき、seraphim で現在位置を押してハンガーって出た」「再調査は時間の無駄」。移植) =====
+    // v2.5.4 (4bfc288) の 2D の地図の処理の移植:
+    //   補正値の選び方 = StationMapPanel.CorrectionsFor (下の CorrectionsFor。そのまま)。
+    //   直し方の順 = StationMapPanel の現在位置 (UpdateCurrent): 自転する場所は CorrectionsFor の補正で取った時刻の角度を出し (無ければ出せない)、
+    //     時刻合わせ (前は StationMapModel.FitStanding = 床の上になる δ、無ければハンガーの中になる δ) をし、local = 合わせた点 ?? 取った時刻の点、
+    //     hangar = 合わせた結果のハンガー ?? (合わせられなかったとき HangarPointAt(local))。
+    //   ハンガーの判定 = StationMapWeb.HangarAt・HangarPointAt (下の HangarAt・HangarPointAt。定数 HangarRadius・HangarDepth・HangarAbove はそのまま)。
+    // 前と違う所 (データが無いため):
+    //   ・時刻合わせの「床の上」は、v2.6.0 で床の形 (2D の地図の階の床の輪) が無くなったので、今の 3D の決まり (区画の箱 HereBoxMax 未満の中) のまま。
+    //   ・HangarPointAt の OnAnyFloor (床の上か) と NearGraph (道順のグラフの節点から MappedNear 30 m 以内か)、FitStanding のハンガー探しの途中の NearGraph の打ち切りは、
+    //     床の形・道順のグラフが今のデータに無いので見ない (2026-11-05、担当が決めた形。版 8 の DB の 6 か所で、乗り場・店・端末の点 1,503 個のどれも HangarAt に入らなかった)
+    internal sealed record HangarHit(int Index, string Size, double Dist);
+    internal sealed record HereFix((double X, double Y, double Z) Local, string Note, HangarHit? Hangar);
+    // StationMapWeb.HangarRadius・HangarDepth・HangarAbove (v2.5.4 の値のまま)
+    private const double HangarRadius = 150, HangarDepth = 150, HangarAbove = 0;
+    // StationMapWeb.FitWindowSeconds・FitStepSeconds (v2.5.4 の値のまま。ハンガーの中になる時刻を探すのに使う)
+    private const double OldFitWindowSeconds = 1.5, OldFitStepSeconds = 0.001;
+    // StationMapWeb.HangarAt の移植: 局所の点が入るハンガーの範囲 (入口から水平に HangarRadius m 以内、高さが入口の HangarDepth m 下から HangarAbove m 上まで。
+    // いくつも当たれば水平にいちばん近い入口)。入口は place_hangars (前の地図の JSON の exterior.hangars と同じく StationTree の exterior の hangar を木の順に。Index はその順の番号)。無ければ null
+    internal static HangarHit? HangarAt((double X, double Y, double Z) p, StationView3D.Layout layout)
+    {
+        HangarHit? best = null; double bd = double.MaxValue;
+        var hs = layout.Place?.Hangars ?? new();
+        for (int i = 0; i < hs.Count; i++)
+        {
+            var h = hs[i].Pos;
+            if (p.Z > h[2] + HangarAbove || p.Z < h[2] - HangarDepth) continue;
+            var d = Math.Sqrt((p.X - h[0]) * (p.X - h[0]) + (p.Y - h[1]) * (p.Y - h[1]));
+            if (d <= HangarRadius && d < bd) { bd = d; best = new HangarHit(i, hs[i].Size, d); }
+        }
+        return best;
+    }
+    // StationMapWeb.HangarPointAt の移植: Hangars.Count == 0 なら null、OnAnyFloor(p) || NearGraph(p, MappedNear) なら null、ほかは HangarAt。
+    //   NearGraph (道順のグラフの節点から MappedNear m 以内) の代わり (2026-11-05、親の決定): 道順のグラフが今のデータに無いので、その場所の本体の中の分かっている点
+    //   (区画の置き方の一覧の DB の、エレベーター・トラムの乗り場 (place_transit の elevator・elevator-noride・tram)・店 (place_shops)・端末 (place_terms) の位置) の
+    //   どれかから MappedNear m 以内 (3D の距離) なら、ハンガーの中としない。
+    //   OnAnyFloor (どれかの階の床の上か) の代わりは入れていない (床の形 (2D の地図の階の床の輪) が今のデータに無いため)
+    private const double MappedNear = 30;   // StationMapWeb.MappedNear (v2.5.4 の値のまま)
+    internal static HangarHit? HangarPointAt((double X, double Y, double Z) p, StationView3D.Layout layout)
+    {
+        if (layout.Place is not { } pl || pl.Hangars.Count == 0) return null;
+        bool Near(double[] q) => (q[0] - p.X) * (q[0] - p.X) + (q[1] - p.Y) * (q[1] - p.Y) + (q[2] - p.Z) * (q[2] - p.Z) <= MappedNear * MappedNear;
+        if (pl.Transit.Any(t => t.Kind is "elevator" or "elevator-noride" or "tram" && Near(t.Pos)) || pl.Shops.Any(s => Near(s.Pos)) || pl.Terms.Any(t => Near(t.Pos))) return null;
+        return HangarAt(p, layout);
+    }
+    // StationMapPanel.CorrectionsFor の移植 (そのまま): 今の現在位置 (時刻 utc) で測り直した補正値 (CurrentLocation.Locate が「点 = 基準の場所の中心」とみなして測ったもの) があれば、
+    // それは使わず、その前の補正値 (CurrentLocation.PreviousCorrections) に差し替える。前の値が無ければ、測り直した値をそのまま使い、note に知らせの文を入れる
+    private static IReadOnlyList<MapSpinCorrection> CorrectionsFor(double utc, string body, out string note)
+    {
+        note = "";
+        var list = App.Config.MapSpinCorrections;
+        if (list.LastOrDefault(c => c.Body == body && double.IsFinite(c.OffsetDeg)) is not { } latest || latest.Utc != utc) return list;
+        MapSpinCorrection? prev;
+        lock (CurrentLocation.PreviousCorrections) CurrentLocation.PreviousCorrections.TryGetValue(body, out prev);
+        if (prev == null || !double.IsFinite(prev.OffsetDeg))
+        {
+            note = "（前の自転の補正値が無いので、今回の点で測った補正値を使っています）";
+            return list;
+        }
+        return list.Where(c => c.Body != body).Append(prev).ToList();
+    }
+    // 移植元 (StationMapPanel の現在位置) の sameSystem: 現在位置の星系 (CurrentLocation.Locate の System) が場所の星系 (木の場所の Root) と同じか。
+    // 木・場所・星系が引けなければ true (移植元の res == null || node == null と同じ)。UI の糸から呼ぶ (［マップ］タブの木を引く)
+    private static async Task<bool> SameSystemAsync(string record, MapCurrentState cur)
+    {
+        try
+        {
+            if (MapPanel.SharedTreeAsync() is not { } tt || await tt is not { } tree) return true;
+            var node = tree.NodeByStarmapRecord(record);
+            var res = CurrentLocation.Locate(tree, (cur.X, cur.Y, cur.Z), cur.Utc, MapPanel.SystemNames, null, fresh: false);
+            return res == null || node == null || res.System == node.Root;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException) { return true; }
+    }
+    // 今の現在位置 (cur) を場所 (root・layout) の座標に直し、ハンガーの中かも決める。直せなければ null (error に理由)。
+    // 3D の［現在位置］・印・［マップ］タブの現在地の文のどれも、この同じ直し方を使う
+    // sameSystem: 現在位置の星系がこの場所の星系か (移植元の sameSystem。違えば時刻合わせもハンガーの判定もしない。SameSystemAsync)
+    internal static HereFix? FixHere(StationRoot root, StationView3D.Layout? layout, MapCurrentState cur, bool sameSystem, out string? error)
+    {
+        error = null;
+        var global = (cur.X, cur.Y, cur.Z);
+        if (!root.Spins)
+        {
+            var l0 = root.ToLocal(global);
+            return new HereFix(l0, "", sameSystem && layout != null ? HangarPointAt(l0, layout) : null);
+        }
+        var body = BodyRecordOfUuid(root.SpinUuid);
+        if (body == null) { error = "自転する天体が星図に見つからないので、現在位置を出せません"; return null; }
+        var corr = CorrectionsFor(cur.Utc, body, out var corrNote);
+        if (root.CorrectedTheta(cur.Utc, body, corr) is not { } th0) { error = "自転の角度が分からないので、現在位置を出せません"; return null; }
+        var p0 = root.ToLocal(global, StationIndex.DefaultRule, th0);
+        if (!sameSystem) return new HereFix(p0, corrNote, null);
+        // (2026-11-05、親の決定) まず、取った時刻のままの点 (δ = 0) がハンガーの範囲に入るかを見る (移植元の第 1 段「床の上」は床の形の中だったが、今の第 1 段の区画の箱は
+        // 床よりずっと広く、ハンガーの点が少しずらした所で区画の箱に入ってしまうため。2026-11-02 の RR_P3_LEO の点)
+        if (layout != null && HangarPointAt(p0, layout) is { } h0) return new HereFix(p0, corrNote, h0);
+        var boxes = (layout?.Instances ?? new()).Where(i => i.Lo != null && i.Hi != null && i.Hi[0] - i.Lo[0] < HereBoxMax && i.Hi[1] - i.Lo[1] < HereBoxMax && i.Hi[2] - i.Lo[2] < HereBoxMax).ToList();
+        bool InBox((double X, double Y, double Z) q) => boxes.Any(i => q.X >= i.Lo![0] && q.X <= i.Hi![0] && q.Y >= i.Lo[1] && q.Y <= i.Hi[1] && q.Z >= i.Lo[2] && q.Z <= i.Hi[2]);
+        // 時刻合わせ: まず区画の中 (今の 3D の決まりのまま: δ = 0 から HereFitStep 秒ずつ − ・ + へ)、無ければハンガーの中 (前の FitStanding のハンガー探し)
+        IEnumerable<double> Deltas() { yield return 0; for (double k = HereFitStep; k <= HereFitSeconds + 1e-9; k += HereFitStep) { yield return -k; yield return k; } }
+        foreach (var dt in Deltas())
+        {
+            if (root.CorrectedTheta(cur.Utc + dt, body, corr) is not { } th) continue;
+            var q = root.ToLocal(global, StationIndex.DefaultRule, th);
+            if (InBox(q)) return new HereFix(q, corrNote + (dt != 0 ? $"（取った時刻を {dt:+0.00;-0.00} 秒ずらして区画の中に合わせました）" : ""), null);
+        }
+        // ハンガーの中になる δ: 前の FitStanding のハンガー探しと同じ刻み (FitStepSeconds 0.001 秒・FitWindowSeconds 1.5 秒) と順 (+ を先に)
+        IEnumerable<double> OldDeltas() { yield return 0; int n = (int)Math.Round(OldFitWindowSeconds / OldFitStepSeconds); for (int k = 1; k <= n; k++) { yield return k * OldFitStepSeconds; yield return -k * OldFitStepSeconds; } }
+        if (layout != null && (layout.Place?.Hangars ?? new()).Count > 0)
+            foreach (var dt in OldDeltas())
+            {
+                if (root.CorrectedTheta(cur.Utc + dt, body, corr) is not { } th) continue;
+                var q = root.ToLocal(global, StationIndex.DefaultRule, th);
+                if (HangarPointAt(q, layout) is { } h) return new HereFix(q, corrNote + (dt != 0 ? $"（取った時刻を {dt:+0.00;-0.00} 秒ずらしてハンガーの中に合わせました）" : ""), h);
+            }
+        return new HereFix(root.ToLocal(global, StationIndex.DefaultRule, th0), corrNote + "（区画の中に合わせられませんでした。取った時刻のままの位置です）", null);
+    }
+    // ［マップ］タブの現在地の文の「・ハンガー（S）」(MapPanel.NearInnerHtml)。今の現在位置 (cur) が場所 record のハンガーの所なら大きさ、そうでない・まだ求めていなければ null。
+    // 求めていなければ裏で求め (ルート・区画の置き方の一覧を読む)、済んだら HangarNoteReady を UI スレッドで知らせる (［マップ］タブが書き直す)
+    public static event Action? HangarNoteReady;
+    private static (string Key, string? Size) s_mapHangar = ("", null);
+    private static string s_mapHangarPending = "";
+    public static string? MapHangarSize(string record, MapCurrentState cur)
+    {
+        if (cur.Utc <= 0 || record.Length == 0) return null;
+        var key = record + "|" + cur.Utc.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        lock (s_views) { if (s_mapHangar.Key == key) return s_mapHangar.Size; if (s_mapHangarPending == key) return null; s_mapHangarPending = key; }
+        var disp = System.Windows.Application.Current?.Dispatcher;
+        var sameTask = SameSystemAsync(record, cur);   // ［マップ］タブの木は UI の糸から引く
+        _ = Task.Run(async () =>
+        {
+            string? size = null;
+            try
+            {
+                if (Ship3DExports.CurrentStamp() is { } stamp && await RootOfAsync(record, stamp) is { } root
+                    && StationView3D.ReadLayoutDb(StationView3DLayout.DbPath, StationView3DLayout.GameKey(stamp), record) is { } lay)
+                {
+                    size = FixHere(root, lay, cur, await sameTask, out _)?.Hangar?.Size;
+                }
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 現在位置がハンガーの所かを求められませんでした: {ex.Message}"); }
+            lock (s_views) { s_mapHangar = (key, size); if (s_mapHangarPending == key) s_mapHangarPending = ""; }
+            if (size != null) disp?.BeginInvoke(() => HangarNoteReady?.Invoke());
+        });
+        return null;
+    }
+    // ［マップ］の現在位置を押したとき (MapPanel.GoHere3DAsync): この 3D で、3D の［現在位置］と同じ出し方 (取り直さない) で現在位置の所を出す。
+    // ページがまだ用意できていなければ (station.json を読んで hereMarkGet を送る前)、用意できたときに出す
+    private bool _hereRequested, _pageReady;
+    public void RequestHere()
+    {
+        _hereRequested = true;
+        if (_pageReady && !_closed) _ = ShowHereNoCaptureAsync();
+    }
+    private async Task ShowHereNoCaptureAsync()
+    {
+        _hereRequested = false;
+        try
+        {
+            var r = await LocalOfCurrentAsync();
+            if (r.Error != null) { Post(new { type = "here", ok = false, note = r.Error }); return; }
+            var local = r.Pos!.Value;
+            Post(new { type = "here", ok = true, pos = new[] { local.X, local.Y, local.Z }, utc = r.Utc, note = r.Note,
+                hangar = r.Hangar is { } hs ? new { size = hs.Size, index = hs.Index, dist = Math.Round(hs.Dist) } : null });
+            PostHereMark(r);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」の現在位置を出せませんでした: {ex}");
+            Post(new { type = "here", ok = false, note = $"現在位置を出せませんでした: {ex.Message}" });
+        }
+    }
+    // 開いている 3D (別ウィンドウ・［マップ］タブ) の一覧
+    private static readonly HashSet<StationView3DView> s_views = new();
+    // 現在位置を取った (［マップ］タブのボタン・自動の取得・3D の［現在位置］)。開いている 3D の印を置き直す (見ている所・歩くモードは動かさない)。どのスレッドから呼んでもよい (3D の UI スレッドで置き直す)
+    public static void NotifyCurrentChanged()
+    {
+        List<StationView3DView> list; lock (s_views) list = s_views.ToList();
+        foreach (var v in list) if (!v._closed && v._started) _ = v.Dispatcher.InvokeAsync(() => v.RefreshHereMarkAsync());
+    }
+
 
     // 自転する天体の uuid → 星図の record 名 (gamedata_cache.db の starmap_locations を読み取り専用で引く)。引けなければ null
     private static string? BodyRecordOfUuid(string uuid)
@@ -749,7 +992,7 @@ public sealed class StationView3DView : Grid
         {
             using var index = StationIndex.Build(stamp.Path, ct);
             var layout = StationView3D.LayoutOf(index, StationTree.Load(index, StationHangars.RootOf(record), contents: true, ct: ct));
-            StationView3D.PutLayoutDb(db, key, record, layout);
+            StationView3D.PutLayoutDb(db, key, record, layout, index.P4kPath);   // 場所のパレットの色・材質の差し替え (look_*) も、まだ無い socpak の分を足す (2026-11-05)
             return layout;
         }
     }
@@ -990,7 +1233,8 @@ internal static class StationView3DLayout
                 var par = Math.Min(LayoutParallelMax, Ship3DExports.MaxParallelExports().Limit);
                 var res = StationView3D.BuildLayoutDb(DbPath, key, index, roots, (d, n) => { Volatile.Write(ref _done, d); Volatile.Write(ref _total, n); }, ct, par,
                     c => { while (Ship3DExports.CpuHighNow) Task.Delay(1000, c).Wait(c); }, f => JobProgress(job, f),
-                    fillLog: m => App.AppendStartupLog(App.Config.WorkingDirectory, $"[床の補い] {m}"));
+                    fillLog: m => App.AppendStartupLog(App.Config.WorkingDirectory, $"[床の補い] {m}"),
+                    roofLog: m => App.AppendStartupLog(App.Config.WorkingDirectory, $"[屋根の扉] {m}"));
                 Log($"並べた数 {par}");
                 Log($"一括で作りました: 場所 {res.Places}・置かれた所 {res.Instances}・socpak {res.Socpaks}・{res.Bytes / 1024} KB・{res.Seconds:F1} 秒" +
                     (res.Failed.Count > 0 ? $"。作れなかった場所 {res.Failed.Count}: {string.Join(" / ", res.Failed)}" : ""));

@@ -72,6 +72,9 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        // ［所持船］の表の行を入れ替えたら (どこで入れ替えても)、塗装の欄の候補を裏で読んで入れる (FillMyShipPaintsAsync。2026-11-05)
+        DependencyPropertyDescriptor.FromProperty(ItemsControl.ItemsSourceProperty, typeof(DataGrid))
+            .AddValueChanged(dgMyShips, (_, _) => _ = FillMyShipPaintsAsync());
         // 窓が前面に来たら「<版> <チャンネル> を読み取る」ボタンの表示を更新する (build_manifest.id を読むだけ)
         Activated += (_, _) => UpdateExtractButton();
         // 船の積載量 (SCU) の共通の関数 (ゲームデータ → UEX → Ship Matrix) が使う作業ディレクトリと UEX の船データ
@@ -568,11 +571,16 @@ public partial class MainWindow : Window
     private async void Translate_Click(object sender, RoutedEventArgs e) => await RunPipeline("translate");
     private async void Apply_Click(object sender, RoutedEventArgs e)
     {
-        // ゲーム内の名前に付ける印を選んでから反映する
+        // 日本語化の適応範囲 (全て翻訳／一部翻訳) と、ゲーム内の名前に付ける印を選んでから反映する
         if (!_running)
         {
+            var scopeDlg = new TranslationScopeDialog(App.Config.PartialTranslation, App.Config.PartialTranslationUnchecked) { Owner = this };
+            if (scopeDlg.ShowDialog() != true) return;
             var dlg = new InGameMarksDialog(App.Config.EquipmentClassMarks, App.Config.MissionReputationMarks, App.Config.BlueprintMissionMarks) { Owner = this };
             if (dlg.ShowDialog() != true) return;
+            // 適応範囲は、印のダイアログで［実行］を押したときに印と一緒に設定へ入れる (印のダイアログでやめたら変えない)
+            App.Config.PartialTranslation = scopeDlg.PartialTranslation;
+            App.Config.PartialTranslationUnchecked = scopeDlg.UncheckedCategories;
             App.Config.EquipmentClassMarks = dlg.EquipmentClassMarks;
             App.Config.MissionReputationMarks = dlg.MissionReputationMarks;
             App.Config.BlueprintMissionMarks = dlg.BlueprintMissionMarks;
@@ -792,7 +800,8 @@ public partial class MainWindow : Window
                     var merged = IniMerger.Merge(english, japanese, TranslatedPath,
                         App.Config.ForceEnglishPatterns, DbPath, glossary,
                         Path.Combine(WorkDir, "gamedata_cache.db"), App.Config.MissionReputationMarks,
-                        App.Config.EquipmentClassMarks, App.Config.BlueprintMissionMarks);
+                        App.Config.EquipmentClassMarks, App.Config.BlueprintMissionMarks,
+                        TranslationScope.UntranslatedCategories(App.Config));
                     GlobalIniParser.Write(OutputPath, merged);
                     appliedMerged = merged;
                     Log($"出力: {OutputPath} ({new FileInfo(OutputPath).Length:N0} bytes)");
@@ -1940,6 +1949,8 @@ public partial class MainWindow : Window
                 App.Config.EquipmentClassMarks,
                 App.Config.BlueprintMissionMarks,
                 App.Config.MissionReputationMarks,
+                App.Config.PartialTranslation,
+                App.Config.PartialTranslationUnchecked,
                 App.Config.ArmisticeSoundEnabled,
                 App.Config.ArmisticeSoundPath,
                 App.Config.ArrivalSoundEnabled,
@@ -1969,8 +1980,10 @@ public partial class MainWindow : Window
                 App.Config.Ship3DFolder,
                 App.Config.Ship3DMaxMB,
                 App.Config.Ship3DNoSave,
+                App.Config.Ship3DPalette,
                 App.Config.Station3DCacheMaxGB,
                 App.Config.Station3DTextureMaxPx,
+                App.Config.Station3DDebugView,
                 App.Config.AutoUpdateEnabled,
                 App.Config.AutoUpdateTime,
                 App.Config.ExtractedBuildVersion,
@@ -4756,13 +4769,14 @@ public partial class MainWindow : Window
 
     private void LoadoutDefaultName_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if (e.ClickCount == 2 && (sender as FrameworkElement)?.DataContext is LoadoutRow row && row.DefaultItemRecord.Length > 0)
+        // 塗装の行は何もしない (塗装の品は［詳細］のデータ (item_index・items) に無く、「品目が見つかりませんでした。」になるため。2026-11-05)
+        if (e.ClickCount == 2 && (sender as FrameworkElement)?.DataContext is LoadoutRow row && row.DefaultItemRecord.Length > 0 && row.PortKey != ShipPaints.PortName)
             DetailPanel.Request(row.DefaultItemRecord, row.DefaultItemName);
     }
 
     private void LoadoutCurrentName_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if (e.ClickCount == 2 && (sender as FrameworkElement)?.DataContext is LoadoutRow row && row.EffectiveItemRecord.Length > 0)
+        if (e.ClickCount == 2 && (sender as FrameworkElement)?.DataContext is LoadoutRow row && row.EffectiveItemRecord.Length > 0 && row.PortKey != ShipPaints.PortName)
             DetailPanel.Request(row.EffectiveItemRecord, row.EffectiveItemName);
     }
 
@@ -6382,6 +6396,8 @@ public partial class MainWindow : Window
 
         // ツールチップは初回表示時に生成 (所持船→保有船インスタンスの選び方は OpenLoadout_Click と同じ FindHangarRowForMyShip)
         var hangarRow = FindHangarRowForMyShip(row);
+        // 塗装の欄の保存のキー (［装備］ボタン ResolveLoadoutChoiceForMyShip と同じ船を指す)
+        row.ShipKey = hangarRow?.InstanceKey ?? $"my|{e.Id}";
         if (hangarRow != null)
         {
             row.TooltipSource = hangarRow.TooltipSource;   // 保有船の行と同じもの (作った文も同じく覚える)
@@ -8050,7 +8066,9 @@ public partial class MainWindow : Window
             ship.Record ??= res.Record;   // 解決した record は船セレクタの項目に覚える (UI のスレッドで書く)
             dgLoadout.ItemsSource = res.Rows;
             _loadoutShownShipKey = ship.ShipKey;
-            txtLoadoutStatus.Text = $"{ship.Name}: 搭載枠 {res.Rows.Count} / 設定済 {res.Rows.Count(r => r.IsCustom)}";
+            // 搭載枠の数に塗装の行は数えない
+            var portRows = res.Rows.Where(r => r.PortKey != ShipPaints.PortName).ToList();
+            txtLoadoutStatus.Text = $"{ship.Name}: 搭載枠 {portRows.Count} / 設定済 {portRows.Count(r => r.IsCustom)}";
         }
         finally
         {
@@ -8078,6 +8096,9 @@ public partial class MainWindow : Window
                 var rows = h.GetShipLoadout(shipKey, rec, equip, throwIfBusy: true)
                     .Select(p => MakeLoadoutRow(p, rec, mine, equip))
                     .ToList();
+                // 塗装の行 (付けられる塗装がある船だけ。表のいちばん下)
+                token.ThrowIfCancellationRequested();
+                if (MakePaintLoadoutRow(h.LoadLoadout(shipKey), rec) is { } paintRow) rows.Add(paintRow);
                 return new LoadoutLoad { Record = rec, Rows = rows };
             });
         }
@@ -8151,6 +8172,50 @@ public partial class MainWindow : Window
         return row;
     }
 
+    // ［装備］の表の塗装の行 (2026-11-05、利用者の指示「船舶の持っているリストのオプションに塗装も出して」)。裏のスレッドで呼ぶ。
+    // 塗装の口 (ShipPaints.PortName) は ship_ports に無いので、ほかの口とは別に作る。候補は「標準」(保存なし = 既定のロードアウトのまま) と、
+    // その船に付けられる塗装 (ShipPaints.ListFor。英語名の順)。付けられる塗装が無い船 (別の型の塗装の船を含む) は null (行を出さない)。
+    // 選ぶとほかの口と同じく LoadoutItem_Changed で ship_loadouts に保存する (「標準」なら行を消す)
+    internal static LoadoutRow? MakePaintLoadoutRow(Dictionary<string, string> loadout, string shipRecordName)
+    {
+        var list = ShipPaints.ListFor(shipRecordName);
+        if (list.Count == 0) return null;
+        const string prefix = "EntityClassDefinition.";
+        var def = ShipPaints.DefaultPaintOf(shipRecordName);
+        var defPaint = def == null ? null : list.FirstOrDefault(p => p.Record.Equals(def, StringComparison.OrdinalIgnoreCase));
+        var row = new LoadoutRow
+        {
+            PortName = ShipPaints.PortName,
+            PortKey = ShipPaints.PortName,
+            ItemType = "Paints",
+            TypeDisplay = "塗装",
+            PortDisplay = "塗装",
+            DefaultItemRecord = def == null ? "" : prefix + def,
+            DefaultItemName = def == null ? "標準" : defPaint != null ? ShipPaints.DisplayName(defPaint) : def,
+            ChoiceToolTip = "この船に付けられる塗装が候補になります。選ぶとすぐ保存し、次にこの船の 3D を開いたときの初めの塗装になります (［所持船］の表の塗装の欄と同じ値)。「標準」は既定のままです",
+        };
+        var standard = new LoadoutChoice { IsDefault = true, ItemRecord = "", Display = "標準" };
+        row.Candidates.Add(standard);
+        foreach (var p in list)
+            row.Candidates.Add(new LoadoutChoice { ItemRecord = prefix + p.Record, ItemName = ShipPaints.DisplayName(p), Display = ShipPaints.DisplayName(p) });
+        row.SelectedChoice = standard;
+        if (loadout.TryGetValue(ShipPaints.PortName, out var saved) && saved.Length > 0)
+        {
+            row.CurrentItemRecord = saved;
+            var cur = row.Candidates.Skip(1).FirstOrDefault(c => c.ItemRecord.Equals(saved, StringComparison.OrdinalIgnoreCase));
+            if (cur == null)
+            {
+                // 今この船に付けられない塗装 (パッチで無くなった等) はそのまま出す (ほかの口の「所持リストに無し」と同じ扱い)
+                var name = saved.StartsWith(prefix, StringComparison.Ordinal) ? saved[prefix.Length..] : saved;
+                cur = new LoadoutChoice { ItemRecord = saved, ItemName = name, Display = $"{name} (この船に付けられない塗装)" };
+                row.Candidates.Insert(1, cur);
+            }
+            row.CurrentItemName = cur.ItemName;
+            row.SelectedChoice = cur;
+        }
+        return row;
+    }
+
     // 装備グリッドの ComboBox。ItemsSource 再代入時にも発火するので、値が同じなら何もしない
     private void LoadoutItem_Changed(object sender, SelectionChangedEventArgs e)
     {
@@ -8167,11 +8232,21 @@ public partial class MainWindow : Window
             _hangarService.SetLoadoutItem(ship.ShipKey, row.PortKey, choice.IsDefault ? null : choice.ItemRecord,
                 row.HasReplaceableChildren, row.EffectiveItemRecord, row.DefaultItemRecord);
             row.SelectedChoice = choice;
+            // 塗装の行なら、［所持船］の表の塗装の欄の覚えも合わせる (表を作り直したとき古い値を先に出さないように)
+            if (row.PortKey == ShipPaints.PortName && _myShipPaintData is { } pd)
+            {
+                if (choice.IsDefault) pd.Saved.Remove(ship.ShipKey);
+                else pd.Saved[ship.ShipKey] = Ship3DExports.ShortName(choice.ItemRecord);
+            }
             Log($"[Equip] {ship.Name} {row.PortKey}: {(choice.IsDefault ? "デフォルトに戻す" : choice.Display)}");
             LoadUpgradeData();   // ツールチップを更新 (内部で RefreshLoadoutShipCombo → RefreshLoadoutGrid)
         }
         catch (Exception ex)
         {
+            // 保存できなければ、欄を前の値に戻す (戻すときは保存しない。2026-11-05)
+            _suppressLoadoutEvents = true;
+            try { combo.SelectedItem = row.SelectedChoice; }
+            finally { _suppressLoadoutEvents = false; }
             MessageBox.Show($"装備の保存に失敗しました: {ex.Message}", "エラー");
         }
     }
@@ -8536,8 +8611,160 @@ public partial class MainWindow : Window
             }
         }
         catch (Exception ex) { Log($"[Ship] 詳細の品目を決められませんでした ({my.Name}): {ex.Message}"); record = null; }
-        if (record != null) DetailPanel.Request(record, my.Name);
+        if (record != null)
+        {
+            // この［詳細］の表示から 3D を開いたときの初めの塗装を、この所持船の塗装にする (2026-11-05)
+            DetailPanel.Request(record, my.Name, my.ShipKey.Length > 0 ? my.ShipKey : null);
+        }
         else DetailPanel.RequestSearch(my.Name);
+    }
+
+    // ［所持船］の表の塗装の欄 (2026-11-05、利用者の指示「所持船のリストでも自分の持っている塗装をリスト選択で自動保存して ３D の表示時にデフォルトとして適応できるようにしてほしい」)。
+    // 行ごとに、船の record を決め (船名と Ship Matrix のメーカーで ResolveShipRecordName。［装備］の所持船の項目と同じ)、候補を作る:
+    //   「標準」(保存なし)、持っている塗装 (My Hangar の同期の塗装のうち名前が合うもの。ShipPaints.Owned) を「★ 」付きで上に、その下にほかの付けられる塗装。
+    // 今の値は ship_loadouts の塗装の口 (行の ShipKey。［装備］の表の塗装の行と同じ値)。DB の読み出しと一覧は裏のスレッド (初回の一覧は数秒かかる)。
+    // 一度読んだもの (船名ごとの付けられる塗装・持っている塗装・保存した塗装。_myShipPaintData) は覚えておき、表を作り直したときはそれで先に埋め (空の欄を見せない)、
+    // そのうえで毎回裏で読み直して、違っていたら入れ替える (My Hangar の同期・装備データの再抽出の後も、表を作り直したときの読み直しで新しくなる)
+    private sealed class MyShipPaintData
+    {
+        public readonly Dictionary<string, IReadOnlyList<ShipPaints.Paint>> Lists = new(StringComparer.OrdinalIgnoreCase);   // 船名 → 付けられる塗装 (record が決まらない船は空)
+        public HashSet<string> Owned = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, string> Saved = new(StringComparer.Ordinal);   // ship_key → 保存した塗装 (品の短い名前)
+    }
+    private MyShipPaintData? _myShipPaintData;
+    private int _myShipPaintVersion;
+
+    // 1 行の候補と、今の値 (保存した塗装。無ければ「標準」)。付けられる塗装が無ければ候補は空 (選べない)
+    internal static (List<LoadoutChoice> Choices, LoadoutChoice? Selected) BuildMyShipPaintChoices(IReadOnlyList<ShipPaints.Paint>? list, ISet<string> owned, string? savedPaint)
+    {
+        const string prefix = "EntityClassDefinition.";
+        if (list == null || list.Count == 0) return (new List<LoadoutChoice>(), null);
+        var standard = new LoadoutChoice { IsDefault = true, ItemRecord = "", Display = "標準" };
+        var choices = new List<LoadoutChoice> { standard };
+        foreach (var p in list.Where(p => owned.Contains(p.Record)))
+            choices.Add(new LoadoutChoice { ItemRecord = prefix + p.Record, ItemName = ShipPaints.DisplayName(p), Display = "★ " + ShipPaints.DisplayName(p) });
+        foreach (var p in list.Where(p => !owned.Contains(p.Record)))
+            choices.Add(new LoadoutChoice { ItemRecord = prefix + p.Record, ItemName = ShipPaints.DisplayName(p), Display = ShipPaints.DisplayName(p) });
+        var sel = standard;
+        if (!string.IsNullOrEmpty(savedPaint))
+        {
+            sel = choices.Skip(1).FirstOrDefault(c => c.ItemRecord.Equals(prefix + savedPaint, StringComparison.OrdinalIgnoreCase))
+                ?? new LoadoutChoice { ItemRecord = prefix + savedPaint, ItemName = savedPaint, Display = $"{savedPaint} (この船に付けられない塗装)" };
+            if (!choices.Contains(sel)) choices.Insert(1, sel);
+        }
+        return (choices, sel);
+    }
+
+    // 行の欄の中身を比べるための文字 (候補の並びと今の値)
+    private static string PaintSignature(List<LoadoutChoice> choices, LoadoutChoice? sel) =>
+        string.Join("\n", choices.Select(c => c.ItemRecord + "|" + c.Display)) + "#" + (sel?.ItemRecord ?? "-");
+
+    // 覚えたものから行の欄を入れる。changedOnly なら中身が今と違う行だけ入れ替える
+    private void ApplyMyShipPaints(List<MyShipRow> rows, MyShipPaintData data, bool changedOnly)
+    {
+        _suppressMyShipPaintEvents = true;
+        try
+        {
+            foreach (var row in rows)
+            {
+                if (!data.Lists.TryGetValue(row.Name, out var list)) continue;
+                var (choices, sel) = BuildMyShipPaintChoices(list, data.Owned, row.ShipKey.Length > 0 ? data.Saved.GetValueOrDefault(row.ShipKey) : null);
+                if (changedOnly && PaintSignature(choices, sel) == PaintSignature(row.PaintChoices, row.SelectedPaint)) continue;
+                row.PaintChoices = choices;   // 候補を先に入れてから、選んでいるものを入れる
+                row.SelectedPaint = sel;
+            }
+        }
+        finally { _suppressMyShipPaintEvents = false; }
+    }
+
+    private async Task FillMyShipPaintsAsync()
+    {
+        if (dgMyShips.ItemsSource is not IEnumerable<MyShipRow> src) return;
+        var rows = src.ToList();
+        if (rows.Count == 0) return;
+        var version = ++_myShipPaintVersion;
+        // 覚えがあれば先に入れる (空の欄を見せない)
+        if (_myShipPaintData is { } known) ApplyMyShipPaints(rows, known, changedOnly: false);
+        var workDir = WorkDir;
+        var names = rows.Select(r => r.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        MyShipPaintData data;
+        try
+        {
+            data = await Task.Run(() =>
+            {
+                var d = new MyShipPaintData { Owned = ShipPaints.Owned(workDir).Records, Saved = ShipPaints.SavedByKey(workDir) };
+                var h = new HangarService();
+                h.SetCacheDir(workDir);
+                foreach (var name in names)
+                {
+                    var rec = h.ResolveShipRecordNameReadOnly(name, h.ResolveShipReadOnly(name)?.ManufacturerName);
+                    d.Lists[name] = rec == null ? [] : ShipPaints.ListFor(rec);
+                }
+                return d;
+            });
+        }
+        catch (Exception ex)
+        {
+            Log($"[Ship] 所持船の塗装の欄を読み込めませんでした: {ex.Message}");
+            return;
+        }
+        if (version != _myShipPaintVersion) return;   // 表が入れ替わった (新しい読み込みが入れる)
+        _myShipPaintData = data;
+        ApplyMyShipPaints(rows, data, changedOnly: true);
+    }
+
+    private bool _suppressMyShipPaintEvents;
+
+    // 同じ ship_key の行 (同じ船を 2 隻以上持っているとき、どれも同じ保有船インスタンスのキーになる) の今の値を、保存した値 (itemRecord。null なら標準) に合わせる
+    internal static void SyncMyShipPaintRows(IEnumerable<MyShipRow> rows, string shipKey, string? itemRecord)
+    {
+        foreach (var r in rows)
+        {
+            if (r.ShipKey != shipKey || r.PaintChoices.Count == 0) continue;
+            var sel = itemRecord == null ? r.PaintChoices.FirstOrDefault(c => c.IsDefault)
+                : r.PaintChoices.FirstOrDefault(c => !c.IsDefault && c.ItemRecord.Equals(itemRecord, StringComparison.OrdinalIgnoreCase));
+            if (sel != null) r.SelectedPaint = sel;
+        }
+    }
+
+    // 塗装の欄を選び直した: すぐ ship_loadouts の塗装の口に保存する (「標準」なら行を消す)。開いている 3D は変えない (次に開いたときから)。
+    // 保存できなければ、欄を前の値に戻す (戻すときは保存しない)
+    private void MyShipPaint_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressMyShipPaintEvents) return;
+        if (sender is not ComboBox combo || combo.DataContext is not MyShipRow row) return;
+        if (combo.SelectedItem is not LoadoutChoice choice || ReferenceEquals(choice, row.SelectedPaint) || row.ShipKey.Length == 0) return;
+        var item = choice.IsDefault ? null : choice.ItemRecord;
+        try
+        {
+            _hangarService.SetCacheDir(WorkDir);
+            _hangarService.SetLoadoutItem(row.ShipKey, ShipPaints.PortName, item);
+        }
+        catch (Exception ex)
+        {
+            _suppressMyShipPaintEvents = true;
+            try { combo.SelectedItem = row.SelectedPaint; }
+            finally { _suppressMyShipPaintEvents = false; }
+            MessageBox.Show($"塗装の保存に失敗しました: {ex.Message}", "エラー");
+            return;
+        }
+        // 覚えと、同じ ship_key のほかの行も合わせる
+        if (_myShipPaintData is { } d)
+        {
+            const string prefix = "EntityClassDefinition.";
+            if (item == null) d.Saved.Remove(row.ShipKey);
+            else d.Saved[row.ShipKey] = item.StartsWith(prefix, StringComparison.Ordinal) ? item[prefix.Length..] : item;
+        }
+        _suppressMyShipPaintEvents = true;
+        try
+        {
+            row.SelectedPaint = choice;
+            if (dgMyShips.ItemsSource is IEnumerable<MyShipRow> all) SyncMyShipPaintRows(all.Where(r => !ReferenceEquals(r, row)), row.ShipKey, item);
+        }
+        finally { _suppressMyShipPaintEvents = false; }
+        Log($"[Equip] {row.Name} 塗装: {(choice.IsDefault ? "標準に戻す" : choice.ItemName)}");
+        // ［装備］の表が同じ船を出していれば読み直す (塗装の行に同じ値を出す)
+        if (_loadoutShownShipKey == row.ShipKey) RefreshLoadoutGrid();
     }
 
     // 販売中の船 (RSI ストア) の「船/商品」列 (2 列目) のダブルクリック: ［詳細］タブで開く
@@ -9616,8 +9843,20 @@ public class UpgradeShipRow
 
 // 所持船 (交易用) グリッドの 1 行。MyShipEntry の写し + 同期済み保有船 (Hangar) との照合結果。
 // 交易タブ (cmbTradeShip) は MyShipEntry をそのまま使うので、こちらは表示専用
-public class MyShipRow
+public class MyShipRow : INotifyPropertyChanged
 {
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    // 塗装の欄 (2026-11-05、利用者の指示「所持船のリストでも自分の持っている塗装をリスト選択で自動保存して ３D の表示時にデフォルトとして適応できるようにしてほしい」)。
+    // ShipKey: この所持船の ship_loadouts のキー (［装備］ボタンと同じ選び方: 同じ船の保有船インスタンス、無ければ "my|{id}")。
+    // 候補 (PaintChoices) は裏で読んでから入れる (MainWindow.FillMyShipPaintsAsync)。付けられる塗装が無い船は空で選べない
+    public string ShipKey { get; set; } = "";
+    private List<LoadoutChoice> _paintChoices = new();
+    public List<LoadoutChoice> PaintChoices { get => _paintChoices; set { _paintChoices = value; PropertyChanged?.Invoke(this, new(nameof(PaintChoices))); PropertyChanged?.Invoke(this, new(nameof(HasPaints))); } }
+    private LoadoutChoice? _selectedPaint;
+    public LoadoutChoice? SelectedPaint { get => _selectedPaint; set { _selectedPaint = value; PropertyChanged?.Invoke(this, new(nameof(SelectedPaint))); } }
+    public bool HasPaints => _paintChoices.Count > 1;
+
     public int Id { get; set; }
     public string Name { get; set; } = "";
     public string Manufacturer { get; set; } = "";
@@ -9704,6 +9943,8 @@ public class LoadoutRow : ShipPortLoadout
     public List<LoadoutChoice> Candidates { get; set; } = new();
     public LoadoutChoice? SelectedChoice { get; set; }
     public bool HasCandidates => Candidates.Count > 1;      // 「(デフォルトに戻す)」以外に候補があるか
+    // 「装備を設定」の ComboBox の説明 (塗装の行は MakePaintLoadoutRow が塗装の説明にする)
+    public string ChoiceToolTip { get; set; } = "所持コンポーネントのうち同じ種別・搭載枠 Size 以下・使用可のものが候補になります";
 }
 
 // 所持コンポーネント (dgMyComponents) の表示行。MyComponent を包み、Usable の変更を OnUsableChanged 経由で DB へ書き戻す

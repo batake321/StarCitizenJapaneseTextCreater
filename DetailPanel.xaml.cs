@@ -32,7 +32,21 @@ public partial class DetailPanel : UserControl
 {
     // 表から［詳細］を開く要求 (record 名。無ければ null、名前)。MainWindow が受ける
     public static event Action<string?, string>? Requested;
-    public static void Request(string? record, string name) => Requested?.Invoke(string.IsNullOrWhiteSpace(record) ? null : record, name ?? "");
+    public static void Request(string? record, string name) => Request(record, name, null);
+    // shipKey: どの所持船の詳細か (ship_loadouts のキー。［所持船］の行から開いたとき)。この詳細の表示から開いた船の 3D は、その所持船の塗装で開く (2026-11-05)。
+    // 頼みの品 (record) と組で覚え、ShowItem がその品を出すときだけ使う (ほかの道で詳細を出したら捨てる。LoadDetailAsync)
+    private static (string Record, string Key)? s_requestShipKey;
+    public static void Request(string? record, string name, string? shipKey)
+    {
+        var rec = string.IsNullOrWhiteSpace(record) ? null : record;
+        s_requestShipKey = rec != null && shipKey != null ? (rec, shipKey) : null;
+        Requested?.Invoke(rec, name ?? "");
+    }
+    // 今の詳細の表示の所持船 (品と ship_key)。次に出す詳細で使うもの (_ownedNext) は ShowItem が入れ、LoadDetailAsync が今のものにする (入っていなければ消す)
+    private (string Record, string Key)? _ownedShip, _ownedNext;
+    // 今の詳細の表示が、その品の所持船から開いたものなら、その ship_key
+    private string? OwnedShipKeyFor(string record) =>
+        _ownedShip is { } o && string.Equals(o.Record, record, StringComparison.OrdinalIgnoreCase) ? o.Key : null;
     // 名前欄にその名前を入れて検索した状態で［詳細］を開く要求 (名前)。MainWindow が受ける
     public static event Action<string>? SearchRequested;
     public static void RequestSearch(string name) => SearchRequested?.Invoke(name ?? "");
@@ -280,6 +294,9 @@ public partial class DetailPanel : UserControl
     // record が無ければ名前で検索し、名前が同じ (大文字小文字無視) 候補、無ければ最初の候補を出す
     public async void ShowItem(string? record, string name)
     {
+        // 所持船から開いた頼みなら、その品の詳細を出すときにその所持船を覚える (ほかの頼みでは覚えない)
+        _ownedNext = s_requestShipKey is { } rk && record != null && string.Equals(rk.Record, record, StringComparison.OrdinalIgnoreCase) ? rk : null;
+        s_requestShipKey = null;
         PushHistory(CaptureState());
         _searchTimer.Stop();
         SetQueryAndCategoryAll(name);
@@ -882,6 +899,9 @@ public partial class DetailPanel : UserControl
     // 品目の詳細の【販売場所】の店は、shop_price_links で店に結べた行だけお店の詳細へのリンクにする (ShopTree を作れなければリンク無し)
     private async Task LoadDetailAsync(string record)
     {
+        // 詳細の表示 1 回分だけ、所持船を覚える (ShowItem が入れた頼みの品のときだけ。ほかの道 (一覧・検索・履歴・リンク) で出したら捨てる)
+        _ownedShip = _ownedNext is { } on && string.Equals(on.Record, record, StringComparison.OrdinalIgnoreCase) ? on : null;
+        _ownedNext = null;
         var version = ++_detailVersion;
         _detailRecord = record;
         var status = txtStatus.Text;
@@ -1101,7 +1121,9 @@ public partial class DetailPanel : UserControl
         var shortName = Ship3DExports.ShortName(record);
         if (_thumbError is { } old && string.Equals(old.Record, record, StringComparison.OrdinalIgnoreCase)) _thumbError = null;
         byte[]? png = null;
-        if (_thumbMemory.TryGetValue(shortName, out var remembered) && ex.StateOf(record) == Ship3DCacheState.None && Ship3DExports.NoSave) png = remembered;
+        // 覚えた絵は色付けの設定ごとに分ける (保存しない設定の GLB は今の版で書かれるので、版では分けない)
+        var memoryKey = App.Config.Ship3DPalette ? shortName : shortName + "|" + ShipPaints.IdNoPalette;
+        if (_thumbMemory.TryGetValue(memoryKey, out var remembered) && ex.StateOf(record) == Ship3DCacheState.None && Ship3DExports.NoSave) png = remembered;
         if (png == null)
         {
             var path = await ViewPathAsync(record, name, quiet: true);
@@ -1116,7 +1138,10 @@ public partial class DetailPanel : UserControl
                 return;
             }
             if (!string.Equals(record, _ship3DRecord, StringComparison.OrdinalIgnoreCase)) return;
-            var thumbPath = Ship3DExports.ThumbPath(path);
+            // 色付けを切っている・GLB が古い版の材質の決め方で書かれているときは、その材質の表を当てた絵を別の名前で持つ (ShipPaints.ThumbTableId・ThumbPath。2026-11-05、親の決定)。
+            // どちらでもなければ今までどおり GLB の横の .png
+            var tableId = await Task.Run(() => ShipPaints.ThumbTableId(path));
+            var thumbPath = tableId == null ? Ship3DExports.ThumbPath(path) : ShipPaints.ThumbPath(path, shortName, tableId);
             try
             {
                 if (File.Exists(thumbPath) && File.GetLastWriteTimeUtc(thumbPath) >= File.GetLastWriteTimeUtc(path)) png = await File.ReadAllBytesAsync(thumbPath);
@@ -1126,13 +1151,24 @@ public partial class DetailPanel : UserControl
             {
                 // 描いている間はその GLB を「表示中」にして消されないようにする (保存しない設定の一時ファイルも)
                 ex.AcquireView(shortName);
-                try { png = await RenderThumbAsync(shortName, path); }
+                string? table = null;
+                try
+                {
+                    if (tableId != null)
+                    {
+                        // 表を作れなければ GLB の材質のまま描き、その絵は保存しない (次に開いたときにまた作る)
+                        try { table = await ShipPaints.GetTableAsync(shortName, path, tableId); }
+                        catch (Exception e) { AppendAppLog($"[3D モデル] 「{shortName}」の絵に当てる材質の表 ({tableId}) を作れませんでした (GLB の材質のまま描きます): {e.Message}"); }
+                    }
+                    png = await RenderThumbAsync(shortName, path, table);
+                }
                 finally { ex.ReleaseView(shortName); }
                 if (png == null) return;
-                try { await File.WriteAllBytesAsync(thumbPath, png); }
+                if (tableId == null || table != null)
+                    try { Directory.CreateDirectory(Path.GetDirectoryName(thumbPath)!); await File.WriteAllBytesAsync(thumbPath, png); }
                 catch (Exception e) { AppendAppLog($"[3D モデル] 絵 {Path.GetFileName(thumbPath)} を書けませんでした: {e.Message}"); }
             }
-            _thumbMemory[shortName] = png;
+            _thumbMemory[memoryKey] = png;
         }
         if (!string.Equals(record, _ship3DRecord, StringComparison.OrdinalIgnoreCase)) return;
         _thumb = (record, "data:image/png;base64," + Convert.ToBase64String(png));
@@ -1140,7 +1176,8 @@ public partial class DetailPanel : UserControl
     }
 
     // 隠した WebView2 (webThumb) でビューアを ?thumb=1 で開き、描いた PNG を受け取る。描けなければ null (理由はログ)。1 つずつ描く
-    private async Task<byte[]?> RenderThumbAsync(string shortName, string glbPath)
+    // tablePath: 当てる材質の表 (無ければ GLB の材質のまま)
+    private async Task<byte[]?> RenderThumbAsync(string shortName, string glbPath, string? tablePath = null)
     {
         await _thumbGate.WaitAsync();
         try
@@ -1171,7 +1208,7 @@ public partial class DetailPanel : UserControl
             _thumbTcs = tcs;
             try
             {
-                Ship3DWeb.ShowThumb(webThumb, shortName, glbPath);
+                Ship3DWeb.ShowThumb(webThumb, shortName, glbPath, tablePath);
                 var done = await Task.WhenAny(tcs.Task, Task.Delay(ThumbRenderTimeoutMs));
                 if (done != tcs.Task) { AppendAppLog($"[3D モデル] 「{shortName}」の絵が {ThumbRenderTimeoutMs / 1000} 秒たっても描けなかったのでやめました"); return null; }
                 var dataUrl = tcs.Task.Result;
@@ -1223,7 +1260,7 @@ public partial class DetailPanel : UserControl
         var owner = Window.GetWindow(this);
         try
         {
-            var win = new Ship3DWindow(record, name);
+            var win = new Ship3DWindow(record, name, OwnedShipKeyFor(record));
             if (owner != null && owner.IsLoaded) win.Owner = owner;
             win.Show();
             // 別ウィンドウで出したら、この欄は詳細の表に戻す (利用者の要望。同じ 3D を 2 か所で出さない)。3D を出していなければ何もしない
@@ -1264,7 +1301,7 @@ public partial class DetailPanel : UserControl
         if (_ship3DShown != null) Ship3DExports.Instance.ReleaseView(_ship3DShown);
         Ship3DExports.Instance.AcquireView(shortName);
         _ship3DShown = shortName;
-        try { Ship3DWeb.Show(web3D, shortName, name, glbPath, isItem: Ship3DExports.IsItemRecord(record)); }
+        try { Ship3DWeb.Show(web3D, shortName, name, glbPath, isItem: Ship3DExports.IsItemRecord(record), shipKey: OwnedShipKeyFor(record)); }
         catch (Exception ex)
         {
             AppendAppLog($"[3D モデル] 表示できませんでした: {ex}");
@@ -1747,6 +1784,8 @@ internal static class DetailHtml
         .map text { fill: #212121; font-size: 22px; }
         .map text.small { font-size: 18px; fill: #5D4037; }
         .map g.cur { fill: none; stroke: #E53935; stroke-width: 2; }
+        .map g.curmark.taken { cursor: pointer; }
+        .map g.curmark.taken g.cur * { pointer-events: visible; }
         .map g.est circle { fill: #FFFFFF; stroke: #E53935; stroke-width: 3; }
         .map line.qt, .map polyline.qt { stroke: #E53935; stroke-width: 3; fill: none; }
         .map polyline.qt { stroke-dasharray: 10 6; }
@@ -1774,6 +1813,10 @@ internal static class DetailHtml
         th, td { border: 1px solid #BBB; padding: 3px 8px; vertical-align: top; text-align: left; }
         th { background: #E8E8E8; font-weight: 600; }
         tr:nth-child(even) td { background: #F8F8F8; }
+        tr.fp { cursor: pointer; }
+        table.foldtbl tr td { background: none; }
+        table.foldtbl tr.ev td { background: #F8F8F8; }
+        table.foldtbl tr.fp:hover td { background: #E3F2FD; }
         .em { color: #1565C0; }
         .amenbar { display: flex; flex-wrap: wrap; gap: 4px; margin: 0.2em 0 0.4em; }
         .amenbar .amen { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 50%; background: #37474F; }
@@ -1814,6 +1857,17 @@ internal static class DetailHtml
           }
           window.addEventListener('error', function (ev) { reportError('event', ev.error || ev.message); });
           window.addEventListener('unhandledrejection', function (ev) { reportError('promise', ev.reason); });
+          // (2026-11-05、利用者の指示「マップの現在位置をクリックしたときに建物内なら 3D 表示」) 取った座標の現在位置の印・その文字 (g.curmark.taken) と、
+          // 【現在位置の近く】の現在地の文 (aside.near p.here) を押したら、アプリへ { type: 'gohere' } (［マップ］タブ (MapPanel.GoHere3DAsync) が、建物の中ならその場所の 3D を出す)。
+          // ドラッグ (押した所から 6px より動いた) の後の click は見ない
+          var downX = 0, downY = 0;
+          document.addEventListener('pointerdown', function (ev) { downX = ev.clientX; downY = ev.clientY; }, true);
+          document.addEventListener('click', function (ev) {
+            if (Math.abs(ev.clientX - downX) + Math.abs(ev.clientY - downY) > 6) return;
+            var t = ev.target;
+            if (!(t && t.closest && t.closest('g.curmark.taken, aside.near p.here'))) return;
+            if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage({ type: 'gohere' });
+          });
           var FIT = 260 / 300, MARGIN = 1;
           // 拡大の上限でさらに拡大したときに、地図へ移る場所を探す範囲 (画面の px)。印のアイコン (外径 12px) と枠 (20px) の外に指 1 本ぶんの余裕を見て 40px
           // (仮の値。2026-11-01、利用者の決めた案 1 で親と決めた。動かしてみて直す)。同じ知らせを続けて送らないための間 (ms)
@@ -2132,6 +2186,7 @@ internal static class DetailHtml
                 var k = m.mk ? m.mk.k : '';
                 var cur = mk.querySelector('g.cur'), est = mk.querySelector('g.est'), line = mk.querySelector('line.qt'), lab = mk.querySelector('text.mk'), ti = mk.querySelector('title');
                 vis(cur, k === 'taken'); vis(est, k === 'est'); vis(line, k === 'moving');
+                mk.classList.toggle('taken', k === 'taken');   // 取った座標の印のときだけ押せる (gohere。推定の位置の印は押しても何も起きない)
                 if (m.mk) {
                   setXY(cur, m.mk.x, m.mk.y); setXY(est, m.mk.x, m.mk.y); setXY(lab, m.mk.x, m.mk.y);
                   if (lab) { lab.textContent = m.mk.l; lab.removeAttribute('data-off'); }
@@ -2196,6 +2251,60 @@ internal static class DetailHtml
             start();
           }
           Array.prototype.forEach.call(document.querySelectorAll('svg.zmap'), setup);
+          // 親子でまとめた表 (2026-11-05。［マップ］タブの【現在位置の近く】(MapPanel.NearInnerHtml)・場所の詳細の【距離】(GameDataQueryService.AppendDistances)):
+          // 最初の欄が「▼ 」で始まる行を親、そのすぐ後に続く最初の欄が「　└」で始まる行をその子にし、子は初めは隠す。
+          // 親の行 (リンクの外) を押すたびに開け閉めする (開いているときは「▲」。［詳細］の一覧の ▼ のまとめと同じ見た目と動き)。
+          // 開いた親は最初の欄のリンク先 (無ければ文字) で覚え、【現在位置の近く】を書き換えた後も開いたままにする (ページを作り直したら閉じる)
+          var foldOpen = {};
+          function foldKey(tr) { var a = tr.cells[0].querySelector('a'); return a ? a.getAttribute('href') : tr.cells[0].textContent.slice(1); }
+          function foldSet(tr, open) {
+            var f = tr.cells[0].firstChild;
+            if (f && f.nodeType === 3) f.data = (open ? '▲' : '▼') + f.data.slice(1);
+            if (open) tr.classList.add('open'); else tr.classList.remove('open');
+            tr._foldKids.forEach(function (k) { k.hidden = !open; });
+          }
+          // ▼ のまとめのある表 (table.foldtbl) の縞: 見えている行だけを上から数え、偶数番目の行に ev を付ける (色は CSS。ほかの表は今の nth-child のまま)
+          function foldStripe(t) {
+            var n = 0;
+            Array.prototype.forEach.call(t.querySelectorAll('tbody > tr'), function (tr) {
+              if (tr.hidden) { tr.classList.remove('ev'); return; }
+              n++;
+              if (n % 2 === 0) tr.classList.add('ev'); else tr.classList.remove('ev');
+            });
+          }
+          function initFolds(root) {
+            Array.prototype.forEach.call(root.querySelectorAll('table'), function (t) {
+              var parent = null;
+              Array.prototype.forEach.call(t.querySelectorAll('tbody > tr'), function (tr) {
+                var c = tr.cells[0];
+                if (!c) { parent = null; return; }
+                if (parent && c.textContent.indexOf('　└') === 0) { tr.classList.add('fc'); parent._foldKids.push(tr); return; }
+                parent = null;
+                var f = c.firstChild;
+                if (f && f.nodeType === 3 && /^[▼▲] /.test(f.data)) { parent = tr; tr._foldKids = []; }
+              });
+              var folds = false;
+              Array.prototype.forEach.call(t.querySelectorAll('tbody > tr'), function (tr) {
+                if (!tr._foldKids || tr._foldKids.length === 0) return;
+                tr.classList.add('fp');
+                folds = true;
+                foldSet(tr, foldOpen[foldKey(tr)] === true);
+              });
+              if (folds) { t.classList.add('foldtbl'); foldStripe(t); }
+            });
+          }
+          document.addEventListener('click', function (e) {
+            var el = e.target;
+            if (!el || !el.closest || el.closest('a')) return;
+            var tr = el.closest('tr.fp');
+            if (!tr || !tr._foldKids) return;
+            var open = !tr.classList.contains('open');
+            foldOpen[foldKey(tr)] = open;
+            foldSet(tr, open);
+            var t = tr.closest('table');
+            if (t) foldStripe(t);
+          });
+          initFolds(document);
           // マップタブの【現在位置の近く】(aside.near) の書き換え: アプリが打ち消した HTML を入れる。無ければ隠す (詳細タブのページには aside.near が無い)
           if (window.chrome && window.chrome.webview) {
             window.chrome.webview.addEventListener('message', function (e) {
@@ -2203,7 +2312,7 @@ internal static class DetailHtml
               if (!d || d.type !== 'mapupdate') return;
               var a = document.querySelector('aside.near');
               if (!a) return;
-              if (d.near) { a.innerHTML = d.near; a.hidden = false; } else { a.innerHTML = ''; a.hidden = true; }
+              if (d.near) { a.innerHTML = d.near; a.hidden = false; initFolds(a); } else { a.innerHTML = ''; a.hidden = true; }
             });
           }
         })();

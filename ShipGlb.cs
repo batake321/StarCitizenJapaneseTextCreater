@@ -12,7 +12,11 @@ namespace StarCitizenJapaneseTextCreater;
 // 違いは asset.extras.export_timestamp_unix (書き出した時刻) だけ。
 internal static class ShipGlb
 {
-    public const string GeneratorVersion = "0.2.2";
+    // GLB の asset.extras.generator_version に書く版。書き出しの材質の決め方の版も兼ねる (材質の決め方を変えたら進める。2026-11-05、親の決定):
+    //   "0.2.2" は移植元 (StarBreaker v0.2.2) と同じ決め方。"0.2.3" はガラス (GlassPBR) の色の決まり (白なら着色していないガラスの色・glassColor の読み方) を変えた版。
+    //   取り込み済みの GLB の版が今の版と違えば、3D の画面は今の決め方の材質の表 (ShipPaints.IdStandardTable) を当てて描く。材質の表の鮮度にも使う (ShipPaints)。
+    //   文字の長さは変えない (GLB のほかのバイトを変えないため)
+    public const string GeneratorVersion = "0.2.3";
 
     // PNG 1 枚。GLB の塊に入れたら中身 (Data) を放し、入れた場所 (Region) だけを覚える (メモリを抑えるため。
     // 同じ中身は同じ場所になる (pack_texture_deduped) ので、2 回目からは Region を返しても結果は同じ)
@@ -30,11 +34,14 @@ internal static class ShipGlb
         public List<ShipExport.Payload> Children = new();
         public ShipInteriors.Loaded Interiors = new();
         public string? EntityName, GeometryPath, MaterialPath;
+        // true ならパレットの色 (本体・子・船内のパレットの A・B・C と glass) を材質に当てない (色は材質そのものの色。ガラスの色の決まりは同じ)。
+        // 3D の画面の色付けを切る設定の材質の表を作るときだけ (ShipExport.ExportJson。2026-11-05、利用者の指示「"船・装備・武器の 3D は常に色付け" これは設定で切れるようにしてください。」)
+        public bool NoPalette;
     }
 
     public static void Write(ShipExport.Ctx ctx, Input input, Stream output)
     {
-        var b = new Builder();
+        var b = new Builder { NoPalette = input.NoPalette };
         List<int> scene;
         if (input.RootMesh is { } rm)
         {
@@ -139,6 +146,8 @@ internal static class ShipGlb
         public readonly List<string> Views = new(), Accessors = new(), Materials = new(), Images = new(), TexturesJson = new(), Meshes = new();
         public readonly List<Node> Nodes = new();
         public bool HasSampler;
+        // Input.NoPalette
+        public bool NoPalette;
         private readonly Dictionary<string, int> _matDedup = new(StringComparer.Ordinal);
         private readonly Dictionary<string, (int Off, int Len)> _texCache = new(StringComparer.Ordinal);
 
@@ -303,9 +312,11 @@ internal static class ShipGlb
                 string? stem = null;
                 if (mtl!.SourcePath is string sp) { var f = sp[(sp.LastIndexOfAny(['\\', '/']) + 1)..]; stem = f.EndsWith(".mtl", StringComparison.Ordinal) ? f[..^4] : f; }
                 name = stem != null ? $"{stem}_mtl_{baseName}_0{sub.MatId}" : baseName.Length == 0 ? null : baseName;
-                float[]? pal = palette == null ? null : m.PaletteTint switch { 1 => palette[0], 2 => palette[1], 3 => palette[2], _ => m.IsGlass ? palette[3] : null };
+                float[]? pal = palette == null || NoPalette ? null : m.PaletteTint switch { 1 => palette[0], 2 => palette[1], 3 => palette[2], _ => m.IsGlass ? palette[3] : null };
                 float[]? layerColor = m.Layers.Count > 0 && !(m.Layers[0].Tint[0] == 1 && m.Layers[0].Tint[1] == 1 && m.Layers[0].Tint[2] == 1) ? m.Layers[0].Tint : null;
                 var c = pal ?? m.MetalBaseColor() ?? layerColor ?? m.Diffuse;
+                // ガラス (GlassPBR) は、色の出どころ (パレットの A・B・C・glassColor、材質の色) によらず、決まった色が白なら着色していないガラスの色 (GlassTint) (2026-11-05、利用者の指示)
+                if (m.IsGlass) c = GlassTint.OrUntinted(c);
                 baseColor = [c[0], c[1], c[2], m.Opacity];
                 doubleSided = m.DoubleSided;
             }

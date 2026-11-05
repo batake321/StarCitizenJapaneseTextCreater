@@ -9,6 +9,15 @@
        &item=1: 船でない品 (武器・装備など)。［船外］［船内］のボタンと「船内の位置」の欄を出さない (2026-11-05、利用者の指示「船内船外はおかしい」)
        &thumb=1: 小さな絵 (［詳細］の見出しの右。DetailPanel.RenderThumbAsync)。画面の部品を出さず、192×192 の透明な背景で船外の初めの向きから 1 コマ描き、
          chrome.webview.postMessage({type:'thumb', png:<PNG の data URL>}) で返す
+       &table=<材質の表の URL> (小さな絵のときだけ): その表を当ててから描く (色付けなし・古い版の GLB の標準の表)
+       &ship=<短い名前>: 塗装の切り替えと色付けの設定 (2026-11-05)。小さな絵のときは使わない。アプリとのやり取り (Ship3DWeb):
+         ビューア → アプリ {type:'paintInit', ship} (開いたとき)
+           ← {type:'paintList', ship, items:[{id, en, ja}], initial, standardId}: items が空でなければ右端に塗装の一覧を出す (id '' は「標準」)。
+             standardId: 「標準」に当てる材質の表 ('' なら GLB の材質のまま、'~std' なら GLB が古い版の材質の決め方なので今のコードの標準の表を当てる)。
+             initial が '' でなければ、その塗装 (保存した塗装・色付けを切ったときの '~nopal') を初めに当てる
+         ビューア → アプリ {type:'paintTable', ship, id} (塗装を選んだとき。初めての塗装は作るのに数秒かかる)
+           ← {type:'paintTable', ship, id, url} (材質の表の JSON の URL) か {type:'paintTable', ship, id, error}
+         材質の表: {materials: glTF の材質の配列, prims: mesh ごとの primitive ごとの材質の番号}。形・画像は読み込んだ GLB のまま、材質だけを差し替える
      GLB の座標 (実物で確かめたもの。t_ORIG_600i.glb / t_ORIG_X1.glb): いちばん上のノード CryEngine_Z_up が Z 上向きを Y 上向きに直していて、
        上 = +Y、前 = -Z (600i の hardpoint_seat_pilot が z = -45 で船の範囲 -66.7〜60.2 の前寄り。操縦席のノードの +Y 軸 (CryEngine の前) も -Z を向く)、
        左 = -X (hardpoint_seat_bridge_left が x = -1.41、_right が +1.41)。 -->
@@ -35,6 +44,24 @@
   /* 右上の閉じる (2026-11-05、利用者「閉じるボタンが欲しい右上の赤い x で」): 押すとアプリに {type:'close'} を送る (詳細の欄は［表に戻る］と同じ、別ウィンドウは閉じる) */
   #btnClose { position: absolute; right: 8px; top: 8px; width: 28px; height: 28px; padding: 0; line-height: 26px; text-align: center; font-size: 16px; font-weight: bold; color: #fff; background: #c62828; border: 1px solid #e57373; border-radius: 4px; }
   #btnClose:hover { background: #e53935; }
+  /* 右端の塗装の一覧 (2026-11-05、利用者の指示「右端に縦のリストでバリエーションを表示して切替で見れるようにしたい」)。
+     「船内の位置」の欄 (#side) の右に並べる。数が多い船 (最多 26 個) は欄の中でスクロールする。塗装の無い船・武器・装備・小さな絵では出さない */
+  #paintSide { width: 170px; background: #262a33; border-left: 1px solid #3a3f4a; overflow-y: auto; padding: 6px; box-sizing: border-box; }
+  #paintSide h3 { margin: 4px 0 6px; font-size: 13px; font-weight: bold; color: #ccc; }
+  #paintSide button { display: block; width: 100%; margin: 0 0 4px; text-align: left; }
+  #paintSide button .ja { display: block; font-size: 11px; color: #b8bfcc; }
+  #paintSide button.on .ja { color: #e4ecfa; }
+  /* 出せない塗装 (形の照合で断られた塗装。押せない。理由は説明 (title) に出す) */
+  #paintSide button.ng, #paintSide button.ng:hover { background: #2e323b; color: #7d8390; border-color: #444a56; cursor: default; }
+  #paintSide button.ng .ja { color: #6c7280; }
+  /* 塗装を作っている間・切り替えられなかったときの知らせ (右下の小さな形。ステーションの 3D の取り出し中の形に合わせる) */
+  #paintBusy { position: absolute; right: 12px; bottom: 12px; background: rgba(0,0,0,0.8); border: 1px solid #888; padding: 6px 10px; pointer-events: none; z-index: 5; max-width: 60%; }
+  #paintBusyText { font-size: 13px; font-weight: bold; color: #fff; text-align: center; margin-bottom: 4px; white-space: pre-wrap; }
+  #paintBusy.error #paintBusyText { color: #ff9a9a; margin-bottom: 0; }
+  #paintBusyOuter { width: 200px; height: 8px; background: #333; border: 1px solid #777; overflow: hidden; position: relative; }
+  #paintBusy.error #paintBusyOuter { display: none; }
+  #paintBusyBar { position: absolute; top: 0; bottom: 0; width: 30%; background: #4a8; animation: paintbusy 1.2s linear infinite; }
+  @keyframes paintbusy { from { left: -30%; } to { left: 100%; } }
 </style>
 <script type="importmap">
 { "imports": { "three": "../three/build/three.module.js" } }
@@ -53,10 +80,15 @@
     <div id="help">左ドラッグ: 回転 (船外は船のまわり / 船内は見回す)　右ドラッグ: 平行移動　ホイール: 拡大縮小 (船内は前後)<br>
       W/A/S/D: 前後左右　↑/↓: 上下　Insert/Delete: 拡大/縮小　Home: 初めの位置</div>
     <div id="msg">読み込みを始めています...</div>
+    <div id="paintBusy" class="hidden"><div id="paintBusyText"></div><div id="paintBusyOuter"><div id="paintBusyBar"></div></div></div>
   </div>
   <div id="side">
     <h3>船内の位置</h3>
     <div id="places"><div class="none">(読み込み中)</div></div>
+  </div>
+  <div id="paintSide" class="hidden">
+    <h3>塗装</h3>
+    <div id="paints"></div>
   </div>
 </div>
 <script type="module">
@@ -80,6 +112,9 @@ const isThumb = params.get('thumb') === '1';
 const THUMB_SIZE = 192;
 if (isItem) for (const id of ['btnOutside', 'btnInside', 'side']) document.getElementById(id).classList.add('hidden');
 if (isThumb) for (const id of ['top', 'help', 'side', 'msg']) document.getElementById(id).classList.add('hidden');
+// 塗装の切り替え・色付けの設定 (小さな絵では使わない)
+const shipName = params.get('ship') || '';
+const paintIO = !isThumb && shipName.length > 0;
 
 const msgEl = document.getElementById('msg');
 function showMessage(text, isError) {
@@ -603,6 +638,256 @@ function renderThumb() {
   }
 }
 
+// 小さな絵: &table=<URL> があれば、その材質の表 (色付けなし・古い版の GLB の標準の表) を当ててから描く。当てられなければ描かずに失敗を返す
+// (アプリは表を当てた絵を別の名前で保存するので、表を当てない絵をその名前で返さない)
+async function thumbWithTable() {
+  const turl = params.get('table');
+  if (turl) {
+    try {
+      const res = await fetch(turl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const made = await buildMaterials(await res.json());
+      meshEntries.forEach((e, i) => { e.o.material = made.perEntry[i] ?? e.orig; });
+    } catch (err) {
+      reportError(`小さな絵に材質の表を当てられませんでした: ${err?.message ?? err}`);
+      return;
+    }
+  }
+  renderThumb();
+}
+
+// ===== 材質の見え方の直し =====
+// 画像 (テクスチャ) の無い白い材質は灰色 (#888888) で描く (2026-11-05、利用者の指示「bitmap がないのか真っ白だが見えにくい。色がないのは灰色で」)。
+// 画像のある面・白でない色の面・ガラス (transmission) は変えない。ライトの当たり方も変えない。
+// GLTFLoader は baseColorFactor を material.color (線形)、baseColorTexture を material.map に入れる。白は r・g・b が 0.9 以上
+function adjustMaterial(m) {
+  // 自己発光 (emissiveFactor) が入っているのに発光用の画像 (emissiveMap) が無い材質は、白い光を全面に足して真っ白になる
+  // (2026-11-05、利用者の報告: Cryo-Star SL のクーラー。GLB の材質 13 のうち 11 が emissive 1,1,1 で発光の画像なし)。発光の画像が無ければ発光を 0 にする
+  if (m.emissive && !m.emissiveMap) m.emissive.setHex(0x000000);
+  if (m.map || !m.color || (m.transmission ?? 0) > 0) return;
+  if (m.color.r >= 0.9 && m.color.g >= 0.9 && m.color.b >= 0.9) m.color.setHex(0x888888);
+}
+
+// ===== 塗装の切り替え・色付けの設定 (2026-11-05、利用者の指示「右端に縦のリストでバリエーションを表示して切替で見れるようにしたい」・
+// 「"船・装備・武器の 3D は常に色付け" これは設定で切れるようにしてください。」) =====
+// 形・画像は読み込んだ GLB のまま、アプリが作った材質の表 (塗装つきの書き出しの materials と、mesh・primitive ごとの材質の番号) で材質だけを差し替える。
+// 材質は GLTFLoader と同じ作り方 (parser の loadMaterial・assignFinalMaterial と同じ複製) で作る。見ている向き・拡大・船内／船外はそのまま
+let gltfParser = null;
+let meshEntries = [];        // { o: Mesh, mi: glTF の mesh の番号, pi: primitive の番号, orig: 標準の材質 }
+let paintMaterials = [];     // 今当てている塗装の材質 (標準に戻す・別の塗装にするときに捨てる)
+let currentPaint = '';       // 今当たっている塗装 ('' は標準)
+let wantedPaint = '';        // 選ばれた塗装 (作っている間は currentPaint と違う)
+let currentTable = '';       // 今当てている材質の表 ('' は GLB の材質のまま)
+// 「標準」に当てる材質の表 (アプリの paintList の standardId)。GLB が古い版の材質の決め方で書かれていれば '~std' (今のコードの標準の材質)、今の版なら '' (GLB のまま)
+let standardTable = '';
+let applySeq = 0;
+const tables = new Map();    // 材質の表の id → 材質の表 (届いたもの)
+// 塗装 (一覧の id) に当てる材質の表の id
+function tableIdOf(id) { return id === '' ? standardTable : id; }
+let paintItems = [];
+
+function rememberMeshes(parser, root) {
+  gltfParser = parser;
+  meshEntries = [];
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    const a = parser.associations.get(o);
+    if (a && a.meshes !== undefined && a.primitives !== undefined) meshEntries.push({ o, mi: a.meshes, pi: a.primitives, orig: o.material });
+  });
+}
+
+const busyEl = document.getElementById('paintBusy');
+const busyText = document.getElementById('paintBusyText');
+let busyTimer = 0;
+function showBusy(text) {
+  clearTimeout(busyTimer);
+  busyEl.classList.remove('error');
+  busyText.textContent = text;
+  busyEl.classList.toggle('hidden', !text);
+}
+function showPaintError(text) {
+  clearTimeout(busyTimer);
+  busyEl.classList.add('error');
+  busyText.textContent = text;
+  busyEl.classList.remove('hidden');
+  busyTimer = setTimeout(() => { busyEl.classList.add('hidden'); busyEl.classList.remove('error'); }, 6000);
+}
+
+function labelOf(id) {
+  if (id === '~nopal') return '色付けなし';
+  if (id === '~std' || id === '') return '標準';
+  return paintItems.find(p => p.id === id)?.en ?? id;
+}
+
+// 右端の一覧 (いちばん上が「標準」)。今の塗装 (選んで作っているものを含む) のボタンを on にする
+function showPaints() {
+  const box = document.getElementById('paints');
+  box.textContent = '';
+  for (const p of paintItems) {
+    const b = document.createElement('button');
+    b.textContent = p.en;
+    if (p.ja && p.ja !== p.en) {
+      const j = document.createElement('span');
+      j.className = 'ja';
+      j.textContent = p.ja;
+      b.appendChild(j);
+    }
+    b.title = p.id ? p.id : 'いま 3D に出ている姿 (既定の塗装)';
+    b.classList.toggle('on', p.id === wantedPaint);
+    if (p.ng) {
+      // 出せない塗装: 名前の後ろに印を付け、押せなくする
+      b.firstChild.textContent = `${p.en} (出せない)`;
+      b.classList.add('ng');
+      b.disabled = true;
+      b.title = `${p.id}
+${p.ng}`;
+    }
+    b.addEventListener('click', () => { selectPaint(p.id); canvas.focus(); });
+    box.appendChild(b);
+  }
+  document.getElementById('paintSide').classList.toggle('hidden', paintItems.length === 0 || isItem);
+}
+
+function selectPaint(id) {
+  wantedPaint = id;
+  showPaints();
+  const tid = tableIdOf(id);
+  if (tid === '' || tables.has(tid)) { applyWanted(); return; }
+  showBusy(`塗装「${labelOf(id)}」を作っています...`);
+  try { window.chrome?.webview?.postMessage({ type: 'paintTable', ship: shipName, id: tid }); } catch { }
+  applyWanted();   // 前に選ばれて当てている途中のものを止める (表が届いたらもう一度呼ばれる)
+}
+
+// 選ばれた塗装を当てる (表が届いていて、GLB を読み込んであれば)
+async function applyWanted() {
+  if (!model || !gltfParser) return;
+  const id = wantedPaint;
+  const tid = tableIdOf(id);
+  const seq = ++applySeq;   // 当てている途中のもの (前に選ばれたもの) は、ここで止まる
+  if (tid === currentTable) { currentPaint = id; showBusy(''); return; }
+  if (tid !== '' && !tables.has(tid)) return;   // 作っている (届いたら呼ばれる)
+  try {
+    if (tid === '') {
+      for (const e of meshEntries) e.o.material = e.orig;
+      disposePaintMaterials([]);
+    } else {
+      showBusy(`塗装「${labelOf(id)}」を当てています...`);
+      const made = await buildMaterials(tables.get(tid));
+      if (seq !== applySeq) { for (const m of made.all) m.dispose(); return; }   // 待つ間に別のものが選ばれた
+      meshEntries.forEach((e, i) => { e.o.material = made.perEntry[i] ?? e.orig; });
+      disposePaintMaterials(made.all);
+    }
+    currentPaint = id;
+    currentTable = tid;
+    if (seq === applySeq) showBusy('');
+  } catch (err) {
+    if (seq !== applySeq) return;
+    failPaint(tid, `塗装「${labelOf(id)}」に切り替えられませんでした: ${err?.message ?? err}`);
+  }
+}
+
+function disposePaintMaterials(keep) {
+  const k = new Set(keep);
+  for (const m of paintMaterials) if (!k.has(m)) m.dispose();   // 画像 (テクスチャ) は標準の材質と共有なので捨てない
+  paintMaterials = keep;
+}
+
+// 切り替えられなかった (tid は材質の表の id): 元の塗装のままにして、短い知らせを出す。
+// 今選んでいる塗装の表でなければ (前に選んで、もう選び直したもの)、今の表示 (作っています... など) は消さず、ログに送るだけ
+function failPaint(tid, text) {
+  tables.delete(tid);
+  if (tableIdOf(wantedPaint) === tid) {
+    if (wantedPaint !== currentPaint) { wantedPaint = currentPaint; showPaints(); }
+    showPaintError(text);
+  }
+  try { window.chrome?.webview?.postMessage({ type: 'error', message: text }); } catch { }
+}
+
+// 材質の表から、覚えた mesh ごとの材質を作る。GLTFLoader の loadMaterial を表の materials で呼ぶ (呼ぶ間だけ parser.json.materials を差し替える。
+// loadMaterial と拡張は材質の定義をその場で読むので、作り始めたら元に戻してよい)。primitive ごとの複製は assignFinalMaterial と同じ決まり
+async function buildMaterials(table) {
+  const parser = gltfParser;
+  const saved = parser.json.materials;
+  const baseOf = new Map();
+  const want = [];
+  parser.json.materials = table.materials;
+  try {
+    for (const e of meshEntries) {
+      const row = table.prims?.[e.mi];
+      if (!row || e.pi >= row.length) throw new Error('材質の表が 3D モデルと合いません');
+      const idx = row[e.pi];
+      want.push(idx);
+      if (idx === null || idx === undefined || baseOf.has(idx)) continue;
+      if (!table.materials[idx]) throw new Error('材質の表が 3D モデルと合いません');
+      baseOf.set(idx, parser._invokeOne(ext => ext.loadMaterial && ext.loadMaterial(idx)));
+    }
+  } finally {
+    parser.json.materials = saved;
+  }
+  const bases = new Map();
+  for (const [idx, p] of baseOf) bases.set(idx, await p);
+  const finals = new Map();
+  const all = [...bases.values()];
+  const perEntry = meshEntries.map((e, i) => {
+    const idx = want[i];
+    if (idx === null || idx === undefined) return null;
+    const base = bases.get(idx);
+    // assignFinalMaterial と同じ: 接線が無ければ法線の画像の向きを直した複製、頂点の色があれば vertexColors、法線が無ければ flatShading の複製
+    const g = e.o.geometry;
+    const dt = g.attributes.tangent === undefined, vc = g.attributes.color !== undefined, fl = g.attributes.normal === undefined;
+    if (!dt && !vc && !fl) return base;
+    const key = `${base.uuid}:${dt ? 'dt' : ''}:${vc ? 'vc' : ''}:${fl ? 'fl' : ''}`;
+    let m = finals.get(key);
+    if (!m) {
+      m = base.clone();
+      if (vc) m.vertexColors = true;
+      if (fl) m.flatShading = true;
+      if (dt) {
+        if (m.normalScale) m.normalScale.y *= -1;
+        if (m.clearcoatNormalScale) m.clearcoatNormalScale.y *= -1;
+      }
+      finals.set(key, m);
+      all.push(m);
+    }
+    return m;
+  });
+  for (const m of all) adjustMaterial(m);
+  return { perEntry, all };
+}
+
+if (paintIO) {
+  try {
+    window.chrome?.webview?.addEventListener('message', async e => {
+      const d = e.data;
+      if (!d || d.ship !== shipName) return;
+      if (d.type === 'paintList') {
+        paintItems = Array.isArray(d.items) ? d.items : [];
+        standardTable = d.standardId || '';
+        showPaints();
+        // 初めの塗装。保存が無くても、古い版の GLB なら標準の表を当てる
+        if (d.initial || standardTable) selectPaint(d.initial || '');
+      } else if (d.type === 'paintTable') {
+        if (d.error) {
+          // 形の照合で出せない塗装は、一覧で押せない形にする (次に開いたときもアプリが覚えていて同じ形で出す)
+          if (d.unusable) { const it = paintItems.find(p => p.id === d.id); if (it) { it.ng = d.error; showPaints(); } }
+          failPaint(d.id, `塗装「${labelOf(d.id)}」を作れませんでした: ${d.error}`);
+          return;
+        }
+        try {
+          const res = await fetch(d.url);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          tables.set(d.id, await res.json());
+        } catch (err) {
+          failPaint(d.id, `塗装「${labelOf(d.id)}」の材質の表を読めませんでした: ${err?.message ?? err}`);
+          return;
+        }
+        if (d.id === tableIdOf(wantedPaint)) applyWanted();
+      }
+    });
+    window.chrome?.webview?.postMessage({ type: 'paintInit', ship: shipName });
+  } catch { }
+}
+
 // ===== 読み込み =====
 if (!glbUrl) {
   reportError('表示する GLB が指定されていません。');
@@ -621,24 +906,20 @@ if (!glbUrl) {
     const demos = [];
     root.traverse(o => { if (/demo/i.test(o.name || '')) demos.push(o); });
     for (const o of demos) o.removeFromParent();
-    // 画像 (テクスチャ) の無い白い材質は灰色 (#888888) で描く (2026-11-05、利用者の指示「bitmap がないのか真っ白だが見えにくい。色がないのは灰色で」)。
-    // 画像のある面・白でない色の面・ガラス (transmission) は変えない。ライトの当たり方も変えない。
-    // GLTFLoader は baseColorFactor を material.color (線形)、baseColorTexture を material.map に入れる。白は r・g・b が 0.9 以上
+    // 材質の見え方の直し (adjustMaterial) を、どの材質にも 1 回ずつ当てる (塗装を切り替えたときの材質にも同じものを当てる)
     const seenMats = new Set();
     root.traverse(o => {
       if (!o.isMesh) return;
       for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
         if (!m || seenMats.has(m)) continue;
         seenMats.add(m);
-        // 自己発光 (emissiveFactor) が入っているのに発光用の画像 (emissiveMap) が無い材質は、白い光を全面に足して真っ白になる
-        // (2026-11-05、利用者の報告: Cryo-Star SL のクーラー。GLB の材質 13 のうち 11 が emissive 1,1,1 で発光の画像なし)。発光の画像が無ければ発光を 0 にする
-        if (m.emissive && !m.emissiveMap) m.emissive.setHex(0x000000);
-        if (m.map || !m.color || (m.transmission ?? 0) > 0) continue;
-        if (m.color.r >= 0.9 && m.color.g >= 0.9 && m.color.b >= 0.9) m.color.setHex(0x888888);
+        adjustMaterial(m);
       }
     });
     scene.add(root);
     model = root;
+    // 塗装の切り替えのために、glTF の mesh・primitive の番号と、今の (標準の) 材質を覚えておく
+    rememberMeshes(gltf.parser, root);
 
     const box = new THREE.Box3().setFromObject(model);
     const sphere = box.getBoundingSphere(new THREE.Sphere());
@@ -653,8 +934,10 @@ if (!glbUrl) {
     requestRoomNames(places);
     goOutsideHome();
     showMessage('');
-    if (isThumb) { renderThumb(); return; }
+    if (isThumb) { thumbWithTable(); return; }
     canvas.focus();
+    // 読み込みの間に届いていた塗装 (初めの塗装) を当てる
+    applyWanted();
   }, xhr => {
     if (xhr.total > 0) {
       const pct = Math.floor(xhr.loaded * 100 / xhr.total);

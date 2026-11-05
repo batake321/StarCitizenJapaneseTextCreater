@@ -317,6 +317,26 @@ internal static class StationFill
         return $"{S(g)},{S(g + "m")}|{S(lod + "m")},{S(lod)}";
     }
 
+    // 補いの印 (2026-11-05、親の決定「補いを使い回すかの印に、その形の補いを作るときに使った材質を足す」): 形の印 (KindSig) + "|mtl=" + 材質の印 (MtlSig)。
+    // 材質の印: 材質の .mtl の Data.p4k の中のパス (小文字) + "@" + 目次の CRC32 と大きさ (形の印と同じ種類。無い・読めない材質は "-")
+    public static string MtlSig(P4kArchive p4k, string mtlPath)
+    {
+        if (string.IsNullOrEmpty(mtlPath)) return "-";
+        int i = p4k.Find(mtlPath);
+        return mtlPath.ToLowerInvariant() + "@" + (i < 0 ? "-" : $"{p4k.Crc(i):x8}.{p4k.UncompressedSize(i)}");
+    }
+    public static string FillSig(P4kArchive p4k, string kind, string mtlPath) => KindSig(p4k, kind) + "|mtl=" + MtlSig(p4k, mtlPath);
+    // 前に書いた印 (sig) を今の Data.p4k で作り直したもの (材質のパスは印の中のものを使う)。材質の無い印 (補いを求めない形・前の版の印) は形の印だけ
+    public static string SigNow(P4kArchive p4k, string kind, string sig)
+    {
+        int k = sig.IndexOf("|mtl=", StringComparison.Ordinal);
+        if (k < 0) return KindSig(p4k, kind);
+        var m = sig[(k + 5)..];
+        if (m == "-") return FillSig(p4k, kind, "");
+        int at = m.LastIndexOf('@');
+        return FillSig(p4k, kind, at >= 0 ? m[..at] : m);
+    }
+
     // 場所の印: その場所の socpak (ObjectContainers の下の相対パスの小文字) に当たる .socpak ファイルの名前・CRC・大きさをまとめたもの
     public static string SrcSig(P4kArchive p4k, IEnumerable<string> socpaks)
     {
@@ -430,7 +450,8 @@ internal static class StationFill
     //   prev: 前の DB の中身。形の印が前と同じ形は、前の結果をそのまま使い (比べる計算も LOD0・LOD1 の形の読み込みもしない)、変わった形・新しい形だけを比べる。
     //   建物でない形・床に相当しない形は比べない (IsFloorKind)。
     //   log: 1 区画ごとに、始めた行と終えた行 (時刻・済んだ件数/全件数・秒・メモリ・socpak)、60 秒を超えている区画の名前と経過秒を 15 秒ごとに出す (打ち切りはしない)
-    public static BuildResult Build(string p4kPath, IReadOnlyCollection<string> socpaks, int parallel, Action<int, int>? progress, CancellationToken ct, PrevData? prev = null, Action<string>? log = null)
+    public static BuildResult Build(string p4kPath, IReadOnlyCollection<string> socpaks, int parallel, Action<int, int>? progress, CancellationToken ct, PrevData? prev = null, Action<string>? log = null,
+        Func<string, SocpakScene.Look[]?>? looks = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var ctx1 = SocpakExporter.Shared(p4kPath, 1);
@@ -462,15 +483,12 @@ internal static class StationFill
                         var p = Norm(raw);
                         if (claimed.ContainsKey(p)) return false;
                         if (!IsFloorKind(p)) { if (claimed.TryAdd(p, 0)) Interlocked.Increment(ref excluded); return false; }
-                        var sig = KindSig(ctx1.P4k, p); kindSigs[p] = sig;
-                        if (prev != null && prev.KindSig.TryGetValue(p, out var ps) && ps == sig)
-                        {
-                            if (claimed.TryAdd(p, 0)) { Interlocked.Increment(ref reused); if (prev.Fill.TryGetValue(p, out var pf)) { fill[p] = pf; Interlocked.Add(ref tris, pf.TriCount ?? 0); } }
-                            return false;
-                        }
+                        // (2026-11-05) 前の DB の補いを使うかは、形の印に補いを作る材質の印を足した FillSig で決める。材質は粗い形を読んで (Mesh.Mtl) 分かるので、
+                        // ここでは前と同じかを決めずに読み、読んだ後に比べる (前と同じ形は細かい形を読まず、比べる計算もしない)
+                        kindSigs.TryAdd(p, KindSig(ctx1.P4k, p));
                         return true;
                     }
-                    var scene1 = SocpakExporter.Export(ctx1, list, ct: ct, wantCgf: Want1);   // 求め済み・前と同じ・対象外の種類の形は読まない
+                    var scene1 = SocpakExporter.Export(ctx1, list, ct: ct, wantCgf: Want1, looks: looks);   // 求め済み・対象外の種類の形は読まない
                     var kinds = scene1.CgfPaths.Select(Norm).Distinct(StringComparer.Ordinal).ToArray();
                     foreach (var k in kinds) kindSigs.GetOrAdd(k, x => KindSig(ctx1.P4k, x));
                     socpakKinds[sp] = kinds;
@@ -478,11 +496,21 @@ internal static class StationFill
                     foreach (var c in scene1.Containers)
                         foreach (var pl in c.Placements)
                             if (pl.Mesh.CgfPath.Length > 0 && !m1.ContainsKey(Norm(pl.Mesh.CgfPath)) && claimed.TryAdd(Norm(pl.Mesh.CgfPath), 0)) m1[Norm(pl.Mesh.CgfPath)] = pl.Mesh;
+                    // 形の印 + 補いを作る材質 (この形で最初に出てきた置き方の、差し替え後の材質) の印。前の DB と同じなら前の補いを使う
+                    foreach (var key in m1.Keys.ToList())
+                    {
+                        var fsig = FillSig(ctx1.P4k, key, m1[key].Mtl); kindSigs[key] = fsig;
+                        if (prev != null && prev.KindSig.TryGetValue(key, out var ps) && ps == fsig)
+                        {
+                            Interlocked.Increment(ref reused); if (prev.Fill.TryGetValue(key, out var pf)) { fill[key] = pf; Interlocked.Add(ref tris, pf.TriCount ?? 0); }
+                            m1.Remove(key);
+                        }
+                    }
                     var need = m1.Where(kv => HasLodVariant(ctx1.P4k, kv.Value.CgfPath, 1)).ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
                     if (need.Count > 0)
                     {
                         var names = new HashSet<string>(need.Values.Select(m => m.Name), StringComparer.Ordinal);
-                        var scene0 = SocpakExporter.Export(ctx0, list, wantMesh: names.Contains, ct: ct, wantCgf: pth => need.ContainsKey(Norm(pth)));
+                        var scene0 = SocpakExporter.Export(ctx0, list, wantMesh: names.Contains, ct: ct, wantCgf: pth => need.ContainsKey(Norm(pth)), looks: looks);
                         var seen = new HashSet<string>(StringComparer.Ordinal);
                         foreach (var c in scene0.Containers)
                             foreach (var pl in c.Placements)
@@ -858,7 +886,7 @@ internal static class StationFill
     // 場所ごとの照会と計算 (BuildLayoutDb から)。places: 場所 → その場所の socpak。前の DB (prev) の印と今の Data.p4k の印が同じ場所は計算しない。
     // 返す: 書く中身 (補う面・場所の印・場所ごとの形と印) と数
     public static (Dictionary<string, FillData> Fill, Dictionary<string, string> PlaceSrc, Dictionary<string, List<(string Kind, string Sig)>> PlaceKinds, BuildStats Stats) Run(
-        string p4kPath, IReadOnlyDictionary<string, List<string>> places, PrevData prev, int parallel, Action<int, int>? progress, CancellationToken ct, Action<string>? log = null)
+        string p4kPath, IReadOnlyDictionary<string, List<string>> places, PrevData prev, int parallel, Action<int, int>? progress, CancellationToken ct, Action<string>? log = null, Func<string, SocpakScene.Look[]?>? looks = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var p4k = SocpakExporter.Shared(p4kPath, 1).P4k;
@@ -867,12 +895,12 @@ internal static class StationFill
         foreach (var kv in places.OrderBy(x => x.Key, StringComparer.Ordinal))
         {
             var src = SrcSig(p4k, kv.Value); placeSrc[kv.Key] = src;
-            bool same = prev.PlaceSrc.TryGetValue(kv.Key, out var ps) && ps == src && (!prev.PlaceKinds.TryGetValue(kv.Key, out var pk) || pk.All(x => KindSig(p4k, x.Kind) == x.Sig));   // 形が 1 つも無い場所は pk 無し
+            bool same = prev.PlaceSrc.TryGetValue(kv.Key, out var ps) && ps == src && (!prev.PlaceKinds.TryGetValue(kv.Key, out var pk) || pk.All(x => SigNow(p4k, x.Kind, x.Sig) == x.Sig));   // 形が 1 つも無い場所は pk 無し
             (same ? reusedPlaces : changed).Add(kv.Key);
         }
         log?.Invoke($"{DateTime.Now:HH:mm:ss} places {places.Count}: reuse {reusedPlaces.Count}, compute {changed.Count}");
         var sps = changed.SelectMany(r => places[r]).Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.Ordinal).ToList();
-        var br = Build(p4kPath, sps, parallel, progress, ct, prev, log);
+        var br = Build(p4kPath, sps, parallel, progress, ct, prev, log, looks);
         var fill = new Dictionary<string, FillData>(StringComparer.Ordinal);
         var placeKinds = new Dictionary<string, List<(string Kind, string Sig)>>(StringComparer.Ordinal);
         foreach (var r in reusedPlaces)
@@ -928,6 +956,9 @@ internal static class StationFill
     public const string WalkDbName = "view3d_fill_walk.db";
     public static string WalkDbPath => Path.Combine(StationPlaces.Folder, WalkDbName);
     private static readonly object WalkWriteLock = new();
+    // 歩くモードの裏の補いの行の印: 補いの印 (FillSig。細かい形を読んだ置き方の、差し替え後の材質) (2026-11-05)。
+    // 材質の入っていない行 (それより前の行。差し替える前の材質の形との比べ) は Table で使わない
+    public static string WalkSig(P4kArchive p4k, string kind, string mtlPath) => FillSig(p4k, kind, mtlPath);
     public static void WriteWalk(string dbPath, string kind, string sig, float[] localTris)
     {
         if (localTris.Length < 9) return;
@@ -994,10 +1025,13 @@ internal static class StationFill
                 var fi = new FileInfo(dbPath);
                 var wi = walkDbPath != null && p4k != null ? new FileInfo(walkDbPath) : null;
                 if (!fi.Exists && wi is not { Exists: true }) { _tableStamp = ""; return _table = new(StringComparer.Ordinal); }
-                var stamp = dbPath + "|" + (fi.Exists ? fi.LastWriteTimeUtc.Ticks + "|" + fi.Length : "-") + "|" + (wi is { Exists: true } ? walkDbPath + "|" + wi.LastWriteTimeUtc.Ticks + "|" + wi.Length : "-");
+                // (2026-11-05、親の決定) 配る DB の part_fill は、DB が今の版・今の Data.p4k の印で作ったもの (StationView3D.LayoutDbIsCurrent) のときだけ使う。
+                // 一括の作り直しが終わっていない・失敗した前のパッチの DB が残っていると、形の変わった部品に前の補いが当たるため (行ごとの形の印は持っていない)
+                var key = p4k != null ? StationView3D.LayoutKeyOf(p4k.Path) ?? "" : null;
+                var stamp = dbPath + "|" + (fi.Exists ? fi.LastWriteTimeUtc.Ticks + "|" + fi.Length : "-") + "|" + (wi is { Exists: true } ? walkDbPath + "|" + wi.LastWriteTimeUtc.Ticks + "|" + wi.Length : "-") + "|" + (key ?? "-");
                 if (stamp == _tableStamp) return _table;
                 var t = new Dictionary<string, FillData>(StringComparer.Ordinal);
-                if (fi.Exists)
+                if (fi.Exists && (key == null || (key.Length > 0 && StationView3D.LayoutDbIsCurrent(dbPath, key))))
                     using (var c = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={dbPath};Mode=ReadOnly;Pooling=False"))
                     {
                         c.Open();
@@ -1025,7 +1059,8 @@ internal static class StationFill
                             while (r.Read())
                             {
                                 var kind = r.GetString(0);
-                                if (r.GetString(1) != KindSig(p4k, kind)) continue;   // パッチで形が変わった行は使わない
+                                var wsig = r.GetString(1);
+                                if (!wsig.Contains("|mtl=", StringComparison.Ordinal) || SigNow(p4k, kind, wsig) != wsig) continue;   // パッチで形・材質が変わった行・材質の差し替えより前の行は使わない
                                 var packed = (byte[])r[2];
                                 if (t.TryGetValue(kind, out var f)) f.AddPackedRaw(packed); else { var nf = new FillData(Array.Empty<float>()); nf.AddPackedRaw(packed); t[kind] = nf; }
                             }

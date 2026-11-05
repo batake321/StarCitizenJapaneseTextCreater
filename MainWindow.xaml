@@ -707,6 +707,19 @@
                                     <Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
+                            <!-- 塗装 (2026-11-05): 選ぶとすぐ保存 (MainWindow.MyShipPaint_Changed)。★ は My Hangar で持っている塗装。付けられる塗装が無い船は選べない -->
+                            <DataGridTemplateColumn Header="塗装" Width="240">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <ComboBox ItemsSource="{Binding PaintChoices}" DisplayMemberPath="Display"
+                                                  SelectedItem="{Binding SelectedPaint, Mode=OneWay}"
+                                                  SelectionChanged="MyShipPaint_Changed"
+                                                  IsEnabled="{Binding HasPaints}"
+                                                  ToolTip="この船の塗装。選ぶとすぐ保存し、次にこの船の 3D を開いたときの初めの塗装になります (［装備］の表の塗装の行と同じ値)。★ は My Hangar の同期で持っている塗装です"
+                                                  FontSize="11" Margin="2" VerticalAlignment="Center"/>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
                             <DataGridTemplateColumn Header="" Width="170">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
@@ -1487,7 +1500,7 @@
                                                                   SelectedItem="{Binding SelectedChoice, Mode=OneWay}"
                                                                   SelectionChanged="LoadoutItem_Changed"
                                                                   IsEnabled="{Binding HasCandidates}"
-                                                                  ToolTip="所持コンポーネントのうち同じ種別・搭載枠 Size 以下・使用可のものが候補になります"
+                                                                  ToolTip="{Binding ChoiceToolTip}"
                                                                   FontSize="11" Margin="2" VerticalAlignment="Center">
                                                             <ComboBox.ItemContainerStyle>
                                                                 <Style TargetType="ComboBoxItem">
@@ -2558,6 +2571,9 @@
                                     <TextBlock x:Name="txtShip3DUsage" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
                                     <CheckBox x:Name="chkShip3DNoSave" Content="3D モデルを保存しない" VerticalAlignment="Center" Margin="16,0,0,0"
                                               ToolTip="入れると、船の 3D を見るたびにゲームデータ (Data.p4k) から直接読み、置き場所には保存しません (表示をやめたら消します)。［船舶・車両をまとめて取り込む］は使えなくなります。切ると (既定)、読んだものを置き場所に保存し、次からはそれを使います。「設定を保存」で有効になります"/>
+                                    <!-- 船・装備・武器の 3D の色付け (既定はオン。2026-11-05)。ステーションの 3D の「色付け」スイッチとは別 -->
+                                    <CheckBox x:Name="chkShip3DPalette" Content="船・装備・武器の 3D の色付け" VerticalAlignment="Center" Margin="16,0,0,0"
+                                              ToolTip="入れると (既定)、船・装備・武器の 3D をゲームの色 (パレットの色・塗装の色) を付けて出し、船の 3D の右端に塗装の一覧を出します。切ると、パレットの色を付けずに材質そのものの色で出し、塗装の一覧は出しません (取り込んだ 3D モデルは作り直しません)。ステーションの 3D の「色付け」スイッチとは別です。「設定を保存」で有効になり、次に 3D を開いたときから効きます"/>
                                 </StackPanel>
 
                                 <!-- ステーションの 3D の地点ごとの取り出し結果の保存 (StationView3DCache): 上限 (GB)。0 なら保存しない・先読みしない -->
@@ -2574,6 +2590,9 @@
                                     <TextBox x:Name="txtStation3DTextureMaxPx" Width="90" VerticalAlignment="Center"
                                              ToolTip="ステーションの 3D (新しい方式) で部品に貼るゲームの画像 (テクスチャ) の、長い辺の上限 (px。既定 512)。ゲームの画像をこの大きさ以下になる細かさで戻して PNG にし、置き場所の stations3d_textures フォルダに置きます (1 枚 1 回)。0 なら画像を貼りません (単色)。値を変えると、見た場所の保存 (ステーション (GB)) は作り直しになります。「設定を保存」で有効になります"/>
                                     <TextBlock Text="0 なら画像を貼らない (単色)" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
+                                    <!-- マップのデバッグ表示 (ステーションの 3D の下部の枠。既定はオフ。2026-11-05) -->
+                                    <CheckBox x:Name="chkStation3DDebugView" Content="マップのデバッグ表示" VerticalAlignment="Center" Margin="16,0,0,0"
+                                              ToolTip="入れると、ステーションの 3D (新しい方式) で形を押したときに、画面の下部に押した部品の名前・判定の面・押した所の高さなどの細かい文を出します。切ると (既定) 出しません。「設定を保存」で有効になり、次に 3D を開いたときから効きます"/>
                                 </StackPanel>
 
                                 <StackPanel Grid.Row="5" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="0,6,0,4">

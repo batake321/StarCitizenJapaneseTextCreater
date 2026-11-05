@@ -11,6 +11,10 @@ addEventListener('unhandledrejection', e => report('promise', e.reason));
 const qs = new URLSearchParams(location.search);
 const BASE = qs.get('data') || '';
 const APP = !!(window.chrome && window.chrome.webview);
+// ?debug=1: アプリの設定「マップのデバッグ表示」(App.Config.Station3DDebugView。既定オフ) が入っているとき (StationView3DWindow が付ける)。
+// 入っていなければ、下部の枠 (#pick。押した部品の名前・判定の面・押した所の高さ) を出さない (2026-11-05、利用者の指示「この3D の下部の細かいテキストも設定でデフォルトでオフのマップのデバッグ表示という設定を付けてほしい」)
+const DEBUG = qs.get('debug') === '1';
+document.body.classList.toggle('dbg', DEBUG);
 // アプリからの知らせ (地点の進み具合・出来た・失敗)
 const regionWait = new Map(); let regionSeq = 0;
 if (APP) window.chrome.webview.addEventListener('message', e => {
@@ -21,10 +25,13 @@ if (APP) window.chrome.webview.addEventListener('message', e => {
   if (d.type === 'prewarm') { prewarmStart(d); return; }
   if (d.type === 'prewarmCancel') { prewarmStop(); return; }
   if (d.type === 'here') { onHere(d); return; }
+  if (d.type === 'hereMark') { onHereMark(d); return; }   // 現在位置の印 (下の「現在位置の印」)
   if (d.type === 'walkFill') { onWalkFill(d); return; }
   if (d.type === 'notes') { onNotes(d); return; }
   if (d.type === 'noteAdded') { onNoteAdded(d); return; }
   if (d.type === 'exterior') { onExterior(d); return; }   // 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート。下の「外から見たときの印と見出し」)
+  // マイハンガーの大きさのうち、ハンガーの区画が決まるもの (アプリの StationHangarCatalog.Resolve)。本体の station.json に覚え、行き先の窓はこの大きさだけを出す (hangarSizesOf)
+  if (d.type === 'hangarSizes') { const sv = stationSaved ? stationSaved.VIEW : VIEW; if (Array.isArray(d.sizes)) { if (sv) sv.hangarSizesOk = d.sizes; else pendingSizes = d.sizes; } return; }   // 場所のデータ (VIEW) が入る前なら覚えて、入った後に当てる
   if (d.type === 'noteError') { document.getElementById('msg').textContent = 'コメントの印を保存できませんでした: ' + (d.message || ''); return; }
   const w = regionWait.get(d.id); if (!w) return;
   if (d.type === 'regionProgress') showProgress(d.done, d.total);
@@ -45,12 +52,12 @@ function requestRegion(c, r) {
   if (!APP && qs.get('api')) {
     const api = qs.get('api'); let on = true;
     (async () => { while (on) { try { const p = await (await fetch(api + 'progress')).json(); if (on && p.total) showProgress(p.done, p.total); } catch (_) { } await new Promise(r => setTimeout(r, 500)); } })();
-    return fetch(api + 'region?c=' + c.map(v => v.toFixed(3)).join(',') + '&r=' + r + '&site=' + encodeURIComponent(SITE)).then(x => x.json()).then(d => { if (d.error) throw new Error(d.error); return d; }).finally(() => { on = false; });
+    return (regionPalReq = palOn(), fetch(api + 'region?c=' + c.map(v => v.toFixed(3)).join(',') + '&r=' + r + '&site=' + encodeURIComponent(SITE) + '&pal=' + (regionPalReq ? '1' : '0'))).then(x => x.json()).then(d => { if (d.error) throw new Error(d.error); return d; }).finally(() => { on = false; });
   }
   if (!APP) return Promise.resolve({ base: qs.get('region') || '' });
   const id = ++regionSeq;
   for (const [k, w] of regionWait) { regionWait.delete(k); w.ng(new Error('取りやめ')); }
-  return new Promise((ok, ng) => { regionWait.set(id, { ok, ng }); window.chrome.webview.postMessage({ type: 'region', id, c, r, site: SITE }); }).then(d => ({ ...d, id }));
+  return new Promise((ok, ng) => { regionWait.set(id, { ok, ng }); regionPalReq = palOn(); window.chrome.webview.postMessage({ type: 'region', id, c, r, site: SITE, pal: regionPalReq }); }).then(d => ({ ...d, id }));
 }
 const el = document.getElementById('view');
 const R = new THREE.WebGLRenderer({ antialias: true }); R.setPixelRatio(devicePixelRatio); el.appendChild(R.domElement);
@@ -74,17 +81,26 @@ let cur = null, curBuf = null;
 const tgt = new THREE.Vector3(); let dist = 40, az = 0.8, el2 = 0.6;
 function upd() { cam.position.set(tgt.x + dist * Math.cos(el2) * Math.cos(az), tgt.y + dist * Math.cos(el2) * Math.sin(az), tgt.z + dist * Math.sin(el2)); cam.lookAt(tgt); }
 let drag = null, moved = 0; const cv = R.domElement;
+// 3D の表示へフォーカスを戻せるようにする (Tab の順には入れない)。左の欄の ▼ の見出し・ボタン・チェック・ドロップダウンを押した後は、ここへ戻す
+// (2026-11-05、親の決定: 押した後にフォーカスが残ると、歩くモードのスペース・W・A・S・D がその欄の開閉・ボタン・選択に取られるため)。キーボードで Tab で移って操作するのはそのままできる
+cv.tabIndex = -1;
+const focusView = () => setTimeout(() => cv.focus({ preventScroll: true }), 0);
+document.getElementById('side').addEventListener('click', e => { if (e.target.closest('summary, button, input[type=checkbox]')) focusView(); });
+document.getElementById('side').addEventListener('change', e => { if (e.target.tagName === 'SELECT') focusView(); });
 cv.addEventListener('contextmenu', e => e.preventDefault());
 cv.addEventListener('pointerdown', e => { drag = { b: e.button, x: e.clientX, y: e.clientY }; moved = 0; cv.setPointerCapture(e.pointerId); });
 cv.addEventListener('pointerup', e => { if (drag && drag.b === 0 && moved < 4) pick(e); drag = null; });
 cv.addEventListener('pointermove', e => {
   if (!drag) return; const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY; moved += Math.abs(dx) + Math.abs(dy);
-  if (walk) { wyaw -= dx * 0.005; wpitch = Math.max(-1.4, Math.min(1.4, wpitch - dy * 0.005)); walkCam(); return; }
+  // (2026-11-05、利用者の指示「RMB 押しながら上下が逆がいい」「ステーションの 3Dは逆にする」) 右ボタンのドラッグだけ、上下の向きを前と逆にする (左ドラッグは今のまま)
+  const vy = drag.b === 2 ? -1 : 1;
+  if (walk) { wyaw -= dx * 0.005; wpitch = Math.max(-1.4, Math.min(1.4, wpitch - vy * dy * 0.005)); walkCam(); return; }
   if (drag.b === 0 && !e.shiftKey) { az -= dx * 0.006; el2 = Math.max(-1.5, Math.min(1.5, el2 + dy * 0.006)); }
   else {
     const f = dist * 0.0015; const right = new THREE.Vector3(-Math.sin(az), Math.cos(az), 0);
     const fwd = cam.getWorldDirection(new THREE.Vector3()); const up = new THREE.Vector3().crossVectors(right, fwd).normalize().negate();
-    tgt.addScaledVector(right, -dx * f).addScaledVector(up, dy * f);
+    // 見るモードの動かす (右ドラッグ・Shift+左ドラッグ): 上下は前と逆 (前はマウスを上へ動かすと見ている所 (自分) が上へ動いた。今は下へ)。Shift+左ドラッグも右ドラッグと同じ向き
+    tgt.addScaledVector(right, -dx * f).addScaledVector(up, -dy * f);
   }
   upd();
 });
@@ -105,10 +121,12 @@ cv.addEventListener('wheel', e => {
 function size() { R.setSize(el.clientWidth, el.clientHeight); cam.aspect = el.clientWidth / el.clientHeight; cam.updateProjectionMatrix(); }
 addEventListener('resize', size); size();
 const keys = new Set();
-addEventListener('keydown', e => { if (document.getElementById('cbox').style.display === 'block') return; if (e.target.tagName === 'TEXTAREA' || (e.target.tagName === 'INPUT' && /^(text|search|number)$/.test(e.target.type))) return; keys.add(e.key.toLowerCase()); if ('wasdqe'.includes(e.key.toLowerCase())) e.preventDefault(); });
+addEventListener('keydown', e => { if (document.getElementById('cbox').style.display === 'block') return; if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || (e.target.tagName === 'INPUT' && /^(text|search|number)$/.test(e.target.type))) return; keys.add(e.key.toLowerCase()); if ('wasdqe'.includes(e.key.toLowerCase())) e.preventDefault(); });
 addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
 addEventListener('keydown', e => {
   if (document.getElementById('cbox').style.display === 'block') { if (e.key === 'Enter') { e.preventDefault(); closeComment(true); } else if (e.key === 'Escape') closeComment(false); return; }
+  if (e.target.id === 'salesQ') return;   // 販売品の枠の検索の欄に打っている間は、Enter (コメント)・歩く操作のキーを取らない
+  if (e.target.tagName === 'SELECT') return;   // ドロップダウン (文字の道案内) にフォーカスがある間は、歩く操作を取らない
   if (walk && e.key === 'Enter') { e.preventDefault(); keys.clear(); openComment(); return; }   // 録画中でなくても (2026-11-05、利用者「enter で文字入れて印付けるのは、いつでもできて入力したら即反映してほしい」)
   if (!walk || e.repeat) return;
   if (e.target.tagName === 'INPUT' && /^(text|search|number)$/.test(e.target.type)) return;
@@ -521,6 +539,7 @@ function drawGravity() {
     const M = v.M; m.matrixAutoUpdate = false; m.matrix.set(M[0], M[1], M[2], M[3], M[4], M[5], M[6], M[7], M[8], M[9], M[10], M[11], 0, 0, 0, 1);
     m.renderOrder = 5; m.userData = { grav: v.name }; gravG.add(m);
   }
+  gravG.visible = !extView;   // 外部視点の間は重力の範囲の箱も出さない (updExtView)
   root.add(gravG);
 }
 // 無重力で浮く: 見ている向きに進む (Space 上・C 下)。床の判定・壁は見ない (すり抜けと同じ)
@@ -591,6 +610,7 @@ function showElev(at, pinned) {
   const key = near[0] + near[3] + near[1].join();
   if (box.dataset.key === key && box.style.display === 'block') return;
   box.dataset.key = key; list.innerHTML = '';
+  if (near[0].startsWith('elevator') && near[6] && hangarBack && stationSaved) { hangarLiftWindow(near, head, list); box.style.display = 'block'; return; }
   if (near[0].startsWith('elevator')) {
     head.textContent = `エレベーター（今: ${near[4]}）`;
     // 同じ路線の乗り場を高さ (1 m 単位) でまとめる。高さごとに、今の乗り場に xy でいちばん近い乗り場 (同じエレベーター) を使う
@@ -631,16 +651,51 @@ function showElev(at, pinned) {
 //   外部ポート (dockingport_NN の番号の順) → 着陸パッド (pad_NN の番号の順) → マイハンガー (この地図のハンガーの入口の大きさ。S・M・L・XL の順)。
 //   マイハンガーの中のハンガーのエレベーターなら、マイハンガーの代わりに「ステーションへ戻る」
 const HANGAR_SIZES = ['S', 'M', 'L', 'XL'];
-function elevOrder(rows, near) {
+// (2026-11-05、利用者の指示「3D でのハンガーのエレベーターで移動先がないのは困る」) ハンガー行きの路線 (station.json の hangarLineTags = 路線の管理のタグ
+// Spaceport_Hangar・TransportManager_Generic_Hangar) の乗り場も、ハンガーのエレベーターとする (Lorville・New Babbage・Area18・GrimHEX は鍵に pad・dockingport が無いため)。
+// ハンガーの入口の無い地図 (hangarSizes が空) では、この見分けは使わない (マイハンガーの行が出ないので、今までの並びのまま)
+// 行き先に出すマイハンガーの大きさ: 入口の大きさ (hangarSizes) のうち、アプリがハンガーの区画が決まると返したもの (hangarSizesOk)。返事が無ければ入口の大きさのまま
+// (2026-11-05、利用者の指示「ないものはエレベーターの行き先に出さない」)
+const hangarSizesOf = sv => !sv ? [] : Array.isArray(sv.hangarSizesOk) ? (sv.hangarSizes || []).filter(z => sv.hangarSizesOk.includes(z)) : (sv.hangarSizes || []);
+const hangarLineOf = (t, sv) => hangarSizesOf(sv).length > 0 && (sv.hangarLineTags || []).includes(t[3]);
+function elevOrder(rows, near, sv = VIEW) {
   const num = (re, t) => { const m = re.exec(t[5] || ''); return m ? +m[1] : null; };
   const dk = t => num(/dockingport_(\d+)$/i, t), pd = t => num(/pad_(\d+)$/i, t);
-  const lift = !!near[6] || rows.some(t => dk(t) !== null || pd(t) !== null);
+  const lift = !!near[6] || hangarLineOf(near, sv) || rows.some(t => dk(t) !== null || pd(t) !== null);
   const normal = rows.filter(t => !(lift && (dk(t) !== null || pd(t) !== null))).sort((a, b) => b[1][2] - a[1][2]);
   const docks = lift ? rows.filter(t => dk(t) !== null).sort((a, b) => dk(a) - dk(b)) : [];
   const pads = lift ? rows.filter(t => dk(t) === null && pd(t) !== null).sort((a, b) => pd(a) - pd(b)) : [];
-  const sizes = lift && !hangarBack ? HANGAR_SIZES.filter(z => (VIEW.hangarSizes || []).includes(z)) : [];
+  const sizes = lift && (!hangarBack || sv !== VIEW) ? HANGAR_SIZES.filter(z => hangarSizesOf(sv).includes(z)) : [];
   const back = hangarBack && near[6] ? [hangarBack] : [];
   return { normal, docks, pads, sizes, back };
+}
+// マイハンガーの中のエレベーターの窓 (2026-11-05、利用者の指示「3D でのハンガーのエレベーターで移動先がないのは困る」。親の決定):
+//   入るときに乗った本体の乗り場 (hangarBack.stop) の路線の行き先を、本体のその乗り場で窓を開いたときと同じ一覧 (同じ高さのまとめ方・elevOrder の並び) で出す。
+//   本体の行き先を選ぶと、本体へ戻ってその乗り場に立つ (leaveHangar と同じ移り方。向きは入るときに決めた向き)。
+//   入るときに乗った乗り場は「ステーションへ戻る」の段に今のまま出す (本体の一覧からは除く)。マイハンガーの段は本体と同じ大きさ (今のハンガーは「（今のハンガー・閉じる）」)
+function hangarLiftWindow(near, head, list) {
+  const from = hangarBack.stop, sv = stationSaved.VIEW;
+  const size = window.__hangar && window.__hangar.size;
+  head.textContent = `ハンガーのエレベーター（今: マイハンガー${size ? `（${size}）` : ''}）`;
+  tboxRow(list, '（今の階・閉じる）', 'cur', () => hideTbox(near));
+  const body = (sv.transit || []).filter(t => t[0].startsWith('elevator') && t[3] === from[3]);
+  const byZ = new Map();
+  for (const t of body) {
+    const k2 = Math.abs(t[1][2] - from[1][2]) <= 1 && t[5] === from[5] ? 'cur' : t[5] + '|' + t[1][2].toFixed(0); const d = Math.hypot(t[1][0] - from[1][0], t[1][1] - from[1][1]);
+    const prev = byZ.get(k2); if (!prev || d < prev[1]) byZ.set(k2, [k2 === 'cur' ? from : t, d]);
+  }
+  const rows = [...byZ.values()].map(v => v[0]);
+  const dup = new Map(); for (const t of rows) dup.set(t[4], (dup.get(t[4]) || 0) + 1);
+  const row = t => { if (t === from) return; tboxRow(list, t[4] + (dup.get(t[4]) > 1 ? `（高さ ${t[1][2].toFixed(1)} m）` : ''), '', () => leaveHangar(t)); };
+  const o = elevOrder(rows, from, sv);
+  for (const t of o.normal) row(t);
+  if (o.docks.length) { tboxHead(list, '外部ポート'); for (const t of o.docks) row(t); }
+  if (o.pads.length) { tboxHead(list, '着陸パッド'); for (const t of o.pads) row(t); }
+  if (o.sizes.length) {
+    tboxHead(list, 'マイハンガー');
+    for (const z of o.sizes) { if (z === size) tboxRow(list, `マイハンガー（${z}）（今のハンガー・閉じる）`, 'cur', () => hideTbox(near)); else tboxRow(list, `マイハンガー（${z}）`, '', () => openHangar(z, from)); }
+  }
+  tboxHead(list, 'ステーションへ戻る'); tboxRow(list, hangarBack.label, '', () => leaveHangar());
 }
 function tboxHead(list, text) { const d = document.createElement('div'); d.textContent = text; d.style.cssText = 'padding:4px 8px;background:#2a3038;color:#9cf;font-size:12px'; list.appendChild(d); }
 // 録画に「ここで移った」を入れる (再生で前の点からなめらかにつながず、その時刻に飛ぶ。点の 9 番目が 1)
@@ -724,7 +779,9 @@ async function openHangar(size, from) {
   } catch (e) { msg.textContent = `マイハンガー（${size}）: ${e.message}`; return; }
   msg.textContent = '';
   if (!stationSaved) stationSaved = { VIEW, BASE, title: document.getElementById('title').textContent };
-  hangarBack = { label: `${from[4]}（${stationSaved.VIEW.station}）`, pos: from[1].slice(), yaw: wyaw + Math.PI, stop: from };
+  // ハンガーの中から別の大きさのハンガーへ移るとき (from が入るときに乗った乗り場) は、戻る向きは入るときに決めた向きのまま
+  const backYaw = hangarBack && hangarBack.stop === from ? hangarBack.yaw : wyaw + Math.PI;
+  hangarBack = { label: `${from[4]}（${stationSaved.VIEW.station}）`, pos: from[1].slice(), yaw: backYaw, stop: from };
   SITE = info.site; BASE = info.data; VIEW = await (await fetch(BASE + 'station.json')).json();
   document.getElementById('title').textContent = `マイハンガー（${size}）: ${info.title || ''}`; document.getElementById('hangarHow').textContent = info.how || ''; document.getElementById('hangarBar').style.display = 'block';
   renderTargets();
@@ -733,9 +790,10 @@ async function openHangar(size, from) {
   window.__hangar = { size, site: SITE, start: lift ? 'lift' : 'center' };
   await travelTo(abs, wyaw + Math.PI, lift || null, window.__hangar, true);
 }
-async function leaveHangar() {
+// to: 本体の乗り場 (VIEW.transit の行)。無ければ入るときに乗った乗り場 (今までの「ステーションへ戻る」)。移り方・向きは同じで、立つ乗り場だけが違う
+async function leaveHangar(to) {
   if (!stationSaved || !hangarBack) return;
-  const b = hangarBack; SITE = ''; VIEW = stationSaved.VIEW; BASE = stationSaved.BASE; document.getElementById('title').textContent = stationSaved.title;
+  const b = to ? { ...hangarBack, pos: to[1].slice(), stop: to } : hangarBack; SITE = ''; VIEW = stationSaved.VIEW; BASE = stationSaved.BASE; document.getElementById('title').textContent = stationSaved.title;
   stationSaved = null; hangarBack = null; document.getElementById('hangarBar').style.display = 'none';
   renderTargets();
   await travelTo(b.pos, b.yaw, b.stop, window.__hangarBack = {}, true);
@@ -769,7 +827,7 @@ function closeComment(ok) {
 let noteMarks = [], noteSeq = 0, notesReq = 0;
 function noteDraw(note) {
   const c = cur.center;
-  const g = commentMark({ t: 0, pos: [note.pos[0] - c[0], note.pos[1] - c[1], note.pos[2] - c[2]], text: note.text }, [0, 0, 0], markOn('comment'), noteMarks);
+  const g = commentMark({ t: 0, pos: [note.pos[0] - c[0], note.pos[1] - c[1], note.pos[2] - c[2]], text: note.text }, [0, 0, 0], true, noteMarks);   // 保存したコメントはいつも「出すべき」(shown)。出すかはスイッチ (commentShow・applyMarkVis) で決める (コメントのスイッチが OFF の間に読み込んだ印も、ON に戻せば出す)
   g.userData.note = note; return g;
 }
 function addNote(pos, text) {
@@ -816,11 +874,11 @@ function refreshDistLabels(force) {
   }
 }
 // 文字の札 (1 行の文字か、行の配列)
-function textSprite(text) {
+function textSprite(text, frame = '#ffee66', ink = '#ffffff') {
   const lines = Array.isArray(text) ? text : [text];
   const c = document.createElement('canvas'); const g = c.getContext('2d'); g.font = '28px sans-serif';
   const w = Math.ceil(Math.max(...lines.map(l => g.measureText(l).width))) + 24, hh = 44 * lines.length; c.width = w; c.height = hh; g.font = '28px sans-serif';
-  g.fillStyle = 'rgba(0,0,0,0.75)'; g.fillRect(0, 0, w, hh); g.strokeStyle = '#ffee66'; g.strokeRect(1, 1, w - 2, hh - 2); g.fillStyle = '#ffffff';
+  g.fillStyle = 'rgba(0,0,0,0.75)'; g.fillRect(0, 0, w, hh); g.strokeStyle = frame; g.strokeRect(1, 1, w - 2, hh - 2); g.fillStyle = ink;
   lines.forEach((l, i) => g.fillText(l, 12, 31 + 44 * i));
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false })); sp.scale.set(w / 44 * 0.5, 0.5 * lines.length, 1); sp.renderOrder = 20; return sp;
 }
@@ -831,7 +889,7 @@ function commentMark(cm, co, visible, list = cMarks) {
   const ball = new THREE.Mesh(new THREE.SphereGeometry(0.12), new THREE.MeshBasicMaterial({ color: 0xffee66, depthTest: false })); ball.position.copy(p0); ball.renderOrder = 20;
   const lg = new THREE.BufferGeometry().setFromPoints([p0, p1]); const line = new THREE.Line(lg, new THREE.LineBasicMaterial({ color: 0xffee66, depthTest: false })); line.renderOrder = 20;
   const sp = textSprite(cm.text); sp.position.copy(p1); sp.position.z += 0.3;
-  g.add(ball, line, sp); g.userData.shown = visible; g.visible = visible && markOn('comment'); g.userData.t = cm.t; g.userData.cat = 'comment'; g.userData.sp = sp; root.add(g); list.push(g);
+  g.add(ball, line, sp); g.userData.shown = visible; g.visible = visible && commentShow(); g.userData.t = cm.t; g.userData.cat = 'comment'; g.userData.sp = sp; root.add(g); list.push(g);
   return g;
 }
 function showComments(list) {
@@ -848,7 +906,7 @@ function playStep(dt) {
   const a = P[play.i], b = P[Math.min(play.i + 1, P.length - 1)], f = b[0] > a[0] ? Math.min(1, (play.t - a[0]) / (b[0] - a[0])) : 0;
   const po = play.center ? [play.center[0] - cur.center[0], play.center[1] - cur.center[1], play.center[2] - cur.center[2]] : [0, 0, 0];
   wpos.set(a[1] + (b[1] - a[1]) * f + po[0], a[2] + (b[2] - a[2]) * f + po[1], a[3] + (b[3] - a[3]) * f + po[2]); wyaw = a[4] + (b[4] - a[4]) * f; wpitch = a[5]; stance = a[6]; noclip = a[7] === 1; updWalkUi();
-  { const on = markOn('comment'); for (const m of cMarks) { const s = play.t >= m.userData.t; m.userData.shown = s; m.visible = s && on; } }
+  { const on = commentShow(); for (const m of cMarks) { const s = play.t >= m.userData.t; m.userData.shown = s; m.visible = s && on; } }
   walkCam(); document.getElementById('recInfo').textContent = `再生中 ${play.i + 1} / ${P.length}`;
   if (play.i >= P.length - 1) { play = null; document.getElementById('recInfo').textContent = '再生おわり'; }
 }
@@ -908,22 +966,114 @@ function requestSales(t) {
 // 販売品の枠 (アプリの地図の［MAP］の販売品の枠と同じ中身: {title, shops: [{name, note} | {name, tables: [{cols, rows, left}]}]})。✕ か Esc で閉じる
 // 枠の上でホイールを回したら枠の中がスクロールし、画面の拡大縮小 (canvas の wheel) には取られないようにする (2026-11-05、利用者の指示「ホイールスクロール」)。枠は overflow:auto と高さの上限 (view3d.html の #sbox)
 document.getElementById('sbox').addEventListener('wheel', e => { e.stopPropagation(); }, { passive: true });
+// 販売品の枠の検索・表示する種類・並び替え (2026-11-05、利用者の指示「販売品は出る。検索・表示する種類の設定・並び替えができると完璧」)。
+//   検索: 品名の一部 (大文字小文字を区別しない。打つたびに絞る。覚えない)。品名はアプリの返事 (StationView3DShops.Sales) の「品名」の列 (ゲームの英語の名前) だけで、日本語名は返事に無い。
+//   表示する種類: 品目の表の「種類」の列 (［詳細］と同じ分類の言葉。アプリの DetailTypeLabel) ごとのチェックと数。外した種類は localStorage (view3d.salesHidden = 種類の名前の配列) に覚え、
+//     別の店・次に開いたときも外れたまま (その店に無い種類の覚えは消さない)。［全部］はこの店の種類を全部出す形に戻す。種類が SALES_FOLD_TYPES より多いときは ▼ を閉じて始める。
+//     コモディティの表 (種類の列が無い) は種類で絞らない。
+//   並び替え: 元の順 (アプリの返事の順 = 品名の順)・品名・価格・種類と、昇順・降順。localStorage (view3d.salesSort = {key, desc}) に覚える。覚えが無ければ元の順。
+//     価格は、表の左寄せでない最初の列 (価格・購入・買値。「-」なら次の列) の金額。金額の無い品は、昇順でも降順でも後ろ。同じ値の品は元の順
+const SALES_FOLD_TYPES = 8;
+const salesLoad = (k, def) => { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); return v ?? def; } catch (_) { return def; } };
+const salesSave = (k, v) => { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); } catch (_) { } };
+// 価格の列の金額 (「1,234 aUEC」・レンタルの「1日 1,234 aUEC / …」の最初の金額)。無ければ null
+function salesPrice(tb, r) {
+  for (let i = tb.left; i < r.length; i++) {
+    const v = String(r[i] ?? '');
+    if (v === '-' || v === '') continue;
+    const m = /([\d,]+(?:\.\d+)?)\s*aUEC/.exec(v);
+    if (m) return parseFloat(m[1].replace(/,/g, ''));
+  }
+  return null;
+}
 function showSales(d) {
   const box = document.getElementById('sbox'); box.innerHTML = ''; window.__sales = d;
-  // 見出し (題と ✕) は、中をスクロールしても上に残す (2026-11-05、利用者「スクロールすると閉じるのバッテンが押せなくなるのは使いにくい」)
-  const h = document.createElement('div'); h.style.cssText = 'display:flex;justify-content:space-between;font-weight:bold;margin-bottom:6px;position:sticky;top:0;background:rgba(0,0,0,.92);padding:4px 0;z-index:1';
+  // 見出し (題と ✕、検索・並び替え・表示する種類) は、中をスクロールしても上に残す (2026-11-05、利用者「スクロールすると閉じるのバッテンが押せなくなるのは使いにくい」)
+  const head = document.createElement('div'); head.style.cssText = 'position:sticky;top:0;background:rgba(0,0,0,.92);padding:4px 0;z-index:1;margin-bottom:6px';
+  const h = document.createElement('div'); h.style.cssText = 'display:flex;justify-content:space-between;font-weight:bold';
   const ti = document.createElement('span'); ti.textContent = d.title || '販売品'; const x = document.createElement('button'); x.textContent = '✕'; x.style.cssText = 'width:auto;display:inline;border:1px solid #666'; x.onclick = () => { box.style.display = 'none'; };
-  h.appendChild(ti); h.appendChild(x); box.appendChild(h);
-  for (const sh of d.shops || []) {
-    const n = document.createElement('div'); n.textContent = sh.name; n.style.cssText = 'margin:6px 0 2px;color:#9cf'; box.appendChild(n);
-    if (sh.note) { const m = document.createElement('div'); m.textContent = sh.note; box.appendChild(m); continue; }
-    for (const tb of sh.tables || []) {
-      const table = document.createElement('table'); const tr = document.createElement('tr');
-      for (const c of tb.cols) { const th = document.createElement('th'); th.textContent = c; tr.appendChild(th); } table.appendChild(tr);
-      for (const r of tb.rows) { const tr2 = document.createElement('tr'); r.forEach((v, i) => { const td = document.createElement('td'); td.textContent = v; if (i >= tb.left) td.style.textAlign = 'right'; tr2.appendChild(td); }); table.appendChild(tr2); }
-      box.appendChild(table);
+  h.appendChild(ti); h.appendChild(x); head.appendChild(h);
+  box.appendChild(head);
+  const body = document.createElement('div'); box.appendChild(body);
+  const tables = (d.shops || []).flatMap(sh => sh.tables || []);
+  const typeCol = tb => tb.cols.indexOf('種類');
+  // この店の種類と数 (品目の表の「種類」の列。出てくる順)
+  const typeCount = new Map();
+  for (const tb of tables) { const ci = typeCol(tb); if (ci < 0) continue; for (const r of tb.rows) typeCount.set(r[ci], (typeCount.get(r[ci]) || 0) + 1); }
+  // 覚えが配列でなければ (形の違う値) 空とし、文字列でない要素は捨てる
+  const hv = salesLoad('view3d.salesHidden', []);
+  const hidden = new Set((Array.isArray(hv) ? hv : []).filter(t => typeof t === 'string'));
+  const ss = salesLoad('view3d.salesSort', null);
+  const sort = { key: ss && ['name', 'price', 'type'].includes(ss.key) ? ss.key : '', desc: !!(ss && ss.desc) };
+  let q = null, typeBox = null, typeSum = null;
+  if (tables.length) {
+    const ctl = document.createElement('div'); ctl.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;font-weight:normal';
+    q = document.createElement('input'); q.type = 'search'; q.id = 'salesQ'; q.placeholder = '品名の一部で絞り込み'; q.style.cssText = 'flex:1;min-width:160px;background:#222;color:#ddd;border:1px solid #444;padding:3px';
+    const lab = document.createElement('span'); lab.textContent = '並び:';
+    const sortSel = document.createElement('select'); sortSel.style.cssText = 'background:#222;color:#ddd;border:1px solid #444';
+    for (const [v, t] of [['', '元の順'], ['name', '品名'], ['price', '価格'], ['type', '種類']]) { const o = document.createElement('option'); o.value = v; o.textContent = t; sortSel.appendChild(o); }
+    const dirB = document.createElement('button'); dirB.style.cssText = 'width:auto;display:inline;border:1px solid #666;padding:2px 8px';
+    const updDir = () => { dirB.textContent = sort.desc ? '降順 ▼' : '昇順 ▲'; dirB.disabled = !sort.key; };
+    sortSel.value = sort.key; updDir();
+    sortSel.onchange = () => { sort.key = sortSel.value; updDir(); salesSave('view3d.salesSort', sort.key ? { key: sort.key, desc: sort.desc } : null); render(); };
+    dirB.onclick = () => { sort.desc = !sort.desc; updDir(); salesSave('view3d.salesSort', { key: sort.key, desc: sort.desc }); render(); };
+    q.oninput = () => render();
+    ctl.append(q, lab, sortSel, dirB); head.appendChild(ctl);
+    if (typeCount.size) {
+      typeBox = document.createElement('details'); typeBox.open = typeCount.size <= SALES_FOLD_TYPES; typeBox.style.cssText = 'margin-top:4px;font-weight:normal';
+      typeSum = document.createElement('summary'); typeSum.style.cssText = 'cursor:pointer;color:#9cf'; typeBox.appendChild(typeSum);
+      const wrap = document.createElement('div'); wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:2px 12px;margin-top:4px;align-items:center';
+      const allB = document.createElement('button'); allB.textContent = '全部'; allB.style.cssText = 'width:auto;display:inline;border:1px solid #666;padding:1px 8px';
+      wrap.appendChild(allB);
+      const cbs = [];
+      for (const [t, n] of typeCount) {
+        const l = document.createElement('label'); l.style.cssText = 'display:inline;white-space:nowrap;cursor:pointer';
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !hidden.has(t);
+        cb.onchange = () => { if (cb.checked) hidden.delete(t); else hidden.add(t); salesSave('view3d.salesHidden', [...hidden]); render(); };
+        l.append(cb, `${t || '（種類なし）'} (${n})`); wrap.appendChild(l); cbs.push([t, cb]);
+      }
+      allB.onclick = () => { for (const [t, cb] of cbs) { hidden.delete(t); cb.checked = true; } salesSave('view3d.salesHidden', [...hidden]); render(); };
+      typeBox.appendChild(wrap); head.appendChild(typeBox);
     }
   }
+  const cmpS = (a, b) => String(a).localeCompare(String(b), 'ja', { sensitivity: 'base' });
+  function render() {
+    body.innerHTML = '';
+    const word = q ? q.value.trim().toLowerCase() : '';
+    let shown = 0, total = 0;
+    for (const sh of d.shops || []) {
+      const n = document.createElement('div'); n.textContent = sh.name; n.style.cssText = 'margin:6px 0 2px;color:#9cf'; body.appendChild(n);
+      if (sh.note) { const m = document.createElement('div'); m.textContent = sh.note; body.appendChild(m); continue; }
+      for (const tb of sh.tables || []) {
+        const ci = typeCol(tb);
+        total += tb.rows.length;
+        const rows = tb.rows.map((r, i) => ({ r, i })).filter(({ r }) => (!word || String(r[0]).toLowerCase().includes(word)) && (ci < 0 || !hidden.has(r[ci])));
+        if (sort.key) {
+          const sgn = sort.desc ? -1 : 1;
+          rows.sort((A, B) => {
+            let c = 0;
+            if (sort.key === 'price') {
+              const pa = salesPrice(tb, A.r), pb = salesPrice(tb, B.r);
+              if (pa == null || pb == null) c = pa == null && pb == null ? 0 : pa == null ? 1 : -1;   // 金額の無い品は後ろ
+              else c = sgn * (pa - pb);
+            }
+            else if (sort.key === 'type') c = ci >= 0 ? sgn * cmpS(A.r[ci], B.r[ci]) : 0;
+            else c = sgn * cmpS(A.r[0], B.r[0]);
+            return c || A.i - B.i;
+          });
+        }
+        shown += rows.length;
+        const cnt = document.createElement('div'); cnt.style.cssText = 'font-size:12px;color:#aaa'; cnt.textContent = rows.length === tb.rows.length ? `${tb.rows.length} 品` : `${rows.length} / ${tb.rows.length} 品`; body.appendChild(cnt);
+        if (!rows.length) { const m = document.createElement('div'); m.textContent = '条件に合う品がありません。'; m.style.margin = '2px 0 10px'; body.appendChild(m); continue; }
+        const table = document.createElement('table'); const tr = document.createElement('tr');
+        for (const c of tb.cols) { const th = document.createElement('th'); th.textContent = c; tr.appendChild(th); } table.appendChild(tr);
+        for (const { r } of rows) { const tr2 = document.createElement('tr'); r.forEach((v, i) => { const td = document.createElement('td'); td.textContent = v; if (i >= tb.left) td.style.textAlign = 'right'; tr2.appendChild(td); }); table.appendChild(tr2); }
+        body.appendChild(table);
+      }
+    }
+    if (typeSum) { const on = [...typeCount.keys()].filter(t => !hidden.has(t)).length; typeSum.textContent = `表示する種類 (${on} / ${typeCount.size})・表示 ${shown} / ${total} 品`; }
+  }
+  render();
   box.style.display = 'block';
 }
 addEventListener('keydown', e => { if (e.key === 'Escape') document.getElementById('sbox').style.display = 'none'; });
@@ -942,6 +1092,13 @@ function pick(e) {
     const sps = noteMarks.filter(g => g.visible).map(g => g.userData.sp); const nh = sps.length ? ray.intersectObjects(sps, false)[0] : null;
     if (nh && (!hit || nh.distance <= hit.distance + 1.5)) { const g = nh.object.parent; const note = g.userData.note; if (window.confirm(`このコメントを消しますか？\n「${note.text}」`)) deleteNote(g); return; }
   }
+  // 歩くモードで乗り場の印 (エレベーター・トラムの黄色の玉) を押したら、その印のまわりの乗り場の行き先の窓を開く (操作盤を押したときと同じ。着いた直後の 3 m の決まりにも掛からない)
+  // (2026-11-05、親の決定)。印は形より手前に描いているので、コメントの札と同じく、形に当たっていても印を先に見る
+  if (walk && shpG && shpG.visible && document.getElementById('cbox').style.display !== 'block') {
+    const balls = []; shpG.traverse(o => { if (o.isMesh && o.userData.cat === 'transit' && o.visible) balls.push(o); });
+    const bh = balls.length ? ray.intersectObjects(balls, false)[0] : null;
+    if (bh && (!hit || bh.distance <= hit.distance + 1.5)) { showElev(bh.object.position.clone(), true); return; }
+  }
   if (!hit) { box.style.display = 'none'; return; }
   if (document.getElementById('cbox').style.display === 'block') { cPos = hit.point.clone(); document.getElementById('cpos').textContent = `(位置: 押した所 ${cPos.x.toFixed(1)}, ${cPos.y.toFixed(1)}, ${cPos.z.toFixed(1)})`; document.getElementById('ctext').focus(); return; }
   // 店の端末 (station.json の端末のうち、店 (shopGuid) の結び付いたもの) から 1.5 m 以内を押したら、その店の販売品を出す
@@ -952,12 +1109,16 @@ function pick(e) {
     // 店の結び付いていない端末を押したときは、そう出す (何も出ないと押せていないのか分からない)
     if (tAny) { showSales({ title: '販売品', shops: [{ name: tAny.label || tAny.kind, note: 'この端末に結び付いた店が地図のデータにありません' }] }); return; } }
   if (!walk) setCenter(hit.point);
-  else { const k0 = hit.kind; const io0 = cur.ioffs[k0]; if (io0) { const id0 = new Uint32Array(curBuf, io0[0] * 4, io0[1])[hit.tri]; const w_ = cur.parts[id0][1].split('_'); if (w_.includes('elevator') && w_.includes('panel')) showElev(hit.point, true); }
+  else { const k0 = hit.kind; const io0 = cur.ioffs[k0]; if (io0) { const id0 = new Uint32Array(curBuf, io0[0] * 4, io0[1])[hit.tri]; const w_ = cur.parts[id0][1].split('_');
+      // エレベーターの操作盤: 名前の語に elevator と panel (hightech 型 console_elevator_1_panel_a など)、または elevator・console・freestanding
+      // (util 型のハンガー・ステーションの console_elevator_1_freestanding_a。2026-11-05、親の決定。語の組は Data.p4k の形の名前で確かめた)
+      if (w_.includes('elevator') && (w_.includes('panel') || (w_.includes('console') && w_.includes('freestanding')))) showElev(hit.point, true); }
     // トラム: 乗り場 (地図のデータの tram) から 5 m 以内のどの面を押しても、その駅の一覧を出す (トラムのパネルの部品の名前は確かめていないので、名前では決めない)
     if ((cur.transit || []).some(t => t[0] === 'tram' && stopDist(t, hit.point) < 5)) showElev(hit.point, true); }
   const k = hit.kind; if (!cur.ioffs[k]) return;
   const [o, n] = cur.ioffs[k]; const ids = new Uint32Array(curBuf, o * 4, n);
   const part = cur.parts[ids[hit.tri]];
+  if (!DEBUG) return;   // 下部の枠 (#pick) は設定「マップのデバッグ表示」のときだけ (上の先頭の DEBUG)
   box.style.display = 'block';
   box.textContent = `${part[1]}  (inst ${part[0]}・${part[4]})\n押した面: ${NAME[k]}\n部品の種類: ${NAME[part[2]]}\n部品の中の判定の面:\n${partFloors(cur, ids[hit.tri])}\n押した所の高さ: 中心から ${hit.point.z.toFixed(2)} m (絶対 ${(hit.point.z + cur.center[2]).toFixed(2)} m)
 押した所 (絶対): ${(hit.point.x + cur.center[0]).toFixed(2)}, ${(hit.point.y + cur.center[1]).toFixed(2)}, ${(hit.point.z + cur.center[2]).toFixed(2)}`;
@@ -1136,19 +1297,29 @@ function guideText(targets, entrances, flist) {
   const res = [];
   for (const tg of targets) {
     if (['elevator', 'tram', 'hangar_lobby'].includes(tg.kind)) continue;
-    const p_ = tg.pos; let txt = `フロア ${floorOf(p_[2])}。`;
+    // text: 人が読む案内 (フロア・入口の有無と店の中心からの距離・乗り場につながるか・いちばん近い乗り口)。
+    // dbg: 前と同じ全文 (部品の名前・床の部品・直線の高さ・道の点・直線が当たった部品の内訳を含む。設定「マップのデバッグ表示」のときに出す)
+    const p_ = tg.pos; let txt = `フロア ${floorOf(p_[2])}。`, dbg = txt;
     if (['shop', 'admin', 'pharmacy'].includes(tg.kind)) {
       const en = entrances.find(e => e.shop === tg.name); const ok_ = (en ? en.list : []).filter(o => o[5]);
-      if (en && en.floor) txt += `店の中心の床 ${en.floor[0].toFixed(2)} m (${en.floor[1]})、直線の高さ ${en.h.toFixed(2)} m。`;
-      if (ok_.length) { const o = ok_[0]; txt += `入口 ${o[1]} (店の中心から ${o[3].toFixed(1)} m)。入口の道の点 ${o[6]}・${o[8] ? '乗り場につながる' : '乗り場につながらない'}。`; }
-      else txt += '入口になる開口部が無い (' + (en ? en.list : []).map(o => `${o[1]} ${o[3].toFixed(1)} m: 直線が ${o[11].join(', ')} に当たる`).join('; ') + ')。';
+      if (en && en.floor) dbg += `店の中心の床 ${en.floor[0].toFixed(2)} m (${en.floor[1]})、直線の高さ ${en.h.toFixed(2)} m。`;
+      if (ok_.length) {
+        const o = ok_[0];
+        dbg += `入口 ${o[1]} (店の中心から ${o[3].toFixed(1)} m)。入口の道の点 ${o[6]}・${o[8] ? '乗り場につながる' : '乗り場につながらない'}。`;
+        txt += `入口は店の中心から ${o[3].toFixed(1)} m。${o[8] ? '乗り場につながる' : '乗り場につながらない'}。`;
+      }
+      else {
+        dbg += '入口になる開口部が無い (' + (en ? en.list : []).map(o => `${o[1]} ${o[3].toFixed(1)} m: 直線が ${o[11].join(', ')} に当たる`).join('; ') + ')。';
+        txt += '入口になる開口部が無い。';
+      }
     }
     if (els.length) {
       const d3 = t => Math.hypot(t.pos[0] - p_[0], t.pos[1] - p_[1], t.pos[2] - p_[2]);
       const e = els.reduce((a, b) => d3(b) < d3(a) ? b : a);
-      txt += `いちばん近い乗り口: ${e.label} (行き先 ${e.name}・フロア ${floorOf(e.pos[2])})、直線で ${d3(e).toFixed(0)} m。`;
+      const near_ = `いちばん近い乗り口: ${e.label} (行き先 ${e.name}・フロア ${floorOf(e.pos[2])})、直線で ${d3(e).toFixed(0)} m。`;
+      txt += near_; dbg += near_;
     }
-    res.push({ shop: dispRow(tg), text: txt });
+    res.push({ shop: dispRow(tg), text: txt, dbg, t: tg });
   }
   return res;
 }
@@ -1208,13 +1379,15 @@ async function buildScene(p, res, keep, t0) {
         // 画像の番号の続く区間 (worker が番号の順に並べている)。画像のある区間が 1 つでもあれば uv とグループを付ける
         const runs = []; let s = 0;
         while (s < cnt) { let e = s + 1; const id = T[s]; while (e < cnt && T[e] === id) e++; runs.push([s, e, id]); s = e; }
-        if (runs.some(([, , id]) => id >= 0 && TEXS[id] && TEXS[id].url)) {
-          g.setAttribute('uv', new THREE.BufferAttribute(uvAll.subarray(uo + a * 6, uo + (a + cnt) * 6), 2));
+        // (2026-11-05) textures の color: true は画像なしの色だけの項目 (場所のパレットの色を指す、画像の無い面)。tint の色で描く (map なし)
+        const hasTex = id => id >= 0 && TEXS[id] && (TEXS[id].url || TEXS[id].color);
+        if (runs.some(([, , id]) => hasTex(id))) {
+          if (runs.some(([, , id]) => id >= 0 && TEXS[id] && TEXS[id].url)) g.setAttribute('uv', new THREE.BufferAttribute(uvAll.subarray(uo + a * 6, uo + (a + cnt) * 6), 2));
           mats = [plain]; const mi = new Map();
           for (const [s0, e0, id] of runs) {
             let m = 0;
             // 色合い (textures の tint = 材質の層 1 の TintColor。無ければ白): hardsurface/layerblend 系は灰色の下地の画像に層の色を掛けて色を出すので map × color (2026-11-05、利用者の報告「かなり灰色になった」)
-            if (id >= 0 && TEXS[id] && TEXS[id].url) { m = mi.get(id); if (m === undefined) { const tn = TEXS[id].tint || [1, 1, 1]; m = mats.length; mats.push(new THREE.MeshLambertMaterial({ map: texOf(TEXS[id]), color: new THREE.Color(tn[0], tn[1], tn[2]), ...matOpts })); mi.set(id, m); } }
+            if (hasTex(id)) { m = mi.get(id); if (m === undefined) { const tn = TEXS[id].tint || [1, 1, 1]; m = mats.length; mats.push(new THREE.MeshLambertMaterial({ map: TEXS[id].url ? texOf(TEXS[id]) : null, color: new THREE.Color(tn[0], tn[1], tn[2]), ...matOpts })); mi.set(id, m); } }
             g.addGroup(s0 * 3, (e0 - s0) * 3, m);
           }
         }
@@ -1240,7 +1413,7 @@ async function buildScene(p, res, keep, t0) {
   }
   nroot.position.set(0, 0, 0); root = nroot;
   for (const k of new Set([...Object.keys(groups), ...Object.keys(ngroups)])) groups[k] = ngroups[k] ?? null;
-  cur = p; curBuf = buf;
+  cur = p; curBuf = buf; curPal = regionPalReq;   // この地点を頼んだときの色付け (reloadForPalette)
   // 当たり判定: 荒い区切り coarse を受け取り、作ってあった升は全部捨てる (keep でも中心が変わり、升の鍵がずれるため)
   coarse = res.coarse; cellReset();
   // 細かい形で補った面 (extra): keep なら中心の差 off で座標を直して新しい root に描き直す。別の場所に替わった (keep でない) なら捨てる
@@ -1289,7 +1462,9 @@ function show(t0, keep) {
     `\n読み込み ${((performance.now() - (t0 || performance.now())) / 1000).toFixed(1)} 秒・${(curBuf.byteLength / 1048576).toFixed(0)} MB` +
     (REG.missing.length ? `\n形の出なかった socpak (この地点): ${REG.missing.length}` : '') +
     (window.__lastRegion?.app?.extractSeconds != null ? `\n時間: 選んでから描き終わるまで ${(((performance.now() - (t0 || performance.now())) / 1000)).toFixed(1)} 秒 = 区画の用意 ${window.__lastRegion.wait.toFixed(1)} 秒 (取り出し ${window.__lastRegion.app.extractSeconds.toFixed(1)} 秒・計算 ${window.__lastRegion.app.computeSeconds.toFixed(1)} 秒。どちらも同時に動かした分の足し合わせ) + ビューアの読み込みと描く用意 ${(((performance.now() - (t0 || performance.now())) / 1000) - window.__lastRegion.wait).toFixed(1)} 秒` : '');
-  document.getElementById('guide').textContent = (p.guide || []).map(g => `■ ${g.shop}\n${g.text}`).join('\n\n');
+  renderGuide();
+  drawHereMark();
+  if (pendingHere && !pendingHereSince) setTimeout(runPendingHere, 0);   // 待つのをやめていた here (runPendingHere) を、地点を読み込めたので出す   // 現在位置の印 (地点の中心が変わったので置き直す)
   const fl2 = document.getElementById('flist2'); fl2.innerHTML = '';
   const allB = document.createElement('button'); allB.textContent = '全部 (切らない)'; allB.onclick = () => { selFloor = null; applyFloor(); }; fl2.appendChild(allB);
   (p.flist || []).slice().reverse().forEach(fl => {
@@ -1405,13 +1580,42 @@ function applyVis() {
   // 「テクスチャ」: ON なら画像の材質の配列、OFF なら灰色の 1 つの材質 (形のグループはそのまま。1 つの材質ならグループ全部に同じ材質で描かれる)
   const texOn = document.getElementById('texOn').checked;
   for (const k of Object.keys(COL)) for (const m of groups[k] || []) { const want = texOn && m.userData.mats ? m.userData.mats : m.userData.plain; if (want && m.material !== want) m.material = want; }
-  if (shpG) shpG.visible = document.getElementById('shp').checked;
+  // 外部視点 (extView) の間は、内部の玉と札 (shpG の中の全部) を出さない (updExtView)
+  if (shpG) shpG.visible = document.getElementById('shp').checked && !extView;
   // 店の印 (柱と玉) は、部品の中・後ろにあっても見えるよう、いつも手前に描く
   shpG?.traverse(o => { if (o.material) { o.material.depthTest = false; o.material.needsUpdate = true; } });
 }
 document.querySelectorAll('.lg input').forEach(i => i.addEventListener('change', applyVis));
+// 「テクスチャ」のスイッチ (右上の #swPanel): 切り替えたら localStorage (view3d.tex = "1"・"0") に覚え、次に開いたとき (別の場所・別ウィンドウ・［マップ］タブ・次の起動) もその状態で始める。
+// OFF で開いたときは、buildScene が初めから灰色の材質で作る (2026-11-05、利用者の指示「テクスチャを貼るのは ON OFF できるように、切り替えたら覚えておいて以降はそれに従うようにしてほしい」)
+try { const t = localStorage.getItem('view3d.tex'); if (t === '1' || t === '0') document.getElementById('texOn').checked = t === '1'; } catch (_) { }
+document.getElementById('texOn').addEventListener('change', e => { try { localStorage.setItem('view3d.tex', e.target.checked ? '1' : '0'); } catch (_) { } applyVis(); refreshPalSwitch(); });
+// 「色付け」のスイッチ (右上の #swPanel の「テクスチャ」の下。2026-11-05、利用者の指示「1 で。右のスイッチに入れて自動保存にして」「色付けは場所に寄らず、どこの場所でも全体で共通でいいです」):
+//   場所のパレットの色を付けるか。地点を頼む知らせ ({type:'region', …, pal}) に入れてアプリへ渡し、アプリがその色付けで地点を作る (StationView3DWindow。先読みも最後に頼んだ色付け)。
+//   切り替えたら localStorage (view3d.pal = "1"・"0"。場所によらず 1 つ) に覚え、今の地点を同じ中心・半径で読み直す (keep。見ている所・向き・歩くモードはそのまま)。
+//   読み込み中なら終わってから、終わった地点の色付けが今のスイッチと違うときだけ読み直す。「テクスチャ」が OFF の間は押せない (つまみの位置・覚えは変えない)
+const palOn = () => document.getElementById('palOn').checked;
+let regionPalReq = true, curPal = null;   // 最後に頼んだ地点の色付け・今出している地点の色付け
+try { const t = localStorage.getItem('view3d.pal'); if (t === '1' || t === '0') document.getElementById('palOn').checked = t === '1'; } catch (_) { }
+function refreshPalSwitch() { document.getElementById('palOn').disabled = !document.getElementById('texOn').checked; }
+function reloadForPalette() {
+  // 読み込み中 (最初の地点を含む) は終わってから見る (最初の地点はまだ cur が無いので、先に loading を見る)
+  if (loading) { setTimeout(reloadForPalette, 500); return; }
+  if (!cur) return;
+  if (curPal === palOn()) return;
+  loadRegion(cur.center.slice(), cur.r, true);
+}
+document.getElementById('palOn').addEventListener('change', e => { try { localStorage.setItem('view3d.pal', e.target.checked ? '1' : '0'); } catch (_) { } reloadForPalette(); });
+refreshPalSwitch();
+// エレベーター・トラムの行き先の窓 (#tbox) は、右上のスイッチの欄の左に置く (欄と重ならないように。欄の幅は数の文字で変わるので、変わるたびに置き直す)
+function placeTbox() { const s = document.getElementById('swPanel'), b = document.getElementById('tbox'); if (!s || !b) return;
+  // #view が狭くて欄の左に入り切らないときは、左の端 (8 px) で止める (画面の外に出さない。そのときは欄と重なる)
+  const want = el.clientWidth - s.offsetLeft + 8, maxRight = Math.max(0, el.clientWidth - (b.offsetWidth || 340 + 20) - 8);
+  b.style.right = Math.min(want, maxRight) + 'px'; }
+addEventListener('resize', placeTbox); try { new ResizeObserver(placeTbox).observe(document.getElementById('swPanel')); } catch (_) { } placeTbox();
 // 「表示」のチェック (2026-11-05、利用者「チェックボックスで表示するものを選べるように」): 店 (shop)・端末 (terminal)・エレベーター・トラム (transit)・クエストの扉・パネル (quest)・コメント (comment)。
-// 印 (玉) と札に userData.cat を付けておき、作り直さずに visible だけ切り替える。状態は localStorage (view3d.marks) に覚える。既定は全部 ON
+// 印 (玉) と札に userData.cat を付けておき、作り直さずに visible だけ切り替える。状態は localStorage (view3d.marks) に覚える。既定は全部 ON。
+// (2026-11-05) チェックは左の欄から右上のスイッチの欄 (#swPanel の「印」) へ移した (class mk・data-cat・保存の鍵は前のまま)
 const MARK_CATS = ['shop', 'terminal', 'transit', 'quest', 'comment'];
 function markCatOf(kind) {
   if (kind === 'terminal_questdoor' || kind === 'terminal_questitem' || kind === 'terminal_questpanel') return 'quest';   // StationView3D.cs の EntityKinds ("terminal_" + questdoor/questitem/questpanel)
@@ -1424,9 +1628,29 @@ function markOn(cat) { const cb = document.querySelector(`.mk[data-cat="${cat}"]
 function applyMarkVis() {
   const on = {}; for (const c of MARK_CATS) on[c] = markOn(c);
   shpG?.traverse(o => { const c = o.userData.cat; if (c && c in on) o.visible = on[c]; });
-  for (const g of [...cMarks, ...noteMarks]) g.visible = on.comment && g.userData.shown !== false;
+  for (const g of [...cMarks, ...noteMarks]) g.visible = on.comment && !extView && g.userData.shown !== false;
   try { localStorage.setItem('view3d.marks', JSON.stringify(on)); } catch (_) { }
 }
+// コメントの印を出すか: 「印」のコメントのスイッチが ON で、外部視点でない (スイッチの覚えている状態は変えない)
+const commentShow = () => markOn('comment') && !extView;
+// ===== 外部視点 (2026-11-05、利用者の指示「外になったら内部は全部消してほしい。邪魔。」「外部から見てる、内部で見てるでこのスイッチの有効無効は切り替えてほしい」) =====
+// 外部視点 = 外から見たときの印と見出しを出す条件 (extTick) のうち、印の有無を除いたもの: 地点があり、歩くモードでなく、マイハンガーの中でなく、回転の中心からの距離が地点の半径以上。
+// 毎コマ、描く (R.render) 前に判定し (updExtView)、外部視点の引き出し線・見出し (extTick) も同じ値で出す・消すので、片方だけ出ているコマは無い。
+// 外部視点の間: 内部の印と札 (shpG = 店・端末・エレベーター・トラム・クエスト・そのほかの玉と札、店名の札、距離の付いた札・まとめた札。cMarks・noteMarks = 再生と保存のコメントの印) を出さない。
+//   「印」の 5 つのスイッチは押せない形、「キャプション」のスイッチは押せる形 (数が 0 の種類は押せないまま)。内部で見ている間はその逆。「テクスチャ」はいつでも押せる。
+//   押せない形にしてもスイッチの ON・OFF (覚えている状態) は変えない。部品の形は消さない
+let extView = false;
+const extViewNow = () => !!cur && !walk && !SITE && dist >= cur.r;
+function refreshSwitches() {
+  document.querySelectorAll('.mk').forEach(cb => { cb.disabled = extView; });
+  for (const id of ['chkExtPad', 'chkExtDock', 'chkExtFreight', 'chkExtHangar']) { const cb = document.getElementById(id); if (cb) cb.disabled = !extView || cb.dataset.zero === '1'; }
+}
+function updExtView() {
+  const v = extViewNow(); if (v === extView) return;
+  extView = v; applyVis(); applyMarkVis(); refreshSwitches();
+  if (gravG) gravG.visible = !extView;   // 重力の範囲の箱 (drawGravity) も、内部の印と同じ値で出す・消す
+}
+refreshSwitches();
 try { const s = JSON.parse(localStorage.getItem('view3d.marks') || '{}'); document.querySelectorAll('.mk').forEach(cb => { if (typeof s[cb.dataset.cat] === 'boolean') cb.checked = s[cb.dataset.cat]; }); } catch (_) { }
 document.querySelectorAll('.mk').forEach(cb => cb.addEventListener('change', applyMarkVis));
 ['cutH', 'ghostA'].forEach(id => document.getElementById(id).addEventListener('input', applyFloor));
@@ -1692,6 +1916,8 @@ function regionR() { return Math.max(10, +document.getElementById('regionR').val
 // 行き先を選び直したら、前の行き先の残りの読み込み (裏の ±R) はしない (goGen)
 let goGen = 0, pendingGo = null;
 function goTarget(t, btn) {
+  // 文字の道案内も、押した先の項目に合わせる (今の地点に無ければ、読み込んだ後の show で合わせる)。道案内の無い種類 (エレベーター・トラム・hangar_lobby) は合わせない
+  if (!['elevator', 'tram', 'hangar_lobby'].includes(t.kind)) { guideWant = t; renderGuide(); }
   if (loading) { pendingGo = [t, btn]; document.querySelectorAll('#tlist button').forEach(b => b.classList.remove('on')); btn?.classList.add('on'); ++goGen; return; }
   document.querySelectorAll('#tlist button').forEach(b => b.classList.remove('on')); btn?.classList.add('on');
   const q = t.pos, r = regionR();
@@ -1710,6 +1936,36 @@ function goTarget(t, btn) {
     }).then(() => { if (gen === goGen) window.__allDone = performance.now(); });
   }
 }
+// ===== 文字の道案内 (2026-11-05、利用者の指示「文字の道案内にドロップダウンリストを出して選んで表示する形にして」) =====
+// 項目は今の地点の道案内 (cur.guide。名前は飛ぶ先の一覧と同じ dispRow、並びも同じ)。いちばん上の「（選ぶ）」は何も出さない。
+// 飛ぶ先の一覧で押した先が道案内にもあれば、その項目に合わせる (guideWant。読み込みが終わった後の show でも合わせる)。
+// 文は、設定「マップのデバッグ表示」(DEBUG) のときは確かめ用の内訳を含む全文 (dbg)、そうでなければ案内の部分 (text)
+let guideWant = null;
+function renderGuide() {
+  const sel = document.getElementById('guideSel'), box = document.getElementById('guide');
+  const list = (cur && cur.guide) || [];
+  const keep = guideWant || (sel.selectedIndex > 0 && sel._list ? sel._list[sel.selectedIndex - 1]?.t : null);
+  sel.innerHTML = ''; const o0 = document.createElement('option'); o0.value = ''; o0.textContent = '（選ぶ）'; sel.appendChild(o0);
+  list.forEach((g, i) => { const o = document.createElement('option'); o.value = String(i); o.textContent = g.shop; sel.appendChild(o); });
+  sel._list = list;
+  const k = keep ? list.findIndex(g => g.t === keep) : -1;
+  sel.selectedIndex = k >= 0 ? k + 1 : 0;
+  if (k >= 0) guideWant = null;
+  showGuide();
+}
+function showGuide() {
+  const sel = document.getElementById('guideSel'), box = document.getElementById('guide');
+  const g = sel.selectedIndex > 0 && sel._list ? sel._list[sel.selectedIndex - 1] : null;
+  box.textContent = g ? (DEBUG ? g.dbg : g.text) : '';
+}
+document.getElementById('guideSel').addEventListener('change', () => { guideWant = null; showGuide(); });
+// 左の欄のまとまり (details.sec) の開いた・畳んだ状態を localStorage (view3d.side = {id: true|false}) に覚える。覚えが無ければ html の初めの状態
+// (飛ぶ先・歩くモード・文字の道案内が開く)
+try { const s = JSON.parse(localStorage.getItem('view3d.side') || '{}'); if (s && typeof s === 'object') document.querySelectorAll('details.sec').forEach(d => { if (typeof s[d.id] === 'boolean') d.open = s[d.id]; }); } catch (_) { }
+document.querySelectorAll('details.sec').forEach(d => d.addEventListener('toggle', () => {
+  const s = {}; document.querySelectorAll('details.sec').forEach(x => { s[x.id] = x.open; });
+  try { localStorage.setItem('view3d.side', JSON.stringify(s)); } catch (_) { }
+}));
 function renderTargets() {
   const box = document.getElementById('tlist'); box.innerHTML = ''; const f = document.getElementById('tfilter').value.trim().toLowerCase();
   const order = { shop: 0, admin: 1, pharmacy: 2, hangar_lobby: 4, elevator: 5, tram: 6, stair: 7 };
@@ -1735,12 +1991,14 @@ function nearCheck() {
 // ===== 外から見たときの印と見出し (着陸パッド・ハンガー・ドッキングポート) =====
 // (2026-11-05、利用者の指示「Seraphim なんか引いて行って外部視点になったときパッドなんかは引き出し線とか前にさんざんやったのを表示するように」「一度作ってんだから、今回入れてよ。外部になったときだけ出して」)
 // v2.5.3 の旧方式のステーションの 3D (wwwroot/station3d/viewer.html) の印・見出し・引き出し線の置き方を、そのまま移したもの (置き方の決まり・定数・色・丸の大きさ・線の太さは旧方式のまま)。
-// 印の元: station.json を読んだ後にアプリへ {type:'exteriorGet'} で頼み、{type:'exterior', pads:[{pos,key,text}], hangars:[{pos,size}], docks:[{pos,key,text}]} で返る
-// (StationView3D.ExteriorMarks。pos は場所の座標 (z 上)。text は鍵のゲームの訳。旧方式の scene.json の markers と URL の labels に当たる)。
+// 印の元: station.json を読んだ後にアプリへ {type:'exteriorGet'} で頼み、{type:'exterior', pads:[{pos,key,text}], hangars:[{pos,size}], docks:[{pos,key,text}], roofDoors:[{origin,center}]} で返る
+// (StationView3D.ExteriorMarks。pos は場所の座標 (z 上)。text は鍵のゲームの訳。旧方式の scene.json の markers と URL の labels に当たる。
+//  roofDoors は屋根の扉の候補 (StationView3D.RoofDoors。旧方式がビューアの中で全部の部品から集めていたものを、今の方式ではアプリが区画の置き方の一覧の全部の区画から集める))。
 // 出すのは外部視点のときだけ: 歩くモードでなく、回転の中心からの距離 dist が読み込んだ地点の半径 cur.r 以上 (nearCheck の「引いて全体を見ている」判定 !walk && dist >= r と同じ)。
 // 中に戻ったら (dist < cur.r)・歩くモードにしたら消す。マイハンガーの中 (SITE) はステーションではないので出さない。
 // 旧方式の「初めの位置」(goHome) は無いので、丸の大きさの基準 (homeRadius) は「今の向きで全部の印が画面の真ん中 HOME_FILL に入るいちばん近い距離」(旧方式の fitRadius と同じ求め方) にする。
-// 旧方式の「ハンガーの印を屋根の扉の中心へ動かす」(roofDoors) は、ステーション全体の形を読まない今の方式では行わない。
+// 旧方式の「ハンガーの印を屋根の扉の中心へ動かす」(roofDoors) は、旧方式と同じ所 (onExterior の buildMarks の直後。ハンガーの集まりは動かす前の位置、寄せる箱は動かした後の位置) で行う。
+// 外部貨物エレベーター (freight) は {type:'exterior'} の freight:[{pos,text}] (text は旧方式と同じ「外部貨物EV」)。切り替えはキャプションのスイッチ chkExtFreight (旧方式の chkFreight)。
 let extTick = () => { }, onExterior = () => { }, requestExterior = () => { };
 {
   const svg = document.getElementById('extLines');
@@ -1748,7 +2006,7 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { };
   const size = () => ({ w: Math.max(1, el.clientWidth), h: Math.max(1, el.clientHeight) });
   const KINDS = {
     pad: { color: '#ffcc33', chk: 'chkExtPad', count: 'nExtPad' },
-    freight: { color: '#6fdc8c', chk: null, count: null },
+    freight: { color: '#6fdc8c', chk: 'chkExtFreight', count: 'nExtFreight' },
     hangar: { color: '#6cb6ff', chk: 'chkExtHangar', count: 'nExtHangar' },
     dock: { color: '#ff8ad8', chk: 'chkExtDock', count: 'nExtDock' },
   };
@@ -1809,18 +2067,27 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { };
       if (!d.chk) continue;
       const n = list.filter(x => x.kind === k).length;
       document.getElementById(d.count).textContent = `(${n})`;
-      document.getElementById(d.chk).disabled = n === 0;
+      // 数が 0 の種類は押せない (dataset.zero)。外部視点でないときも押せない (refreshSwitches)
+      document.getElementById(d.chk).dataset.zero = n === 0 ? '1' : '';
     }
+    refreshSwitches();
     return list;
   }
-  for (const d of Object.values(KINDS)) if (d.chk) document.getElementById(d.chk).addEventListener('change', () => { dirty = true; });
+  // キャプションのスイッチ (右上の #swPanel。着陸パッド・ハンガー・ドッキングポート) は、切り替えたら localStorage (view3d.ext = {pad, hangar, dock}) に覚え、次に開いたときもその状態で始める
+  // (2026-11-05、利用者の指示「切り替えたら覚えておいて以降はそれに従うようにしてほしい」「キャプション(引き出し線を含む) も同様に縦に並べてほしい」)
+  try { const s = JSON.parse(localStorage.getItem('view3d.ext') || '{}'); for (const [k, d] of Object.entries(KINDS)) if (d.chk && typeof s[k] === 'boolean') document.getElementById(d.chk).checked = s[k]; } catch (_) { }
+  const saveExt = () => { const on = {}; for (const [k, d] of Object.entries(KINDS)) if (d.chk) on[k] = document.getElementById(d.chk).checked; try { localStorage.setItem('view3d.ext', JSON.stringify(on)); } catch (_) { } };
+  for (const d of Object.values(KINDS)) if (d.chk) document.getElementById(d.chk).addEventListener('change', () => { dirty = true; saveExt(); });
   const kindOn = k => { const d = KINDS[k]; return !d.chk || document.getElementById(d.chk).checked; };
 
   const MERGE_PX = 28;     // 同じ見出しの印をまとめる画面上の距離
   const FREIGHT_JOIN_M = 800;
   // 同じ大きさのハンガーを初めから 1 つの見出しにする間 (m)。旧方式で写しで数えて決めた値 (Checkmate・HUR-L1・GrimHEX は大きさごとに 1 つになり、JP の離れたハンガーは別に出る)
   const HANGAR_JOIN_M = 600;
-  const MARGIN = 8;        // 画面の端からの余白
+  // 屋根の扉の見分け (m): 写しの扉の部品は、屋根の扉 XL が 202 × 320 × 4 m の板 (GrimHEX)、正面の扉は高さ 42〜66 m・厚さ 4 m の縦の板
+  // (旧方式の ROOF_DOOR_THIN = 10, ROOF_DOOR_WIDE = 30, ROOF_DOOR_JOIN = 2。板の見分け (THIN・WIDE) はアプリ (StationView3D.RoofDoors) が行うので、ここは結び付ける距離だけ)
+  const ROOF_DOOR_JOIN = 2;
+  const MARGIN = 8;       // 画面の端からの余白
   const LABEL_OFFSET = 14; // 印から見出しまでの初めの間
   const LABEL_GAP = 6;     // 見出しの枠をほかの見出しの枠・結ぶ線から離す距離 (利用者の目安 4〜8 px / 6 px)
   // 引き出し線の太さ (px)。利用者の指示「引き出し線がわかりにくい。太くしたら合格」「引き出し線は全てで同じく太く」で、どの種類も同じ 3
@@ -1950,7 +2217,7 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { };
   }
   // 置く。戻り値は置けなかった見出し (g.hidden)。置いた見出しには g.box・g.segs・g.x・g.y が入る。
   function placeGroups(groups, shown, ctx, opt = {}) {
-    const { W, cx, cy, TOP, BOTTOM } = ctx;
+    const { W, cx, cy, TOP, BOTTOM, avoid } = ctx;
     const boxes = [];
     const segs = [];
     const dots = shown.map(s => { const r = Math.max(DOT_R, dotRadius(s.m) + 0.5); return { s, r: { x0: s.x - r, y0: s.y - r, x1: s.x + r, y1: s.y + r } }; });
@@ -1960,6 +2227,8 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { };
     const tryAt = (g, x, y, own) => {
       const box = { x0: x, y0: y, x1: x + g.w, y1: y + CAP_H };
       const wide = grow(box, LABEL_GAP);
+      // 右上のスイッチの欄 (#swPanel) の下には見出しを置かない (置ける範囲から欄の分を除く。線と点はこれまでどおり)
+      if (avoid && boxHit(wide, avoid)) return null;
       for (const b of boxes) if (boxHit(wide, b)) return null;
       for (const d of dots) if (boxHit(box, d.r)) return null;
       for (const s of segs) if (segBox(s, wide)) return null;
@@ -2169,7 +2438,9 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { };
       shown.push({ m, x, y });
     });
     v.copy(center).sub(cc).project(cam);
-    const ctx = { W, H, TOP, BOTTOM, cx: THREE.MathUtils.clamp((v.x + 1) / 2 * W, 0, W), cy: THREE.MathUtils.clamp((1 - v.y) / 2 * H, 0, H) };
+    const swp = document.getElementById('swPanel');
+    const avoid = swp && swp.offsetWidth > 0 ? { x0: swp.offsetLeft, y0: swp.offsetTop, x1: swp.offsetLeft + swp.offsetWidth, y1: swp.offsetTop + swp.offsetHeight } : null;
+    const ctx = { W, H, TOP, BOTTOM, avoid, cx: THREE.MathUtils.clamp((v.x + 1) / 2 * W, 0, W), cy: THREE.MathUtils.clamp((1 - v.y) / 2 * H, 0, H) };
     const split = new Set();
     let hangI = 0, retries = 0, groups = [];
     let lastOpt = {};
@@ -2255,6 +2526,18 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { };
   requestExterior = () => { marks = []; clear(); if (APP) window.chrome.webview.postMessage({ type: 'exteriorGet' }); };
   onExterior = d => {
     marks = buildMarks(d);
+    // (2026-11-02、利用者の指示「ハンガーの入り口がどこにあるかが重要」による親の決定。旧方式 viewer.html 1091〜1101 行の移植) 屋根に扉のあるハンガーの印は、扉の部品の真ん中へ動かす。
+    // 結び付け方: ハンガーの印 (InstancedHangarGateway の Pos) と、扉の部品を置いた原点が ROOF_DOOR_JOIN 以内で同じ所にあり (写しの GrimHEX・Checkmate で、扉の部品の原点は
+    // 印とぴったり同じだった)、その部品が水平の板 (屋根の扉) のときだけ。正面の扉 (縦の板) は、印が扉の下の真ん中 (入口) にあるので動かさない
+    const roofDoors = (d?.roofDoors ?? []).map(r => ({ origin: toV(r.origin), center: toV(r.center) }));
+    let movedDoors = 0;
+    for (const mk of marks) {
+      if (mk.kind !== 'hangar') continue;
+      let best = null, bd = ROOF_DOOR_JOIN;
+      for (const r of roofDoors) { const dd = r.origin.distanceTo(mk.pos); if (dd <= bd) { bd = dd; best = r; } }
+      if (best) { mk.pos = best.center.clone(); movedDoors++; }
+    }
+    document.body.dataset.extRoofDoors = `屋根の扉へ動かしたハンガー ${movedDoors}`;   // 確かめ用 (旧方式は dataset.info に書いていた)
     // 寄せる箱: station.json の center (区画を置いた所の真ん中) と印の位置を囲む箱。その中心を振り分けの基準にし、半径を基準の距離の探し方の上限に使う
     const box = new THREE.Box3();
     if (Array.isArray(VIEW?.center) && VIEW.center.length === 3) box.expandByPoint(toV(VIEW.center));
@@ -2265,7 +2548,7 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { };
     dirty = true;
   };
   extTick = now => {
-    const on = !!cur && !walk && !SITE && dist >= cur.r && marks.length > 0;
+    const on = extView && marks.length > 0;   // extView は描く前に updExtView が決めた外部視点 (内部の印を消すのと同じ値)
     if (!on) { if (wasOn) { clear(); wasOn = false; needFull = false; } return; }
     const { w, h } = size();
     const sig = [cam.position.x, cam.position.y, cam.position.z, cam.quaternion.x, cam.quaternion.y, cam.quaternion.z, cam.quaternion.w, w, h, cur.center.join()].map(x => typeof x === 'number' ? x.toFixed(4) : x).join(',');
@@ -2278,21 +2561,29 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { };
 // 確かめ用: いちばん長い 1 コマ (ms。window.__frameMax = 0 で計り直す) と、読み込みの段ごとの時間 (window.__phase)
 // window.__frames: 長いコマの上位 8 件 [コマの間 ms, そのうち描画 (R.render) ms, その間の段 (window.__stage)]
 let lastFrame = performance.now(), lastRender = 0; window.__frameMax = 0; window.__frames = []; window.__stage = '';
-(function loop() { requestAnimationFrame(loop); { const nowF = performance.now(), gap = nowF - lastFrame; window.__frameMax = Math.max(window.__frameMax, gap); if (gap > 50) { const f = window.__frames; f.push([+gap.toFixed(0), +lastRender.toFixed(0), window.__stage]); f.sort((a, b) => b[0] - a[0]); f.length = Math.min(f.length, 8); } lastFrame = nowF; } try { nearCheck(); } catch (e) { window.__err = String(e && e.stack || e); } try { refreshDistLabels(); } catch (e) { window.__err = String(e && e.stack || e); } try { walkCheckTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { keyMove(); } catch (e) { window.__err = String(e && e.stack || e); } const tr = performance.now(); R.render(scene, cam); lastRender = performance.now() - tr; try { extTick(performance.now()); } catch (e) { window.__err = String(e && e.stack || e); } window.__stage = loading ? window.__stage : ''; })();
+(function loop() { requestAnimationFrame(loop); { const nowF = performance.now(), gap = nowF - lastFrame; window.__frameMax = Math.max(window.__frameMax, gap); if (gap > 50) { const f = window.__frames; f.push([+gap.toFixed(0), +lastRender.toFixed(0), window.__stage]); f.sort((a, b) => b[0] - a[0]); f.length = Math.min(f.length, 8); } lastFrame = nowF; } try { nearCheck(); } catch (e) { window.__err = String(e && e.stack || e); } try { refreshDistLabels(); } catch (e) { window.__err = String(e && e.stack || e); } try { walkCheckTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { keyMove(); } catch (e) { window.__err = String(e && e.stack || e); } try { updExtView(); } catch (e) { window.__err = String(e && e.stack || e); } const tr = performance.now(); R.render(scene, cam); lastRender = performance.now() - tr; try { extTick(performance.now()); } catch (e) { window.__err = String(e && e.stack || e); } window.__stage = loading ? window.__stage : ''; })();
 // ===== 始め =====
 (async () => {
   try {
     if (!BASE) { document.getElementById('msg').textContent = 'データの置き場が指定されていません'; return; }
     VIEW = await (await fetch(BASE + 'station.json')).json();
     if (VIEW.format !== 'scjt-view3d-1') throw new Error('形の違うデータ: ' + VIEW.format);
+    if (pendingSizes) { VIEW.hangarSizesOk = pendingSizes; pendingSizes = null; }
     document.getElementById('title').textContent = qs.get('title') || VIEW.station;
     renderTargets();
+    if (APP) window.chrome.webview.postMessage({ type: 'hangarSizesGet' });   // マイハンガーの大きさのうち区画が決まるもの (返事 {type:'hangarSizes'})
+    if (APP) window.chrome.webview.postMessage({ type: 'hereMarkGet' });   // 今の現在位置がこの場所の中なら印を出す (返事 {type:'hereMark'})
     requestExterior();   // 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート) をアプリに頼む (返事 {type:'exterior'} → onExterior)
     // 最初の地点: 店があればいちばん上の店、無ければ一覧の最初、何も無ければ最初のインスタンスの箱の中心
     // 最初の行き先: ?goto=<名前の一部> があればそれ。無ければハンガーロビーの艦隊マネージャーの端末の前 (2026-11-04、利用者の指示「初期位置は hanger lobby 船舶マネージャーターミナル前がいい」):
     //   艦隊マネージャーの端末 (種類 fleet) のうち、hangar_lobby の乗り口 (エレベーターの行き先に hangar) にいちばん近いもの。hangar_lobby が無ければ一覧のいちばん上の艦隊マネージャー。
     //   艦隊マネージャーの端末が無ければ、一覧のいちばん上の行き先
     const gt = qs.get('goto');
+    // トラムのある場所 (この場所の乗り場にトラムがある。Orison・Lorville など) は、今までの始め方ですぐ始め、現在位置の知らせ (hereMark) がこの場所の中の点で届いたとき、
+    // 利用者がまだ何も操作していなければ、現在位置のまわりを読み込んでそこを中心にする (onHereMark の hereStart。2026-11-05、利用者の指示「"Orison と Lorville" tram がある場所では現在いる区域だけ」・親の決定「待たない」)。
+    // 行き先つきで開いたとき (?goto=) はそちらを先にする (切り替えない)
+    hereStart = APP && !gt && (VIEW.transit || []).some(t => t[0] === 'tram') ? 'wait' : 'no';
+    if (pendingHereMark) { const d = pendingHereMark; pendingHereMark = null; onHereMark(d); }   // 場所のデータが入る前に届いた現在位置の知らせ
     const btns = [...document.querySelectorAll('#tlist button')];
     let first = gt && (btns.find(b => b._t.name === gt) || btns.find(b => b.textContent.includes(gt)));
     if (!first) {
@@ -2305,7 +2596,7 @@ let lastFrame = performance.now(), lastRender = 0; window.__frameMax = 0; window
     if (first) first.click();
     // 行き先の無い場所 (端末・店・乗り場のデータが無い所): 区画を置いた所の真ん中のまわりを出す
     else if (VIEW.center) { document.getElementById('msg').textContent = ''; loadRegion(VIEW.center.slice(), regionR()); }
-    else document.getElementById('msg').textContent = 'この場所には行き先がありません';
+    else document.getElementById('msg').textContent = 'この場所には飛ぶ先がありません';
   } catch (e) { document.getElementById('msg').textContent = '読み込めませんでした: ' + e.message; report('start', e); }
 })();
 document.getElementById('hangarLeave').onclick = () => leaveHangar();
@@ -2316,10 +2607,120 @@ document.getElementById('hereBtn').onclick = () => {
   msg.textContent = '現在位置を取っています...';
   window.chrome.webview.postMessage({ type: 'here' });
 };
+// ===== 現在位置の印 (2026-11-05、利用者の指示「3D でも現在位置が欲しい」。親の決定 3・4) =====
+// アプリが {type:'hereMark', pos (この場所の座標), utc (取った時刻、Unix 秒), spin (自転する場所), note} で知らせる (開いたとき・現在位置を取ったとき・［現在位置］)。
+// pos が null なら印を消す (この場所の外の点)。印は水色 (#00e5ff。admin の桃の玉と見分ける) の玉と、札「現在位置 HH:MM:SS」(画面での大きさが変わらない)。内部の印とは別に扱い、外から見ているときも出す。
+// マイハンガーの中 (SITE) では出さない (ハンガーの中の位置はまだ決められない)。右上のスイッチ「現在位置」(view3d.here) で出す・出さない
+let hereData = null, hereG = null;
+const hereOn = () => document.getElementById('hereOn').checked;
+// トラムのある場所の始め方 ('wait' = 最初の知らせを待っている、'no' = しない・済んだ)。userActed: 利用者が何か操作した (飛ぶ先を押す・ドラッグ・ホイール・キー・歩くモードの切り替え)
+let hereStart = 'no', userActed = false;
+const markActed = e => { if (e.isTrusted) userActed = true; };
+cv.addEventListener('pointerdown', markActed); cv.addEventListener('wheel', markActed);
+addEventListener('keydown', markActed);
+document.getElementById('tlist').addEventListener('click', markActed); document.getElementById('walkBtn').addEventListener('click', markActed);
+// 現在位置のまわりを読み込んで、見るモードでそこを中心にする (読み込み中なら終わってから。その間に操作されたらやめる)
+function startAtHere(pos) {
+  if (userActed || walk || pendingHere) return;
+  if (loading) { setTimeout(() => startAtHere(pos), 300); return; }
+  loadRegion(pos.slice(), regionR()).then(() => { if (cur && !userActed && !walk) { tgt.set(pos[0] - cur.center[0], pos[1] - cur.center[1], pos[2] - cur.center[2]); dist = 40; upd(); } });
+}
+function onHereMark(d) {
+  if (!VIEW) { pendingHereMark = d; return; }   // 場所のデータが入る前: 覚えて、入った後に出す
+  if (hereStart === 'wait') { hereStart = 'no'; if (d && Array.isArray(d.pos) && !userActed) startAtHere(d.pos); }
+  hereData = d && Array.isArray(d.pos) ? d : null; drawHereMark();
+  // ［マップ］タブで取ったとき (・開いたとき) は、ハンガーへ勝手に切り替えない。ハンガーの中なら知らせとハンガーを開くボタンだけ出す。
+  // いまそのハンガー (同じ大きさ) の中を開いているときは、開いた後の形で出す
+  const h = d && d.hangar && Array.isArray(d.at) ? { pos: d.at, hangar: d.hangar, utc: d.utc } : null;
+  showHangarNote(h, !!(h && SITE && window.__hangar && window.__hangar.size === h.hangar.size));
+}
+// ===== 現在位置がハンガーの中のとき (2026-11-05、利用者の指示「ハンガーにいるかどうかは現在位置で分かってるから、マイハンガーか割り当て化はどっちでもいい。3D データは一緒」。親の決定) =====
+// 判定はアプリ (StationView3DView.FixHere・HangarPointAt。v2.5.4 の 2D の地図の判定の移植)。here・hereMark の hangar = {size, index, dist}。
+// 開くハンガーの大きさは判定された入口の大きさ。その大きさのハンガーのデータが決まらない (hangarSizesOf に無い) ときは開かない。
+// 「入るときに乗った本体の乗り場」は、取った点にいちばん近い、ハンガーへ行けるエレベーターの乗り場 (elevOrder でマイハンガーの行が出る乗り場)
+function bodyView() { return stationSaved ? stationSaved.VIEW : VIEW; }
+// 場所のデータ (VIEW) が入る前に届いた知らせ (hangarSizes・hereMark)。入った後 (始めの処理) に当てる
+let pendingSizes = null, pendingHereMark = null;
+function hangarLiftNear(pos) {
+  const sv = bodyView(); if (!sv) return null;
+  const all = (sv.transit || []).filter(t => t[0].startsWith('elevator'));
+  const dk = t => /dockingport_(\d+)$/i.test(t[5] || '') || /pad_(\d+)$/i.test(t[5] || '');
+  const lines = new Set(); for (const t of all) if (dk(t) || hangarLineOf(t, sv) || t[6]) lines.add(t[3]);
+  let best = null, bd = Infinity;
+  for (const t of all) { if (!lines.has(t[3])) continue; const d = Math.hypot(t[1][0] - pos[0], t[1][1] - pos[1], t[1][2] - pos[2]); if (d < bd) { bd = d; best = t; } }
+  return best;
+}
+let hangarNoteData = null;
+// 知らせ (歩くモードの欄の #hereNote): 「ハンガー（S）の所にいます。…」と、［ハンガーを開く］(開いていないとき) ・［本体のこの位置を見る］
+function showHangarNote(h, opened) {
+  hangarNoteData = h;
+  const box = document.getElementById('hereNote'); box.innerHTML = '';
+  if (!h) { box.style.display = 'none'; return; }
+  const z = h.hangar.size || '?', ok = hangarSizesOf(bodyView()).includes(h.hangar.size);
+  const t = document.createElement('div');
+  t.textContent = `ハンガー（${z}）の所にいます（ハンガーの入口 ${h.hangar.index} から水平に ${h.hangar.dist} m）。` + (opened ? 'ハンガーの中での位置は、まだ出せません' : ok ? '' : `この場所のハンガー（${z}）の形はデータにありません`);
+  box.appendChild(t);
+  if (!opened && ok) { const b = document.createElement('button'); b.textContent = `ハンガー（${z}）を開く`; b.onclick = () => openHangarAtHere(h); box.appendChild(b); }
+  const v = document.createElement('button'); v.textContent = '本体のこの位置を見る'; v.onclick = () => standAtBody(h.pos, h.utc); box.appendChild(v);
+  box.style.display = 'block';
+}
+// 本体のその点に立つ (今までの［現在位置］の動き)
+function standAtBody(pos, utc) {
+  if (SITE) leaveHangarQuiet();
+  if (!walk) document.getElementById('walkBtn').click();
+  showHangarNote(null);
+  // 本体のその点に印を出す (ハンガーの中と判定した点は、アプリが本体の印を送らないため)
+  hereData = { pos: pos.slice(), utc: utc || (hereData && hereData.utc) || Date.now() / 1000, spin: false }; drawHereMark();
+  travelTo(pos, wyaw, null, window.__here = {}, false);
+}
+// ハンガーの 3D を開く (本体のハンガーのエレベーターから入るときと同じ openHangar)。開けなければ本体のその点に立つ
+async function openHangarAtHere(h) {
+  const from = hangarLiftNear(h.pos);
+  if (!from || !hangarSizesOf(bodyView()).includes(h.hangar.size)) { standAtBody(h.pos, h.utc); return; }
+  if (SITE) leaveHangarQuiet();
+  if (!walk) document.getElementById('walkBtn').click();
+  await openHangar(h.hangar.size, from);
+  showHangarNote(h, true);
+}
+function drawHereMark() {
+  if (hereG) { scene.remove(hereG); hereG.traverse(o => { o.geometry?.dispose(); o.material?.map?.dispose?.(); o.material?.dispose?.(); }); hereG = null; }
+  if (!hereData || !cur || SITE) return;
+  const c = cur.center, q = hereData.pos;
+  // 読み込んだ地点の範囲 (中心から ±cur.r m の立方体) の外の点には出さない (札は画面での大きさが変わらないので、数 km 先の点の札が大きく見えてしまうため。
+  // 2026-11-05、親の決定「見ている地点の読み込んだ範囲の外の印は出さない」)。その点の地点を読み込めば (［現在位置］など) 出る
+  if (Math.abs(q[0] - c[0]) > cur.r || Math.abs(q[1] - c[1]) > cur.r || Math.abs(q[2] - c[2]) > cur.r) return;
+  const t = new Date(hereData.utc * 1000); const hhmm = [t.getHours(), t.getMinutes(), t.getSeconds()].map(v => String(v).padStart(2, '0')).join(':');
+  hereG = new THREE.Group(); hereG.position.set(q[0] - c[0], q[1] - c[1], q[2] - c[2]);
+  const ball = new THREE.Mesh(new THREE.SphereGeometry(0.5), new THREE.MeshBasicMaterial({ color: 0x00e5ff, depthTest: false }));
+  ball.renderOrder = 9; hereG.add(ball);
+  const lines = [`現在位置 ${hhmm}`]; if (hereData.spin) lines.push('（自転する場所のため、ずれることがあります）');
+  const sp = textSprite(lines, '#00e5ff', '#bff8ff'); sp.material.sizeAttenuation = false; sp.material.depthTest = false;   // 玉と同じ水色の枠・薄い水色の文字 (ほかの札の黄色の枠・白い文字と見分ける)
+  const asp = sp.scale.x / sp.scale.y; const h = 0.045 * lines.length; sp.scale.set(h * asp, h, 1);
+  sp.center.set(0.5, 0); sp.position.set(0, 0, 1.0); sp.renderOrder = 9; hereG.add(sp);
+  hereG.visible = hereOn();
+  scene.add(hereG);
+}
+try { const t = localStorage.getItem('view3d.here'); if (t === '1' || t === '0') document.getElementById('hereOn').checked = t === '1'; } catch (_) { }
+document.getElementById('hereOn').addEventListener('change', e => { try { localStorage.setItem('view3d.here', e.target.checked ? '1' : '0'); } catch (_) { } if (hereG) hereG.visible = e.target.checked; });
+// 地点を読み込む前・読み込み中に届いた here (［マップ］の現在位置を押して開いたときなど) は、読み込み終わってから出す
+let pendingHere = null;
+// 待つのは FAIL_HOLD_MS まで (最初の地点の読み込みが失敗したままでも止まる)。過ぎたら待つのをやめ、次に地点を読み込めた時点 (show の後) で出す
+let pendingHereSince = 0;
+function runPendingHere() {
+  if (!pendingHere) return;
+  if (!pendingHereSince) pendingHereSince = performance.now();
+  if (!cur || loading || !VIEW) { if (performance.now() - pendingHereSince < FAIL_HOLD_MS) setTimeout(runPendingHere, 300); else pendingHereSince = 0; return; }
+  pendingHereSince = 0; const d = pendingHere; pendingHere = null; onHere(d);
+}
 function onHere(d) {
   const msg = document.getElementById('msg');
   if (!d.ok) { msg.textContent = d.note || '現在位置を出せませんでした'; return; }
+  hereStart = 'no';   // トラムのある場所の始め方 (startAtHere) より、こちらを先にする
+  if (!cur || loading || !VIEW) { pendingHere = d; runPendingHere(); return; }
   msg.textContent = d.note || '';
+  // ハンガーの中なら、そのハンガーの 3D を開く (データが決まらない・乗り場が無いときは、今までどおり本体のその点に立つ。知らせは出す)
+  if (d.hangar) { const h = { pos: d.pos, hangar: d.hangar, utc: d.utc }; if (hangarSizesOf(bodyView()).includes(d.hangar.size) && hangarLiftNear(d.pos)) { openHangarAtHere(h); return; } standAtBody(d.pos, d.utc); showHangarNote(h, false); return; }
+  showHangarNote(null);
   if (SITE) leaveHangarQuiet();
   if (!walk) document.getElementById('walkBtn').click();
   travelTo(d.pos, wyaw, null, window.__here = {}, false);

@@ -73,6 +73,8 @@ public partial class MapPanel : UserControl
         InitAutoCaptureCheck();
         s_instance = this;
         InitPlaceMap();
+        // 現在位置がハンガーの所かを裏で求め終えたら、現在地の文 (「・ハンガー（S）」) を書き直す (StationView3DView.MapHangarSize。2026-11-05)
+        StationView3DView.HangarNoteReady += () => { if (_pageView != null && _pageView == CurrentView() && _webReady && _tree != null) PostUpdate(_tree, ComputeEffective(_tree), Now()); };
         // 推定位置・量子ジャンプの状態・自転の向きが変わったら、ページを作り直さずに書き換える (PostUpdate。拡大率と表示の中心はそのまま)。
         // ページがまだ無い・表示が違うときだけ作る
         _estimateTimer.Tick += async (_, _) =>
@@ -192,6 +194,12 @@ public partial class MapPanel : UserControl
                 LogScriptError("[マップ] 星系図のエラー", App.Config.MapView ?? "", Str("where"), Str("message"), Str("stack"));
                 return;
             }
+            // 現在位置の印・その文字・現在地の文を押した (MapScript の { type: 'gohere' }): 建物の中ならその場所の 3D を出す (GoHere3DAsync)
+            if (root.TryGetProperty("type", out var gt) && gt.ValueKind == JsonValueKind.String && gt.GetString() == "gohere")
+            {
+                _ = GoHere3DAsync();
+                return;
+            }
             // 拡大の上限でさらに拡大したときの、近くの地図のある場所 (MapScript の enterNear)
             if (root.TryGetProperty("type", out var ty) && ty.ValueKind == JsonValueKind.String && ty.GetString() == "enterplace")
             {
@@ -288,7 +296,40 @@ public partial class MapPanel : UserControl
     // 送る前に、今わかっている現在位置の星系 (KnownCurrentSystem) が今の表示 (3 星系の並びも含む) と違えば、先にその星系 1 つの表示にする
     // (星系のボタンと同じ切り替え方。中心・幅は MapViews に覚えた表示)。切り替えている間も取得中と同じ扱いにする
     // (ボタンを押せなくし、自動の取得を割り込ませない)。取得中 (自動の取得の途中) に押されたときは切り替えない
-    private async void BtnCurrent_Click(object sender, RoutedEventArgs e) => await CaptureCurrentAsync();
+    // 取れたら、今までの処理 (現在地の文・近くの一覧・印・補正・ログ。CaptureCurrentAsync の中) が済んだ後に、建物の中ならその場所の 3D を出す (GoHere3DAsync)
+    private async void BtnCurrent_Click(object sender, RoutedEventArgs e)
+    {
+        var (ok, _) = await CaptureCurrentAsync();
+        if (ok) await GoHere3DAsync();
+    }
+
+    // ===== 現在位置を押したら、建物の中ならその場所の 3D を出す (2026-11-05、利用者の指示「マップの現在位置をクリックしたときに建物内なら 3D 表示まで入れて」) =====
+    // 入口: ［現在位置］ボタンで取れたとき (BtnCurrent_Click)・星系図の現在位置の印とその文字・【現在位置の近く】の現在地の文を押したとき (星系図の { type: 'gohere' })。
+    // 自動の取得 (CaptureAsync の auto)・ステーションの 3D の［現在位置］からは呼ばない。
+    // 建物の中か: 星系図の現在地の文が「〜 内」になるときと同じ決まり (MapState の取った座標の場合: CurrentLocation.Locate → WhereaboutsOf の Inside)。
+    //   使う位置は、いちばん新しく取った座標 (ComputeEffective の Kind が Taken のときだけ。推定の位置では切り替えない)。取り直さない。
+    // その場所の 3D があるか: 星系図に地図のある場所の印を出している場所 (MapPlaceByRecordName。押すとその場所の 3D を出すのと同じ)。
+    // どれかに当たらなければ何もしない (星系図のまま)。当たれば、3D をどこに出すかの今の決まり (別ウィンドウが開いていればそこ、無ければ［マップ］タブ) で出し、
+    // その 3D で、3D の［現在位置］と同じ出し方 (取り直さない) をする (StationView3DView.RequestHere)
+    private async Task GoHere3DAsync()
+    {
+        try
+        {
+            var tree = _tree ?? await GetTreeAsync();
+            if (tree == null || tree.IsEmpty) return;
+            if (ComputeEffective(tree) is not { Kind: CurrentLocation.PositionKind.Taken, NoPos: false } eff) return;
+            var effSystem = eff.System is { Length: > 0 } es ? tree.Systems.FirstOrDefault(s => s.System.Equals(es, StringComparison.OrdinalIgnoreCase)) : null;
+            if (CurrentLocation.Locate(tree, eff.Pos, eff.Unix, SystemNames, null, fresh: false, effSystem) is not { } loc) return;
+            var where = CurrentLocation.WhereaboutsOf(eff.Pos, loc, LogPlaceNode(tree, LandingPlaceProvider?.Invoke()));
+            if (!where.Inside || where.Place is not { } wp) return;
+            if (MapPlaceByRecordName(wp.RecordName) is not { } mp) return;
+            if (StationView3DShops.ShowInOpenWindow(mp.Record, mp.Name, tree, null, here: true)) return;
+            for (DependencyObject? d = this; d != null; d = LogicalTreeHelper.GetParent(d))
+                if (d is TabItem tab) { tab.IsSelected = true; break; }
+            ShowPlace3D(mp.Record, mp.Name, tree, null, here: true);
+        }
+        catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 現在位置の場所の 3D を出せませんでした: {ex.Message}"); }
+    }
 
     // ［現在位置］と同じ処理の公開の入口 (ステーションの 3D (新しい方式) の［現在位置］(StationView3DWindow.CaptureHook) からも呼ぶ)。
     // 戻り値: 座標を取れたか (取得中に呼ばれたときは false) と、そのときのマップタブの状態の欄の文 (取れなかった理由など)。
@@ -478,6 +519,28 @@ public partial class MapPanel : UserControl
     // (取った座標に星系の名前 (MapCurrentState.System) を入れる)
     // 座標を取れたら true
     // from: ボタンのとき、押したボタンの画面 (［マップ］タブ・ステーションの地図など。アプリのログに出す)
+    // クリップボードの読み書き 1 回を待つ上限 (ms)。2026-11-05、利用者の指示「現在位置を押した後何か捜査して文字が中途半端になったときに、そのままクリップボードを見ていてアプリが固まってた。
+    // タイムアウトを2-3秒程度で設定しないと」。前は UI の糸で直接読み書きしていて、上限が無かった (WPF の Clipboard が中で開けるまでやり直す分と、
+    // 別のアプリが持つ形式を引くとき (GetData・GetText) にそのアプリの返事を待つ分の、待つ長さに決まりが無い)
+    private const int ClipboardTimeoutMs = 3000;
+    // クリップボードの読み書き f を別の糸 (STA。クリップボードは STA で使う) で行い、ClipboardTimeoutMs まで待つ。
+    // 過ぎたら TimedOut (糸はそのまま残るが、UI の糸は待たない)、f が例外なら Error。
+    // onLate: 時間切れの後に、残った糸で f が終わったら、同じ糸で続けて行うこと (印の文字を入れる所で時間切れになったとき、元の中身を戻すため。2026-11-05、検証の指摘)
+    private static async Task<(T? Value, bool TimedOut, Exception? Error)> ClipboardCallAsync<T>(Func<T> f, Action? onLate = null)
+    {
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int state = 0;   // 0 = 待っている、1 = 終わった、2 = 時間切れ (待つのをやめた)
+        var th = new System.Threading.Thread(() =>
+        {
+            try { tcs.TrySetResult(f()); } catch (Exception ex) { tcs.TrySetException(ex); }
+            if (Interlocked.CompareExchange(ref state, 1, 0) == 2) onLate?.Invoke();
+        }) { IsBackground = true, Name = "clipboard" };
+        th.SetApartmentState(System.Threading.ApartmentState.STA);
+        th.Start();
+        if (await Task.WhenAny(tcs.Task, Task.Delay(ClipboardTimeoutMs)) != tcs.Task && Interlocked.CompareExchange(ref state, 2, 0) == 0) return (default, true, null);
+        try { return (await tcs.Task, false, null); }
+        catch (Exception ex) { return (default, false, ex); }
+    }
     private async Task<bool> CaptureAsync(bool auto, string from = "［マップ］タブ")
     {
         if (_capturing) return false;
@@ -535,34 +598,44 @@ public partial class MapPanel : UserControl
             DataObject saved;
             int originalFormats = 0;
             int savedFormats = 0;
-            try
+            // クリップボードの読み書きは、別の糸 (STA) で ClipboardTimeoutMs まで待つ (ClipboardCallAsync。2026-11-05、利用者の指示「タイムアウトを2-3秒程度で設定しないと」)
+            var savedCall = await ClipboardCallAsync(() =>
             {
                 var current = Clipboard.GetDataObject();
-                saved = new DataObject();
+                var sv = new DataObject();
                 var formats = current?.GetFormats(false) ?? Array.Empty<string>();
-                originalFormats = formats.Length;
+                int ok = 0;
                 foreach (var f in formats)
                 {
                     try
                     {
-                        if (current!.GetData(f) is { } data) { saved.SetData(f, data); savedFormats++; }
+                        if (current!.GetData(f) is { } data) { sv.SetData(f, data); ok++; }
                     }
                     catch (Exception) { }
                 }
-            }
-            catch (Exception)
-            {
-                return Fail("クリップボードを使えなかったので送りませんでした");
-            }
+                return (Saved: sv, Original: formats.Length, Ok: ok);
+            });
+            if (savedCall.TimedOut) return Fail($"クリップボードが {ClipboardTimeoutMs / 1000} 秒たっても使えなかったので送りませんでした");
+            if (savedCall.Error != null) return Fail("クリップボードを使えなかったので送りませんでした");
+            (saved, originalFormats, savedFormats) = savedCall.Value;
             if (originalFormats > 0 && savedFormats < originalFormats)
             {
                 return Fail("クリップボードの中身を覚えられなかったので送りませんでした（クリップボードの中身はそのままです）",
                     $"クリップボードの中身を覚えられなかったので送りませんでした（形式 {originalFormats} のうち覚えられたのは {savedFormats}）");
             }
             txtStatus.Text = (auto ? "自動で /showlocation を送っています..." : "ゲームに /showlocation を送っています...") + ocrNote;
-            try { Clipboard.SetText(ClipboardPlaceholder); } catch (Exception) { }
+            // 印の文字は、アプリの外でも残る形 (SetDataObject の copy = true。WPF の説明「アプリが終わっても残す」) で入れる。
+            // 時間切れになったら、残った糸が入れ終えた後に、同じ糸で元の中身を戻す (戻せなければログ)
+            var placeholderCall = await ClipboardCallAsync(() => { Clipboard.SetDataObject(new DataObject(DataFormats.UnicodeText, ClipboardPlaceholder), true); return true; },
+                () =>
+                {
+                    try { if (savedFormats > 0) Clipboard.SetDataObject(saved, true); else Clipboard.Clear(); }
+                    catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] クリップボードを元に戻せませんでした（{mode}・時間切れの後）: {ex.GetType().FullName}: {ex.Message}"); }
+                });
+            if (placeholderCall.TimedOut) return Fail($"クリップボードが {ClipboardTimeoutMs / 1000} 秒たっても使えなかったので送りませんでした");
             ShowLocationSender.SendResult sent;
             string? text = null;
+            var clipboardTimedOut = false;   // 座標を読むとき、クリップボードが ClipboardTimeoutMs までに読めなかった
             // 最後の Enter を押した時刻 (ゲームが座標を出した時刻。取った座標の時刻にする)
             var enterUtc = new System.Runtime.CompilerServices.StrongBox<double>(double.NaN);
             try
@@ -572,7 +645,8 @@ public partial class MapPanel : UserControl
                 if (sent == ShowLocationSender.SendResult.Sent)
                 {
                     await Task.Delay(1500);   // 最後の Enter から 1500ms 後に読む
-                    try { text = Clipboard.GetText(); } catch (Exception) { }
+                    var read = await ClipboardCallAsync(() => Clipboard.GetText());
+                    if (read.TimedOut) clipboardTimedOut = true; else text = read.Value;
                 }
             }
             finally
@@ -583,13 +657,10 @@ public partial class MapPanel : UserControl
                 for (int attempt = 0; attempt <= 3; attempt++)
                 {
                     if (attempt > 0) await Task.Delay(100);
-                    try
-                    {
-                        if (savedFormats > 0) Clipboard.SetDataObject(saved, true); else Clipboard.Clear();
-                        restoreError = null;
-                        break;
-                    }
-                    catch (Exception ex) { restoreError = ex; }
+                    var restore = await ClipboardCallAsync(() => { if (savedFormats > 0) Clipboard.SetDataObject(saved, true); else Clipboard.Clear(); return true; });
+                    if (restore.TimedOut) { restoreError = new TimeoutException($"{ClipboardTimeoutMs / 1000} 秒たっても戻せませんでした"); break; }   // 待ちが続いている糸がクリップボードを使っているので、やり直さない
+                    if (restore.Error == null) { restoreError = null; break; }
+                    restoreError = restore.Error;
                 }
                 if (restoreError != null)
                 {
@@ -606,6 +677,8 @@ public partial class MapPanel : UserControl
             {
                 return Fail("送っている途中でゲームの窓が前から外れたので止めました。ゲームのチャット欄に打ちかけの文字が残っていれば消してください");
             }
+            if (clipboardTimedOut)
+                return Fail($"クリップボードから座標を読めませんでした（{ClipboardTimeoutMs / 1000} 秒たっても読めなかったので止めました）");
             if (CurrentLocation.Parse(text) is not { } pos)
             {
                 // (2026-11-02) 読めなかったクリップボードの文字の頭をアプリのログに出す (理由を後で調べられるように)
@@ -645,6 +718,8 @@ public partial class MapPanel : UserControl
             // 覚えたリストは書き換えず、新しいリストに入れ替える
             var locationId = QuantumStateProvider?.Invoke()?.LocationId ?? "";
             App.Config.MapCurrent = new MapCurrentState { X = pos.X, Y = pos.Y, Z = pos.Z, Utc = now, LocationId = locationId, System = qtSystem?.System ?? "" };
+            // 開いているステーションの 3D に、現在位置の印を置き直してもらう (2026-11-05、利用者の指示「3D でも現在位置が欲しい」。見ている所は動かさない)
+            StationView3DView.NotifyCurrentChanged();
             // ボタンで取った座標の時刻 (ステーションの地図は、これが今の現在位置の時刻と同じなら、どの画面のボタンで取ったときも出発地を現在位置にする)
             if (!auto) LastButtonCaptureUtc = now;
             if (locationId.Length > 0 && CurrentLocation.Classify(tree, pos, now, SystemNames, LogPlaceNode(tree, LandingPlaceProvider?.Invoke()), qtSystem) is { } where)
@@ -1031,7 +1106,7 @@ public partial class MapPanel : UserControl
     private static string MovingUnknownLine(CurrentLocation.EffectivePosition eff) => $"現在地: 移動中（{eff.FromName ?? "?"} → {eff.TargetDesc ?? "目的地不明"}）";
 
     // 【現在位置の近く】の中身: いちばん上に現在地 (大きめの字)、その下に現在位置の出どころ・星系・近くの惑星の自転の向き、
-    // 近い順に 10 か所 (場所名 (押すと［詳細］)・種類・距離)。自転の親の向きが分からない場所には「（自転不明）」。量子ジャンプ中は目的地からの距離。
+    // 近い順に 10 か所 (場所名 (押すと［詳細］)・種類・距離。同じ所の親子・同じ行はまとめて 1 か所と数える)。自転の親の向きが分からない場所には「（自転不明）」。量子ジャンプ中は目的地からの距離。
     // 追い読みが動いていなければ「ゲームログを読めていないので推定位置は出せません」を添える
     private static string NearInnerHtml(ShopTree tree, CurrentLocation.Result loc, CurrentLocation.EffectivePosition eff, CurrentLocation.Whereabouts? where, bool logRunning)
     {
@@ -1047,8 +1122,10 @@ public partial class MapPanel : UserControl
         else if (where is { Place: { } wp })
         {
             var src = estimated ? "推定" : where.FromLog ? "Game.log の居場所から" : "いちばん近い場所";
+            // 取った座標がその場所のハンガーの所なら「・ハンガー（S）」(StationView3DView.MapHangarSize。求め終わるまでは付けない。自分のハンガーかは区別しないので「マイハンガー」とは書かない)
+            var hangarPart = where.Inside && eff.Kind == CurrentLocation.PositionKind.Taken && StationView3DView.MapHangarSize(wp.RecordName, App.Config.MapCurrent) is { } hz ? $"・ハンガー（{hz}）" : "";
             here = where.Inside
-                ? (estimated ? $"現在地: {wp.Name} 内（{src}）" : $"現在地: {wp.Name} 内（中心から {D(where.Distance)}、{src}）")
+                ? (estimated ? $"現在地: {wp.Name} 内{hangarPart}（{src}）" : $"現在地: {wp.Name} 内{hangarPart}（中心から {D(where.Distance)}、{src}）")
                 : where.FromLog ? $"現在地: {wp.Name}（{src}）" : $"現在地: {wp.Name} 付近（{D(where.Distance)}、{src}）";
         }
         else
@@ -1081,12 +1158,22 @@ public partial class MapPanel : UserControl
         if (loc.Planet is { } p)
             sb.Append("<br>").Append(E(SpinLine(p, eff.Unix)));
         sb.Append("</p><table><thead><tr><th>場所</th><th>種類</th><th>距離</th></tr></thead><tbody>");
-        foreach (var r in loc.Near)
+        // 近い順の場所を親子・同じ行でまとめる (CurrentLocation.GroupNear。まとめた 1 行を 1 つと数えて 10 行)。
+        // 同じ名前・同じ種類・同じ所の場所は 1 行に「×N」、親と同じ所にある子は親の行「▼ 親（N 件）」の下に「　└ 子」(初めは隠す。押すと開く。DetailHtml の MapScript の initFolds)
+        void Row(CurrentLocation.NearRow r, int count, string prefix, string suffix, bool hidden)
         {
-            sb.Append("<tr><td><a href=\"scjt://detail/").Append(Uri.EscapeDataString(r.Node.Record)).Append("\">").Append(E(r.Node.Name)).Append("</a>");
+            sb.Append(hidden ? "<tr hidden><td>" : "<tr><td>").Append(prefix)
+              .Append("<a href=\"scjt://detail/").Append(Uri.EscapeDataString(r.Node.Record)).Append("\">").Append(E(r.Node.Name)).Append("</a>");
+            if (count > 1) sb.Append(" ×").Append(count.ToString(inv));
             if (r.SpinUnknown) sb.Append("（自転不明）");
-            sb.Append("</td><td>").Append(E(r.Node.TypeLabel)).Append("</td><td>").Append(E(D(r.Distance)))
+            sb.Append(suffix).Append("</td><td>").Append(E(r.Node.TypeLabel)).Append("</td><td>").Append(E(D(r.Distance)))
               .Append(eff.Kind == CurrentLocation.PositionKind.Moving ? "（到着後）" : "").Append("</td></tr>");
+        }
+        foreach (var g in CurrentLocation.GroupNear(loc.All, loc.Thetas, CurrentLocation.NearCount))
+        {
+            if (g.Kids.Count == 0) { Row(g.Head, g.HeadCount, "", "", false); continue; }
+            Row(g.Head, g.HeadCount, "▼ ", $"（{g.Kids.Count.ToString(inv)} 件）", false);
+            foreach (var (kr, kc) in g.Kids) Row(kr, kc, "　└ ", "", true);
         }
         sb.Append("</tbody></table>");
         return sb.ToString();
@@ -1119,6 +1206,8 @@ public partial class MapPanel : UserControl
 
     // ［詳細］の［地図表示］などから呼ぶ (アプリにマップタブは 1 つ)
     private static MapPanel? s_instance;
+    // 場所の木 (［マップ］タブが作るもの)。ステーションの 3D が、現在位置の星系がその場所の星系かを見るのに使う (StationView3DView.SameSystemAsync)。［マップ］タブが無ければ null
+    internal static Task<ShopTree?>? SharedTreeAsync() => s_instance?.GetTreeAsync();
     // 場所の階層マップを出しているか (星系図は隠す)
     // ページのスクリプトのエラー (［マップ］タブの星系図の MapScript) をアプリのログに書く。
     // 書くもの: 場所 (place)・処理 (where)・エラーの文・スタックの先頭 ScriptErrorStackLines 行。
@@ -1209,7 +1298,8 @@ public partial class MapPanel : UserControl
     private StationView3DView? _place3D;
     private string _place3DName = "";
     private ShopTree? _place3DTree;
-    private void ShowPlace3D(string recordName, string name, ShopTree? tree, string? focusShop)
+    // here: 出した後に、その 3D で現在位置の所を出す (StationView3DView.RequestHere。GoHere3DAsync)
+    private void ShowPlace3D(string recordName, string name, ShopTree? tree, string? focusShop, bool here = false)
     {
         if (_place3D == null || _place3D.Record != recordName || focusShop != null)
         {
@@ -1227,6 +1317,7 @@ public partial class MapPanel : UserControl
         txtPlaceName.Text = _place3D.PlaceTitle;
         webMap.Visibility = Visibility.Collapsed;
         pnlPlace.Visibility = Visibility.Visible;
+        if (here) _place3D.RequestHere();
     }
 
     // 星系図を出す。［星系図に戻る］・3D から遠ざかり切ったとき。
@@ -1466,7 +1557,7 @@ public partial class MapPanel : UserControl
         aside.near h3 { font-size: 22px; margin: 0.2em 0 0.3em; }
         aside.near p { margin: 0.2em 0 0.5em; }
         aside.near table { font-size: 22px; }
-        aside.near p.here { font-size: 28px; font-weight: 600; color: #B71C1C; margin: 0.2em 0 0.4em; }
+        aside.near p.here { font-size: 28px; font-weight: 600; color: #B71C1C; margin: 0.2em 0 0.4em; cursor: pointer; }
         aside.near p.warn { color: #B71C1C; }
         aside.near p.qtline { font-size: 24px; font-weight: 600; color: #C62828; margin: 0 0 0.1em; }
         aside.near p.qtfrom { font-size: 18px; color: #6D4C41; margin: 0 0 0.4em; }

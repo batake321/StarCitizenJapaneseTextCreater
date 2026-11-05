@@ -399,6 +399,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         try { File.Delete(GlbPath(shortName)); } catch (Exception ex) { Log($"{shortName}.glb を消せませんでした: {ex.Message}"); return; }
         try { File.Delete(SidecarPath(shortName)); } catch (Exception ex) { Log($"{shortName}.json を消せませんでした: {ex.Message}"); }
         DeleteThumb(GlbPath(shortName));
+        ShipPaints.DeleteTables(shortName);   // 塗装の切り替えの材質の表 (この GLB に当てるもの)
     }
 
     // 後で消すことにした船を、表示・書き出しが無くなっていれば消す
@@ -433,6 +434,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         if (!_viewFiles.Remove(shortName, out var path)) return;
         try { File.Delete(path); } catch (Exception ex) { Log($"表示の間だけ置いた {Path.GetFileName(path)} を消せませんでした: {ex.Message}"); }
         DeleteThumb(path);
+        ShipPaints.DeleteViewTables(path);   // 塗装の切り替えの材質の表 (この GLB の横)
     }
 
     // 表示に使う GLB (置き場所の中のパス)。取り込み済みならそれ (Data.p4k が変わっていれば照合してから)、無ければ Data.p4k から直接読む
@@ -1160,7 +1162,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             {
                 // 保存しない: 一時ファイルのまま表示に使う (表示をやめたら消す。DeleteViewFileIfIdle)
                 keepTmp = true;
-                if (_viewFiles.Remove(job.Short, out var old)) { try { File.Delete(old); } catch { } DeleteThumb(old); }
+                if (_viewFiles.Remove(job.Short, out var old)) { try { File.Delete(old); } catch { } DeleteThumb(old); ShipPaints.DeleteViewTables(old); }
                 _viewFiles[job.Short] = tmp;
                 Log($"「{job.Name}」({job.Short}) を直接読みました (保存しない設定のため、表示の間だけ置きます): {job.Watch.Elapsed.TotalSeconds:F1} 秒、{FormatBytes(res.GlbBytes)}");
                 job.SetPhase(Ship3DJobPhase.Done, "");
@@ -1186,6 +1188,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 throw new InvalidOperationException($"置き場所に同じ名前のファイル ({job.Short}.glb / {job.Short}.json) があり、このアプリが書いたものではないので上書きしません。置き場所を変えるか、そのファイルを移してください");
             var final = GlbPath(job.Short);
             File.Move(tmp, final, overwrite: true);
+            ShipPaints.DeleteTables(job.Short);   // 前の GLB に当てる塗装の材質の表・絵はもう使わないので消す
             _pendingDelete.Remove(job.Short);   // 書き出し直したので、前のものを後で消す予定は取りやめ
             var glbBytes = new FileInfo(final).Length;
             WriteSidecar(job.Short, new Sidecar
@@ -1269,6 +1272,7 @@ public sealed class Ship3DExports : INotifyPropertyChanged
                 f.Delete();
                 try { File.Delete(SidecarPath(shortName)); } catch { }
                 DeleteThumb(f.FullName);
+                ShipPaints.DeleteTables(shortName);
                 total -= length;
                 deleted.Add(shortName);
             }

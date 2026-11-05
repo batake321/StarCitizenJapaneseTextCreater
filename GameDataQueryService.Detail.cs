@@ -1627,7 +1627,7 @@ public partial class GameDataQueryService
     private static string SpinTimeNote(double unix) =>
         $"（{DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(unix * 1000)).LocalDateTime.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} 時点の自転の向き）";
 
-    // 【距離】: 同じ星系の座標がある場所 (DistanceTypes。自分は除く) までの距離の表 (名前 (リンク) | 種類 | 距離)。近い順に全部。
+    // 【距離】: 同じ星系の座標がある場所 (DistanceTypes。自分は除く) までの距離の表 (名前 (リンク) | 種類 | 距離)。近い順に全部 (同じ所の親子・同じ行はまとめる)。
     // 位置は惑星・衛星の自転の角度 thetas で回したもの (CurrentLocation.PlacePosition)
     private static void AppendDistances(StringBuilder sb, ShopTreeNode node, IReadOnlyDictionary<ShopTreeNode, double> thetas)
     {
@@ -1638,7 +1638,18 @@ public partial class GameDataQueryService
         if (list.Count == 0) { sb.AppendLine("(なし)"); return; }
         sb.AppendLine("| 名前 | 種類 | 距離 |");
         sb.AppendLine("|---|---|---|");
-        foreach (var (n, d) in list) sb.AppendLine($"| {DetailLink(n.Record, n.Name)} | {Cell(MdEscape(n.TypeLabel))} | {FormatDistance(d)} |");
+        // 同じ所の親子・同じ行は【現在位置の近く】と同じ決まりでまとめる (CurrentLocation.GroupNear。2026-11-05)。
+        // 同じ名前・同じ種類・同じ所は 1 行に「×N」、親と同じ所の子は親の行「▼ 親（N 件）」の下に「　└ 子」(ページでは初めは隠し、親の行を押すと開く。DetailHtml の MapScript の initFolds)
+        var groups = CurrentLocation.GroupNear(list.Select(x => new CurrentLocation.NearRow(x.Node, x.D, false)).ToList(), thetas, int.MaxValue);
+        static string Name(ShopTreeNode n, int count) => DetailLink(n.Record, n.Name) + (count > 1 ? $" ×{count}" : "");
+        foreach (var g in groups)
+        {
+            var n = g.Head.Node;
+            if (g.Kids.Count == 0) { sb.AppendLine($"| {Name(n, g.HeadCount)} | {Cell(MdEscape(n.TypeLabel))} | {FormatDistance(g.Head.Distance)} |"); continue; }
+            sb.AppendLine($"| ▼ {Name(n, g.HeadCount)}（{g.Kids.Count} 件） | {Cell(MdEscape(n.TypeLabel))} | {FormatDistance(g.Head.Distance)} |");
+            foreach (var (k, c) in g.Kids)
+                sb.AppendLine($"| 　└ {Name(k.Node, c)} | {Cell(MdEscape(k.Node.TypeLabel))} | {FormatDistance(k.Distance)} |");
+        }
     }
 
     // 図の行「<<svg:BASE64>>」(DetailHtml が SVG にする。文字の欄では「（図は WebView2 が必要です）」にする)
@@ -1912,7 +1923,8 @@ public partial class GameDataQueryService
             var from = mkFrom ?? mkPos;
             var at = $"data-x=\"{F(mkPos.X)}\" data-y=\"{F(mkPos.Y)}\"";
             static string Vis(bool on) => on ? "" : " visibility=\"hidden\"";
-            sb.Append($"<g class=\"curmark\"><title>{Xml(mkLabel)}</title>" +
+            // 取った座標の印は class に taken (星系図のスクリプトが、押せる見た目にして押したら gohere を送る。2026-11-05)
+            sb.Append($"<g class=\"curmark{(mkKind == MapOverlay.KindTaken ? " taken" : "")}\"><title>{Xml(mkLabel)}</title>" +
                       $"<g class=\"cur\" {at} data-pr=\"10\" transform=\"translate({F(x)},{F(y)})\"{Vis(mkKind == MapOverlay.KindTaken)}><circle r=\"7\"/><path d=\"M-10,0 H-3 M3,0 H10 M0,-10 V-3 M0,3 V10\"/></g>" +
                       $"<g class=\"est\" {at} data-pr=\"10\" transform=\"translate({F(x)},{F(y)})\"{Vis(mkKind == MapOverlay.KindEstimated)}><circle r=\"8\"/></g>" +
                       $"<text class=\"curtext mk\" data-pri=\"0\" data-sub=\"0\" data-no=\"-1\" {at} data-ox=\"14\" data-oy=\"8\" x=\"{F(x + 14)}\" y=\"{F(y + 8)}\"" +

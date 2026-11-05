@@ -19,7 +19,7 @@ internal sealed class StationView3DCache
 {
     // 保存の形の版。保存する中身が変わる変更 (BuildGeo・ComputeInst・WriteSocpakFile・融合・床の補い・region.json の項目) を入れたときは、ここを上げる
     // (Version には、ほかにモジュールの MVID も入るので、ビルドし直したときは必ず別の鍵になる)
-    public const string FormatVersion = "region-cache-5";   // 2: 区画のファイルの parts にエレベーターの扉の前の向きを足した (2026-11-05)。3: region.json に店のカウンターの箱 counters を足した (2026-11-05)。4: parts に UV・画像の番号、region.json に textures を足した (2026-11-05)。5: counters を店と同じ階の箱だけにした (2026-11-05)
+    public const string FormatVersion = "region-cache-7";   // 2: 区画のファイルの parts にエレベーターの扉の前の向きを足した (2026-11-05)。3: region.json に店のカウンターの箱 counters を足した (2026-11-05)。4: parts に UV・画像の番号、region.json に textures を足した (2026-11-05)。5: counters を店と同じ階の箱だけにした (2026-11-05)。6: 場所のパレットの色・材質の差し替え (textures の tint・color、画像の無い面の画像の番号、差し替えた材質の形) (2026-11-05)。7: ガラスの色 (白なら薄い水色。画像の無いガラスも色だけの項目) (2026-11-05)
     public const string FolderName = "stations3d_cache";
     private const string MetaName = "cache.json";
     // 保存する前に、保存先のドライブに残しておく空き (これを割るなら保存しない)
@@ -210,6 +210,9 @@ internal sealed class StationView3DCache
 
     // 古い・使えないものと、途中で止まった書きかけを消す。最初の 1 回だけ (窓を開いたとき)。
     // 鍵の合わないもの (Data.p4k・区画の置き方の一覧・プログラムの版が今と違う) は、使えないので消す
+    // 色付け (場所のパレットの色) を切った地点は、区画の置き方の一覧の印 (layoutId) の後ろに NoPaletteSuffix を付けた印で保存する (2026-11-05、利用者の指示「1 で。右のスイッチに入れて自動保存にして」)。
+    // 色付けを入れた地点の印は今のまま (前に保存したものもそのまま使える)。片方の印のものを、もう片方のときに使うことはない (TryGet が印を比べる)
+    public const string NoPaletteSuffix = "|nopal";
     public void SweepStale(string p4kKey, string layoutId)
     {
         lock (_lock) { if (_swept) return; _swept = true; }
@@ -228,7 +231,7 @@ internal sealed class StationView3DCache
                 var mp = Path.Combine(d, MetaName);
                 Meta? m = null;
                 try { if (File.Exists(mp)) m = JsonSerializer.Deserialize<Meta>(File.ReadAllBytes(mp)); } catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException) { }
-                if (m == null || m.Version != Version || m.P4k != p4kKey || m.Layout != layoutId)
+                if (m == null || m.Version != Version || m.P4k != p4kKey || (m.Layout != layoutId && m.Layout != layoutId + NoPaletteSuffix))   // 色付けを切った地点 (NoPaletteSuffix) も今の一覧のものなら残す
                 {
                     lock (_lock) { if (_inUse.GetValueOrDefault(name) > 0) continue; }
                     TryDeleteSoon(d);

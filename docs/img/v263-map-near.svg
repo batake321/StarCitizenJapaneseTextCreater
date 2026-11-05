@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" width="900" height="400" role="img" aria-labelledby="t d">
+  <title id="t">マップの現在位置の近くの一覧（仮の図）</title>
+  <desc id="d">［マップ］タブの【現在位置の近く】。現在地の文にハンガーの所なら「・ハンガー（S）」が付きます。同じ所にある親と子（Seraphim Station と Seraphim Clinic など）は親の行「▼ 親（N 件）」にまとめ、押すと子の行「└ 子」が出ます。同じ名前・同じ種類の近い場所は 1 行にまとめて「×2」を付けます。</desc>
+  <style>
+    .f  { font-family: sans-serif; }
+    .h  { font-size: 15px; fill: #e6eef7; font-weight: 700; }
+    .tx { font-size: 13px; fill: #dde6ef; }
+    .ln { font-size: 13px; fill: #7cc4ff; }
+    .th { font-size: 13px; fill: #9fb3c8; font-weight: 700; }
+    .no { font-size: 15px; fill: #fff; font-weight: 700; }
+    .cap { font-size: 12.5px; fill: #c9d6e3; }
+  </style>
+
+  <rect x="0" y="0" width="900" height="400" rx="8" fill="#1b222c"/>
+  <rect x="20" y="16" width="860" height="350" fill="#141a22" stroke="#2f3d4d"/>
+  <text class="f h" x="36" y="42">【現在位置の近く】</text>
+  <text class="f tx" x="36" y="68">現在地: Seraphim Station 内・ハンガー（S）（中心から 420 m、いちばん近い場所）</text>
+  <text class="f tx" x="36" y="92">現在位置: 取った座標 (2026-11-05 14:32:05)</text>
+  <text class="f tx" x="36" y="112">星系: Stanton</text>
+
+  <line x1="36" y1="130" x2="864" y2="130" stroke="#2f3d4d"/>
+  <text class="f th" x="40" y="148">場所</text><text class="f th" x="560" y="148">種類</text><text class="f th" x="720" y="148">距離</text>
+  <line x1="36" y1="156" x2="864" y2="156" stroke="#2f3d4d"/>
+  <g class="f tx">
+    <text x="40" y="178">▼ <tspan class="ln">Seraphim Station</tspan>（1 件）</text><text x="560" y="178">人工</text><text x="720" y="178">420 m</text>
+    <text x="40" y="204">　└ <tspan class="ln">Seraphim Clinic</tspan></text><text x="560" y="204">人工</text><text x="720" y="204">450 m</text>
+    <text x="40" y="230"><tspan class="ln">Crusader</tspan></text><text x="560" y="230">惑星</text><text x="720" y="230">1,080 Km</text>
+    <text x="40" y="256"><tspan class="ln">Vision Center</tspan> ×2</text><text x="560" y="256">人工</text><text x="720" y="256">5,400 Km</text>
+    <text x="40" y="282"><tspan class="ln">Orison</tspan></text><text x="560" y="282">居住地</text><text x="720" y="282">5,410 Km</text>
+    <text x="40" y="308" fill="#7f8fa0">（ほかの行は省いています）</text>
+  </g>
+  <rect x="36" y="188" width="828" height="24" fill="#7cc4ff" fill-opacity="0.06"/>
+  <text class="f cap" x="36" y="340">▼ の行を押すと子の行が出ます（初めは隠れています）。場所の［詳細］の【距離】の表も同じまとめ方です</text>
+
+  <text class="f cap" x="20" y="390">仮の図。場所の名前・種類・距離・時刻は例です。実際の画面と細部が違うことがあります</text>
+
+  <!-- 番号 -->
+  <g class="f">
+    <circle cx="530" cy="62" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="530" y="67" text-anchor="middle">1</text>
+    <circle cx="290" cy="172" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="290" y="177" text-anchor="middle">2</text>
+    <circle cx="290" cy="200" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="290" y="205" text-anchor="middle">3</text>
+    <circle cx="200" cy="252" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="200" y="257" text-anchor="middle">4</text>
+  </g>
+</svg>
