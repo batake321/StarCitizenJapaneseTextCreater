@@ -421,7 +421,7 @@ public partial class MapPanel : UserControl
     // 建物の中か: 星系図の現在地の文が「〜 内」になるときと同じ決まり (MapState の取った座標の場合: CurrentLocation.Locate → WhereaboutsOf の Inside)。
     //   使う位置は、いちばん新しく取った座標 (ComputeEffective の Kind が Taken のときだけ。推定の位置では切り替えない)。取り直さない。
     // その場所の 3D があるか: 星系図に地図のある場所の印を出している場所 (MapPlaceByRecordName。押すとその場所の 3D を出すのと同じ)。
-    // どれかに当たらなければ何もしない (星系図のまま)。当たれば、3D をどこに出すかの今の決まり (別ウィンドウが開いていればそこ、無ければ［マップ］タブ) で出し、
+    // 位置が無い (取った座標でない) ときは何もしない。建物の中でない・その場所の 3D が無いときは、［マップ］タブに 3D を出していたら星系図に戻す (無ければ星系図のまま)。当たれば、3D をどこに出すかの今の決まり (別ウィンドウが開いていればそこ、無ければ［マップ］タブ) で出し、
     // その 3D で、3D の［現在位置］と同じ出し方 (取り直さない) をする (StationView3DView.RequestHere)
     // activate: 3D の別ウィンドウに出すとき、その窓を前に出すか (既定は出す)。現在位置のキーから来たとき (CaptureCurrentFromHotkeyAsync) は偽
     // (ゲームからフォーカスを取らない。3D の中身の更新・［マップ］タブへの切り替えは同じ)
@@ -435,8 +435,13 @@ public partial class MapPanel : UserControl
             var effSystem = eff.System is { Length: > 0 } es ? tree.Systems.FirstOrDefault(s => s.System.Equals(es, StringComparison.OrdinalIgnoreCase)) : null;
             if (CurrentLocation.Locate(tree, eff.Pos, eff.Unix, SystemNames, null, fresh: false, effSystem) is not { } loc) return;
             var where = CurrentLocation.WhereaboutsOf(eff.Pos, loc, LogPlaceNode(tree, LandingPlaceProvider?.Invoke()));
-            if (!where.Inside || where.Place is not { } wp) return;
-            if (MapPlaceByRecordName(wp.RecordName) is not { } mp) return;
+            if (!where.Inside || where.Place is not { } wp || MapPlaceByRecordName(wp.RecordName) is not { } mp)
+            {
+                // (2026-11-06、利用者の報告「宇宙空間で現在位置を取ったときに、その前に map にステーション内部の 3D が表示されてると星系のマップにならない」)
+                // 建物の中でない・その場所の 3D が無いときに、［マップ］タブに 3D を出していたら、星系図に戻す (別ウィンドウの 3D はそのまま)
+                if (pnlPlace.Visibility == Visibility.Visible) BackToStarMap();
+                return;
+            }
             if (StationView3DShops.ShowInOpenWindow(mp.Record, mp.Name, tree, null, here: true, activate: activate)) return;
             for (DependencyObject? d = this; d != null; d = LogicalTreeHelper.GetParent(d))
                 if (d is TabItem tab) { tab.IsSelected = true; break; }
