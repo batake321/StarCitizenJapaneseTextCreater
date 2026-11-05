@@ -29,13 +29,13 @@ public static class OreHere
     public sealed record Section(string Method, List<RockLine> Rocks);
     // 品質の 1 行 (範囲とばらつき・その値の資源)
     public sealed record QualityLine(string Range, string Resources);
-    // オーバーレイの中身: 見出し (場所の名前（星系）)・掘り方ごとの行・知らせ (行が無いときの文。あれば "")・品質の行・品質の説明の行 (品質の行が無ければ空)
-    public sealed record Content(string Title, List<Section> Sections, string Message, List<QualityLine> Quality, List<string> QualityNotes);
+    // オーバーレイの中身: 見出し (場所の名前（星系）)・掘り方ごとの行・知らせ (行が無いときの文。あれば "")・品質の行。
+    // 説明・注意の行は出さない (2026-11-06、利用者の指示「注意を勝手に入れることを固く禁止する」「画面を狭くするだけ」。
+    // 前は品質の下に「品質はゲームデータの範囲で、個々の岩の値ではありません」「倍率 = …」の 2 行を出していた)
+    public sealed record Content(string Title, List<Section> Sections, string Message, List<QualityLine> Quality);
 
     public const string NoDataMessage = "ここで採掘できる物のデータはありません";
     public const string QualityHeader = "品質";
-    public const string QualityNote = "品質はゲームデータの範囲で、個々の岩の値ではありません";
-    public const string ScaleNote = "倍率 = 岩の中の行ごとの品質の倍率（ゲームデータの値そのまま）";
     // 列の見出し
     public static readonly string[] Columns = ["岩", "格", "出やすさ", "シグネチャー", "岩の中の資源と割合"];
 
@@ -189,7 +189,7 @@ public static class OreHere
     {
         var title = where.Name.Length > 0 ? (where.System.Length > 0 ? $"{where.Name}（{where.System}）" : where.Name)
             : where.System.Length > 0 ? where.System : "現在位置";
-        Content None() => new(title, [], NoDataMessage, [], []);
+        Content None() => new(title, [], NoDataMessage, []);
         if (where.Place is not { } place || !File.Exists(gamedataDbPath)) return None();
 
         var merged = new List<MergedRow>();
@@ -245,7 +245,6 @@ public static class OreHere
         // 資源の出てきた順 (品質の行の並びに使う) と、倍率を書いた岩があったか
         var resourceOrder = new List<(string Uuid, string Record)>();
         void Seen(string uuid, string record) { if (!resourceOrder.Any(x => x.Uuid.Equals(uuid, StringComparison.OrdinalIgnoreCase))) resourceOrder.Add((uuid, record)); }
-        var scaleShown = false;
 
         // 岩ごとの行。並び: 掘り方の順、出やすさの大きい順 (preset が 2 つ以上なら大きいほう)、岩の名前
         var rocks = merged.GroupBy(x => (x.Method, x.Rock)).Select(g =>
@@ -270,7 +269,6 @@ public static class OreHere
             {
                 // その岩の行が全部 1 (か項目が無い) なら倍率を書かない
                 var showScale = rockParts.Any(p => p.Scale is { } s && s != 1);
-                if (showScale) scaleShown = true;
                 // 資源ごとに (出てきた順)、行の割合を並べる。同じ岩の中身の中に同じ値の行が 2 つ以上あれば「×2」と添える (行を重ねて並べない)。
                 // 場所に preset が 2 つ以上あって岩の中身のレコードが違うときは、同じ値の行は 1 つにする (数は多いほう)
                 var groups = new List<(string Uuid, string Record, List<(string Range, int Count)> Ranges)>();
@@ -317,10 +315,7 @@ public static class OreHere
             else if (!byRange[bi].Names.Contains(name)) byRange[bi].Names.Add(name);
         }
         foreach (var (range, names) in byRange) qualityLines.Add(new QualityLine(range, string.Join("、", names)));
-        var notes = new List<string>();
-        if (qualityLines.Count > 0) notes.Add(QualityNote);
-        if (scaleShown) notes.Add(ScaleNote);
-        return new Content(title, sections, "", qualityLines, notes);
+        return new Content(title, sections, "", qualityLines);
     }
 
     // 中身を文字の行にする (確かめ・ログ用。オーバーレイに出る文字を全部)
@@ -339,7 +334,6 @@ public static class OreHere
             lines.Add($"■ {QualityHeader}");
             foreach (var q in c.Quality) lines.Add($"  {q.Range} | {q.Resources}");
         }
-        foreach (var n in c.QualityNotes) lines.Add($"  {n}");
         return lines;
     }
 }

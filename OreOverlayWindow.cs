@@ -458,7 +458,6 @@ internal sealed class OreOverlayWindow : Window
             }
             _content.Children.Add(grid);
         }
-        foreach (var n in c.QualityNotes) _content.Children.Add(Text(n, DimBrush, size: 12, margin: M(0, 4, 0, 0)));
     }
 
     // ===== 変更中 (位置・大きさ) =====

@@ -394,7 +394,7 @@ public partial class MapPanel : UserControl
         {
             var content = here ? OreHere.Compose(tree!, db, translationsDb, (cur.X, cur.Y, cur.Z), cur.Utc, cur.System, known) : null;
             if (content is { Sections.Count: > 0 }) return content;
-            return OreHere.Sample(db, translationsDb) ?? content ?? new OreHere.Content("現在位置", [], OreHere.NoDataMessage, [], []);
+            return OreHere.Sample(db, translationsDb) ?? content ?? new OreHere.Content("現在位置", [], OreHere.NoDataMessage, []);
         });
     }
 
