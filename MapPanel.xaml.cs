@@ -473,23 +473,15 @@ public partial class MapPanel : UserControl
             }
         }
         var ok = await CaptureAsync(auto: false, from, keepGameFront);
-        // (2026-11-02、利用者の指摘「現在位置ボタンで位置がとれないとでる」) 座標を読めなかったときは、1 回だけ取り直す。
-        // 間は自動の取得の取り直し (目的地の選択の後、取れなければ 3 秒おきにあと 2 回) と同じ 3 秒
-        if (!ok && _lastFailUnreadable)
-        {
-            App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 座標を読めなかったので、{ButtonRetryDelay.TotalSeconds:0} 秒後に 1 回だけ取り直します（ボタン・{from}）");
-            await Task.Delay(ButtonRetryDelay);
-            ok = await CaptureAsync(auto: false, from + "・取り直し", keepGameFront);
-        }
+        // (2026-11-06、利用者の指示「"/showlocation" 送り直しはやめるべき」) /showlocation を送って座標が返らなかったときは、送り直さない
+        // (2026-11-02 に入れた「座標を読めなかったら 3 秒後に 1 回だけ取り直す」をやめた。自動の取得も同じ: 送って返らなかったら、その後の回をやめる)
         // 取れなかったときの Game.log の手がかり (ステーションの地図がハンガーにいるかの推測に使う。StationMapPanel)
         // 時刻は UTC (Game.log の行の時刻 (GameLogParser) と同じ)
         LastCaptureFailLog = ok ? null : (DateTime.UtcNow, LandingPlaceProvider?.Invoke(), QuantumStateProvider?.Invoke());
         return (ok, txtStatus.Text);
     }
 
-    // ボタンで座標を読めなかったときの取り直しまでの間 (CaptureCurrentAsync)
-    private static readonly TimeSpan ButtonRetryDelay = TimeSpan.FromSeconds(3);
-    // 直前の取得の失敗が「座標を読めなかった」(クリップボードの文字が座標の形でない) か
+    // 直前の取得の失敗が「座標を読めなかった」(/showlocation を送ったが、クリップボードの文字が座標の形でない) か。自動の取得は、これが真ならその後の回をやめる (送り直さない)
     private bool _lastFailUnreadable;
     // ボタンで取れなかったときの Game.log の手がかり (取れなかった時刻 (UTC)・今の着陸場所の名前・量子ジャンプの状態)。取れたら null。アプリを動かしている間だけ
     public static (DateTime At, string? Landing, GameLogQuantumState? Quantum)? LastCaptureFailLog { get; private set; }
@@ -532,7 +524,7 @@ public partial class MapPanel : UserControl
 
     // ［ゲームログ］の追い読みで量子ジャンプの目的地の選択 (kind = "select") か到着 (kind = "arrive") の行を見た (GameLogPanel.QuantumEventSeen)。
     // 「QT・着陸・ゲーム開始のときに自動で現在位置を取る」(旧「QT の前後で自動で現在位置を取る」) がオンなら座標を取る (CaptureAsync(auto: true))。マップタブが見えていなくても動く。
-    //   目的地の選択: 行を見たらすぐ (跳ぶ前に出発地を取るため)。取れなかった (座標を読めない・ゲームの窓が前に無い) ら、3 秒おきにあと 2 回まで試す。
+    //   目的地の選択: 行を見たらすぐ (跳ぶ前に出発地を取るため)。取れなかった (ゲームの窓が前に無い・mobiGlas が開いているなど、/showlocation を送っていない) ら、3 秒おきにあと 2 回まで試す。送って座標が返らなかったときは、送り直さずにやめる (2026-11-06)。
     //     量子ジャンプが移動中になったら、その時点でやめる。ボタンの取得の途中なら、その回は飛ばす
     //     (星図 (mobiGlas など) を開いている間はチャットに届かず取れないことがあるため)
     //   到着: 2 秒後に 1 回。2 区間の経路の区間 1 の終わり (kind = "leg1")・着陸場に着いた (kind = "land"。量子ジャンプの後でなくても。
@@ -558,13 +550,13 @@ public partial class MapPanel : UserControl
                 if (i > 0) await Task.Delay(TimeSpan.FromSeconds(3));
                 if (select && QuantumStateProvider?.Invoke() is { Moving: true }) break;   // 跳んだ後は出発地にならないのでやめる
                 if (_capturing) continue;   // ボタンの取得の途中: この回は飛ばす
-                if (await CaptureAsync(auto: true)) break;
+                if (await CaptureAsync(auto: true) || _lastFailUnreadable) break;   // 取れた。または、送って座標が返らなかった (送り直さない)
             }
         });
     }
 
     // 量子ジャンプが移動中になった: 移動中になった時刻 (MovingSince) の 15 秒後と 45 秒後に座標を取る (今がもう過ぎていればすぐ)。
-    // 各回、取れなかったら 3 秒おきにあと 2 回まで試す。試す前に、移動中でなくなった・目的地を選び直した (TargetTime が変わった) ならやめる (その後の回もやめる)。
+    // 各回、取れなかったら 3 秒おきにあと 2 回まで試す (/showlocation を送って座標が返らなかったときは、送り直さずにやめる)。試す前に、移動中でなくなった・目的地を選び直した (TargetTime が変わった) ならやめる (その後の回もやめる)。
     // ボタンの取得の途中なら、その試しは飛ばす
     private void OnQuantumMoving()
     {
@@ -582,7 +574,7 @@ public partial class MapPanel : UserControl
                     if (i > 0) await Task.Delay(TimeSpan.FromSeconds(3));
                     if (QuantumStateProvider?.Invoke() is not { Moving: true } cq || cq.TargetTime != targetTime) return;   // 着いた・選び直した: この後の回もやめる
                     if (_capturing) continue;   // ボタンの取得の途中: この試しは飛ばす
-                    if (await CaptureAsync(auto: true)) break;
+                    if (await CaptureAsync(auto: true) || _lastFailUnreadable) break;   // 取れた。または、送って座標が返らなかった (送り直さない)
                 }
             }
         });
@@ -590,7 +582,7 @@ public partial class MapPanel : UserControl
 
     // 目的地を選んだ後に離陸し、ステーション・着陸場の区域を出た (TakeoffExitAt): 区域を出た時刻の 15 秒後と 45 秒後に座標を取る (今がもう過ぎていればすぐ)。
     // 離陸の後の最初の Location の変化は移動中にしないので、そのまま跳ぶと移動中にならない (2026-10-31 15:14 の出発)。決まりは OnQuantumMoving と同じ:
-    // 各回、取れなかったら 3 秒おきにあと 2 回まで試す。試す前に、到着した (QtActive でない)・目的地を選び直した (TargetTime が変わった) ならやめる (その後の回もやめる)。
+    // 各回、取れなかったら 3 秒おきにあと 2 回まで試す (/showlocation を送って座標が返らなかったときは、送り直さずにやめる)。試す前に、到着した (QtActive でない)・目的地を選び直した (TargetTime が変わった) ならやめる (その後の回もやめる)。
     // ボタンの取得の途中なら、その試しは飛ばす
     private void OnQuantumTakeoffExit()
     {
@@ -608,7 +600,7 @@ public partial class MapPanel : UserControl
                     if (i > 0) await Task.Delay(TimeSpan.FromSeconds(3));
                     if (QuantumStateProvider?.Invoke() is not { } cq || !QtActive(cq) || cq.TargetTime != targetTime) return;   // 着いた・選び直した: この後の回もやめる
                     if (_capturing) continue;   // ボタンの取得の途中: この試しは飛ばす
-                    if (await CaptureAsync(auto: true)) break;
+                    if (await CaptureAsync(auto: true) || _lastFailUnreadable) break;   // 取れた。または、送って座標が返らなかった (送り直さない)
                 }
             }
         });
