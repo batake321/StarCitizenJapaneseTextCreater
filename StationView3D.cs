@@ -2839,7 +2839,7 @@ internal static class StationView3D
         //   (版 8 の一覧の全部の場所で確かめた値: 選ばれるまとまりは端末から 5.1〜16.7 m (Lorville の Teasa Spaceport だけ 43.4 m)、同じ路線のほかの行き先 (貨物デッキ・精製デッキ・
         //    シップディーラーなど) は 229.9 m 以上。鍵は場所で違う: レストストップは @ui_interactor_lobby「ロビー」、Pyro のステーションは @ui_dest_entry_pyro「入口」、
         //    Levski は「税関へ」、都市は「Teasa Spaceport」「NBIS ターミナル」など。鍵に lobby を含む乗り場で選んでいた前の決まりの 45 か所は、同じ行になる)
-        //   選んだまとまりを、同じ路線・同じ鍵の行き先の点 (destination) ごとに 1 つの行にする (乗り場は、いちばん近い行き先の点に付ける。行き先の点が無ければ全部で 1 つ)。
+        //   選んだまとまりを、路線ごとに 1 つの行にする (行き先の点 (destination) が 2 つ以上あっても分けない)。
         //   位置は、まとめた乗り場のうち行き先の点にいちばん近い乗り場。名前は鍵の訳 (ゲームの訳に「ハンガーロビー」に当たる言葉は無い)、乗り場が 2 つ以上なら「×数」。
         //   もとの乗り場の行 (エレベーター: ロビー) はそのまま残す (道案内のいちばん近い乗り口・乗り口の玉は今までのまま)
         {
@@ -2856,11 +2856,12 @@ internal static class StationView3D
                 var stops = grp.ToList();
                 var dests = map.Transit.Where(t => t.Kind == "destination" && t.Line == line && t.Stop == grp.Key).Select(t => t.Pos).ToList();
                 if (dests.Count == 0) dests.Add([stops.Average(s => s.Pos[0]), stops.Average(s => s.Pos[1]), stops.Average(s => s.Pos[2])]);
-                int Nearest(double[] p) { int best = 0; for (int i = 1; i < dests.Count; i++) if (D(dests[i], p) < D(dests[best], p)) best = i; return best; }
-                foreach (var g in stops.GroupBy(s => Nearest(s.Pos)).OrderBy(g => g.Key))
+                // 路線ごとに 1 つの行 (2026-11-05、利用者の指示「×8」: Checkmate・Orbituary・Ruin Station は、同じロビーの「入口」の行き先の点が 3.9〜4.4 m 離れて
+                // 2 つあり、点ごとに行を分けると「入口」が 2 行 (×5 と ×3) になっていた。同じ路線・同じ鍵の乗り場は 1 つの行「入口 ×8」にまとめる。
+                // 配る一覧の全部の場所で、行が分かれていたのはこの 3 か所だけ)。位置は、行き先の点にいちばん近い乗り場
                 {
-                    var at = g.MinBy(s => D(dests[g.Key], s.Pos))!;
-                    var n = g.Count();
+                    var at = stops.MinBy(s => dests.Min(d => D(d, s.Pos)))!;
+                    var n = stops.Count;
                     targets.Add(new { kind = "hangar_lobby", label = "ハンガーロビー", name = loc.Get(grp.Key) + (n > 1 ? $" ×{n}" : ""), pos = at.Pos });
                 }
             }
