@@ -646,8 +646,7 @@ async function thumbWithTable() {
     try {
       const res = await fetch(turl);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const made = await buildMaterials(await res.json());
-      meshEntries.forEach((e, i) => { e.o.material = made.perEntry[i] ?? e.orig; });
+      putTable(await buildMaterials(await res.json()));
     } catch (err) {
       reportError(`小さな絵に材質の表を当てられませんでした: ${err?.message ?? err}`);
       return;
@@ -675,6 +674,17 @@ function adjustMaterial(m) {
 let gltfParser = null;
 let meshEntries = [];        // { o: Mesh, mi: glTF の mesh の番号, pi: primitive の番号, orig: 標準の材質 }
 let paintMaterials = [];     // 今当てている塗装の材質 (標準に戻す・別の塗装にするときに捨てる)
+// 描く部品 (primitive) を変える塗装 (表の rebuild) で作り直して足した部品 ({ host, mesh })。標準に戻す・別の塗装にするときに外す。
+// 形 (BufferGeometry) は GLTFLoader の primitiveCache に残り、同じ表を当て直したときに使い回すので捨てない (頂点のデータは標準の部品と共有するため)。
+// 作り直す mesh の元の部品は、見えない材質 (HIDDEN_MAT) にして描かない (node の子は残るので、外さずに材質だけ替える)
+let paintAdded = [];
+const HIDDEN_MAT = new THREE.MeshBasicMaterial({ visible: false });
+// glTF の mesh の番号 → その mesh を出している three.js の入れ物 (node ごと。1 つの primitive の mesh は Mesh そのもの、2 つ以上は Group)
+let meshHosts = new Map();
+// 作り直しの accessor の定義 (定義の文字 → parser.json.accessors の番号)。GLB にある定義と同じならその番号 (頂点のデータを標準の部品と共有する)、
+// 無ければ足す (同じ定義は 1 回だけ)
+const extraAccessors = new Map();
+let accessorsIndexed = false;
 let currentPaint = '';       // 今当たっている塗装 ('' は標準)
 let wantedPaint = '';        // 選ばれた塗装 (作っている間は currentPaint と違う)
 let currentTable = '';       // 今当てている材質の表 ('' は GLB の材質のまま)
@@ -689,10 +699,17 @@ let paintItems = [];
 function rememberMeshes(parser, root) {
   gltfParser = parser;
   meshEntries = [];
+  meshHosts = new Map();
+  const addHost = (mi, h) => { if (!meshHosts.has(mi)) meshHosts.set(mi, new Set()); meshHosts.get(mi).add(h); };
   root.traverse(o => {
-    if (!o.isMesh) return;
     const a = parser.associations.get(o);
-    if (a && a.meshes !== undefined && a.primitives !== undefined) meshEntries.push({ o, mi: a.meshes, pi: a.primitives, orig: o.material });
+    if (!a || a.meshes === undefined) return;
+    // GLTFLoader: primitive が 2 つ以上 (または 0) の mesh は Group (associations は {meshes}) の子に Mesh ({meshes, primitives})、1 つなら Mesh がそのまま node
+    if (a.primitives === undefined) { if (!o.isMesh) addHost(a.meshes, o); return; }
+    if (!o.isMesh) return;
+    meshEntries.push({ o, mi: a.meshes, pi: a.primitives, orig: o.material });
+    const pa = o.parent ? parser.associations.get(o.parent) : null;
+    if (!(pa && pa.meshes === a.meshes && pa.primitives === undefined)) addHost(a.meshes, o);
   });
 }
 
@@ -768,14 +785,14 @@ async function applyWanted() {
   if (tid !== '' && !tables.has(tid)) return;   // 作っている (届いたら呼ばれる)
   try {
     if (tid === '') {
+      removeAdded();
       for (const e of meshEntries) e.o.material = e.orig;
       disposePaintMaterials([]);
     } else {
       showBusy(`塗装「${labelOf(id)}」を当てています...`);
       const made = await buildMaterials(tables.get(tid));
-      if (seq !== applySeq) { for (const m of made.all) m.dispose(); return; }   // 待つ間に別のものが選ばれた
-      meshEntries.forEach((e, i) => { e.o.material = made.perEntry[i] ?? e.orig; });
-      disposePaintMaterials(made.all);
+      if (seq !== applySeq) { discardMade(made); return; }   // 待つ間に別のものが選ばれた
+      putTable(made);
     }
     currentPaint = id;
     currentTable = tid;
@@ -784,6 +801,23 @@ async function applyWanted() {
     if (seq !== applySeq) return;
     failPaint(tid, `塗装「${labelOf(id)}」に切り替えられませんでした: ${err?.message ?? err}`);
   }
+}
+
+// 作った材質・部品を当てる (前に足した部品は外して捨てる)
+function putTable(made) {
+  removeAdded();
+  meshEntries.forEach((e, i) => { e.o.material = made.perEntry[i] ?? e.orig; });
+  for (const a of made.added) a.host.add(a.mesh);
+  paintAdded = made.added;
+  disposePaintMaterials(made.all);
+}
+function removeAdded() {
+  for (const a of paintAdded) a.host.remove(a.mesh);
+  paintAdded = [];
+}
+// 当てずにやめたもの (待つ間に別の塗装が選ばれた) を捨てる (材質だけ。形は上の理由で残す)
+function discardMade(made) {
+  for (const m of made.all) m.dispose();
 }
 
 function disposePaintMaterials(keep) {
@@ -804,23 +838,32 @@ function failPaint(tid, text) {
 }
 
 // 材質の表から、覚えた mesh ごとの材質を作る。GLTFLoader の loadMaterial を表の materials で呼ぶ (呼ぶ間だけ parser.json.materials を差し替える。
-// loadMaterial と拡張は材質の定義をその場で読むので、作り始めたら元に戻してよい)。primitive ごとの複製は assignFinalMaterial と同じ決まり
+// loadMaterial と拡張は材質の定義をその場で読むので、作り始めたら元に戻してよい)。primitive ごとの複製は assignFinalMaterial と同じ決まり。
+// 表の rebuild にある mesh (塗装で描く部品 (primitive) が変わる mesh。2026-11-05、利用者の指示「出せるようにしてから公開」) は、元の部品を見えない材質にし、
+// 表の primitive の一覧から形を作り直して、その mesh を出している入れ物 (meshHosts) に子として足す。形は GLB の BIN から読む
+// (表の accessor の定義を parser.json.accessors に足し、GLTFLoader の loadGeometries で作る。bufferView は今の GLB と同じ番号)
 async function buildMaterials(table) {
   const parser = gltfParser;
+  const rebuild = table.rebuild || {};
   const saved = parser.json.materials;
   const baseOf = new Map();
   const want = [];
+  const loadMat = idx => {
+    if (idx === null || idx === undefined || baseOf.has(idx)) return;
+    if (!table.materials[idx]) throw new Error('材質の表が 3D モデルと合いません');
+    baseOf.set(idx, parser._invokeOne(ext => ext.loadMaterial && ext.loadMaterial(idx)));
+  };
   parser.json.materials = table.materials;
   try {
     for (const e of meshEntries) {
+      if (rebuild[e.mi]) { want.push(HIDDEN_MAT); continue; }   // 作り直す mesh の元の部品は描かない
       const row = table.prims?.[e.mi];
       if (!row || e.pi >= row.length) throw new Error('材質の表が 3D モデルと合いません');
       const idx = row[e.pi];
       want.push(idx);
-      if (idx === null || idx === undefined || baseOf.has(idx)) continue;
-      if (!table.materials[idx]) throw new Error('材質の表が 3D モデルと合いません');
-      baseOf.set(idx, parser._invokeOne(ext => ext.loadMaterial && ext.loadMaterial(idx)));
+      loadMat(idx);
     }
+    for (const prims of Object.values(rebuild)) for (const pr of prims) loadMat(pr.material);
   } finally {
     parser.json.materials = saved;
   }
@@ -828,12 +871,8 @@ async function buildMaterials(table) {
   for (const [idx, p] of baseOf) bases.set(idx, await p);
   const finals = new Map();
   const all = [...bases.values()];
-  const perEntry = meshEntries.map((e, i) => {
-    const idx = want[i];
-    if (idx === null || idx === undefined) return null;
-    const base = bases.get(idx);
-    // assignFinalMaterial と同じ: 接線が無ければ法線の画像の向きを直した複製、頂点の色があれば vertexColors、法線が無ければ flatShading の複製
-    const g = e.o.geometry;
+  // assignFinalMaterial と同じ: 接線が無ければ法線の画像の向きを直した複製、頂点の色があれば vertexColors、法線が無ければ flatShading の複製
+  const finalOf = (base, g) => {
     const dt = g.attributes.tangent === undefined, vc = g.attributes.color !== undefined, fl = g.attributes.normal === undefined;
     if (!dt && !vc && !fl) return base;
     const key = `${base.uuid}:${dt ? 'dt' : ''}:${vc ? 'vc' : ''}:${fl ? 'fl' : ''}`;
@@ -850,9 +889,52 @@ async function buildMaterials(table) {
       all.push(m);
     }
     return m;
+  };
+  const perEntry = meshEntries.map((e, i) => {
+    const idx = want[i];
+    if (idx === HIDDEN_MAT) return HIDDEN_MAT;
+    if (idx === null || idx === undefined) return null;
+    return finalOf(bases.get(idx), e.o.geometry);
   });
+  // 作り直す mesh の形と部品
+  const added = [];
+  const nViews = parser.json.bufferViews?.length ?? 0;
+  if (!accessorsIndexed && Object.keys(rebuild).length > 0) {
+    accessorsIndexed = true;
+    parser.json.accessors.forEach((a, i) => { const k = JSON.stringify(a); if (!extraAccessors.has(k)) extraAccessors.set(k, i); });
+  }
+  const accessorIndex = def => {
+    if (!def || typeof def !== 'object' || !(def.bufferView >= 0 && def.bufferView < nViews)) throw new Error('材質の表の形のデータが 3D モデルと合いません');
+    const key = JSON.stringify(def);
+    let i = extraAccessors.get(key);
+    if (i === undefined) { i = parser.json.accessors.length; parser.json.accessors.push(def); extraAccessors.set(key, i); }
+    return i;
+  };
+  for (const [k, prims] of Object.entries(rebuild)) {
+    const mi = Number(k);
+    const hosts = meshHosts.get(mi);
+    if (!hosts || hosts.size === 0) continue;   // 描いていない mesh (demo の部品として外したものなど)
+    const defs = prims.map(pr => {
+      if (pr.mode !== undefined && pr.mode !== 4) throw new Error('材質の表の部品の描き方 (mode) を扱えません');
+      const attributes = {};
+      for (const [name, def] of Object.entries(pr.attributes || {})) attributes[name] = accessorIndex(def);
+      const d = { attributes };
+      if (pr.indices) d.indices = accessorIndex(pr.indices);
+      return d;
+    });
+    const gs = await parser.loadGeometries(defs);
+    for (const host of hosts) {
+      gs.forEach((g, j) => {
+        const midx = prims[j].material;
+        const mat = midx === null || midx === undefined ? HIDDEN_MAT : finalOf(bases.get(midx), g);
+        const mesh = new THREE.Mesh(g, mat);
+        mesh.name = `${host.name || 'mesh'}_paint_${j}`;
+        added.push({ host, mesh });
+      });
+    }
+  }
   for (const m of all) adjustMaterial(m);
-  return { perEntry, all };
+  return { perEntry, all, added };
 }
 
 if (paintIO) {

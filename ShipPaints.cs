@@ -53,8 +53,8 @@ internal static class ShipPaints
 
     // 一覧の保存の版 (作り方を変えたら上げる。違えば作り直す)
     private const int ListVersion = 1;
-    // 材質の表の版
-    private const int TableVersion = 1;
+    // 材質の表の版 (2: 描く部品 (primitive) の出る・出ないを変える塗装の作り直し rebuild を足した。1 の表と「出せない」の印は使わずに作り直す)
+    private const int TableVersion = 2;
     private const string AppMark = "StarCitizenJapaneseTextCreater.ship3d.paints";
 
     public static string Folder => Path.Combine(Ship3DExports.Folder, "ship3d_paints");
@@ -786,11 +786,12 @@ internal static class ShipPaints
         return d;
     }
 
-    // 材質の表を作る (中身は JSON の UTF-8):
+    // 材質の表を作る (中身は JSON の UTF-8。版 2 から rebuild を足した):
     //   { "app", "version", "ship", "paint": id, "p4k": Data.p4k の印, "glbLength", "glbTicks": 当てる GLB の大きさ・更新日時,
     //     "materials": 塗装つきの GLB の materials (glTF の材質の配列そのまま),
-    //     "prims": mesh ごとの、primitive ごとの材質の番号 (materials の中の番号。meshes の並び・primitives の並びは今の GLB と同じ) }
-    // 今の GLB と形の部分が違えば InvalidOperationException
+    //     "prims": mesh ごとの、primitive ごとの材質の番号 (materials の中の番号。meshes の並びは今の GLB と同じ。primitives の並びも、rebuild に無い mesh では今の GLB と同じ)
+    //     "rebuild": { "<mesh の番号>": [primitive (attributes・indices は accessor の定義そのもの、material・mode)] } (primitive の中身が今の GLB と違う mesh だけ) }
+    // 今の GLB と形の枠 (FrameHash) が違えば PaintUnusableException
     internal static byte[] BuildTable(P4kArchive p4k, DataCoreDb db, string shortName, string id, string glbPath, string p4kKey)
     {
         string? paint = id == IdNone ? "" : id == IdNoPalette || id == IdStandardTable ? null : id;
@@ -800,23 +801,33 @@ internal static class ShipPaints
         var glb = new FileInfo(glbPath);
         using var docNew = JsonDocument.Parse(TrimPad(json), new JsonDocumentOptions { MaxDepth = 256 });
         using var docBase = JsonDocument.Parse(TrimPad(ReadGlbJson(glbPath)), new JsonDocumentOptions { MaxDepth = 256 });
-        var newShape = ShapeHash(docNew.RootElement);
-        if (!newShape.AsSpan().SequenceEqual(ShapeHash(docBase.RootElement)))
+        // 形の枠 (BIN・bufferView・画像・node・mesh の数と名前など。FrameHash) が今の GLB と同じなら出せる。違うのが mesh の primitive (描く submesh の出る・出ない) と
+        // それに伴う accessor だけなら、その mesh を作り直す (rebuild。2026-11-05、利用者の指示「出せるようにしてから公開」。実例: Origin M80 の Tetra は primitive が 55 個増える)
+        var newFrame = FrameHash(docNew.RootElement);
+        if (!newFrame.AsSpan().SequenceEqual(FrameHash(docBase.RootElement)))
         {
-            // 理由を分ける: 今のコードの標準 (引数なしの書き出し) の形が、この塗装の形と同じなら、違うのは取り込み済みの GLB の方 (取り込み直せば出せる)。
-            // 違えば、この塗装そのものが描く部品 (submesh の出る・出ない) を変える塗装 (取り込み直しても出せない。実例: Origin M80 の Tetra は primitive が 55 個増える)
+            // 理由を分ける: 今のコードの標準 (引数なしの書き出し) の枠が、この塗装の枠と同じなら、違うのは取り込み済みの GLB の方 (取り込み直せば出せる)。
+            // 違えば、この塗装そのものが形の塊・部品の並びを変える塗装 (取り込み直しても出せない)
             bool reimport;
             if (paint == null && id != IdNoPalette) reimport = true;   // 標準の表そのもの
             else
             {
                 var (_, stdJson) = ShipExport.ExportJson(p4k, db, shortName, null, false);
                 using var docStd = JsonDocument.Parse(TrimPad(stdJson), new JsonDocumentOptions { MaxDepth = 256 });
-                reimport = newShape.AsSpan().SequenceEqual(ShapeHash(docStd.RootElement));
+                reimport = newFrame.AsSpan().SequenceEqual(FrameHash(docStd.RootElement));
             }
             throw new PaintUnusableException(reimport
                 ? "今の 3D モデルと形が合わないので、この塗装は出せません。3D モデルを取り込み直すと出せるようになります"
-                : "この塗装は色のほかに描く部品も変えるので、今の 3D 表示では出せません (取り込み直しても変わりません)");
+                : "この塗装は描く部品のほかに形のデータの並びも変えるので、今の 3D 表示では出せません (取り込み直しても変わりません)");
         }
+        // primitive の中身 (attributes・indices が指す accessor の定義・mode) が今の GLB と違う mesh
+        var baseAcc = docBase.RootElement.TryGetProperty("accessors", out var ba) ? ba : default;
+        var newAcc = docNew.RootElement.TryGetProperty("accessors", out var na) ? na : default;
+        var baseMeshes = docBase.RootElement.GetProperty("meshes");
+        var newMeshes = docNew.RootElement.GetProperty("meshes");
+        var rebuild = new List<int>();
+        for (int i = 0; i < newMeshes.GetArrayLength(); i++)
+            if (PrimSignature(baseMeshes[i], baseAcc) != PrimSignature(newMeshes[i], newAcc)) rebuild.Add(i);
         using var ms = new MemoryStream();
         using (var w = new Utf8JsonWriter(ms))
         {
@@ -845,9 +856,93 @@ internal static class ShipPaints
                     w.WriteEndArray();
                 }
             w.WriteEndArray();
+            // rebuild: 作り直す mesh の番号 (文字) → 塗装つきの primitive の一覧。attributes・indices は accessor の番号ではなく accessor の定義そのもの
+            // (bufferView は今の GLB と同じ番号。ビューアは定義を足して GLB の BIN から読む)。material は materials の中の番号
+            w.WritePropertyName("rebuild");
+            w.WriteStartObject();
+            foreach (var mi in rebuild)
+            {
+                w.WritePropertyName(mi.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                w.WriteStartArray();
+                foreach (var prim in newMeshes[mi].GetProperty("primitives").EnumerateArray())
+                {
+                    w.WriteStartObject();
+                    foreach (var pp in prim.EnumerateObject())
+                    {
+                        if (pp.Name == "attributes")
+                        {
+                            w.WritePropertyName("attributes");
+                            w.WriteStartObject();
+                            foreach (var at in pp.Value.EnumerateObject()) { w.WritePropertyName(at.Name); newAcc[at.Value.GetInt32()].WriteTo(w); }
+                            w.WriteEndObject();
+                        }
+                        else if (pp.Name == "indices") { w.WritePropertyName("indices"); newAcc[pp.Value.GetInt32()].WriteTo(w); }
+                        else if (pp.Name is "material" or "mode") pp.WriteTo(w);
+                        else throw new PaintUnusableException($"この塗装の部品に今の 3D 表示で扱えない欄 ({pp.Name}) があるので、出せません");
+                    }
+                    w.WriteEndObject();
+                }
+                w.WriteEndArray();
+            }
+            w.WriteEndObject();
             w.WriteEndObject();
         }
         return ms.ToArray();
+    }
+
+    // mesh の primitive の中身を比べる文字 (attributes・indices が指す accessor の定義、mode。material は含めない)
+    private static string PrimSignature(JsonElement mesh, JsonElement accessors)
+    {
+        var sb = new StringBuilder();
+        if (!mesh.TryGetProperty("primitives", out var prims)) return "";
+        foreach (var prim in prims.EnumerateArray())
+        {
+            sb.Append('[');
+            foreach (var pp in prim.EnumerateObject())
+            {
+                if (pp.Name == "material") continue;
+                sb.Append(pp.Name).Append('=');
+                if (pp.Name == "attributes")
+                    foreach (var at in pp.Value.EnumerateObject()) sb.Append(at.Name).Append(':').Append(accessors[at.Value.GetInt32()].GetRawText()).Append(';');
+                else if (pp.Name == "indices") sb.Append(accessors[pp.Value.GetInt32()].GetRawText());
+                else sb.Append(pp.Value.GetRawText());
+                sb.Append('|');
+            }
+            sb.Append(']');
+        }
+        return sb.ToString();
+    }
+
+    // GLB の JSON のうち形の枠 (ShapeHash から、さらに accessors と mesh の primitives を除き、mesh の数とほかの欄 (名前) だけを残したもの) の SHA-256。
+    // ここが同じで違うのが primitive だけなら、BIN はそのままで mesh を作り直せる (BIN の大きさ (buffers)・bufferViews・画像・node は同じ)
+    internal static byte[] FrameHash(JsonElement root)
+    {
+        using var ms = new MemoryStream();
+        using (var w = new Utf8JsonWriter(ms))
+        {
+            w.WriteStartObject();
+            foreach (var p in root.EnumerateObject())
+            {
+                if (p.Name is "asset" or "materials" or "extensionsUsed" or "accessors") continue;
+                w.WritePropertyName(p.Name);
+                if (p.Name == "meshes" && p.Value.ValueKind == JsonValueKind.Array)
+                {
+                    w.WriteStartArray();
+                    foreach (var mesh in p.Value.EnumerateArray()) WriteWithout(w, mesh, "primitives");
+                    w.WriteEndArray();
+                }
+                else if (p.Name == "nodes" && p.Value.ValueKind == JsonValueKind.Array)
+                {
+                    w.WriteStartArray();
+                    foreach (var node in p.Value.EnumerateArray()) WriteWithout(w, node, "extras");
+                    w.WriteEndArray();
+                }
+                else p.Value.WriteTo(w);
+            }
+            w.WriteEndObject();
+        }
+        ms.Position = 0;
+        return SHA256.HashData(ms);
     }
 
     // GLB の JSON の塊 (詰め物の空白を含む)
