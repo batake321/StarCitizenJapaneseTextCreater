@@ -303,7 +303,7 @@ public partial class MapPanel : UserControl
         if (!ok) return;
         // 現在位置のオーバーレイ (設定がオンのときだけ。ゲームの画面の上に、その場所で採掘できる物を出す。3D を出す流れは待たせない)
         _ = ShowOreOverlayAsync();
-        await GoHere3DAsync();
+        await GoHere3DAsync(captured: true);
     }
 
     // ===== 現在位置のキー (2026-11-05、利用者の指示「現在位置ボタンはゲームがアクティブでも L-CTRL + L-Shift + Ins がゲームとかぶらなければ
@@ -340,7 +340,7 @@ public partial class MapPanel : UserControl
             var (ok, _) = await CaptureCurrentAsync(HotkeyFrom, keepGameFront: true);
             if (!ok) return;
             _ = ShowOreOverlayAsync();
-            await GoHere3DAsync(activate: false);
+            await GoHere3DAsync(activate: false, captured: true);
         }
         catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] キーで現在位置を取れませんでした: {ex.Message}"); }
         finally { _hotkeyBusy = false; }
@@ -426,22 +426,48 @@ public partial class MapPanel : UserControl
     // その 3D で、3D の［現在位置］と同じ出し方 (取り直さない) をする (StationView3DView.RequestHere)
     // activate: 3D の別ウィンドウに出すとき、その窓を前に出すか (既定は出す)。現在位置のキーから来たとき (CaptureCurrentFromHotkeyAsync) は偽
     // (ゲームからフォーカスを取らない。3D の中身の更新・［マップ］タブへの切り替えは同じ)
-    private async Task GoHere3DAsync(bool activate = true)
+    // captured: 今取れたばかりの座標 (App.Config.MapCurrent) で決める (ボタン・キー・自動の取得の直後)。偽なら、今までどおり使う現在位置 (ComputeEffective) が
+    //   取った座標 (Taken) のときだけ (星系図の現在位置の印を押したとき)。
+    //   (2026-11-06、利用者の報告「キー入力でも切り替わらない」: 量子ジャンプの途中は、使う現在位置が推定 (Moving など) になり、取れた直後でも何もせずに終わっていた)
+    // auto: 自動の取得の直後 (2026-11-06、利用者の報告「自動での現在位置取得でstation 3D から成型にマップが切り替わらない」)。3D を新しく出すこと・［マップ］タブを選ぶことはせず、
+    //   ［マップ］タブに出ている 3D が今の位置に合わないとき (建物の中でなく、外から見る形で出すステーションの 3D でもない) に星系図に戻すだけ
+    private async Task GoHere3DAsync(bool activate = true, bool captured = false, bool auto = false)
     {
         try
         {
             var tree = _tree ?? await GetTreeAsync();
             if (tree == null || tree.IsEmpty) return;
-            if (ComputeEffective(tree) is not { Kind: CurrentLocation.PositionKind.Taken, NoPos: false } eff) return;
-            var effSystem = eff.System is { Length: > 0 } es ? tree.Systems.FirstOrDefault(s => s.System.Equals(es, StringComparison.OrdinalIgnoreCase)) : null;
-            if (CurrentLocation.Locate(tree, eff.Pos, eff.Unix, SystemNames, null, fresh: false, effSystem) is not { } loc) return;
-            var where = CurrentLocation.WhereaboutsOf(eff.Pos, loc, LogPlaceNode(tree, LandingPlaceProvider?.Invoke()));
+            (double X, double Y, double Z) pos; double unix; string? sysName;
+            if (captured)
+            {
+                var cur = App.Config.MapCurrent;
+                if (cur.Utc <= 0) return;
+                pos = (cur.X, cur.Y, cur.Z); unix = cur.Utc; sysName = cur.System;
+            }
+            else
+            {
+                if (ComputeEffective(tree) is not { Kind: CurrentLocation.PositionKind.Taken, NoPos: false } eff) return;
+                pos = eff.Pos; unix = eff.Unix; sysName = eff.System;
+            }
+            var effSystem = sysName is { Length: > 0 } es ? tree.Systems.FirstOrDefault(s => s.System.Equals(es, StringComparison.OrdinalIgnoreCase)) : null;
+            if (CurrentLocation.Locate(tree, pos, unix, SystemNames, null, fresh: false, effSystem) is not { } loc) return;
+            var where = CurrentLocation.WhereaboutsOf(pos, loc, LogPlaceNode(tree, LandingPlaceProvider?.Invoke()));
             if (!where.Inside || where.Place is not { } wp || MapPlaceByRecordName(wp.RecordName) is not { } mp)
             {
+                var near = ExteriorStationOf(loc);
+                // 出た後かの覚え (_lastInside): 近くにステーションが無い・別のステーションの近くに来たら捨てる (次に近づいたときは、外から見る形で出す)
+                if (_lastInside is { } li && (near == null || !IsOrUnder(li, near))) _lastInside = null;
+                var showExterior = near != null && !LeftStation(tree, near) && !(_lastInside is { } li2 && IsOrUnder(li2, near));
+                if (auto)
+                {
+                    // 自動: 外から見る形で出すステーションの 3D がもう［マップ］タブに出ていれば、そのまま。ほかの 3D が出ていたら星系図に戻す
+                    if (pnlPlace.Visibility == Visibility.Visible && !(showExterior && _place3D?.Record == near!.RecordName)) BackToStarMap();
+                    return;
+                }
                 // (2026-11-06、利用者の指示・親の決定。下の「近くのステーションを外から見る形で出す」) 近くのステーション (50 km 以内でいちばん近いもの) があり、
                 // そのステーションから出た後でなければ、そのステーションの 3D を外から全体が見える形で出す (中の行き先へは飛ばない)。
                 // 出す先は建物の中のときと同じ (別ウィンドウが開いていればそこ、無ければ［マップ］タブ)。同じステーションを出していれば開き直さず、外からの見え方に切り替える
-                if (ExteriorStationOf(loc) is { } st && !LeftStation(tree, st))
+                if (showExterior && near is { } st)
                 {
                     if (StationView3DShops.ShowInOpenWindow(st.RecordName, st.Name, tree, null, activate: activate, exterior: true)) return;
                     for (DependencyObject? d = this; d != null; d = LogicalTreeHelper.GetParent(d))
@@ -454,12 +480,25 @@ public partial class MapPanel : UserControl
                 if (pnlPlace.Visibility == Visibility.Visible) BackToStarMap();
                 return;
             }
+            // 建物の中: 出た後かの覚えに、今いる場所を入れる (この後、外で取ったときに「そのステーションから出た後」とする。下の _lastInside)
+            _lastInside = wp;
+            if (auto) return;   // 自動の取得では、3D を新しく出さない (今までどおり)
             if (StationView3DShops.ShowInOpenWindow(mp.Record, mp.Name, tree, null, here: true, activate: activate)) return;
             for (DependencyObject? d = this; d != null; d = LogicalTreeHelper.GetParent(d))
                 if (d is TabItem tab) { tab.IsSelected = true; break; }
             ShowPlace3D(mp.Record, mp.Name, tree, null, here: true);
         }
         catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] 現在位置の場所の 3D を出せませんでした: {ex.Message}"); }
+    }
+
+    // いちばん最近、建物の中で取ったときの場所 (アプリを動かしている間だけ)。その後に外で取った位置が、その場所のステーション (その場所そのものか、星図の親) の
+    // 近くなら、「そのステーションから出た後」として、外から見る形の 3D を出さない (2026-11-06、利用者の報告「キー入力でも切り替わらない」:
+    // Game.log の着陸場所の区域を出るまでは LeftStation が偽のままで、ステーションを出て 2 km の所で取ると、外から見る形の 3D が出ていた)
+    private ShopTreeNode? _lastInside;
+    private static bool IsOrUnder(ShopTreeNode n, ShopTreeNode station)
+    {
+        for (ShopTreeNode? a = n; a != null; a = a.Parent) if (ReferenceEquals(a, station)) return true;
+        return false;
     }
 
     // ===== 近くのステーションを外から見る形で出す (2026-11-06、利用者の指示「あとあると便利なのは、現在位置を取ったときにステーションから 50Km 以内かつ
@@ -895,6 +934,8 @@ public partial class MapPanel : UserControl
                 SaveConfig?.Invoke();
                 txtStatus.Text = $"自動で現在位置を取得しました ({LocalTime(now)})" + ocrNote + clipboardNote;
                 if (_pageView != null && _pageView == CurrentView() && _webReady && _tree != null) PostUpdate(_tree, ComputeEffective(_tree), Now());
+                // ［マップ］タブに出ている 3D が今の位置に合わなければ星系図に戻す (GoHere3DAsync の auto)
+                await GoHere3DAsync(activate: false, captured: true, auto: true);
                 return true;
             }
             App.Config.MapView = system;
