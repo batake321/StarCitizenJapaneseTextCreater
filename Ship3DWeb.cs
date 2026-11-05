@@ -65,6 +65,20 @@ internal static class Ship3DWeb
                     if (type == "paintInit") await PaintInitAsync(web, view);
                     else await PaintTableAsync(web, view, doc.RootElement.TryGetProperty("id", out var pid) ? pid.GetString() ?? "" : "");
                 }
+                else if (type == "ladderInit")
+                {
+                    // 船内を歩くモードのはしご (ビューアの walk.js。2026-11-05): その船の船内のはしごの行 (gamedata_cache.db の ship_ladders。ShipLadders) を返す。
+                    // 表が無い・行が無いときは空 (ビューアは形の名前と乗り降りの点からだけはしごを作る)
+                    if (!Views.TryGetValue(web, out var view) || !doc.RootElement.TryGetProperty("ship", out var sh) || sh.GetString() != view.Short) return;
+                    var dbPath = Path.Combine(App.Config.WorkingDirectory, "gamedata_cache.db");
+                    var rows = await Task.Run(() => ShipLadders.ReadFor(dbPath, view.Short));
+                    Post(web, view, new
+                    {
+                        type = "ladders", ship = view.Short,
+                        items = rows.Select(r => new { container = r.Container, entity = r.Entity, b = new[] { r.Bx, r.By, r.Bz }, t = new[] { r.Tx, r.Ty, r.Tz }, f = new[] { r.Fx, r.Fy, r.Fz },
+                            height = r.Height, approachBottom = r.ApproachBottom, approachTop = r.ApproachTop }).ToArray(),
+                    });
+                }
                 else if (type == "roomNames" && doc.RootElement.TryGetProperty("names", out var arr) && arr.ValueKind == JsonValueKind.Array)
                 {
                     // 語の表で日本語にできなかった部屋の名前を AI で訳して返す (Ship3DRoomNames)。50 個・80 字までに限る

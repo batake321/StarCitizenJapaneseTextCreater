@@ -1039,6 +1039,9 @@ public partial class DetailPanel : UserControl
                 Ship3DCacheState.Fresh => "3D モデル: キャッシュあり",
                 Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying => "3D モデル: 照合中 (パッチで Data.p4k が変わったので元データを確かめています)",
                 Ship3DCacheState.NoGame => "3D モデル: ゲームの Data.p4k が見つかりません",
+                // 前の版で取り込んだ船: ［3D 表示］は取り込み済みのモデルをそのまま出す (Ship3DExports.OldShipCachePath)
+                _ when ex.OldShipCachePath(_ship3DRecord) != null => Ship3DExports.NoSave ? "3D モデル: キャッシュあり (前の版で取り込んだもの)"
+                    : "3D モデル: キャッシュあり (前の版で取り込んだもの。［読み込み］で取り込み直せます)",
                 _ => Ship3DExports.NoSave ? "3D モデル: 保存しない設定 (［3D 表示］でゲームデータから直接読みます)"
                     : ex.CpuHigh ? $"3D モデル: キャッシュなし。CPU 使用率 {ex.CpuPercent:F0}% のため、下がってから読み込みます"
                                 : "3D モデル: キャッシュなし (［3D 表示］でゲームデータから直接読みます)",

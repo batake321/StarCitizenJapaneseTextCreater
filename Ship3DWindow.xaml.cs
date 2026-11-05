@@ -207,7 +207,9 @@ public partial class Ship3DWindow : Window
         var ex = Ship3DExports.Instance;
         var state = ex.StateOf(record);
         if (state == Ship3DCacheState.NoGame) { ShowOverlay("ゲームの Data.p4k が見つかりません。設定タブのゲームのフォルダとチャンネルを確かめてください。"); return; }
-        if (state == Ship3DCacheState.None && string.Equals(_directTried, record, StringComparison.OrdinalIgnoreCase))
+        // 前の版で取り込んだ船 (状態は「なし」) は、取り込み済みのモデルをそのまま出す (読み込み中の文は出さない。Ship3DExports.OldShipCachePath)
+        bool oldCache = state == Ship3DCacheState.None && ex.OldShipCachePath(record) != null;
+        if (state == Ship3DCacheState.None && !oldCache && string.Equals(_directTried, record, StringComparison.OrdinalIgnoreCase))
         {
             if (ex.IsExporting(record)) ShowOverlay("ゲームデータから読み込み中です。終わったらここに出します。");
             return;
@@ -216,7 +218,7 @@ public partial class Ship3DWindow : Window
         try
         {
             if (state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying) ShowOverlay("照合中 (パッチで Data.p4k が変わったので、この船の元データを確かめています)...");
-            else if (state == Ship3DCacheState.None)
+            else if (state == Ship3DCacheState.None && !oldCache)
             {
                 _directTried = record;
                 ShowOverlay("ゲームデータから読み込んでいます (進み具合は上の欄に出ます)...");
@@ -311,6 +313,9 @@ public partial class Ship3DWindow : Window
                 Ship3DCacheState.Fresh => "キャッシュあり",
                 Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying => "照合中 (パッチで Data.p4k が変わったので元データを確かめています)",
                 Ship3DCacheState.NoGame => "ゲームの Data.p4k が見つかりません",
+                // 前の版で取り込んだ船: 開いたときは取り込み済みのモデルをそのまま出す (Ship3DExports.OldShipCachePath)
+                _ when ex.OldShipCachePath(_record) != null => Ship3DExports.NoSave ? "キャッシュあり (前の版で取り込んだもの)"
+                    : "キャッシュあり (前の版で取り込んだもの。［読み込み］で取り込み直せます)",
                 _ => Ship3DExports.NoSave ? "保存しない設定 (開いたときにゲームデータから直接読みます)"
                     : ex.CpuHigh ? $"キャッシュなし。CPU 使用率 {ex.CpuPercent:F0}% のため、下がってから読み込みます"
                                 : "キャッシュなし (開いたときにゲームデータから直接読みます)",

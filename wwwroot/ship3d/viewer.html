@@ -19,7 +19,8 @@
            ← {type:'paintTable', ship, id, url} (材質の表の JSON の URL) か {type:'paintTable', ship, id, error}
          材質の表: {materials: glTF の材質の配列, prims: mesh ごとの primitive ごとの材質の番号}。形・画像は読み込んだ GLB のまま、材質だけを差し替える
      船内を歩くモード (2026-11-05): ［船内］のときに左上の 2 段目に［歩くモード］［走る］［姿勢］［すり抜け］を出す (船でない品・小さな絵では出さない)。
-       計算は walk.js (ステーションの 3D の歩くモード wwwroot/stationmap/view3d.js を写したもの)。歩くモードが OFF のときの船内の動きは今までどおり
+       計算は walk.js (ステーションの 3D の歩くモード wwwroot/stationmap/view3d.js を写したもの)。歩くモードが OFF のときの船内の動きは今までどおり。
+       船内のはしご (Ladder のエンティティ) はアプリの DB から受け取る: ビューア → アプリ {type:'ladderInit', ship}、アプリ → {type:'ladders', ship, items} (walk.js の頭の説明)
      GLB の座標 (実物で確かめたもの。t_ORIG_600i.glb / t_ORIG_X1.glb): いちばん上のノード CryEngine_Z_up が Z 上向きを Y 上向きに直していて、
        上 = +Y、前 = -Z (600i の hardpoint_seat_pilot が z = -45 で船の範囲 -66.7〜60.2 の前寄り。操縦席のノードの +Y 軸 (CryEngine の前) も -Z を向く)、
        左 = -X (hardpoint_seat_bridge_left が x = -1.41、_right が +1.41)。 -->
@@ -210,6 +211,7 @@ let model = null;
 // 船内を歩くモード (walk.js)。船でない品・小さな絵では作らない (ボタンも出さない)
 const walkMode = (isItem || isThumb) ? null : createWalk({
   camera, inside, applyCamera, model: () => model, parser: () => gltfParser, mode: () => mode, focus: () => canvas.focus(),
+  ship: shipName, eyeSeated: EYE_SEATED,
 });
 
 function applyCamera() {

@@ -16,9 +16,26 @@
 //   3. ドアと見分けた三角形は、足元の升 (f) にも入れない (移植元は足元には入れる)
 //   4. はしごの箱のうち、水平の範囲が重なり、上下に続いている (すき間 1.5 m 以内) ものを 1 つの箱にまとめる (mergeLadders)
 //   5. はしごの降り方: 上端で見ている向きの 0.6 m 先に床が無ければ、その先・まわりの床を探して立つ (ladderTop)。はしごの上でスペースを押すと、見ている向きの床へ降りる (途中の階)
+//   6. はしごの元 (buildLadders。2026-11-05、利用者の指示「はしごを船に足して ironclad で確認して」・「ironclad ははしごで乗り込む」):
+//      ・形: 名前の語に ladder のある部品の箱 (移植元の決まり。4 でまとめる)
+//      ・船内の Ladder のエンティティ: アプリが配る DB (gamedata_cache.db の ship_ladders。ShipLadders.cs) から渡す (ビューア → {type:'ladderInit', ship}、
+//        アプリ → {type:'ladders', ship, items:[{container, entity, b:[下端 x, y, z], t:[上端], f:[向き], height, …}]}。座標は船の座標 = 歩く計算の座標)。
+//        上下の範囲は下端 〜 上端 (エンティティの位置 〜 +height)。GLB には入っていない (船の書き出しが読み飛ばす種類) ので、取り込み直しは要らない
+//      ・乗り降りの点の対: GLB にあるゲームのデータのノードで、名前の語に ladder があり _enter_pos と _exit_pos で終わる対 (_zerog は使わない。
+//        例 Ironclad の side_ladder_left_enter_pos・side_ladder_left_exit_pos = 乗り込み用のはしご)。箱の高さは 2 点の低い方 〜 高い方、水平は 2 点を含む範囲。
+//        上端の降りる所は高い方の点の真下の床 (あればその床の高さを箱の上端にする)、下端は低い方の点の真下に面があればその面、無ければ点の高さ (= 見えない床)
+//      ・同じはしごを二重に作らない: エンティティ・対のはしごと、水平の範囲が重なり上下が続く形の箱は入れない
+//   7. 見えない床 (vfloorZ。利用者の指示「船の周りに仮想の透明な床を置くのがいいと思う」): 水平に限りなく広がる床を 1 枚、当たりの元の全部の三角形のいちばん低い所と
+//      はしごの下端のいちばん低い所の、低いほうの高さに置く。描かない。足元の面としてだけ効く (ほかの面が無い所の床になる。groundAt・lowAt)。頭上・横の当たりには入れない
+//   8. 入る所: 今のカメラが座席の目の位置 (hardpoint_seat… のノード + 座った目の高さ) にいれば、その座席の降りる点 (GLB の IP_SeatExit…・IP_SeatAccess… のノード) の
+//      真下の船内の床に立つ (利用者の指示「座っていたら操縦席の横の床から」)。無ければ座席の近くの船内の床。座席にいないときは、カメラの真下の面が船内の床か
+//      見えない床ならそこ、どちらでもなければ近くの船内の床、それも無ければカメラの真下の見えない床 (startPlace)
+//   9. はしごの上端のそば (箱から水平 0.6 m 以内・足が上端 −0.1 〜 +1.0 m) で S を押すと、はしごに乗って下り始める (移植元は上からは乗れない)。
+//      下端で離れるときは、その所の床 (下端 + 0.6 m 以下のいちばん高い面) に立つ (移植元は下端の 0.5 m 下まで下がって離れる。見えない床があると、そこから落ちるため)
 import * as THREE from 'three';
 
-// env: { camera, inside (船内の見る位置 { pos, yaw, pitch }), applyCamera(), model() (読み込んだ GLB の場面), parser() (GLTFLoader の parser), mode() ('outside'／'inside'), focus() }
+// env: { camera, inside (船内の見る位置 { pos, yaw, pitch }), applyCamera(), model() (読み込んだ GLB の場面), parser() (GLTFLoader の parser), mode() ('outside'／'inside'), focus(),
+//        ship (船の短い名前。アプリに船内のはしごを聞くのに使う。無ければ ''), eyeSeated (座った目の高さ m。viewer.html の EYE_SEATED) }
 export function createWalk(env) {
   const cam = env.camera, inside = env.inside;
   const $ = id => document.getElementById(id);
@@ -159,6 +176,57 @@ export function createWalk(env) {
     }
     return out;
   }
+  // 船だけの決まり 6・7: はしごの一覧 (cur.ladders) と見えない床の高さ (vfloorZ) を作る。当たりの元 (curBuf・coarse) ができた後と、アプリからはしごが届いた後に呼ぶ。
+  // 1 つのはしご: [名前, 名前 2, 低い角, 高い角, { kind: 'shape'／'db'／'pair', top: 上端で立つ所 [x, y, z] (対で、床があるとき), bottom: 下端で立つ所の [x, y] (対・DB) }]
+  let dbLadders = [], vfloorZ = null;
+  const r3 = v => +v.toFixed(3);
+  function buildLadders() {
+    if (!cur) return;
+    vfloorZ = null;   // 見えない床を入れずに作る (対の上端・下端は本物の面で決める)
+    const data = [];
+    // 船内の Ladder のエンティティ (DB)。下端で立つ所は、下端から向き (エンティティの +Y) へ 0.45 m (はしごの手前)
+    for (const d of dbLadders) {
+      if (!Array.isArray(d?.b) || !Array.isArray(d?.t) || d.b.length < 3 || d.t.length < 3 || ![...d.b, ...d.t].every(Number.isFinite)) continue;
+      const lo = [0, 1, 2].map(k => r3(Math.min(d.b[k], d.t[k]))), hi = [0, 1, 2].map(k => r3(Math.max(d.b[k], d.t[k])));
+      if (hi[2] - lo[2] < 0.3) continue;
+      const f = Array.isArray(d.f) && d.f.length >= 2 && Number.isFinite(d.f[0]) && Number.isFinite(d.f[1]) ? d.f : [0, 0];
+      data.push([String(d.entity ?? 'Ladder'), String(d.container ?? ''), lo, hi, { kind: 'db', bottom: [d.b[0] + f[0] * 0.45, d.b[1] + f[1] * 0.45] }]);
+    }
+    // 乗り降りの点の対 (GLB のノード)
+    const ends = new Map(), model = env.model(), v = new THREE.Vector3();
+    model.traverse(o => {
+      const n = (o.name || '').toLowerCase(); const m = /^(.*)_(enter|exit)_pos$/.exec(n);
+      if (!m || !nameWords(n).includes('ladder')) return;
+      const p = toWalk(o.getWorldPosition(v), new THREE.Vector3());
+      const e = ends.get(m[1]) || {}; if (!e[m[2]]) e[m[2]] = p; ends.set(m[1], e);
+    });
+    for (const [name, e] of ends) {
+      if (!e.enter || !e.exit) continue;
+      const bp = e.enter.z <= e.exit.z ? e.enter : e.exit, tp = bp === e.enter ? e.exit : e.enter;
+      // 上端: 高い方の点の真下 (LADDER_TOP_TOL m 以内) の床。あれば箱の上端をその床にし、そこに立つ。下端: 低い方の点の真下 (2 m 以内) に面があればその面
+      const tg = groundAt(tp.x, tp.y, tp.z + 0.05), topZ = tg !== null && tg >= tp.z - LADDER_TOP_TOL ? tg : null;
+      const bg = groundAt(bp.x, bp.y, bp.z + 0.05), botZ = bg !== null && bg >= bp.z - 2 ? bg : bp.z;
+      const lo = [r3(Math.min(bp.x, tp.x)), r3(Math.min(bp.y, tp.y)), r3(botZ)], hi = [r3(Math.max(bp.x, tp.x)), r3(Math.max(bp.y, tp.y)), r3(topZ ?? tp.z)];
+      if (hi[2] - lo[2] < 0.3) continue;
+      data.push([name, 'enter_pos/exit_pos', lo, hi, { kind: 'pair', top: topZ !== null ? [tp.x, tp.y, topZ] : null, bottom: [bp.x, bp.y] }]);
+    }
+    // 形の箱のうち、エンティティ・対のはしごと重なる (水平の範囲が重なり、上下が続く) ものは入れない
+    const dup = (a, b) => !(a[2][0] > b[3][0] || b[2][0] > a[3][0] || a[2][1] > b[3][1] || b[2][1] > a[3][1]) && Math.max(a[2][2], b[2][2]) - Math.min(a[3][2], b[3][2]) <= LADDER_GAP;
+    const shapes = cur.shapeLadders.filter(sh => !data.some(d => dup(sh, d)));
+    cur.ladders = data.concat(shapes);
+    // 見えない床の高さ
+    let z = cur.minZ; for (const l of cur.ladders) if (l[2][2] < z) z = l[2][2];
+    vfloorZ = Number.isFinite(z) ? z : null;
+    if (buildStat) { buildStat.ladders = cur.ladders.length; buildStat.vfloor = vfloorZ; }
+  }
+  // アプリから届いた船内のはしご (DB)。当たりの元ができていれば、はしごの一覧を作り直す
+  function setDbLadders(items) { dbLadders = Array.isArray(items) ? items : []; buildLadders(); }
+  if (env.ship) {
+    try {
+      window.chrome?.webview?.addEventListener('message', e => { const d = e.data; if (d && d.type === 'ladders' && d.ship === env.ship) setDbLadders(d.items); });
+      window.chrome?.webview?.postMessage({ type: 'ladderInit', ship: env.ship });
+    } catch { }
+  }
   // 当たりの元を作る。mesh ごとの三角形を歩く計算の座標にして並べ (curBuf)、ドアの印 (doorTri)・はしごの箱 (cur.ladders)・荒い区切り (coarse) を作る。
   // 大きい船で画面が固まらないよう、40 ミリ秒ごとに描画へ返す。作っている間に形が変わった (塗装の切り替え) ら、やめて false
   let buildStat = null;
@@ -168,7 +236,7 @@ export function createWalk(env) {
     const model = env.model(); model.updateMatrixWorld(true);
     const meshes = drawnMeshes(); let n = 0; for (const o of meshes) n += triCount(o);
     const F = new Float32Array(n * 9), D = new Uint8Array(n), lad = new Map();
-    let b = 0;
+    let b = 0, minZ = Infinity;
     for (const o of meshes) {
       const [nn, mn, key] = namesOf(o), wn = nameWords(nn), wm = nameWords(mn);
       const door = isDoorWords(wn) || isDoorWords(wm), ladder = wn.includes('ladder') || wm.includes('ladder');
@@ -182,7 +250,7 @@ export function createWalk(env) {
           const x = P ? P[vi * 3] : pos.getX(vi), y = P ? P[vi * 3 + 1] : pos.getY(vi), z = P ? P[vi * 3 + 2] : pos.getZ(vi);
           // 表示の座標 (mesh の置き方 matrixWorld を当てたもの) → 歩く計算の座標 (toWalk と同じ: x, −Z, Y)
           const X = e[0] * x + e[4] * y + e[8] * z + e[12], Y = e[1] * x + e[5] * y + e[9] * z + e[13], Z = e[2] * x + e[6] * y + e[10] * z + e[14];
-          F[b] = X; F[b + 1] = -Z; F[b + 2] = Y;
+          F[b] = X; F[b + 1] = -Z; F[b + 2] = Y; if (Y < minZ) minZ = Y;
           if (box) for (let a = 0; a < 3; a++) { const v = F[b + a]; if (v < box[2][a]) box[2][a] = v; if (v > box[3][a]) box[3][a] = v; }
           b += 3;
         }
@@ -191,7 +259,7 @@ export function createWalk(env) {
       if (!(await pause())) return false;
     }
     // はしごの箱 (移植元 view3d-worker.js 429-430: 名前の語に ladder のある部品ごとの箱。数字は小数 3 桁)
-    const ladders = mergeLadders([...lad.values()].filter(l => l[2][0] <= l[3][0])).map(l => [l[0], l[1], l[2].map(v => +v.toFixed(3)), l[3].map(v => +v.toFixed(3))]);
+    const shapeLadders = mergeLadders([...lad.values()].filter(l => l[2][0] <= l[3][0])).map(l => [l[0], l[1], l[2].map(v => +v.toFixed(3)), l[3].map(v => +v.toFixed(3)), { kind: 'shape' }]);
     // 当たりの荒い区切り (移植元 view3d-worker.js 445-473 の coarse の all・bigAll。fl は船では作らない)
     const BOX = 16, BIG_BOXES = 64;
     const csweep = async (add, big) => {
@@ -209,9 +277,10 @@ export function createWalk(env) {
     if (!(await csweep((key, b) => { out.items[T.pos[tableSlot(T, key)]++] = b; }, () => { }))) return false;
     if (seq !== geoSeq) return false;
     cellReset();
-    curBuf = F.buffer; doorTri = D; cur = { ladders, meshes, tris: n };
+    curBuf = F.buffer; doorTri = D; cur = { ladders: [], shapeLadders, meshes, tris: n, minZ };
     coarse = { all: out.grid, bigAll: Uint32Array.from(bigs) };
-    buildStat = { ms: Math.round(performance.now() - t0), tris: n, meshes: meshes.length, doorTris: D.reduce((s, v) => s + v, 0), ladders: ladders.length, bytes: F.byteLength + D.byteLength + out.grid.items.byteLength + out.grid.keys.byteLength + out.grid.starts.byteLength + bigs.length * 4, boxes: out.grid.keys.length, big: bigs.length };
+    buildStat = null; buildLadders();
+    buildStat = { ms: Math.round(performance.now() - t0), tris: n, meshes: meshes.length, doorTris: D.reduce((s, v) => s + v, 0), ladders: cur.ladders.length, vfloor: vfloorZ, bytes: F.byteLength + D.byteLength + out.grid.items.byteLength + out.grid.keys.byteLength + out.grid.starts.byteLength + bigs.length * 4, boxes: out.grid.keys.length, big: bigs.length };
     return true;
   }
   // 当たりの元が無ければ作る (作っている間は状態の文で知らせる)。できたら true
@@ -235,7 +304,7 @@ export function createWalk(env) {
     if (!cur && !building) return;
     const now = drawnMeshes();
     if (cur && !building && now.length === cur.meshes.length && now.every((o, i) => o === cur.meshes[i])) return;
-    ++geoSeq; cellReset(); coarse = null; cur = null; curBuf = null; doorTri = null;
+    ++geoSeq; cellReset(); coarse = null; cur = null; curBuf = null; doorTri = null; vfloorZ = null;
     if (walk) ensureCur().then(ok => { if (ok && walk) updWalkUi(); });
   }
 
@@ -325,7 +394,9 @@ export function createWalk(env) {
     return false;
   }
   function fits(x, y, z) { if (noclip) return true; const c = ceilAt(x, y, z + 0.05); return c === null || c - z >= STANCE[stance].h; }
-  function groundAt(x, y, zmax) {
+  // 船だけの決まり 7: (x, y) の真下に本物の面 (groundReal) が無ければ、見えない床 (zmax 以下のとき) を床にする
+  function groundAt(x, y, zmax) { const g = groundReal(x, y, zmax); return g === null && vfloorZ !== null && vfloorZ <= zmax ? vfloorZ : g; }
+  function groundReal(x, y, zmax) {
     // (x, y) の真下で、zmax より低い歩く面のいちばん高い所
     const all = new Float32Array(curBuf); const l = cellGet('f', Math.floor(x), Math.floor(y)); let best = null;
     if (l) for (const b of l) {
@@ -348,7 +419,7 @@ export function createWalk(env) {
       if (s_ < 0 || t_ < 0 || s_ + t_ > 1) continue;
       const z = az_ + s_ * (bz - az_) + t_ * (cz - az_); if (best === null || z < best) best = z;
     }
-    return best;
+    return best === null ? vfloorZ : best;   // 船だけの決まり 7: 本物の面が無い所は見えない床
   }
   function lowestNear(x, y) {
     let best = lowAt(x, y);
@@ -371,7 +442,7 @@ export function createWalk(env) {
   // 歩くモード中の操作の説明 (移植元 view3d.html 110-121 の表のうち、船にある操作)
   const WALK_HELP = 'W・S: 前後に歩く　A・D: 左右に歩く　Q・E・ドラッグ: 向きを変える　Shift: 走る ON・OFF　スペース: ジャンプ (前に段があれば、よじ登る)<br>'
     + 'C: しゃがむ　Ctrl: 寝そべる　N: すり抜け ON・OFF　Insert/Delete: 拡大/縮小<br>'
-    + 'はしごのそばで W: 上る / S: 下りる / スペース: 見ている向きの床へ降りる';
+    + 'はしごのそばで W: 上る / S: 下りる / スペース: 見ている向きの床へ降りる　船の外は見えない床の上を歩けます';
   function updWalkUi() {
     const sn = { stand: '立つ', crouch: 'しゃがむ', prone: '寝そべる' }[stance];
     $('runBtn').textContent = '走る: ' + (run ? 'ON' : 'OFF'); $('runBtn').classList.toggle('on', run);
@@ -405,7 +476,9 @@ export function createWalk(env) {
   // 船だけの決まり 5 (上端): はしごの上端 (wpos.z) に着いたとき、見ている向きへ 0.6 m 出た所に床 (上端の高さから上下 LADDER_TOP_TOL m 以内で、体が入る所) が無ければ、
   // 同じ向きへ 1.0 m・1.5 m、それでも無ければまわり 8 方向の 0.6・1.0・1.5 m を近い順に探し、最初に見つかった床に立つ。立てたら true。どこにも無ければ false (移植元の扱いのまま)
   const LADDER_OUT = [0.6, 1.0, 1.5], LADDER_TOP_TOL = 1.0;
-  function ladderTop() {
+  function ladderTop(l) {
+    // 乗り降りの点の対のはしご: 上の点の真下の床に立つ (体が入れば)
+    const tp = l?.[4]?.top; if (tp && fits(tp[0], tp[1], tp[2])) { wpos.set(tp[0], tp[1], tp[2]); return true; }
     const at = (a, r) => { const x = wpos.x + Math.cos(a) * r, y = wpos.y + Math.sin(a) * r, g = floorWithin(x, y, wpos.z, LADDER_TOP_TOL); if (g === null) return false; wpos.set(x, y, g); return true; };
     for (const r of LADDER_OUT) if (at(wyaw, r)) return true;
     for (const r of LADDER_OUT) for (let k = 1; k < 8; k++) if (at(wyaw + k * Math.PI / 4, r)) return true;
@@ -419,10 +492,24 @@ export function createWalk(env) {
     if (keys.has('w')) mv.add(f); if (keys.has('s')) mv.sub(f); if (keys.has('d')) mv.add(r); if (keys.has('a')) mv.sub(r);
     // はしご: はしごの部品の箱から xy で 0.6 m 以内で W を押すと登る (S で下りる)。上の端に着いたら前へ 0.6 m 出て、そこの床に立つ
     if (!onLadder && keys.has('w')) onLadder = (cur.ladders || []).find(l => Math.max(l[2][0] - wpos.x, wpos.x - l[3][0], 0) ** 2 + Math.max(l[2][1] - wpos.y, wpos.y - l[3][1], 0) ** 2 <= 0.36 && wpos.z >= l[2][2] - 0.5 && wpos.z < l[3][2] - 0.1) || null;
+    // 船だけの決まり 9: はしごの上端のそば (箱から xy で 0.6 m 以内・足が上端 −0.1 〜 +1.0 m) で S を押すと、はしごに乗って下り始める (足は上端のすぐ下から。
+    // DB・対のはしごは、下端で立つ所の xy へ寄せる)
+    if (!onLadder && !air && keys.has('s') && !keys.has('w')) {
+      const l = (cur.ladders || []).find(l => Math.max(l[2][0] - wpos.x, wpos.x - l[3][0], 0) ** 2 + Math.max(l[2][1] - wpos.y, wpos.y - l[3][1], 0) ** 2 <= 0.36 && wpos.z >= l[3][2] - 0.1 && wpos.z <= l[3][2] + 1.0);
+      if (l) { onLadder = l; const bt = l[4]?.bottom; if (bt) { wpos.x = bt[0]; wpos.y = bt[1]; } wpos.z = l[3][2] - 0.01; vz = 0; }
+    }
     if (onLadder) {
       if (keys.has('w')) wpos.z += LADDER_V * dt; if (keys.has('s')) wpos.z -= LADDER_V * dt;
-      if (wpos.z >= onLadder[3][2]) { wpos.z = onLadder[3][2]; if (!ladderTop()) { wpos.x += Math.cos(wyaw) * 0.6; wpos.y += Math.sin(wyaw) * 0.6; const g = groundAt(wpos.x, wpos.y, wpos.z + STEP); if (g !== null) wpos.z = g; } onLadder = null; }
-      else if (wpos.z <= onLadder[2][2] - 0.5 || !keys.size) { if (!keys.has('w') && !keys.has('s')) {} else if (wpos.z <= onLadder[2][2]) onLadder = null; }
+      if (wpos.z >= onLadder[3][2]) { wpos.z = onLadder[3][2]; if (!ladderTop(onLadder)) { wpos.x += Math.cos(wyaw) * 0.6; wpos.y += Math.sin(wyaw) * 0.6; const g = groundAt(wpos.x, wpos.y, wpos.z + STEP); if (g !== null) wpos.z = g; } onLadder = null; }
+      else if (wpos.z <= onLadder[2][2] - 0.5 || !keys.size) {
+        if (!keys.has('w') && !keys.has('s')) {}
+        else if (wpos.z <= onLadder[2][2]) {
+          // 船だけの決まり 9: 下端で離れるときは、下端で立つ所 (対・DB のはしご。無ければ今の xy) の、下端 + STEP 以下のいちばん高い面に立つ
+          const l = onLadder, bt = l[4]?.bottom; onLadder = null;
+          if (bt) { wpos.x = bt[0]; wpos.y = bt[1]; }
+          const g = groundAt(wpos.x, wpos.y, l[2][2] + STEP); if (g !== null) wpos.z = g;
+        }
+      }
       walkCam(); return;
     }
     const spd = (run ? RUN : WALK) * STANCE[stance].sp * dt;
@@ -462,17 +549,81 @@ export function createWalk(env) {
     const dv = toWalk(cam.getWorldDirection(new THREE.Vector3()), new THREE.Vector3()); wyaw = Math.atan2(dv.y, dv.x); wpitch = Math.asin(Math.max(-1, Math.min(1, dv.z)));
   }
   // 船だけの決まり 1: 入った所 (カメラの真下の面) で「立つ」の体が入らない (fits が成り立たない)・真下に面が無い・頭上に面が無いときは、
-  // 今の位置から水平に近い順 (0.5 m 刻みで 6 m まで、まわり 16 方向) に、床 (カメラの高さより下の面) があって「立つ」の体が入り、頭上に面がある所を探し、最初に見つかった所に立つ。
-  // 見つからなければそのまま (移植元の扱い)。向きはカメラのまま
-  function standNear() {
-    const st0 = toWalk(cam.position, new THREE.Vector3());
-    // 立てる床: 面があり、「立つ」の体が入り、頭上に面がある (船の中の床だけを選ぶ)
-    const ok = (x, y, g) => g !== null && fits(x, y, g) && ceilAt(x, y, g + 0.05) !== null;
-    if (ok(st0.x, st0.y, groundAt(st0.x, st0.y, st0.z))) return;
-    for (let r = 0.5; r <= 6; r += 0.5) for (let k = 0; k < 16; k++) {
-      const a = k * Math.PI / 8, x = st0.x + r * Math.cos(a), y = st0.y + r * Math.sin(a), g = groundAt(x, y, st0.z);
-      if (ok(x, y, g)) { wpos.set(x, y, g); return; }
+  // 今の位置から水平に近い順 (0.5 m 刻みで 6 m まで、まわり 16 方向) に、床 (カメラの高さより下の面) があって「立つ」の体が入り、頭上に面がある所を探し、最初に見つかった所に立つ
+  // (nearFloor)。向きはカメラのまま。見えない床・座席から入るときの決まり (7・8) と合わせて startPlace が決める
+  // 船内の立てる床: 本物の面があり、「立つ」の体が入り、頭上に面がある
+  const okFloor = (x, y, g) => g !== null && fits(x, y, g) && ceilAt(x, y, g + 0.05) !== null;
+  // (cx, cy) から水平に近い順 (0.5 m 刻みで 6 m まで、まわり 16 方向) に、高さ cz より下の船内の立てる床を探す。[x, y, 床] か null。
+  // pts (座席の降りる点の並び。座席から入るとき) があれば、同じ距離に立てる床がいくつもあるとき、降りる点のどれかにいちばん近い所を選ぶ
+  // (例: Titan の操縦席は降りる点の真下に立てず、1 m の所に 3 つある床のうち、乗る点 IP_SeatAccess_Interior に近い真後ろの通路の床になる)。無ければ最初に見つかった所
+  function nearFloor(cx, cy, cz, pts) {
+    for (let r = 0.5; r <= 6; r += 0.5) {
+      let best = null, bd = Infinity;
+      for (let k = 0; k < 16; k++) {
+        const a = k * Math.PI / 8, x = cx + r * Math.cos(a), y = cy + r * Math.sin(a), g = groundReal(x, y, cz);
+        if (!okFloor(x, y, g)) continue;
+        if (!pts || pts.length === 0) return [x, y, g];
+        const d = Math.min(...pts.map(q => Math.hypot(q.p.x - x, q.p.y - y)));
+        if (d < bd) { bd = d; best = [x, y, g]; }
+      }
+      if (best) return best;
     }
+    return null;
+  }
+  // 点 p の真下 (3 m 以内) の面を上から順に見て、最初の船内の立てる床の高さ。無ければ null
+  function floorUnder(p) {
+    for (let top = p.z + 0.05, i = 0; i < 16; i++) {
+      const g = groundReal(p.x, p.y, top); if (g === null || g < p.z - 3) return null;
+      if (okFloor(p.x, p.y, g)) return g;
+      top = g - 0.01;
+    }
+    return null;
+  }
+  // 船だけの決まり 8: 今のカメラ (歩く計算の座標 st0) が座席の目の位置 (hardpoint_seat… のノード + 座った目の高さ。0.5 m 以内) にいれば、その座席。
+  // 返すもの: { name, pos (座席のノードの位置), points: 降りる点の並び [{ name, p }] }。降りる点は、名前が ip_seatexit…・ip_seataccess… で始まるノード
+  // (eva・zerog・exterior・ladder を含むものは除く) のうち、いちばん近い親の hardpoint_… のノードが座席から 1 m 以内のもの。exit を含む名前が先、同じなら座席に近い順
+  const SEAT_NEAR = 0.5, SEAT_ACCESS_R = 1.0;
+  function seatAt(st0) {
+    const model = env.model(), v = new THREE.Vector3(); let seat = null, best = SEAT_NEAR;
+    const wp = o => toWalk(o.getWorldPosition(v), new THREE.Vector3());
+    model.traverse(o => {
+      const n = (o.name || '').toLowerCase();
+      if (!n.startsWith('hardpoint_seat') || n.includes('access')) return;
+      const p = wp(o), d = Math.hypot(p.x - st0.x, p.y - st0.y, p.z + (env.eyeSeated ?? 1.2) - st0.z);
+      if (d <= best) { best = d; seat = { name: o.name, pos: p, points: [] }; }
+    });
+    if (!seat) return null;
+    model.traverse(o => {
+      const n = (o.name || '').toLowerCase();
+      if (!/^ip_seat(exit|access)/.test(n) || /eva|zerog|exterior|ladder/.test(n)) return;
+      let h = o.parent; while (h && h !== model && !(h.name || '').toLowerCase().startsWith('hardpoint_')) h = h.parent;
+      if (!h || h === model) return;
+      const hp = wp(h); if (Math.hypot(hp.x - seat.pos.x, hp.y - seat.pos.y, hp.z - seat.pos.z) > SEAT_ACCESS_R) return;
+      const p = wp(o); seat.points.push({ name: o.name, p, exit: n.includes('exit'), d: Math.hypot(p.x - seat.pos.x, p.y - seat.pos.y) });
+    });
+    seat.points.sort((a, b) => (a.exit === b.exit ? a.d - b.d : a.exit ? -1 : 1));
+    return seat;
+  }
+  // 入る所を決める (船だけの決まり 1・7・8)。standUnderCamera でカメラの真下の面に置いた後に呼ぶ。決めた決まりを startHow に残す (確かめ用)
+  let startHow = null;
+  function startPlace() {
+    const st0 = toWalk(cam.position, new THREE.Vector3());
+    // 座席にいるとき: その座席の降りる点の真下の船内の床 → 無ければ座席の近くの船内の床
+    const seat = seatAt(st0);
+    if (seat) {
+      for (const q of seat.points) { const g = floorUnder(q.p); if (g !== null) { wpos.set(q.p.x, q.p.y, g); startHow = { how: 'seat-point', seat: seat.name, node: q.name }; return; } }
+      const n = nearFloor(seat.pos.x, seat.pos.y, st0.z, seat.points);
+      if (n) { wpos.set(n[0], n[1], n[2]); startHow = { how: 'seat-near', seat: seat.name, points: seat.points.map(q => q.name) }; return; }
+    }
+    // カメラの真下の面が、船内の床か、見えない床なら、そこ
+    const g0 = groundAt(st0.x, st0.y, st0.z);
+    if (okFloor(st0.x, st0.y, groundReal(st0.x, st0.y, st0.z))) { startHow = { how: 'under-camera' }; return; }
+    if (g0 !== null && g0 === vfloorZ && groundReal(st0.x, st0.y, st0.z) === null) { startHow = { how: 'vfloor' }; return; }
+    // どちらでもない (外板の上など): 近くの船内の床 → 無ければカメラの真下の見えない床 → それも無ければそのまま (移植元の扱い)
+    const n = nearFloor(st0.x, st0.y, st0.z);
+    if (n) { wpos.set(n[0], n[1], n[2]); startHow = { how: 'near' }; return; }
+    if (vfloorZ !== null) { wpos.set(st0.x, st0.y, vfloorZ); startHow = { how: 'vfloor-under' }; return; }
+    startHow = { how: 'as-is' };
   }
   async function setWalk(on) {
     if (on === walk) return;
@@ -481,7 +632,7 @@ export function createWalk(env) {
     if (walk) {
       if (!(await ensureCur())) return;   // 作っている間に OFF にされた
       air = false; vz = 0; onLadder = null; stance = 'stand';
-      standUnderCamera(); standNear(); walkCam(); updWalkUi(); $('walkInfo').textContent = run ? '走る' : '歩く';
+      standUnderCamera(); startPlace(); walkCam(); updWalkUi(); $('walkInfo').textContent = run ? '走る' : '歩く';
     } else {
       // 歩くモードを OFF にしても、カメラの位置と向きは変えない (walkCam が船内の見る位置 inside に入れてある)
       busy = false; $('walkInfo').textContent = '';
@@ -497,6 +648,7 @@ export function createWalk(env) {
     low: (x, y) => lowestNear(x, y), setPitch: v => { wpitch = v; walkCam(); }, place: (x, y, z, yaw) => { wpos.set(x, y, z); wyaw = yaw; air = false; vz = 0; onLadder = null; walkCam(); },
     ground: (x, y, z) => groundAt(x, y, z), ceil: (x, y, z) => ceilAt(x, y, z), tall: (x, y, z) => tallObjectAt(x, y, z), gap: (x, y, z) => groundGap(x, y, z), gaps: () => gapLog, seg: (...a) => segHit(...a), blocked: (...a) => blocked(...a), fits: (...a) => fits(...a),
     on: () => walk, busy: () => busy, pos: () => [wpos.x, wpos.y, wpos.z, wyaw, run, stance, air, noclip, onLadder ? onLadder[0] : null], cam, keys, step: dt => walkStep(dt),
+    setDbLadders, vfloor: () => vfloorZ, groundReal: (x, y, z) => groundReal(x, y, z), startHow: () => startHow, seatAt: (x, y, z) => { const s = seatAt(new THREE.Vector3(x, y, z)); return s ? { name: s.name, pos: s.pos.toArray(), points: s.points.map(q => [q.name, q.p.toArray(), q.exit]) } : null; },
     cur: () => cur, stat: () => buildStat, cellCount: () => Object.fromEntries(Object.entries(cells).map(([k, m]) => [k, m.size])), setWalk, geoChanged,
   };
 

@@ -244,8 +244,9 @@ public sealed class Ship3DExports : INotifyPropertyChanged
     internal const int ItemExportVersion = 1;
 
     // 船・車両の取り出しの処理の版。船の面の出し方を変えたら進める。取り込み済みの船の記録の版がこれより古い (欄が無い) ときは、Data.p4k の印が今と同じでも
-    // その船のキャッシュを「なし」として扱う (CacheStateOf): 次にその船を開いたとき (［3D 表示］・別ウィンドウ・［読み込み］) に取り込み直して置き換え、
-    // ［船舶・車両をまとめて取り込む］も押せるようになる (押せば版の古い船をまとめて取り込み直す)。裏で自動に取り込み直すことはしない
+    // その船のキャッシュを「なし」として扱う (CacheStateOf): ［読み込み］と［船舶・車両をまとめて取り込む］が押せるようになる (押せば新しい決まりで取り込み直して置き換える)。
+    // ただし、開いたとき (［3D 表示］・別ウィンドウ・小さな絵) は取り込み済みのモデルをそのまま出し、取り込み直しは始めない
+    // (OldShipCachePath。2026-11-05、利用者の指示: 利用者の PC で船を勝手に取り込み直さない)。裏で自動に取り込み直すこともしない
     // (自動の取り直し ScanAsync は Data.p4k の印が違う船だけを照合し、元データが変わっていた船だけを取り直す。版が古いだけの船は並ばない)。
     // 材質の決め方の版 (ShipGlb.GeneratorVersion) とは別 (そちらを上げると、取り込み直さなくても標準の材質の表が当たる)。
     //   1 (2026-11-05、利用者の決定「広げる」): 面を隠す決まりのデカールの見分けを語で見る (「%DECALS」の材質の面 = 船内の吊るした服・小物が出る。SocpakGlb.SubMat.IsDecal)
@@ -314,7 +315,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         if (!File.Exists(GlbPath(shortName))) return Ship3DCacheState.None;
         var s = ReadOurSidecar(shortName);
         if (s == null) return Ship3DCacheState.None;
-        // 取り出しの処理の版が古い品・船は、無いものとして扱う (次に開いたときに作り直して置き換える。保存しない設定では今までどおり直接読む。CacheStateOf)
+        // 取り出しの処理の版が古い品・船は、無いものとして扱う (CacheStateOf)。品は次に開いたときに作り直して置き換える (保存しない設定では今までどおり直接読む)。
+        // 船は、開いたときは取り込み済みのモデルをそのまま出す (GetViewPathAsync の OldShipCachePath)。［読み込み］・まとめて取り込むで取り込み直せる
         return CacheStateOf(s, stamp);
     }
 
@@ -343,9 +345,27 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         var state = StateOf(record);
         if (state == Ship3DCacheState.Fresh) return GlbPath(ShortName(record));
         if (state is Ship3DCacheState.NeedsVerify or Ship3DCacheState.Verifying)
-            // 照合で元データが同じでも、取り出しの処理の版が古い船は使わない (照合の後は「なし」になる。呼ぶ側が取り込み直す)
+            // 照合で元データが同じでも、取り出しの処理の版が古い船はここでは返さない (照合の後は「なし」になる。［読み込み］は取り込み直し、
+            // 開いたとき (GetViewPathAsync) は OldShipCachePath で取り込み済みのモデルを出す)
             return await VerifyAsync(record) && StateOf(record) == Ship3DCacheState.Fresh ? GlbPath(ShortName(record)) : null;
         return null;
+    }
+
+    // 取り出しの処理の版が古いだけの船の、取り込み済みのモデル (2026-11-05、利用者の指示「起動後ユーザーとか無駄」: 利用者の PC で船を勝手に取り込み直さない)。
+    // 状態 (StateOf) は「なし」のまま (［読み込み］と［船舶・車両をまとめて取り込む］が押せて、押せば新しい決まりで取り込み直す) だが、
+    // 開いたとき (GetViewPathAsync: ［3D 表示］・別ウィンドウ・小さな絵) はこのモデルをそのまま出す。
+    // 当たるのは: 置き場所に GLB とこのアプリの横の記録があり、船 (品でない) で、Data.p4k の印が今と同じ (パッチの後なら照合で元データが同じと分かった後)、
+    // 記録の ShipExportVersion が今より古いもの。照合で元データが変わっていた船 (消す・後で消す)・品は当たらない (今までどおり取り込み直す)。当たらなければ null
+    internal string? OldShipCachePath(string record)
+    {
+        var shortName = ShortName(record);
+        if (_verifying.ContainsKey(shortName) || _pendingDelete.Contains(shortName)) return null;
+        var stamp = CurrentStamp();
+        if (stamp == null || !File.Exists(GlbPath(shortName))) return null;
+        var s = ReadOurSidecar(shortName);
+        if (s == null || s.ShipExportVersion >= ShipExportVersion || IsItemRecord(s.Record)) return null;
+        bool stampSame = string.Equals(s.P4kPath, stamp.Path, StringComparison.OrdinalIgnoreCase) && s.P4kSize == stamp.Size && s.P4kWriteUtcTicks == stamp.WriteUtcTicks;
+        return stampSame ? GlbPath(shortName) : null;
     }
 
     // 照合中の船 (短い名前 → 照合)。同じ船の照合は 1 つにまとめる
@@ -491,6 +511,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
             ShowError(owner, "ゲームの Data.p4k が見つかりません。設定タブのゲームのフォルダとチャンネルを確かめてください。", quiet: quiet);
             return null;
         }
+        // 取り出しの処理の版が古いだけの船は、開いたときは取り込み済みのモデルをそのまま出す (取り込み直しを始めない。OldShipCachePath)
+        if (OldShipCachePath(record) is { } old) return old;
         return await ImportAsync(record, name, owner, confirm: false, save: !App.Config.Ship3DNoSave, quiet: quiet);
     }
 

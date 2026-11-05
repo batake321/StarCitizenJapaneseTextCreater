@@ -546,7 +546,8 @@ public partial class App : Application
     //   設定は起動時と同じ読み方 (AppConfigLoader。個人の設定が無いときに既定を写さないのは --export-backup と同じ)。ゲームのフォルダも起動時と同じ決め方。
     //   作業フォルダは引数があればそれ、無ければ設定の作業フォルダ。その中の gamedata_cache.db に書く (無ければやめる)。
     //   アプリが起動中で、書く先が設定の作業フォルダと同じなら走らせない (同じ DB に 2 つから書かないため)。
-    //   終わったら作業フォルダの DB をチェックポイントし (-wal を空にする)、5 つの表の行数を出す。新しい 3 つの表のどれかが 0 行なら失敗 (終了コード 1)。
+    //   終わったら作業フォルダの DB をチェックポイントし (-wal を空にする)、5 つの表と船の船内のはしごの表 (ship_ladders。同じ作り直しで作る。2026-11-05) の行数を出す。
+    //   新しい 3 つの表・ship_ladders のどれかが 0 行なら失敗 (終了コード 1)。
     //   書き込みは表ごとのトランザクション (前の行を消して入れ直すのを 1 つにまとめる) なので、途中で止まっても、書きかけの表は前の行のまま残る
     private static int RunRebuildOreTables(string? workDirArg)
     {
@@ -590,7 +591,7 @@ public partial class App : Application
         {
             c.Open();
             foreach (var table in new[] { GameDataExtractor.OreLocationsTable, GameDataExtractor.OreSignaturesTable, GameDataExtractor.OreQualityTable,
-                         GameDataExtractor.OreRockPartsTable, GameDataExtractor.OreAreasTable })
+                         GameDataExtractor.OreRockPartsTable, GameDataExtractor.OreAreasTable, ShipLadders.Table })
             {
                 using var cmd = c.CreateCommand();
                 cmd.CommandText = $"SELECT COUNT(*) FROM {table}";
@@ -598,7 +599,8 @@ public partial class App : Application
             }
         }
         var summary = string.Join("・", counts.Select(kv => $"{kv.Key} {kv.Value} 行"));
-        var ok = counts[GameDataExtractor.OreQualityTable] > 0 && counts[GameDataExtractor.OreRockPartsTable] > 0 && counts[GameDataExtractor.OreAreasTable] > 0;
+        var ok = counts[GameDataExtractor.OreQualityTable] > 0 && counts[GameDataExtractor.OreRockPartsTable] > 0 && counts[GameDataExtractor.OreAreasTable] > 0
+            && counts[ShipLadders.Table] > 0;
         Console.WriteLine($"{(ok ? "OK" : "NG")}: {summary} ({sw.Elapsed.TotalSeconds:F0} 秒)");
         return ok ? 0 : 1;
     }
