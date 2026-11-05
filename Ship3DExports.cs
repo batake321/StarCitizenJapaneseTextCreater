@@ -250,7 +250,24 @@ public sealed class Ship3DExports : INotifyPropertyChanged
     // (自動の取り直し ScanAsync は Data.p4k の印が違う船だけを照合し、元データが変わっていた船だけを取り直す。版が古いだけの船は並ばない)。
     // 材質の決め方の版 (ShipGlb.GeneratorVersion) とは別 (そちらを上げると、取り込み直さなくても標準の材質の表が当たる)。
     //   1 (2026-11-05、利用者の決定「広げる」): 面を隠す決まりのデカールの見分けを語で見る (「%DECALS」の材質の面 = 船内の吊るした服・小物が出る。SocpakGlb.SubMat.IsDecal)
-    internal const int ShipExportVersion = 1;
+    //   2 (2026-11-05、利用者の報告「床がない。船舶は表示しない部品があったらダメだよね」): 取り付けられた子の乗り物の区画と、エレベーター・リフトのかごの区画を入れる
+    //     (ShipExportAddon.cs の頭の説明)。これより古い版で取り込んだ船は、開いたときに、その区画だけを別の GLB に取り出して重ねる (ShipAddons.GetAsync。船の本体は取り込み直さない)
+    internal const int ShipExportVersion = 2;
+    // 子の乗り物の区画・かごの区画を初めから入れるようになった版 (これより古い版の船に、足りない区画を足す。IsOldShipGlb)
+    internal const int ShipExtrasVersion = 2;
+
+    // 表示に使う GLB (glbPath) が、置き場所の取り込み済みの船で、子の乗り物の区画・かごの区画が入っていない版 (ShipExtrasVersion より古い) のものか。
+    // 直接読んだ一時の GLB (保存しない設定) は今の版なので false。品は false
+    internal static bool IsOldShipGlb(string shortName, string glbPath)
+    {
+        try
+        {
+            if (!string.Equals(Path.GetFullPath(glbPath), Path.GetFullPath(GlbPath(shortName)), StringComparison.OrdinalIgnoreCase)) return false;
+            var s = ReadOurSidecar(shortName);
+            return s != null && s.ShipExportVersion < ShipExtrasVersion && !IsItemRecord(s.Record);
+        }
+        catch (Exception e) when (e is IOException or ArgumentException or NotSupportedException) { return false; }
+    }
 
     // 横の記録の版と Data.p4k の印から決まるキャッシュの状態 (ファイル・設定に触らない)。
     //   品: 版が古ければ「なし」(印を見る前。照合を通さずに作り直す)。そうでなければ、印が今と同じなら最新、違えば照合が要る。
@@ -483,6 +500,8 @@ public sealed class Ship3DExports : INotifyPropertyChanged
         if (n <= 1) _views.Remove(shortName); else _views[shortName] = n - 1;
         DeletePendingIfIdle(shortName);
         DeleteViewFileIfIdle(shortName);
+        // 保存しない設定で作った、足りない区画の GLB (ShipAddons) も、その船の表示が無くなったら消す
+        if (!_views.ContainsKey(shortName)) ShipAddons.ReleaseViewFiles(shortName);
     }
 
     // 保存しないで直接読んだ船の GLB (短い名前 → 作業用のフォルダの中のファイル)。表示をやめたら消す

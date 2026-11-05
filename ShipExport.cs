@@ -21,6 +21,8 @@ internal static partial class ShipExport
         public CancellationToken Ct;
         // 船でない品 (武器・装備・服など) の書き出しなら true (ShipExportItem.cs の品だけの決まりを使う。船は false で今までどおり)
         public bool Item;
+        // 船の書き出しで、取り付けられた子の乗り物の区画と、Transit のかごの区画も入れるか (ShipExportAddon.cs の頭の説明。品では入れない)
+        public bool Extras;
     }
 
     // ===== 船の選び方 (entity.rs find_candidates): EntityClassDefinition のうち、名前の小文字に検索の小文字を含むもの。名前の短い順 (UTF-8 のバイト数。同じなら record の順) の最初 =====
@@ -1016,6 +1018,9 @@ internal static partial class ShipExport
         public float[] OffPos = new float[3], OffRot = new float[3];
         // 取り付け先のノードから見た置き方の行列 (列優先 16)。あれば OffPos・OffRot の代わりに使う (品の CDF の Attachment の向き。CdfRelMatrix。船では null)
         public float[]? OffMatrix;
+        // この子 (取り付けられた乗り物) が自分で持つ区画 (objectContainers。例: Ironclad の DRAK_Command_Module の command_module_interior)。
+        // 子のノードの下に、子を単体で書き出したときと同じ置き方で入れる (ShipGlb.AttachChild。Ctx.Extras のときだけ。無ければ null)
+        public ShipInteriors.Loaded? Interiors;
     }
 
     private static Loaded? LoadChildMesh(Ctx ctx, ResolvedNode child)
@@ -1046,6 +1051,12 @@ internal static partial class ShipExport
                 if (LoadChildMesh(ctx, child) is { } l)
                 {
                     outList.Add(new Payload { Mesh = l.Mesh, Mtl = l.Mtl, Nmc = l.Nmc, Palette = l.Palette, Bones = l.Bones, EntityName = child.EntityName, ParentNodeName = attach, ParentEntityName = parentEntity, NoRotation = noRot, OffPos = child.OffPos, OffRot = child.OffRot });
+                    // 子が自分の区画を持つ乗り物なら、その区画 (と、その中のかごの区画) も入れる (船だけ)
+                    if (ctx.Extras && ShipInteriors.HasContainers(ctx.Db, child.Record))
+                    {
+                        var ci = ShipInteriors.Load(ctx, child.Record, carriages: true);
+                        if (ci.Containers.Count > 0) outList[^1].Interiors = ci;
+                    }
                     AddAttachments(l, child.EntityName, outList);   // 品の CDF で Model File が本体の子 (例: マガジン) の Attachment (船では空)
                     creates = true;
                 }
@@ -1096,7 +1107,7 @@ internal static partial class ShipExport
     // Export の本体。open は GLB を書く先 (Export と同じく、組み立ての直前に開く)、done は書き終えた先 (閉じる前) を渡す
     private static Result ExportCore(P4kArchive p4k, DataCoreDb db, string name, Action<string>? log, CancellationToken ct, string? paint, bool noPalette, bool item, Func<Stream> open, Action<Stream> done)
     {
-        var ctx = new Ctx { P4k = p4k, Db = db, Log = log, Ct = ct, Item = item };
+        var ctx = new Ctx { P4k = p4k, Db = db, Log = log, Ct = ct, Item = item, Extras = !item };
         var record = FindRecord(db, name, out int cands) ?? throw new ExportException($"no EntityClassDefinition records matching '{name}'");
         var rname = db.String2(record.NameOffset);
         var idx = IndexOf(db);
@@ -1130,7 +1141,7 @@ internal static partial class ShipExport
         Flatten(ctx, resolved.Children, resolved.EntityName, null, payloads);
         ct.ThrowIfCancellationRequested();
 
-        var interiors = ShipInteriors.Load(ctx, record);
+        var interiors = ShipInteriors.Load(ctx, record, carriages: ctx.Extras);
         log?.Invoke($"Assembling: root + {payloads.Count} child meshes + {interiors.Containers.Sum(c => c.Placements.Count)} interior meshes ({interiors.Cgfs.Count} unique CGFs)");
 
         using (var fs = open())

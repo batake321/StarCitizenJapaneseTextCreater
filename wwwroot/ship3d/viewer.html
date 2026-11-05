@@ -20,7 +20,8 @@
          材質の表: {materials: glTF の材質の配列, prims: mesh ごとの primitive ごとの材質の番号}。形・画像は読み込んだ GLB のまま、材質だけを差し替える
      船内を歩くモード (2026-11-05): ［船内］のときに左上の 2 段目に［歩くモード］［走る］［姿勢］［すり抜け］を出す (船でない品・小さな絵では出さない)。
        計算は walk.js (ステーションの 3D の歩くモード wwwroot/stationmap/view3d.js を写したもの)。歩くモードが OFF のときの船内の動きは今までどおり。
-       船内のはしご (Ladder のエンティティ) はアプリの DB から受け取る: ビューア → アプリ {type:'ladderInit', ship}、アプリ → {type:'ladders', ship, items} (walk.js の頭の説明)
+       船内のはしご (Ladder のエンティティ) とエレベーター・リフトの乗り場はアプリの DB から受け取る: ビューア → アプリ {type:'ladderInit', ship}、
+       アプリ → {type:'ladders', ship, items} と {type:'transit', ship, items} (walk.js の頭の説明)。エレベーターの行き先の窓は #tbox
      GLB の座標 (実物で確かめたもの。t_ORIG_600i.glb / t_ORIG_X1.glb): いちばん上のノード CryEngine_Z_up が Z 上向きを Y 上向きに直していて、
        上 = +Y、前 = -Z (600i の hardpoint_seat_pilot が z = -45 で船の範囲 -66.7〜60.2 の前寄り。操縦席のノードの +Y 軸 (CryEngine の前) も -Z を向く)、
        左 = -X (hardpoint_seat_bridge_left が x = -1.41、_right が +1.41)。 -->
@@ -42,6 +43,14 @@
   /* 船内を歩くモードのボタンと状態の文 (［船内］のときだけ出す。［船外］［船内］の並びの下の段) */
   #walkBar { position: absolute; left: 8px; top: 42px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   #walkInfo { text-shadow: 0 0 3px #000; }
+  /* 歩くモードのエレベーター・リフトの行き先の窓 (ステーションの 3D の #tbox と同じ形。walk.js) */
+  #tbox { position: absolute; right: 24px; top: 80px; width: 340px; max-width: calc(100% - 48px); display: none; background: #1b1f24; border: 2px solid #9ab; padding: 8px; z-index: 5; box-sizing: border-box; }
+  #tboxHead { font-weight: bold; margin-bottom: 6px; }
+  #tboxList { height: 300px; max-height: calc(100vh - 220px); overflow-y: auto; border: 1px solid #567; background: #11151a; }
+  #tbox button { display: block; width: 100%; text-align: left; margin: 0; padding: 6px 8px; background: #222; color: #ddd; border: 0; border-bottom: 1px solid #333; border-radius: 0; cursor: pointer; font-size: 14px; }
+  #tbox button:hover { background: #345; }
+  #tbox button.cur { color: #9cf; }
+  #tboxNote { font-size: 12px; color: #aaa; margin-top: 4px; }
   #help { position: absolute; left: 8px; bottom: 8px; color: #bbb; font-size: 12px; text-shadow: 0 0 3px #000; line-height: 1.5; pointer-events: none; }
   #msg { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.7); padding: 12px 18px; border-radius: 6px; max-width: 80%; white-space: pre-wrap; }
   #msg.hidden { display: none; }
@@ -93,6 +102,7 @@
     <div id="help">左ドラッグ: 回転 (船外は船のまわり / 船内は見回す)　右ドラッグ: 平行移動　ホイール: 拡大縮小 (船内は前後)<br>
       W/A/S/D: 前後左右　↑/↓: 上下　Insert/Delete: 拡大/縮小　Home: 初めの位置</div>
     <div id="msg">読み込みを始めています...</div>
+    <div id="tbox"><div id="tboxHead"></div><div id="tboxList"></div><div id="tboxNote">選ぶと移ります。Esc で閉じます</div></div>
     <div id="paintBusy" class="hidden"><div id="paintBusyText"></div><div id="paintBusyOuter"><div id="paintBusyBar"></div></div></div>
   </div>
   <div id="side">
@@ -1026,6 +1036,44 @@ if (paintIO) {
   } catch { }
 }
 
+// ===== 前の版で取り込んだ船に、入っていなかった区画を足す (2026-11-05、利用者の報告「床がない。船舶は表示しない部品があったらダメだよね」) =====
+// 船の GLB を出した後、ビューア → アプリ {type:'addonInit', ship}。アプリ → {type:'addonBusy', ship} (これから取り出す。進み具合を出す) と
+// {type:'addon', ship, url} (url: 足りない区画だけの GLB。船の GLB と同じ座標。足す物が無い・作れなかったときは null)。
+// 足した GLB は船のモデル (model) の子にする (歩くモードの当たりに入る。塗装の切り替えの表は船の GLB の部品だけに当たるので、足した区画の色は変わらない)。
+// 「船内の位置」の欄・船外の初めの位置は、足す前に決めたまま
+function requestAddon() {
+  if (isItem || isThumb || !shipName) return;
+  try { window.chrome?.webview?.postMessage({ type: 'addonInit', ship: shipName }); } catch { }
+}
+if (!isItem && !isThumb && shipName) {
+  try {
+    // 進み具合の文 (塗装と同じ欄) は、ここで出したときだけここで消す (足す物の無い船では、塗装の進み具合の文に触らない)
+    let addonBusy = false;
+    const busy = text => { if (text) { addonBusy = true; showBusy(text); } else if (addonBusy) { addonBusy = false; showBusy(''); } };
+    window.chrome?.webview?.addEventListener('message', e => {
+      const d = e.data;
+      if (!d || d.ship !== shipName) return;
+      if (d.type === 'addonBusy') { busy('船内の入っていなかった区画を取り出しています...'); return; }
+      if (d.type !== 'addon') return;
+      if (!d.url || !model) { busy(''); return; }
+      busy('船内の入っていなかった区画を読み込んでいます...');
+      new GLTFLoader().load(d.url, gltf => {
+        const root = gltf.scene;
+        const drop = [];
+        root.traverse(o => { if (o.isLight || /demo/i.test(o.name || '')) drop.push(o); });
+        for (const o of drop) o.removeFromParent();
+        const seen = new Set();
+        root.traverse(o => {
+          if (!o.isMesh) return;
+          for (const m of Array.isArray(o.material) ? o.material : [o.material]) { if (m && !seen.has(m)) { seen.add(m); adjustMaterial(m); } }
+        });
+        if (model) { model.add(root); walkMode?.geoChanged(); }
+        busy('');
+      }, undefined, err => { busy(''); reportError(`船内の入っていなかった区画を読み込めませんでした: ${err?.message ?? err}`); });
+    });
+  } catch { }
+}
+
 // ===== 読み込み =====
 if (!glbUrl) {
   reportError('表示する GLB が指定されていません。');
@@ -1076,6 +1124,7 @@ if (!glbUrl) {
     canvas.focus();
     // 読み込みの間に届いていた塗装 (初めの塗装) を当てる
     applyWanted();
+    requestAddon();
   }, xhr => {
     if (xhr.total > 0) {
       const pct = Math.floor(xhr.loaded * 100 / xhr.total);

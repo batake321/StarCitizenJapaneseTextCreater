@@ -34,12 +34,14 @@ public static class DatabaseBackupService
     // ore_quality / ore_rock_parts: 資源の品質の範囲と岩の中身の行 (現在位置のオーバーレイの品質。インデックス構築で作る)
     // ore_areas: 採掘できる場所の広がり (現在位置のオーバーレイが小惑星帯の中にいるかを決める。インデックス構築で作る)
     // ship_ladders: 船の船内のはしご (船の 3D の歩くモードのはしご。ShipLadders。インデックス構築で作る)
+    // ship_transit: 船の船内のエレベーター・リフトの乗り場 (船の 3D の歩くモードのエレベーター。ShipTransit。インデックス構築で作る)
+    // ship_addons: 船の 3D に足す区画 (子の乗り物の区画・エレベーターやリフトのかごの区画。ShipAddons。インデックス構築で作る)
     // starmap_locations / game_shops / shop_price_links: 星図の場所・ゲームの店・店と DB の価格の紐づけ (［詳細］タブのお店・ステーション・星系。インデックス構築で作る)
     // mission_map_vars / mission_map_sets / mission_map_places: 契約の行き先の地図 (［契約］タブの詳細の「地図」。インデックス構築で作る)
     // station_map_floating: ステーションの階層マップの取り込みで見つけた浮いたもの (デバッグ用。StationMapExports.LogAndStoreFloating)
     // starmap_amenities: 星図の場所の施設 (［詳細］の場所の施設のアイコンと有無・［マップ］の施設のアイコンと検索。インデックス構築で作る)
     private static readonly string[] IndexTables = ["ships", "ship_ports", "items", "missions", "commodities", "gamedata_meta", "gamedata_cache", "item_shop_prices", "ammo_params", "item_variants", "player_damage_params", "item_ports", "item_port_labels",
-        "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount", "resource_types", "blueprints", "blueprint_materials", "blueprint_pools", "blueprint_modifiers", "starmap_names", "deliverable_sources", "ore_locations", "ore_signatures", "ore_quality", "ore_rock_parts", "ore_areas", "ship_ladders",
+        "item_index", "item_vectors", "mission_reputation", "faction_reputation", "reputation_reward_amount", "resource_types", "blueprints", "blueprint_materials", "blueprint_pools", "blueprint_modifiers", "starmap_names", "deliverable_sources", "ore_locations", "ore_signatures", "ore_quality", "ore_rock_parts", "ore_areas", "ship_ladders", "ship_transit", "ship_addons",
         "starmap_locations", "game_shops", "shop_price_links", "mission_map_vars", "mission_map_sets", "mission_map_places", "station_map_floating", "starmap_amenities"];
     private static readonly string[] KnowledgeTables = ["knowledge"];
     // ore_stock / commodity_trades / mining_log: ［鉱石］タブの在庫・売買の記録・採掘の記録 (個人データ。OreService)

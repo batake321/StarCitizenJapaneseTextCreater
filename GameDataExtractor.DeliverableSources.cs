@@ -319,6 +319,14 @@ public partial class GameDataExtractor
             try { WriteShipLadders(p4kPath, skipWriteIfIndexBuildStarts, ct); }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { StatusChanged?.Invoke($"[船のはしご] 作れませんでした (前のデータを残します): {ex.Message}"); }
+            // 9. 船の船内のエレベーター・リフトの乗り場 (ship_transit。ShipTransit の頭の説明)。扱いは 8 と同じ
+            try { WriteShipTransit(p4kPath, skipWriteIfIndexBuildStarts, ct); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { StatusChanged?.Invoke($"[船のエレベーター] 作れませんでした (前のデータを残します): {ex.Message}"); }
+            // 10. 船の 3D に足す区画 (ship_addons。ShipAddons の頭の説明)。扱いは 8 と同じ
+            try { WriteShipAddons(p4kPath, skipWriteIfIndexBuildStarts, ct); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { StatusChanged?.Invoke($"[船に足す区画] 作れませんでした (前のデータを残します): {ex.Message}"); }
             if (!hasTargets) return 0;
             using (var tx = _db!.BeginTransaction())
             {
@@ -382,6 +390,54 @@ public partial class GameDataExtractor
         }
         ShipLadders.Write(_db!, rows);
         StatusChanged?.Invoke($"[船のはしご] {rows.Count} 行 (船・車両 {rows.Select(r => r.Ship).Distinct(StringComparer.OrdinalIgnoreCase).Count()} 件)。時間 {sw.Elapsed.TotalSeconds:F1}秒");
+    }
+
+    // 船の船内のエレベーター・リフトの乗り場 (ship_transit) を作って入れ替える (2026-11-05、利用者の指示「館内エレベーターも場所のエレベーターと同じように リフトも…」)。
+    // 読む物・1 行も作れなかったときの扱い・skipWriteIfIndexBuildStarts は WriteShipLadders と同じ (ShipTransit.Find)
+    private void WriteShipTransit(string p4kPath, bool skipWriteIfIndexBuildStarts, CancellationToken ct)
+    {
+        var sw = Stopwatch.StartNew();
+        var rows = ShipTransit.Find(P4kArchive.Shared(p4kPath), DataCoreShared.Get(_dcbPath, p4kPath), ct, m => StatusChanged?.Invoke(m));
+        ct.ThrowIfCancellationRequested();
+        if (skipWriteIfIndexBuildStarts && IsIndexBuildRunning)
+        {
+            StatusChanged?.Invoke("[船のエレベーター] インデックス構築・装備データの再抽出が始まったので、作った値は書き込みませんでした");
+            return;
+        }
+        if (rows.Count == 0)
+        {
+            using var ddl = _db!.CreateCommand();
+            ddl.CommandText = ShipTransit.Ddl;
+            ddl.ExecuteNonQuery();
+            StatusChanged?.Invoke("[船のエレベーター] 1 行も作れませんでした (前のデータを残します)");
+            return;
+        }
+        ShipTransit.Write(_db!, rows);
+        StatusChanged?.Invoke($"[船のエレベーター] {rows.Count} 行 (船・車両 {rows.Select(r => r.Ship).Distinct(StringComparer.OrdinalIgnoreCase).Count()} 件・路線 {rows.Select(r => (r.Ship, r.Line)).Distinct().Count()} 本)。時間 {sw.Elapsed.TotalSeconds:F1}秒");
+    }
+
+    // 船の 3D に足す区画 (ship_addons) を作って入れ替える (2026-11-05、利用者の報告「床がない。船舶は表示しない部品があったらダメだよね」)。
+    // 読む物・1 行も作れなかったときの扱い・skipWriteIfIndexBuildStarts は WriteShipLadders と同じ (ShipAddons.Find)
+    private void WriteShipAddons(string p4kPath, bool skipWriteIfIndexBuildStarts, CancellationToken ct)
+    {
+        var sw = Stopwatch.StartNew();
+        var rows = ShipAddons.Find(P4kArchive.Shared(p4kPath), DataCoreShared.Get(_dcbPath, p4kPath), ct, m => StatusChanged?.Invoke(m));
+        ct.ThrowIfCancellationRequested();
+        if (skipWriteIfIndexBuildStarts && IsIndexBuildRunning)
+        {
+            StatusChanged?.Invoke("[船に足す区画] インデックス構築・装備データの再抽出が始まったので、作った値は書き込みませんでした");
+            return;
+        }
+        if (rows.Count == 0)
+        {
+            using var ddl = _db!.CreateCommand();
+            ddl.CommandText = ShipAddons.Ddl;
+            ddl.ExecuteNonQuery();
+            StatusChanged?.Invoke("[船に足す区画] 1 行も作れませんでした (前のデータを残します)");
+            return;
+        }
+        ShipAddons.Write(_db!, rows);
+        StatusChanged?.Invoke($"[船に足す区画] {rows.Count} 行 (船・車両 {rows.Select(r => r.Ship).Distinct(StringComparer.OrdinalIgnoreCase).Count()} 件。子の乗り物の区画 {rows.Count(r => r.Kind == "child")}・かごの区画 {rows.Count(r => r.Kind == "carriage")})。時間 {sw.Elapsed.TotalSeconds:F1}秒");
     }
 
     // 対象: missions の Wikelo の契約の納品物 (契約側の HaulingOverride とテンプレート側の _TemplateHauling_。MissionService.DeliverableRefsForBuild)。
@@ -765,12 +821,15 @@ public partial class GameDataExtractor
     // インデックスを構築した DB で、ore_locations・シグネチャー (ore_signatures)・品質 (ore_quality / ore_rock_parts)・広がり (ore_areas) の表のどれかがまだ無いか
     // (前の版で構築した DB・前の版のバックアップを取り込んだ DB)。
     // 起動後の RebuildOreLocationsAsync を走らせるか決めるため。表は EnsureDb では作らない (無いことを印にする)。
-    // 同じ作り直しで作る船の船内のはしごの表 (ship_ladders。ShipLadders) が無いときも真 (2026-11-05)
+    // 同じ作り直しで作る船の船内のはしごの表 (ship_ladders。ShipLadders)・エレベーターの乗り場の表 (ship_transit。ShipTransit) が無いときも真 (2026-11-05)。
+    // 船の 3D に足す区画の表 (ship_addons。ShipAddons) も同じ (2026-11-05)
     public bool NeedsOreLocations()
     {
         EnsureDb();
         using var cmd = _db!.CreateCommand();
-        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM item_index) AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (@t, @s, @q, @p, @a, @l)) < 6";
+        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM item_index) AND (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (@t, @s, @q, @p, @a, @l, @tr, @ad)) < 8";
+        cmd.Parameters.AddWithValue("@tr", ShipTransit.Table);
+        cmd.Parameters.AddWithValue("@ad", ShipAddons.Table);
         cmd.Parameters.AddWithValue("@t", OreLocationsTable);
         cmd.Parameters.AddWithValue("@s", OreSignaturesTable);
         cmd.Parameters.AddWithValue("@q", OreQualityTable);
@@ -938,8 +997,9 @@ public partial class GameDataExtractor
             {
                 // 採掘できる場所・シグネチャー・品質の表は、作れなかったときも空で作る (次の起動で走り直さないように)。
                 // 星図の場所・店・紐づけの表は空で作らない (今の形で作れなかったら、次の起動でまた試す)。
-                // 船の船内のはしごの表 (ship_ladders) も、作れなかったときは空で作る (採掘の表と同じ扱い)
-                ddl.CommandText = OreLocationsDdl + OreSignaturesDdl + OreQualityDdl + OreRockPartsDdl + OreAreasDdl + ShipLadders.Ddl;
+                // 船の船内のはしごの表 (ship_ladders)・エレベーターの乗り場の表 (ship_transit) も、作れなかったときは空で作る (採掘の表と同じ扱い)
+                // 船の 3D に足す区画の表 (ship_addons) も同じ
+                ddl.CommandText = OreLocationsDdl + OreSignaturesDdl + OreQualityDdl + OreRockPartsDdl + OreAreasDdl + ShipLadders.Ddl + ShipTransit.Ddl + ShipAddons.Ddl;
                 ddl.ExecuteNonQuery();
             }
             // 店・星図の表が今の形でできていなければ、そうと分かるように知らせる (印は WriteShopTables が今の形で作れたときだけ書いている)
@@ -967,7 +1027,9 @@ public partial class GameDataExtractor
             var areaCount = Convert.ToInt32(cnt.ExecuteScalar() ?? 0L);
             cnt.CommandText = "SELECT COUNT(*) FROM ship_ladders";
             var ladderCount = Convert.ToInt32(cnt.ExecuteScalar() ?? 0L);
-            StatusChanged?.Invoke($"[採掘できる場所] 起動後の作り直しを終えました (ore_locations は今 {oreCount} 行・ore_signatures は今 {sigCount} 行・ore_quality は今 {qualityCount} 行・ore_rock_parts は今 {partCount} 行・ore_areas は今 {areaCount} 行・ship_ladders は今 {ladderCount} 行)");
+            cnt.CommandText = "SELECT COUNT(*) FROM ship_transit";
+            var transitCount = Convert.ToInt32(cnt.ExecuteScalar() ?? 0L);
+            StatusChanged?.Invoke($"[採掘できる場所] 起動後の作り直しを終えました (ore_locations は今 {oreCount} 行・ore_signatures は今 {sigCount} 行・ore_quality は今 {qualityCount} 行・ore_rock_parts は今 {partCount} 行・ore_areas は今 {areaCount} 行・ship_ladders は今 {ladderCount} 行・ship_transit は今 {transitCount} 行)");
             return oreCount;
         }
         finally

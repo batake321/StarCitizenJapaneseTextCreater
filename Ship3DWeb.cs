@@ -78,6 +78,29 @@ internal static class Ship3DWeb
                         items = rows.Select(r => new { container = r.Container, entity = r.Entity, b = new[] { r.Bx, r.By, r.Bz }, t = new[] { r.Tx, r.Ty, r.Tz }, f = new[] { r.Fx, r.Fy, r.Fz },
                             height = r.Height, approachBottom = r.ApproachBottom, approachTop = r.ApproachTop }).ToArray(),
                     });
+                    // 船内のエレベーター・リフトの乗り場 (gamedata_cache.db の ship_transit。ShipTransit) も返す。形はステーションの 3D の乗り場 (station.json の transit) と同じ:
+                    // [種類, 位置, 階 (空), 路線, 行き先 (訳), 行き先の鍵, 0, 降りる所 (無ければ null。船だけの欄)]。行き先の訳はステーションの 3D と同じ引き方 (StationView3D.Loc: ゲームのフォルダの
+                    // japanese_(japan)\global.ini → translations.db の日本語 → 英語 → 鍵のまま)。表が無い・行が無いときは空 (エレベーターなし)
+                    var stops = await Task.Run(() =>
+                    {
+                        var list = ShipTransit.ReadFor(dbPath, view.Short);
+                        if (list.Count == 0) return new List<object?[]>();
+                        var ini = Ship3DExports.CurrentStamp() is { } stamp ? Path.Combine(Path.GetDirectoryName(stamp.Path) ?? "", "data", "Localization", "japanese_(japan)", "global.ini") : null;
+                        var loc = new StationView3D.Loc(ini, Path.Combine(App.Config.WorkingDirectory, "translations.db"));
+                        return list.Select(r => new object?[] { r.Kind, new[] { r.X, r.Y, r.Z }, "", r.Line, loc.Get(r.Stop), r.Stop, 0,
+                            r.Sx is double sx && r.Sy is double sy && r.Sz is double sz ? new[] { sx, sy, sz } : null }).ToList();
+                    });
+                    Post(web, view, new { type = "transit", ship = view.Short, items = stops });
+                }
+                else if (type == "addonInit")
+                {
+                    // 前の版で取り込んだ船に、入っていなかった区画 (子の乗り物の区画・エレベーターやリフトのかご) だけを足す (ShipAddons の頭の説明。2026-11-05)。
+                    // 足す物が無ければ url は null。作るときは先に addonBusy を送る (ビューアが進み具合を出す)。作れなかったら船は今までどおり出して、ログに 1 行
+                    if (!Views.TryGetValue(web, out var view) || !doc.RootElement.TryGetProperty("ship", out var sh) || sh.GetString() != view.Short || view.IsItem) return;
+                    string? path = null;
+                    try { path = await ShipAddons.GetAsync(view.Short, view.Glb, () => web.Dispatcher.BeginInvoke(() => Post(web, view, new { type = "addonBusy", ship = view.Short }))); }
+                    catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[3D モデル] 「{view.Short}」の入っていなかった区画を取り出せませんでした (船は今までどおり出します): {ex.Message}"); }
+                    Post(web, view, new { type = "addon", ship = view.Short, url = path != null ? FileUrl(path) : null });
                 }
                 else if (type == "roomNames" && doc.RootElement.TryGetProperty("names", out var arr) && arr.ValueKind == JsonValueKind.Array)
                 {

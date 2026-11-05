@@ -176,7 +176,11 @@ internal static class ShipInteriors
     private sealed record Mesh(string CgfPath, string? Mtl, float[] T, string? Guid);
 
     // load_interiors (灯りあり)
-    public static Loaded Load(ShipExport.Ctx ctx, DataCoreDb.Record record)
+    // carriages: 区画の中の TransitManager (エレベーター・リフトの管理) の carriageInterior が指すかごの区画も、かごの置かれる所に足す
+    //   (2026-11-05、利用者の報告「床がない。船舶は表示しない部品があったらダメだよね」: かごの区画は船の区画の一覧 objectContainers に無く、台 (かごの床) が出ていなかった)。
+    //   足す区画は一覧の区画の後ろに並べる (一覧の区画の並び・中身は変えない)。船の構成の書き出し (ShipExport.DumpHierarchy。照合のハッシュ) は false で今までどおり
+    // carriagesOnly: 一覧の区画そのものは入れず、かごの区画だけを返す (前の版で取り込んだ船に足す区画だけの GLB 用。ShipExport.ExportAddon)
+    public static Loaded Load(ShipExport.Ctx ctx, DataCoreDb.Record record, bool carriages = false, bool carriagesOnly = false)
     {
         var res = new Loaded();
         var db = ctx.Db;
@@ -190,11 +194,23 @@ internal static class ShipInteriors
         var payloads = new List<(string Name, List<Mesh> Meshes, List<Light> Lights, float[] T, List<string> Pal)>();
         foreach (var (file, pos, rot) in refs)
         {
+            if (carriagesOnly) break;
             ctx.Ct.ThrowIfCancellationRequested();
             var t = ContainerTransform(pos, rot);
             try { var (n, ms, ls, pal) = LoadSocpak(ctx.P4k, file); payloads.Add((n, ms, ls, t, pal)); }
             catch (Exception e) when (ShipExport.IsLoadError(e) || e is SocpakExporter.SocpakException) { ctx.Log?.Invoke($"failed to load {file}: {e.Message}"); }
         }
+        if (carriages)
+            foreach (var (file, pos, rot) in refs)
+            {
+                var t = ContainerTransform(pos, rot);
+                foreach (var (cfile, ct) in CarriageRefs(ctx.P4k, file, ctx.Log))
+                {
+                    ctx.Ct.ThrowIfCancellationRequested();
+                    try { var (n, ms, ls, pal) = LoadSocpak(ctx.P4k, cfile); payloads.Add((n, ms, ls, Glam.Mul(t, ct), pal)); }
+                    catch (Exception e) when (ShipExport.IsLoadError(e) || e is SocpakExporter.SocpakException) { ctx.Log?.Invoke($"failed to load {cfile}: {e.Message}"); }
+                }
+            }
         // build_interiors_from_payloads
         var gGeom = TryRooted(db, "EntityClassDefinition.Components[SGeometryResourceParams].Geometry.Geometry.Geometry.path");
         var gMtl = TryRooted(db, "EntityClassDefinition.Components[SGeometryResourceParams].Geometry.Geometry.Material.path");
@@ -223,6 +239,87 @@ internal static class ShipInteriors
             if (pal.Count > 0) c.Palette = PaletteByName(db, pal[0]);
             res.Containers.Add(c);
         }
+        return res;
+    }
+
+    // record の objectContainers に区画が 1 つでもあるか (子の乗り物が自分の区画を持つかを手早く見る)
+    internal static bool HasContainers(DataCoreDb db, DataCoreDb.Record record)
+    {
+        var cp = ShipExport.TryCompile(db, record.StructIndex, "Components[VehicleComponentParams].objectContainers", DataCoreDb.AnyLeaf);
+        if (cp == null) return false;
+        var vals = ShipExport.TryValues(db, cp, record, true);
+        if (vals == null) return false;
+        foreach (var v in vals) if (ShipLadders.ContainerRef(v) != null) return true;
+        return false;
+    }
+
+    // 区画 (socpak) の中の TransitManager が指すかごの区画 (carriageInterior の path) と、かごを置く所 (区画の中の位置と向き。列優先 16)。
+    //   実データで確かめた欄 (2026-11-05、DRAK_Ironclad の hold.socpak の TransitManager_Cargo_Lift_Left):
+    //     <Entity EntityClass="TransitManager" Pos="-8.59375,37.7188,-3" …>
+    //       <PropertiesDataCore><SCTransitManager …><carriageInterior path="ObjectContainers/Ships/DRAK/ironclad/cargo_lift.socpak">
+    //       <SCTransitManager><TransitDestinations>
+    //           <Destination nameIdentifier="@vehicle_deck_upper_cargo" destinationPos="-0.65625,-0.0313,2" destinationQuat="1,0,0,0"><Gateway …>
+    //           <Destination nameIdentifier="@vehicle_deck_cargo" destinationPos="-0.65625,-0.0313,-3.1875" destinationQuat="1,0,0,0"><Gateway …>
+    //         <CarriageSpawnLocations><SpawnLocation splineIndex="0" splinePointIndex="0" gatewayIndex="1">
+    //   かごを置く階: CarriageSpawnLocations の最初の SpawnLocation の gatewayIndex (TransitDestinations の中の Gateway の通し番号) の Gateway を持つ行き先。
+    //     その欄が無い・番号が外なら、行き先の並びの最初 (親の決定)。
+    //   置く所: 管理のエンティティの Pos・Rotate に、その行き先の destinationPos・destinationQuat を重ねたもの (Ironclad の左のリフトで、管理 (−8.59, 37.72, −3) +
+    //     (−0.66, −0.03, −3.19) = 乗り場のエンティティ TransitDestination_Ground_Floor_Left の Pos (−9.25, 37.69, −6.19) と同じになることを確かめた)
+    internal static List<(string File, float[] T)> CarriageRefs(P4kArchive p4k, string socpakPath, Action<string>? log = null)
+    {
+        var res = new List<(string, float[])>();
+        try
+        {
+            ShipLadders.ForEachEntity(p4k, socpakPath, (x, ent, attrs) =>
+            {
+                if (attrs.GetValueOrDefault("EntityClass", "") != "TransitManager") return;
+                string? path = null; int? spawnGateway = null;
+                var dests = new List<(double[] Pos, double[] Quat)>(); var gatewayDest = new List<int>();
+                foreach (var c in x.Children(ent))
+                {
+                    var tag = x.Tag(c);
+                    if (tag == "PropertiesDataCore")
+                    {
+                        foreach (var pc in x.Children(c))
+                            if (x.Tag(pc) == "SCTransitManager")
+                                foreach (var ci in x.Children(pc))
+                                    if (x.Tag(ci) == "carriageInterior" && x.AttributeMap(ci).TryGetValue("path", out var cp) && cp.Length > 0) path = cp;
+                    }
+                    else if (tag == "SCTransitManager")
+                    {
+                        foreach (var s in x.Children(c))
+                        {
+                            var st = x.Tag(s);
+                            if (st == "TransitDestinations")
+                            {
+                                foreach (var d in x.Children(s))
+                                {
+                                    if (x.Tag(d) != "Destination") continue;
+                                    var da = x.AttributeMap(d);
+                                    dests.Add((ShipLadders.Csv(da.GetValueOrDefault("destinationPos", "0,0,0"), [0, 0, 0]), ShipLadders.Csv(da.GetValueOrDefault("destinationQuat", "1,0,0,0"), [1, 0, 0, 0])));
+                                    foreach (var gw in x.Children(d)) if (x.Tag(gw) == "Gateway") gatewayDest.Add(dests.Count - 1);
+                                }
+                            }
+                            else if (st == "CarriageSpawnLocations" && spawnGateway == null)
+                            {
+                                foreach (var sl in x.Children(s))
+                                    if (x.Tag(sl) == "SpawnLocation" && x.AttributeMap(sl).TryGetValue("gatewayIndex", out var gi) && int.TryParse(gi, out var g)) { spawnGateway = g; break; }
+                            }
+                        }
+                    }
+                }
+                if (string.IsNullOrEmpty(path) || dests.Count == 0) return;
+                int di = spawnGateway is int sg && sg >= 0 && sg < gatewayDest.Count ? gatewayDest[sg] : 0;
+                var mp = ShipLadders.Csv(attrs.GetValueOrDefault("Pos", "0,0,0"), [0, 0, 0]);
+                var mr = ShipLadders.Csv(attrs.GetValueOrDefault("Rotate", "1,0,0,0"), [1, 0, 0, 0]);
+                var (dp, dq) = dests[di];
+                // 向きは w,x,y,z (Entities の Rotate と同じ読み方)
+                var mt = Glam.FromScaleRotationTranslation(1, 1, 1, (float)mr[1], (float)mr[2], (float)mr[3], (float)mr[0], (float)mp[0], (float)mp[1], (float)mp[2]);
+                var dt = Glam.FromScaleRotationTranslation(1, 1, 1, (float)dq[1], (float)dq[2], (float)dq[3], (float)dq[0], (float)dp[0], (float)dp[1], (float)dp[2]);
+                res.Add((path, Glam.Mul(mt, dt)));
+            });
+        }
+        catch (Exception e) when (ShipExport.IsLoadError(e)) { log?.Invoke($"failed to read transit managers of {socpakPath}: {e.Message}"); }
         return res;
     }
 

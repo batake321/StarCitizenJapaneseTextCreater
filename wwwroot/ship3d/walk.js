@@ -30,6 +30,13 @@
 //   8. 入る所: 今のカメラが座席の目の位置 (hardpoint_seat… のノード + 座った目の高さ) にいれば、その座席の降りる点 (GLB の IP_SeatExit…・IP_SeatAccess… のノード) の
 //      真下の船内の床に立つ (利用者の指示「座っていたら操縦席の横の床から」)。無ければ座席の近くの船内の床。座席にいないときは、カメラの真下の面が船内の床か
 //      見えない床ならそこ、どちらでもなければ近くの船内の床、それも無ければカメラの真下の見えない床 (startPlace)
+//  10. 船内のエレベーター・リフト (2026-11-05、利用者の指示「館内エレベーターも場所のエレベーターと同じように リフトも場所のエレベーターと同じように」):
+//      乗り場 (ゲームのデータの TransitManager の行き先と TransitGateway) は、アプリが配る DB (gamedata_cache.db の ship_transit。ShipTransit.cs) から渡す
+//      (アプリ → {type:'transit', ship, items:[[種類, 位置, 階, 路線, 行き先 (訳), 行き先の鍵, 0, 降りる所 | null], …]}。移植元の station.json の transit と同じ並び + 降りる所)。
+//      使い方は移植元のエレベーターのとおり (showElev・elevMove・elevPlace): 乗り場から 2 m 以内 (xy。高さの差 3 m まで) で行き先の窓、同じ路線の行き先を高い順、
+//      選ぶと行き先の扉の前に立つ。船の 3D モデルにはエレベーターの扉・かごの形が入っていないことが多いので、扉が見つからないときは、
+//      ゲームのデータの降りる所 (乗り場の safeTeleportOffset) の真下の床に立つ (それも無ければ移植元と同じく乗り場の位置)。
+//      移していない物: 操作盤・印を押して窓を開く (船のビューアには形を押す操作が無い)・トラム・マイハンガー・読み込み直し・録画
 //   9. はしごの上端のそば (箱から水平 0.6 m 以内・足が上端 −0.1 〜 +1.0 m) で S を押すと、はしごに乗って下り始める (移植元は上からは乗れない)。
 //      下端で離れるときは、その所の床 (下端 + 0.6 m 以下のいちばん高い面) に立つ (移植元は下端の 0.5 m 下まで下がって離れる。見えない床があると、そこから落ちるため)
 import * as THREE from 'three';
@@ -223,7 +230,10 @@ export function createWalk(env) {
   function setDbLadders(items) { dbLadders = Array.isArray(items) ? items : []; buildLadders(); }
   if (env.ship) {
     try {
-      window.chrome?.webview?.addEventListener('message', e => { const d = e.data; if (d && d.type === 'ladders' && d.ship === env.ship) setDbLadders(d.items); });
+      window.chrome?.webview?.addEventListener('message', e => {
+        const d = e.data; if (!d || d.ship !== env.ship) return;
+        if (d.type === 'ladders') setDbLadders(d.items); else if (d.type === 'transit') setTransit(d.items);
+      });
       window.chrome?.webview?.postMessage({ type: 'ladderInit', ship: env.ship });
     } catch { }
   }
@@ -235,7 +245,7 @@ export function createWalk(env) {
     const pause = async () => { if (performance.now() - last < 40) return true; await tick(); last = performance.now(); return seq === geoSeq; };
     const model = env.model(); model.updateMatrixWorld(true);
     const meshes = drawnMeshes(); let n = 0; for (const o of meshes) n += triCount(o);
-    const F = new Float32Array(n * 9), D = new Uint8Array(n), lad = new Map();
+    const F = new Float32Array(n * 9), D = new Uint8Array(n), lad = new Map(), edoors = new Map();
     let b = 0, minZ = Infinity;
     for (const o of meshes) {
       const [nn, mn, key] = namesOf(o), wn = nameWords(nn), wm = nameWords(mn);
@@ -243,6 +253,15 @@ export function createWalk(env) {
       const pos = o.geometry.attributes.position, idx = o.geometry.index, nt = triCount(o), e = o.matrixWorld.elements;
       const P = !pos.isInterleavedBufferAttribute && !pos.normalized && pos.itemSize === 3 ? pos.array : null, I = idx ? idx.array : null;
       let box = null; if (ladder) { box = lad.get(key); if (!box) lad.set(key, box = [nn, mn, [Infinity, Infinity, Infinity], [-Infinity, -Infinity, -Infinity]]); }
+      // エレベーターの扉 (移植元の見分け: 名前の語に elevator と door/doors、または door/doors があり部品の種類に "/elev/"。StationView3D の BuildGeo)。
+      // 箱と前の向き (部品の局所の +Y を歩く計算の座標に回した xy。移植元 view3d-worker.js 422-434)
+      const dw = w => w.includes('door') || w.includes('doors');
+      const edoor = ((wn.includes('elevator') || wm.includes('elevator')) && (dw(wn) || dw(wm))) || ((dw(wn) || dw(wm)) && /[\\/]elev[\\/]/i.test(mn || ''));
+      let ebox = null;
+      if (edoor) {
+        ebox = edoors.get(key);
+        if (!ebox) { const fx = e[4], fy = -e[6], fl = Math.hypot(fx, fy); edoors.set(key, ebox = [nn || mn, [Infinity, Infinity, Infinity], [-Infinity, -Infinity, -Infinity], fl > 1e-6 ? [+(fx / fl).toFixed(4), +(fy / fl).toFixed(4)] : null]); }
+      }
       if (door) D.fill(1, b / 9, b / 9 + nt);
       for (let t = 0; t < nt; t++) {
         for (let k = 0; k < 3; k++) {
@@ -252,6 +271,7 @@ export function createWalk(env) {
           const X = e[0] * x + e[4] * y + e[8] * z + e[12], Y = e[1] * x + e[5] * y + e[9] * z + e[13], Z = e[2] * x + e[6] * y + e[10] * z + e[14];
           F[b] = X; F[b + 1] = -Z; F[b + 2] = Y; if (Y < minZ) minZ = Y;
           if (box) for (let a = 0; a < 3; a++) { const v = F[b + a]; if (v < box[2][a]) box[2][a] = v; if (v > box[3][a]) box[3][a] = v; }
+          if (ebox) for (let a = 0; a < 3; a++) { const v = F[b + a]; if (v < ebox[1][a]) ebox[1][a] = v; if (v > ebox[2][a]) ebox[2][a] = v; }
           b += 3;
         }
         if ((t & 16383) === 16383 && !(await pause())) return false;
@@ -278,6 +298,7 @@ export function createWalk(env) {
     if (seq !== geoSeq) return false;
     cellReset();
     curBuf = F.buffer; doorTri = D; cur = { ladders: [], shapeLadders, meshes, tris: n, minZ };
+    elevDoors = [...edoors.values()].filter(d => d[1][0] <= d[2][0]).map(d => [d[0], d[1].map(v => +v.toFixed(3)), d[2].map(v => +v.toFixed(3)), d[3]]);
     coarse = { all: out.grid, bigAll: Uint32Array.from(bigs) };
     buildStat = null; buildLadders();
     buildStat = { ms: Math.round(performance.now() - t0), tris: n, meshes: meshes.length, doorTris: D.reduce((s, v) => s + v, 0), ladders: cur.ladders.length, vfloor: vfloorZ, bytes: F.byteLength + D.byteLength + out.grid.items.byteLength + out.grid.keys.byteLength + out.grid.starts.byteLength + bigs.length * 4, boxes: out.grid.keys.length, big: bigs.length };
@@ -442,7 +463,7 @@ export function createWalk(env) {
   // 歩くモード中の操作の説明 (移植元 view3d.html 110-121 の表のうち、船にある操作)
   const WALK_HELP = 'W・S: 前後に歩く　A・D: 左右に歩く　Q・E・ドラッグ: 向きを変える　Shift: 走る ON・OFF　スペース: ジャンプ (前に段があれば、よじ登る)<br>'
     + 'C: しゃがむ　Ctrl: 寝そべる　N: すり抜け ON・OFF　Insert/Delete: 拡大/縮小<br>'
-    + 'はしごのそばで W: 上る / S: 下りる / スペース: 見ている向きの床へ降りる　船の外は見えない床の上を歩けます';
+    + 'はしごのそばで W: 上る / S: 下りる / スペース: 見ている向きの床へ降りる　乗り場に近づく: エレベーター・リフトの行き先の窓 (選ぶと移る。Esc で閉じる)　船の外は見えない床の上を歩けます';
   function updWalkUi() {
     const sn = { stand: '立つ', crouch: 'しゃがむ', prone: '寝そべる' }[stance];
     $('runBtn').textContent = '走る: ' + (run ? 'ON' : 'OFF'); $('runBtn').classList.toggle('on', run);
@@ -510,7 +531,7 @@ export function createWalk(env) {
           const g = groundAt(wpos.x, wpos.y, l[2][2] + STEP); if (g !== null) wpos.z = g;
         }
       }
-      walkCam(); return;
+      walkCam(); showElev(); return;
     }
     const spd = (run ? RUN : WALK) * STANCE[stance].sp * dt;
     if (mv.lengthSq() > 0) {
@@ -538,8 +559,107 @@ export function createWalk(env) {
       if (air && vz <= 0) { const lo = lowestNear(wpos.x, wpos.y); if (lo !== null && z0 >= lo - 0.01 && wpos.z < lo) { wpos.z = lo; air = false; vz = 0; } }
       if (wpos.z < -1000) { air = false; vz = 0; }
     }
-    walkCam();
+    walkCam(); showElev();
   }
+
+  // ===== エレベーター・リフトの行き先の窓 (移植元 view3d.js 479-483・581-648・703-750・802-806 のエレベーターの所) =====
+  // 出す時: 歩いていて乗り場から 2 m 以内に来たとき。行は行き先ごとに 1 つ (名前は行き先の訳)。今いる所の行は「（今の階・閉じる）」で、押すと閉じる。Esc でも閉じる。
+  // 閉じた乗り場・移った先の乗り場では、そこから 3 m 離れるまで、近づいただけでは出さない。
+  // transit: アプリから届いた乗り場 (移植元の cur.transit。座標は船の座標で、移植元の地点の中心 cur.center は 0)。elevDoors: 形から作ったエレベーターの扉 (移植元の cur.elevDoors)
+  let transit = [], elevDoors = [], elevHow = null;
+  let elevPinned = null, tClosed = null;
+  function setTransit(items) { transit = Array.isArray(items) ? items.filter(t => Array.isArray(t) && typeof t[0] === 'string' && Array.isArray(t[1]) && t[1].length >= 3 && t[1].every(Number.isFinite)) : []; }
+  // 乗り場との距離: xy で測り、高さの差が STOP_DZ m を超えるものは遠い扱い
+  const STOP_DZ = 3;
+  const stopDist = (t, q) => { if (Math.abs(t[1][2] - q.z) > STOP_DZ) return Infinity; return Math.hypot(t[1][0] - q.x, t[1][1] - q.y); };
+  function hideTbox(closeAt) { const b = $('tbox'); if (closeAt) tClosed = closeAt; elevPinned = null; b.style.display = 'none'; b.dataset.key = ''; }
+  function tboxRow(list, text, cls, fn) { const b = document.createElement('button'); b.textContent = text; if (cls) b.className = cls; b.onclick = () => { fn(); env.focus(); }; list.appendChild(b); }
+  function showElev(at, pinned) {
+    if (!cur) return;
+    const box = $('tbox'), head = $('tboxHead'), list = $('tboxList');
+    const q = at ? at : wpos, lim = at ? 5 : 2;
+    const all = transit.filter(t => t[0].startsWith('elevator'));
+    if (!pinned && elevPinned) { if (stopDist(elevPinned, wpos) < 5) return; hideTbox(); }
+    if (!pinned && tClosed) { if (stopDist(tClosed, wpos) < 3) return; tClosed = null; }
+    let near = null, nd = Infinity;
+    for (const t of all) { const d = stopDist(t, q); if (d < lim && d < nd) { nd = d; near = t; } }
+    // 船だけ: 今の乗り場は、見つかった乗り場と同じ路線の乗り場のうち、高さのいちばん近いものにする (船は階の間が 4 m ほどで、下の階の乗り場も高さの差 STOP_DZ m 以内に入り、
+    // 乗り場の xy が階ごとに少し違う。Ironclad のエレベーターで、今の階でなく下の階の乗り場が「今の階」になった)
+    if (near) for (const t of all) if (t[3] === near[3] && Math.abs(t[1][2] - q.z) < Math.abs(near[1][2] - q.z)) near = t;
+    if (pinned) { elevPinned = near; tClosed = null; }
+    if (!near) {
+      if (!pinned) { if (box.style.display === 'block') hideTbox(); return; }
+      box.dataset.key = 'none'; list.innerHTML = '';
+      head.textContent = '乗り場が見つかりません';
+      tboxRow(list, 'この 5 m 以内に、データのエレベーターの乗り場が無い（閉じる）', 'cur', () => hideTbox());
+      box.style.display = 'block'; return;
+    }
+    const key = near[0] + near[3] + near[1].join();
+    if (box.dataset.key === key && box.style.display === 'block') return;
+    box.dataset.key = key; list.innerHTML = '';
+    head.textContent = `エレベーター（今: ${near[4]}）`;
+    // 同じ路線の乗り場を高さ (1 m 単位) でまとめる。高さごとに、今の乗り場に xy でいちばん近い乗り場 (同じエレベーター) を使う
+    const byZ = new Map();
+    for (const t of all.filter(t => t[3] === near[3])) {
+      const k2 = Math.abs(t[1][2] - near[1][2]) <= 1 && t[5] === near[5] ? 'cur' : t[5] + '|' + t[1][2].toFixed(0); const d = Math.hypot(t[1][0] - near[1][0], t[1][1] - near[1][1]);
+      const prev = byZ.get(k2); if (!prev || d < prev[1]) byZ.set(k2, [k2 === 'cur' ? near : t, d]);
+    }
+    const rows = [...byZ.values()].map(v => v[0]);
+    const dup = new Map(); for (const t of rows) dup.set(t[4], (dup.get(t[4]) || 0) + 1);
+    const row = t => {
+      const nm = t[4] + (dup.get(t[4]) > 1 ? `（高さ ${t[1][2].toFixed(1)} m）` : '');
+      if (t === near) tboxRow(list, `${nm}（今の階・閉じる）`, 'cur', () => hideTbox(near));
+      else tboxRow(list, nm, '', () => elevMove(near, t));
+    };
+    // 行の並び: 高い順 (移植元の elevOrder の、ハンガーのエレベーターでないときの並び。外部ポート・着陸パッド・マイハンガーの段は船に無い)
+    for (const t of rows.slice().sort((a, b) => b[1][2] - a[1][2])) row(t);
+    if (rows.length <= 1) { const n = document.createElement('div'); n.style.padding = '6px'; n.textContent = '（同じ路線のほかの高さの乗り場が、データに無い）'; list.appendChild(n); }
+    box.style.display = 'block';
+  }
+  // エレベーター: 行き先の扉の向きで立つ所を決める (移植元 view3d.js 703-750)。
+  //   行き先の乗り場に近いエレベーターの扉 (elevDoors。[名前, 箱の低い角, 高い角, 前の向き [fx, fy]]) のうち、
+  //   立つ所 = 扉の箱の中心 + 前の向き × (前の向きでの箱の厚みの半分 + DOOR_STEP m)。そこに行き先の高さの床があればそこに立ち、扉に背を向ける。
+  //   前の向きの側に床が無ければ、反対側に床があればそこ。どちらにも無ければ次の扉へ。前の向きの無い扉は見ない。
+  // 扉は、乗り場から xy で DOOR_NEAR m 以内・高さが乗り場の高さ −ELEV_BAND〜+3 m に掛かるものを、近い順に見る。
+  // 船だけの決まり 10: どの扉にも床が無い (扉の形が船の 3D モデルに無い) ときは、降りる所 (t[7]。ゲームのデータの safeTeleportOffset) の真下の床
+  //   (降りる所の高さ + STEP 以下で、降りる所の高さ −ELEV_BAND 以上) に立ち、向きは乗る前の逆。それも無ければ移植元と同じく乗り場の位置・高さに立つ
+  const ELEV_BAND = 1.5, DOOR_STEP = 0.6, DOOR_NEAR = 6;
+  function elevMove(from, t) { const xyAbs = [wpos.x, wpos.y], yaw0 = wyaw; hideTbox(); elevPlace(t, xyAbs, yaw0); }
+  function elevPlace(t, xyAbs, yaw0) {
+    const tz = t[1][2], sx = t[1][0], sy = t[1][1];
+    const band = g => g !== null && g >= tz - ELEV_BAND ? g : null;
+    {
+      const doors = elevDoors.map(d => { const mx = (d[1][0] + d[2][0]) / 2, my = (d[1][1] + d[2][1]) / 2; return { d, mx, my, dist: Math.hypot(mx - sx, my - sy) }; })
+        .filter(o => o.dist <= DOOR_NEAR && o.d[2][2] >= tz - ELEV_BAND && o.d[1][2] <= tz + 3).sort((a, b) => a.dist - b.dist);
+      let best = null;
+      for (const o of doors) {
+        const f = o.d[3]; if (!f) continue;
+        const half = (Math.abs(f[0]) * (o.d[2][0] - o.d[1][0]) + Math.abs(f[1]) * (o.d[2][1] - o.d[1][1])) / 2;
+        let cand = null;
+        for (const sgn of [1, -1]) {   // 前の向きの側 → 反対側
+          const px = o.mx + sgn * f[0] * (half + DOOR_STEP), py = o.my + sgn * f[1] * (half + DOOR_STEP);
+          const gg = band(groundAt(px, py, tz + STEP)); if (gg === null) continue;
+          cand = { o, px, py, gg, yaw: Math.atan2(py - o.my, px - o.mx) }; break;
+        }
+        if (cand) { best = cand; break; }
+      }
+      if (best) { wpos.set(best.px, best.py, best.gg); wyaw = best.yaw; elevHow = { how: 'door', door: best.o.d[0] }; }
+      else {
+        const s = Array.isArray(t[7]) && t[7].length >= 3 && t[7].every(Number.isFinite) ? t[7] : null;
+        const sg = s ? groundAt(s[0], s[1], s[2] + STEP) : null;
+        if (s && sg !== null && sg >= s[2] - ELEV_BAND) { wpos.set(s[0], s[1], sg); wyaw = yaw0 + Math.PI; elevHow = { how: 'safe' }; }
+        // 扉の床も降りる所の床も見つからないとき: 乗り場の位置・高さに立つ (移植元と同じ)
+        else { wpos.set(sx, sy, tz); wyaw = yaw0 + Math.PI; elevHow = { how: 'none' }; }
+      }
+    }
+    air = false; vz = 0; onLadder = null;
+    hideTbox(t); walkCam();
+  }
+  addEventListener('keydown', e => {
+    if (e.key !== 'Escape' || $('tbox').style.display !== 'block') return;
+    const k = elevPinned; hideTbox(k || undefined);
+    if (!k && cur) { let n = null, nd = 3; for (const t of transit) { const d = stopDist(t, wpos); if (d < nd) { nd = d; n = t; } } if (n) tClosed = n; }
+  });
 
   // ===== ［歩くモード］［走る］［姿勢］［すり抜け］ (移植元 view3d.js 1657-1678) =====
   // 今のカメラの xy のまま、カメラの真下の面に立つ (面が無ければカメラの高さ − 目の高さ)。向きもカメラのまま
@@ -635,7 +755,7 @@ export function createWalk(env) {
       standUnderCamera(); startPlace(); walkCam(); updWalkUi(); $('walkInfo').textContent = run ? '走る' : '歩く';
     } else {
       // 歩くモードを OFF にしても、カメラの位置と向きは変えない (walkCam が船内の見る位置 inside に入れてある)
-      busy = false; $('walkInfo').textContent = '';
+      busy = false; $('walkInfo').textContent = ''; hideTbox();
     }
   }
   $('walkBtn').onclick = () => { setWalk(!walk); env.focus(); };
@@ -648,6 +768,8 @@ export function createWalk(env) {
     low: (x, y) => lowestNear(x, y), setPitch: v => { wpitch = v; walkCam(); }, place: (x, y, z, yaw) => { wpos.set(x, y, z); wyaw = yaw; air = false; vz = 0; onLadder = null; walkCam(); },
     ground: (x, y, z) => groundAt(x, y, z), ceil: (x, y, z) => ceilAt(x, y, z), tall: (x, y, z) => tallObjectAt(x, y, z), gap: (x, y, z) => groundGap(x, y, z), gaps: () => gapLog, seg: (...a) => segHit(...a), blocked: (...a) => blocked(...a), fits: (...a) => fits(...a),
     on: () => walk, busy: () => busy, pos: () => [wpos.x, wpos.y, wpos.z, wyaw, run, stance, air, noclip, onLadder ? onLadder[0] : null], cam, keys, step: dt => walkStep(dt),
+    setTransit, transit: () => transit, elevDoors: () => elevDoors, elevHow: () => elevHow, tbox: () => ({ shown: $('tbox').style.display === 'block', head: $('tboxHead').textContent, rows: [...$('tboxList').querySelectorAll('button')].map(b => b.textContent) }),
+    tboxClick: i => $('tboxList').querySelectorAll('button')[i].click(),
     setDbLadders, vfloor: () => vfloorZ, groundReal: (x, y, z) => groundReal(x, y, z), startHow: () => startHow, seatAt: (x, y, z) => { const s = seatAt(new THREE.Vector3(x, y, z)); return s ? { name: s.name, pos: s.pos.toArray(), points: s.points.map(q => [q.name, q.p.toArray(), q.exit]) } : null; },
     cur: () => cur, stat: () => buildStat, cellCount: () => Object.fromEntries(Object.entries(cells).map(([k, m]) => [k, m.size])), setWalk, geoChanged,
   };

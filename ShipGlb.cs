@@ -37,6 +37,9 @@ internal static class ShipGlb
         // true ならパレットの色 (本体・子・船内のパレットの A・B・C と glass) を材質に当てない (色は材質そのものの色。ガラスの色の決まりは同じ)。
         // 3D の画面の色付けを切る設定の材質の表を作るときだけ (ShipExport.ExportJson。2026-11-05、利用者の指示「"船・装備・武器の 3D は常に色付け" これは設定で切れるようにしてください。」)
         public bool NoPalette;
+        // 足す区画だけの GLB (ShipExport.ExportAddon) のとき: 取り付けられた子の乗り物の区画を、その子のノードの置き方 (船の座標。列優先 16) の下に入れる。
+        // ふつうの船の書き出しでは空 (子の区画は Children の Payload.Interiors で、子のノードの下に入る)
+        public List<(string Name, float[] Matrix, ShipInteriors.Loaded Interiors)> ExtraInteriors = new();
     }
 
     public static void Write(ShipExport.Ctx ctx, Input input, Stream output)
@@ -52,17 +55,26 @@ internal static class ShipGlb
         }
         else scene = new();
         b.AttachBones(input.RootBones, scene);
+        // 灯りの一覧は 1 つ (子の乗り物の区画の灯りが先、船の区画の灯りが後。子の区画の無い船は今までと同じ並び)
+        var lights = new List<ShipInteriors.Light>();
         for (int i = 0; i < input.Children.Count; i++)
         {
             ctx.Ct.ThrowIfCancellationRequested();
-            b.AttachChild(ctx, input.Children[i], scene, input.RootPalette);
+            b.AttachChild(ctx, input.Children[i], scene, input.RootPalette, lights);
             b.MaybeCollect();
             if ((i + 1) % 20 == 0 || i + 1 == input.Children.Count) ctx.Log?.Invoke($"[mem-phase] children {i + 1}/{input.Children.Count}, bin={b.Bin.Len / 1_048_576}MB");
         }
         ctx.Log?.Invoke($"[mem-phase] children done, bin={b.Bin.Len / 1_048_576}MB");
-        var (iscene, lights) = b.AttachInteriors(ctx, input.Interiors, input.RootPalette);
+        var iscene = b.AttachInteriors(ctx, input.Interiors, input.RootPalette, lights);
         ctx.Log?.Invoke($"[mem-phase] interiors done, bin={b.Bin.Len / 1_048_576}MB");
         scene.AddRange(iscene);
+        foreach (var (ename, ematrix, eint) in input.ExtraInteriors)
+        {
+            ctx.Ct.ThrowIfCancellationRequested();
+            var kids = b.AttachInteriors(ctx, eint, input.RootPalette, lights);
+            scene.Add(b.Nodes.Count);
+            b.Nodes.Add(new Node { Name = ename, Matrix = ematrix, Children = kids.Count == 0 ? null : kids });
+        }
 
         // 最初の子に船の名前・パレットの extras (serde_json の Map はキーの順)
         var map = new SortedDictionary<string, string>(StringComparer.Ordinal);
@@ -522,7 +534,7 @@ internal static class ShipGlb
         }
 
         // attach_child_entity
-        public void AttachChild(ShipExport.Ctx ctx, ShipExport.Payload child, List<int> scene, float[][]? fallbackPalette)
+        public void AttachChild(ShipExport.Ctx ctx, ShipExport.Payload child, List<int> scene, float[][]? fallbackPalette, List<ShipInteriors.Light> lights)
         {
             bool hasMesh = child.Mesh.Pos.Length > 0;
             Packed? packed = null;
@@ -576,10 +588,14 @@ internal static class ShipGlb
                 AppendChild(scene.Count > 0 ? scene[0] : 0, childRoot);
             }
             else AppendChild(target, childRoot);
+            // 子が自分で持つ区画: 子のノードの下に入れる (子を単体で書き出したときの、いちばん上の並びと同じ置き方)
+            if (child.Interiors is { } ci)
+                foreach (var n in AttachInteriors(ctx, ci, child.Palette ?? fallbackPalette, lights)) AppendChild(childRoot, n);
         }
 
         // attach_interiors
-        public (List<int> Scene, List<ShipInteriors.Light> Lights) AttachInteriors(ShipExport.Ctx ctx, ShipInteriors.Loaded interiors, float[][]? fallbackPalette)
+        // lights: 灯りの一覧 (ここで足す。ノードの灯りの番号は、この一覧の中の番号)
+        public List<int> AttachInteriors(ShipExport.Ctx ctx, ShipInteriors.Loaded interiors, float[][]? fallbackPalette, List<ShipInteriors.Light> lights)
         {
             var meshCache = new (ShipMeshes.Mesh Mesh, SocpakGlb.MtlFile? Mtl)?[interiors.Cgfs.Count];
             var tried = new bool[interiors.Cgfs.Count];
@@ -589,7 +605,6 @@ internal static class ShipGlb
                 foreach (var (ix, _) in interiors.Containers[ci].Placements) lastUse[ix] = ci;
             int cIndex = -1;
             var packedCache = new Dictionary<(int, string), int>();
-            var lights = new List<ShipInteriors.Light>();
             var scene = new List<int>();
             foreach (var c in interiors.Containers)
             {
@@ -634,7 +649,7 @@ internal static class ShipGlb
                 MaybeCollect();
                 foreach (var (ix, _) in c.Placements) if (lastUse[ix] == cIndex) meshCache[ix] = null;
             }
-            return (scene, lights);
+            return scene;
         }
 
         // 船内の部品の形 (export_cgf_from_path・材質 colors・2 つの箱が 0.01 より違えば NMC を焼き込む)。失敗は null

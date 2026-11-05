@@ -123,7 +123,7 @@ internal static class ShipLadders
     }
 
     // objectContainers の 1 つ: socpak のパスと置き方 (ShipInteriors.ContainerRef と同じ読み方)
-    private static (string File, float[] Pos, float[] Rot)? ContainerRef(DcValue v)
+    internal static (string File, float[] Pos, float[] Rot)? ContainerRef(DcValue v)
     {
         if (DcValue.StrField(v, "fileName") is not { Length: > 0 } file) return null;
         float[] pos = [0, 0, 0], rot = [0, 0, 0];
@@ -146,7 +146,7 @@ internal static class ShipLadders
     }
 
     // 区画の置き方の行列 (列優先。ShipInteriors.ContainerTransform と同じ式 = GLB の interior_<名前> のノードの Matrix)
-    private static float[] ContainerTransform(float[] pos, float[] rotDeg)
+    internal static float[] ContainerTransform(float[] pos, float[] rotDeg)
     {
         float px = ShipInteriors.ToRadians(rotDeg[0]), py = ShipInteriors.ToRadians(rotDeg[1]), pz = ShipInteriors.ToRadians(rotDeg[2]);
         float sx = MathF.Sin(px), cx = MathF.Cos(px), sy = MathF.Sin(py), cy = MathF.Cos(py), sz = MathF.Sin(pz), cz = MathF.Cos(pz);
@@ -154,11 +154,11 @@ internal static class ShipLadders
     }
 
     // 行列 (列優先) を点 (w = 1)・向き (w = 0) に当てる
-    private static double[] Apply(float[] m, double x, double y, double z, double w) =>
+    internal static double[] Apply(float[] m, double x, double y, double z, double w) =>
         [m[0] * x + m[4] * y + m[8] * z + m[12] * w, m[1] * x + m[5] * y + m[9] * z + m[13] * w, m[2] * x + m[6] * y + m[10] * z + m[14] * w];
 
     // 四元数 (w, x, y, z) で向きを回す
-    private static double[] Rotate(double[] q, double vx, double vy, double vz)
+    internal static double[] Rotate(double[] q, double vx, double vy, double vz)
     {
         double w = q[0], x = q[1], y = q[2], z = q[3];
         double n = Math.Sqrt(w * w + x * x + y * y + z * z);
@@ -225,11 +225,46 @@ internal static class ShipLadders
         return res;
     }
 
+    // socpak の中の .soc のエンティティ (エンティティの入れ物の直下の Entity) を順に渡す (LoadSocpakLadders と同じ読み方。船のエレベーター ShipTransit が使う)
+    internal static void ForEachEntity(P4kArchive p4k, string socpakPath, Action<CryXmlB, int, Dictionary<string, string>> onEntity)
+    {
+        var norm = socpakPath.Replace('/', '\\');
+        var p4kPath = norm.ToLowerInvariant().StartsWith(@"data\", StringComparison.Ordinal) ? norm : @"Data\" + norm;
+        int e = p4k.Find(p4kPath);
+        if (e < 0) throw new InvalidDataException($"socpak not found: {p4kPath}");
+        var inner = P4kArchive.FromBytes(p4k.Read(e));
+        for (int i = 0; i < inner.Count; i++)
+        {
+            if (!inner.Name(i).ToLowerInvariant().EndsWith(".soc", StringComparison.Ordinal)) continue;
+            byte[] soc;
+            try { soc = inner.Read(i); }
+            catch (Exception ex) when (ShipExport.IsLoadError(ex)) { continue; }
+            CryChunkFile cf;
+            try { cf = CryChunkFile.Parse(soc); }
+            catch (InvalidDataException) { continue; }
+            if (cf.IsIvo) continue;
+            foreach (var c in cf.Chunks)
+            {
+                if (c.Type != CryChunkFile.CrChCryXmlB) continue;
+                CryXmlB x;
+                try { x = CryXmlB.Parse(cf.ChunkBytes(c)); }
+                catch (InvalidDataException) { continue; }
+                int root = x.Root, container = -1;
+                var rootTag = x.Tag(root);
+                foreach (var ch in x.Children(root)) { var t = x.Tag(ch); if (t == "Entities" || t == "SCOC_Entities") { container = ch; break; } }
+                if (container < 0 && (rootTag == "Entities" || rootTag == "SCOC_Entities")) container = root;
+                if (container < 0) continue;
+                foreach (var ent in x.Children(container))
+                    if (x.Tag(ent) == "Entity") onEntity(x, ent, x.AttributeMap(ent));
+            }
+        }
+    }
+
     private static double? Num(Dictionary<string, string> a, string key) =>
         a.TryGetValue(key, out var s) && double.TryParse(s.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var v) && !double.IsNaN(v) && !double.IsInfinity(v) ? v : null;
 
     // "a,b,c" を数の並びに (足りない所・読めない所は既定の値)
-    private static double[] Csv(string s, double[] def)
+    internal static double[] Csv(string s, double[] def)
     {
         var res = (double[])def.Clone();
         var parts = s.Split(',');
