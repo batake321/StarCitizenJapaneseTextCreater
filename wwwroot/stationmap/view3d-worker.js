@@ -9,13 +9,19 @@
 //   升: 場所の座標で固定の格子。1 辺 CELL m の立方体 (x・y・z とも floor(場所の座標 / CELL))。
 //   部品の大きさ = 置かれた部品の箱 (区画のファイルの部品の箱の 8 隅を場所の座標にした箱) のいちばん長い辺。組は 小 (0)・中 (1)・大 (2)・大きな物体 (3)。境は画面の側が渡す (sizes = [小と中, 中と大, 大きな物体])。
 //   1 つの部品は、箱の中心の入る升 1 つに入れる (升をまたぐ部品も丸ごとその升のかたまりに入る。三角形は切らない)。
-//   外装・内装: 区画 (socpak) のパスの語で決める (socInterior。前の「読む部品を選ぶ」と同じ決まり)。かたまりの種類 cls = 大きさの組 + (内装なら 4)。
+//   外装・内装: 区画 (socpak) のパスの語で決める (socInterior。前の「読む部品を選ぶ」と同じ決まり)。かたまりの種類 cls = 大きさの組 + (内装なら 4) + (下の KEEP なら 8) + (場所の全部の大きな物体なら 16)。
+//   KEEP (8): 小の組の部品のうち、前の「読む部品を選ぶ」で大きさ・距離に関係なく残していた部品 (keepAlways: エレベーターの扉・はしご・階段・判定の色のある部品・上下が逆の重力の範囲に掛かる部品)。
+//     画面の側は、速さに関係なく (走っている間も) 読む (2026-11-06、親の決定: 前の版の動きを戻す。走っている間に 1 m 未満の床の部品の所で床が無くなるため)。距離の決まりは小の組と同じ
+//   場所の全部の大きな物体 (16): アプリが場所ごとに 1 回作って保存する「大きな物体の境以上の部品だけ」の区画のファイル (StationView3D.Session.BuildBigAsync) を { type:'big' } で受け取り、
+//     今の地点の索引に無い置かれた所の部品 (= アプリが取り出した立方体に掛からない区画) を、大きな物体の組のかたまりとして足す (地点の区画と同じ置かれた所は二重に出さない)。
+//     判定の色はアプリが付けていない (0)。その区画に近づいたときは、地点の取り出し直しで地点の索引に入り、そちらの判定の色つきの形に替わる
 // 受け取る:
 //   { type:'build', id, og, base (地点の置き場の URL), region (region.json), o (座標の原点 = 画面の側の cur.center), c・r (地点の立方体の中心・半径), keys: { col, ocol, labk }, names, pal, site, sizes }
 //     → { type:'progress', id, done, total } (用意した区画のファイルの数)、{ type:'done', id, index, textures, texGen, ladders, elevDoors, stairs, fz, fa, lightParts, entParts, stat, times }
 //     (index = { keys: ['ix,iy,iz,cls', …], cells (Int32Array x3), cls (Uint8Array), tris (Uint32Array), parts (Uint32Array), hash (Uint32Array) }。hash = かたまりの中身 (部品の並び) の印。
 //      地点を読み直しても、同じ鍵で hash が同じなら、画面の側はそのかたまりを作り直さない)
 //   { type:'sizes', id, og, sizes } → { type:'index', id, index, stat } (部品の大きさの境を変えたとき。索引を分け直す)
+//   { type:'big', id, og, base, region, thr, site, pal } → { type:'bigReady', id, og, index, textures, stat } (場所の全部の大きな物体。読み込んで持ち、今の地点の索引を分け直して返す)
 //   { type:'chunk', id, og, key } → { type:'chunk', id, og, key, hash, cls, texGen, F, ID, LB, FL, UV, TX, offs, parts, labN, box, col: { g2, g16, big } } (無ければ { type:'chunk', id, og, key, missing: true })
 //     F = 三角形の位置 (原点 o からの相対。float32 x9)。COLK の種類ごとに offs[k] = [F の中の位置, 長さ]。種類の中は画像の番号の順 (-1 が先)。
 //     ID = 三角形 → かたまりの中の部品の番号、LB = 三角形の判定の色 (LABK の番号)、UV・TX = UV (x6) と画像の番号 (無ければ null)、box[k] = 種類ごとの箱 [lo, hi]。
@@ -54,6 +60,7 @@ const COS_WALK_INV = Math.cos(46 * Math.PI / 180);
 const UP = 1, DOWN = 2, DOOR = 4, FLR = 8, OK1 = 16, OK2 = 32, BIG2 = 64, BIG16 = 64;
 let GEO = new Map();   // 区画 (socpak) のパス → 読んだ区画のファイル (今の地点の分。次の地点で同じ区画・同じ置かれた所がそろっていれば使い回す)
 let R = null;          // 今の地点 (索引)
+let BIG = null;         // 場所の全部の大きな物体 (地点と同じ形の持ち物 + site・pal・thr・textures)
 let TEXGEN = 0;        // 画像の番号の並びの代 (region.json の textures の並びが前の地点と合わなくなるたびに増える。かたまりに付けて返す)
 async function fetchGeo(url) {
   const resp = await fetch(url);
@@ -139,15 +146,29 @@ function partGeom(Rg, ri) {
 // 部品の大きさの境 sizes で、部品を「升 × 大きさの組 × 外装・内装」のかたまりに分ける (索引)。三角形の無い部品は入れない
 function bucket(Rg, sizes) {
   const [s1, s2, s3] = sizes; const B = new Map(); const BX = Rg.BX;
-  const stat = { parts: [0, 0, 0, 0, 0, 0, 0, 0], tris: [0, 0, 0, 0, 0, 0, 0, 0] };
+  // stat の並びは cls & 7 (外装 小・中・大・大きな物体、内装 小・中・大・大きな物体)。keep = KEEP の部品、big = 場所の全部の大きな物体から足した部品 [部品, 三角形]
+  const stat = { parts: [0, 0, 0, 0, 0, 0, 0, 0], tris: [0, 0, 0, 0, 0, 0, 0, 0], keep: [0, 0], big: [0, 0] };
+  const put = (src, ri, cls, nt) => {
+    const BX = src.BX, o = ri * 6;
+    const ix = Math.floor((BX[o] + BX[o + 3]) / 2 / CELL), iy = Math.floor((BX[o + 1] + BX[o + 4]) / 2 / CELL), iz = Math.floor((BX[o + 2] + BX[o + 5]) / 2 / CELL);
+    const key = ix + ',' + iy + ',' + iz + ',' + cls;
+    let a = B.get(key); if (!a) B.set(key, a = { ix, iy, iz, cls, list: [], tris: 0, hash: 0, rg: src });
+    a.list.push(ri); a.tris += nt; stat.parts[cls & 7]++; stat.tris[cls & 7] += nt;
+  };
   for (let ri = 0; ri < Rg.n; ri++) {
     const cd = Rg.cand[Rg.CI[ri]], nt = cd.g.parts[Rg.PI[ri]][5]; if (!nt) continue;
     const o = ri * 6, size = Math.max(BX[o + 3] - BX[o], BX[o + 4] - BX[o + 1], BX[o + 5] - BX[o + 2]);
-    const cls = (size >= s3 ? 3 : size >= s2 ? 2 : size >= s1 ? 1 : 0) | (cd.interior ? 4 : 0);
-    const ix = Math.floor((BX[o] + BX[o + 3]) / 2 / CELL), iy = Math.floor((BX[o + 1] + BX[o + 4]) / 2 / CELL), iz = Math.floor((BX[o + 2] + BX[o + 5]) / 2 / CELL);
-    const key = ix + ',' + iy + ',' + iz + ',' + cls;
-    let a = B.get(key); if (!a) B.set(key, a = { ix, iy, iz, cls, list: [], tris: 0, hash: 0 });
-    a.list.push(ri); a.tris += nt; stat.parts[cls]++; stat.tris[cls] += nt;
+    let cls = (size >= s3 ? 3 : size >= s2 ? 2 : size >= s1 ? 1 : 0) | (cd.interior ? 4 : 0);
+    if ((cls & 3) === 0 && Rg.keep[ri]) { cls |= 8; stat.keep[0]++; stat.keep[1] += nt; }
+    put(Rg, ri, cls, nt);
+  }
+  // 場所の全部の大きな物体: 同じ場所・同じ色付けの物だけ。今の地点の索引にある置かれた所の部品は足さない。大きさが境 s3 以上の部品だけ
+  const Bg = BIG && BIG.site === Rg.site && BIG.pal === Rg.pal ? BIG : null;
+  if (Bg) for (let ri = 0; ri < Bg.n; ri++) {
+    const cd = Bg.cand[Bg.CI[ri]]; if (Rg.instCi.has(cd.inst[0])) continue;
+    const nt = cd.g.parts[Bg.PI[ri]][5]; if (!nt) continue;
+    const o = ri * 6, X = Bg.BX, size = Math.max(X[o + 3] - X[o], X[o + 4] - X[o + 1], X[o + 5] - X[o + 2]); if (size < s3) continue;
+    put(Bg, ri, 3 | (cd.interior ? 4 : 0) | 16, nt); stat.big[0]++; stat.big[1] += nt;
   }
   // 中身の印 (FNV-1a): 色付け・部品 (インスタンスの番号と部品の番号) の並び
   const n = B.size, keys = new Array(n), cells = new Int32Array(n * 3), cls = new Uint8Array(n), tris = new Uint32Array(n), parts = new Uint32Array(n), hash = new Uint32Array(n);
@@ -155,7 +176,8 @@ function bucket(Rg, sizes) {
   for (const [key, a] of B) {
     let h = Rg.pal ? 0x811c9dc5 : 0x9dc5811c;
     const mix = v => { for (let s = 0; s < 32; s += 8) { h ^= (v >>> s) & 255; h = Math.imul(h, 0x01000193); } };
-    for (const ri of a.list) { mix(Rg.cand[Rg.CI[ri]].inst[0] | 0); mix(Rg.PI[ri]); }
+    const src = a.rg; if (src !== Rg) mix(0xB16);
+    for (const ri of a.list) { mix(src.cand[src.CI[ri]].inst[0] | 0); mix(src.PI[ri]); }
     a.hash = h >>> 0;
     keys[q] = key; cells[q * 3] = a.ix; cells[q * 3 + 1] = a.iy; cells[q * 3 + 2] = a.iz; cls[q] = a.cls; tris[q] = a.tris; parts[q] = a.list.length; hash[q] = a.hash; q++;
   }
@@ -221,7 +243,7 @@ function buildChunk(Rg, key) {
   const bk = Rg.buckets.get(key); if (!bk) return null;
   const COLK = Rg.COLK, LABK = Rg.LABK, names = Rg.names, o = Rg.o;
   const baseN = {}, texCnt = {}; for (const k of COLK) { baseN[k] = 0; texCnt[k] = new Map(); }
-  const geo = bk.list.map(ri => partGeom(Rg, ri));
+  const geo = bk.list.map(ri => partGeom(bk.rg, ri));
   let anyUv = false;
   for (const s of geo) {
     const p = s.p, k = catOf(p); baseN[k] += p[5];
@@ -263,7 +285,8 @@ function buildChunk(Rg, key) {
     parts.push([cd.inst[0], p[0], k, Object.entries(cnt).map(([kk, n]) => `${names[kk]} ${n}`).join(', ') || '歩ける面に色なし', sp, '', pi]);
   }
   const col = buildCol(F, nTri, FL);
-  const msg = { type: 'chunk', key, hash: bk.hash, cls: bk.cls, texGen: Rg.texGen, F, ID, LB, FL, UV, TX, offs, parts, labN, box, col };
+  // big: 場所の全部の大きな物体のかたまり (画像の番号は、大きな物体の textures の番号)
+  const msg = { type: 'chunk', key, hash: bk.hash, cls: bk.cls, texGen: Rg.texGen, big: bk.rg !== Rg, F, ID, LB, FL, UV, TX, offs, parts, labN, box, col };
   const tr = [F.buffer, ID.buffer, LB.buffer, FL.buffer, col.g2.keys.buffer, col.g2.starts.buffer, col.g2.items.buffer, col.g16.keys.buffer, col.g16.starts.buffer, col.g16.items.buffer, col.big.buffer];
   if (UV) tr.push(UV.buffer, TX.buffer);
   return { msg, tr };
@@ -404,11 +427,15 @@ async function build(m) {
   // 地点の全体で使うもの (部品の形以外の仕組みが使う。どのかたまりを読んでいるかに関係なく、地点の全部の部品から作る):
   //   はしご・エレベーターの扉・階段の箱、判定の床の高さと広さ (フロアの一覧 fz・fa)、名前に light のある部品の名前
   const ladders = [], elevDoors = [], stairs = [], fz = [], fa = [], lightParts = new Set();
+  // KEEP の印 (上の「升ごとに持つ形」の KEEP。前の keepAlways と同じ決まり: エレベーターの扉・はしご・階段 (高さは見ない)・判定の色のある部品・上下が逆の重力の範囲の箱に掛かる部品)
+  const keep = Rg.keep = new Uint8Array(n);
   for (let ri = 0; ri < n; ri++) {
     const cd = cand[CI[ri]], pi = PI[ri], g = cd.g, p = g.parts[pi], nm = metaOf(p);
     if (nm.light) lightParts.add(p[0]);
     const isLadder = nm.ladder, isElevDoor = !!p[9], isStair = nm.stair;
     const q = ri * 6;
+    keep[ri] = isElevDoor || isLadder || isStair || new Uint8Array(g.buf, g.base + cd.ii[1] + g.triStart[pi], p[5]).some(v => v) ||
+      upVols.some(v => BX[q] <= v.hi[0] && BX[q + 3] >= v.lo[0] && BX[q + 1] <= v.hi[1] && BX[q + 4] >= v.lo[1] && BX[q + 2] <= v.hi[2] && BX[q + 5] >= v.lo[2]) ? 1 : 0;
     let floorish = FLOOR2 > 0 && new Uint8Array(g.buf, g.base + cd.ii[1] + g.triStart[pi], p[5]).includes(FLOOR2);
     // 上下が逆の重力の範囲の箱に掛かる部品は、判定の色が無くても床になりうる
     if (!floorish && FLOOR2 > 0) floorish = upVols.some(v => BX[q] - OUT_EPS <= v.hi[0] && BX[q + 3] + OUT_EPS >= v.lo[0] && BX[q + 1] - OUT_EPS <= v.hi[1] && BX[q + 4] + OUT_EPS >= v.lo[1] && BX[q + 2] - OUT_EPS <= v.hi[2] && BX[q + 5] + OUT_EPS >= v.lo[2]);
@@ -450,6 +477,25 @@ async function build(m) {
   self.postMessage({ type: 'done', id, index, textures, texGen, ladders, elevDoors, stairs, fz, fa, lightParts: [...lightParts], entParts, stat, times },
     [index.cells.buffer, index.cls.buffer, index.tris.buffer, index.parts.buffer, index.hash.buffer]);
 }
+// 場所の全部の大きな物体 (アプリの BuildBigAsync が書いた region.json と g/<番号>.bin) を読む。部品は、置かれた所の箱 (場所の座標) のいちばん長い辺が thr 以上で、
+// x の幅が 5000 m 未満のもの (地点の区画の選び方と同じ幅の決まり) だけを持つ
+async function loadBig(m) {
+  const { base, region, thr } = m;
+  const cand = [], CI = [], PI = [], BXs = [], files = new Map();
+  for (const inst of region.instances || []) {
+    let g = files.get(inst[1]); if (!g) { g = await fetchGeo(base + region.geos[inst[1]]); files.set(inst[1], g); }
+    const A = inst[2], ii = g.inst.get(inst[0]); if (!ii) continue;
+    const ci = cand.length; let any = false;
+    for (let pi = 0; pi < g.parts.length; pi++) {
+      const p = g.parts[pi], bl = [Infinity, Infinity, Infinity], bh = [-Infinity, -Infinity, -Infinity];
+      for (const x of [p[6][0], p[7][0]]) for (const y of [p[6][1], p[7][1]]) for (const z of [p[6][2], p[7][2]]) for (let a = 0; a < 3; a++) { const v = A[a * 4] * x + A[a * 4 + 1] * y + A[a * 4 + 2] * z + A[a * 4 + 3]; if (v < bl[a]) bl[a] = v; if (v > bh[a]) bh[a] = v; }
+      if (Math.max(bh[0] - bl[0], bh[1] - bl[1], bh[2] - bl[2]) < thr || bh[0] - bl[0] >= 5000) continue;
+      CI.push(ci); PI.push(pi); BXs.push(...bl, ...bh); any = true;
+    }
+    if (any) cand.push({ inst, g, ii, A, interior: socInterior(inst[5] || '') });
+  }
+  return { site: m.site || '', pal: !!m.pal, thr, textures: region.textures || [], cand, n: CI.length, CI: Uint32Array.from(CI), PI: Uint32Array.from(PI), BX: Float64Array.from(BXs), upVols: [], FLOOR2: R ? R.FLOOR2 : -1 };
+}
 // 前の形の保存 (解析の結果の丸ごとの保存。OPFS の w-<鍵>\) を消す。全部消せたら 0、分からなければ null
 async function wpurge() {
   try {
@@ -466,6 +512,15 @@ self.onmessage = async e => {
   try {
     if (m.type === 'wpurge') { self.postMessage({ type: 'wstat', id: m.id, used: await wpurge() }); return; }
     if (m.type === 'build') { await build(m); return; }
+    if (m.type === 'big') {
+      const t0 = performance.now(), Bg = await loadBig(m);
+      BIG = Bg;
+      if (!R || R.og !== m.og) { self.postMessage({ type: 'bigReady', id: m.id, og: m.og, stale: true, textures: Bg.textures }); return; }
+      const { index, stat } = bucket(R, R.sizes);
+      stat.bigAll = Bg.n; stat.bigLoad = (performance.now() - t0) / 1000;
+      self.postMessage({ type: 'bigReady', id: m.id, og: m.og, index, textures: Bg.textures, stat }, [index.cells.buffer, index.cls.buffer, index.tris.buffer, index.parts.buffer, index.hash.buffer]);
+      return;
+    }
     if (m.type === 'sizes') {
       if (!R || R.og !== m.og) { self.postMessage({ type: 'index', id: m.id, stale: true }); return; }
       const { index, stat } = bucket(R, m.sizes);

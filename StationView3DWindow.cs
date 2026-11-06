@@ -135,6 +135,8 @@ public sealed class StationView3DView : Grid
         _idleTimer?.Dispose(); _idleTimer = null;
         _prefetchCts?.Cancel();
         ReleaseLeases();
+        _bigCts?.Cancel();
+        if (_bigLease is { } bl) { StationView3DCache.Current.Release(bl); _bigLease = null; }
         try { _web.Dispose(); } catch { }
         DeleteTemp();
         _session = null;
@@ -327,6 +329,7 @@ public sealed class StationView3DView : Grid
                 await NoteMessageAsync(type, r);
                 return;
             }
+            if (type == "bigGet") { await BigGetAsync(r); return; }
             if (type != "region" || _session == null || _extract == null || _extractPlain == null) return;
             // pal: 色付け (場所のパレットの色) を当てるか (ビューアの右上のスイッチ「色付け」。無ければ当てる)
             var palette = !(r.TryGetProperty("pal", out var pv) && pv.ValueKind == JsonValueKind.False);
@@ -477,6 +480,64 @@ public sealed class StationView3DView : Grid
             App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」のコメントの印 ({type}) を扱えませんでした: {ex.Message}");
             if (!_closed) Post(new { type = "noteError", message = ex.Message });
         }
+    }
+
+    // ===== 場所の全部の大きな物体 (2026-11-06、利用者の指示「距離に関係なく大きなびったいは書いた方がいいのかも」。親の決定) =====
+    // ビューアの {type:'bigGet', site, pal, s3}: 保存 (StationView3DCache の FindBig。境が s3 以下のもの) があればそれを、無ければ裏で作って (Session.BuildBigAsync。場所ごとに 1 回) 保存し、
+    // {type:'bigReady', site, pal, s3 (作った境), base} を返す。作っている間もビューアは今のまま動く (待たない)。地点を作っている間 (_viewerBusy) は区画の取り出しを待つ。
+    // 作るのにかかった時間はログに 1 行出す。保存しない設定・保存できないとき (上限・空き) は一時の置き場に作り、窓を閉じたら消す
+    private CancellationTokenSource? _bigCts;
+    private string? _bigLease, _bigBuilding;
+    private int _bigSeq;
+    private async Task BigGetAsync(JsonElement r)
+    {
+        var site = r.TryGetProperty("site", out var sv) ? sv.GetString() ?? "" : "";
+        var palette = !(r.TryGetProperty("pal", out var pv) && pv.ValueKind == JsonValueKind.False);
+        var s3 = r.TryGetProperty("s3", out var tv) && tv.TryGetDouble(out var t3) && t3 >= 0 ? t3 : 20;
+        var session = site.Length == 0 ? _session : _hangarSessions.GetValueOrDefault(site);
+        var extract = palette ? _extract : _extractPlain;
+        if (session == null || extract == null) { Post(new { type = "bigError", site, pal = palette, message = "用意が終わっていません" }); return; }
+        var cache = StationView3DCache.Current;
+        var siteKey = site.Length == 0 ? _record : site;
+        var layoutId = LayoutIdOf(palette);
+        if (cache.Enabled && cache.FindBig(siteKey, _p4kKey, layoutId, s3, out var thr, out var hkey) is { } hit)
+        {
+            if (_bigLease is { } old) cache.Release(old);
+            _bigLease = hkey;
+            Post(new { type = "bigReady", site, pal = palette, s3 = thr, @base = UrlOf(hit.Dir), cached = true });
+            return;
+        }
+        // 同じものを作っている最中なら、そのまま待つ (終わったら返す)。別のもの (場所・色付け・境が違う) を作っていたら、やめて作り直す
+        var want = $"{siteKey}|{layoutId}|{s3.ToString("R", System.Globalization.CultureInfo.InvariantCulture)}";
+        if (_bigBuilding == want) return;
+        _bigCts?.Cancel();
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+        _bigCts = cts; _bigBuilding = want;
+        var key = StationView3DCache.KeyOfBig(siteKey, _p4kKey, layoutId, s3);
+        var stage = cache.Enabled && cache.CanStore(PrefetchEstimateBytes) ? cache.BeginStage(key) : null;
+        var dir = stage ?? Path.Combine(_tempDir, $"big{++_bigSeq}");
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            async Task Pause(CancellationToken ct) { while (await Dispatcher.InvokeAsync(() => _viewerBusy)) await Task.Delay(500, ct); }
+            var st = await Task.Run(() => session.BuildBigAsync(s3, dir, extract, AcquireAsync, Pause, cts.Token), cts.Token);
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」の場所の全部の大きな物体 (境 {s3} m) を作りました: {sw.Elapsed.TotalSeconds:F1} 秒・区画 {st.Socpaks} のうち {st.Kept}・部品 {st.Parts}・{st.Bytes / 1048576.0:F0} MB");
+            var served = dir;
+            if (stage != null && cache.Commit(stage, key, siteKey + StationView3DCache.BigSuffix, _p4kKey, layoutId, [s3], 0, st.Socpaks, 0) is { } saved)
+            {
+                if (_bigLease is { } old) cache.Release(old);
+                _bigLease = key; served = saved.Dir;
+            }
+            if (!_closed && ReferenceEquals(_bigCts, cts)) Post(new { type = "bigReady", site, pal = palette, s3, @base = UrlOf(served), seconds = sw.Elapsed.TotalSeconds });
+        }
+        catch (OperationCanceledException) { if (stage != null) StationView3DCache.TryDelete(stage); }
+        catch (Exception ex)
+        {
+            if (stage != null) StationView3DCache.TryDelete(stage);
+            App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」の場所の全部の大きな物体を作れませんでした: {ex}");
+            if (!_closed) Post(new { type = "bigError", site, pal = palette, message = ex.Message });
+        }
+        finally { if (ReferenceEquals(_bigCts, cts)) _bigBuilding = null; }
     }
 
     // ===== 保存したものの手放し・先読み (上の説明) =====

@@ -89,6 +89,37 @@ internal sealed class StationView3DCache
 
     public string DirOf(string key) => Path.Combine(_root, key);
 
+    // ===== 場所の全部の大きな物体 (StationView3D.Session.BuildBigAsync の結果。2026-11-06) =====
+    // 地点と同じ置き場・上限・捨て方で持つ。鍵は、場所 (site) の後ろに BigSuffix を付け、中心の代わりに [境 (m)]・半径 0 にしたもの
+    public const string BigSuffix = "|big";
+    public static string KeyOfBig(string site, string p4kKey, string layoutId, double threshold) => KeyOf(site + BigSuffix, p4kKey, layoutId, [threshold], 0);
+    // 境が maxThreshold 以下の保存のうち、境のいちばん大きいもの (部品のいちばん少ないもの) を返す (使い終わるまで消されない。Release を呼ぶ)。無ければ null
+    public Hit? FindBig(string site, string p4kKey, string layoutId, double maxThreshold, out double threshold, out string key)
+    {
+        threshold = 0; key = "";
+        try
+        {
+            if (!Directory.Exists(_root)) return null;
+            string? best = null; double bt = double.MinValue;
+            foreach (var d in Directory.GetDirectories(_root))
+            {
+                var name = Path.GetFileName(d);
+                if (name.Contains(".tmp-", StringComparison.Ordinal) || name.Contains(".del-", StringComparison.Ordinal)) continue;
+                var mp = Path.Combine(d, MetaName); if (!File.Exists(mp)) continue;
+                Meta? m;
+                try { m = JsonSerializer.Deserialize<Meta>(File.ReadAllBytes(mp)); } catch (JsonException) { continue; }
+                if (m == null || m.Version != Version || m.Site != site + BigSuffix || m.P4k != p4kKey || m.Layout != layoutId || m.R != 0 || m.Center.Length != 1) continue;
+                var t = m.Center[0];
+                if (t <= maxThreshold && t > bt) { bt = t; best = name; }
+            }
+            if (best == null) return null;
+            var hit = TryGet(best, site + BigSuffix, p4kKey, layoutId, [bt], 0);
+            if (hit != null) { threshold = bt; key = best; }
+            return hit;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+    }
+
     private sealed class Meta
     {
         public string Version { get; set; } = "";

@@ -1545,6 +1545,83 @@ internal static class StationView3D
             return st;
         }
 
+        // ===== 場所の全部の大きな物体 (2026-11-06、利用者の指示「距離に関係なく大きなびったいは書いた方がいいのかも」「開けたとこでも150m 以上先は逆に建物など大まかなものが取れた方がいいし」。親の決定) =====
+        // 場所の全部の区画 (置き方の一覧の全インスタンス) から、置かれた所の部品の箱 (部品の箱の 8 隅を場所の座標にした箱) のいちばん長い辺が threshold m 以上で、x の幅が 5000 m 未満の部品だけを、
+        // 地点と同じ形 (region.json と g\NNNN.bin) で outDir に書く。ビューアの解析の糸が、地点の区画に無い置かれた所の分を、距離に関係なく出す (view3d-worker.js の loadBig)。
+        //   区画のファイルの部品は、どこかの置かれた所で境以上になる部品だけ (BuildGeo をその部品だけで通す)。判定の色は付けない (0。ComputeInst を通さない。
+        //   その区画に近づけば地点の取り出しで地点の区画に入り、判定の色つきの形に替わる)。textures は書いた時点のこの Session の画像の一覧 (ビューアは大きな物体の分を別に持つ)。
+        //   区画は 1 つずつ順に取り出す (pause: 地点を作っている間は待つ。acquire: 取り出しの枠)。部品の箱は使い回しの置き場 "b:" に置き (地点の取り出しと共用)、形は置き場に置かない
+        //   (地点の形を押し出さないため)。部品の箱が置き場にあって、どの置かれた所でも境以上の部品が無ければ取り出さない
+        public async Task<(int Socpaks, int Kept, int Parts, long Bytes)> BuildBigAsync(double threshold, string outDir,
+            Extractor extract, Func<CancellationToken, Task<IDisposable>> acquire, Func<CancellationToken, Task> pause, CancellationToken ct)
+        {
+            var bySoc = Layout.GroupBy(i => i.Socpak, StringComparer.Ordinal).ToList();
+            if (Directory.Exists(outDir)) Directory.Delete(outDir, true);
+            Directory.CreateDirectory(Path.Combine(outDir, "g"));
+            // 置かれた所 A で、部品の箱 b (socpak の枠) が境以上か
+            bool Big(double[] b, double[] A)
+            {
+                double[] bl = [double.MaxValue, double.MaxValue, double.MaxValue], bh = [double.MinValue, double.MinValue, double.MinValue];
+                foreach (var x in new[] { b[0], b[3] }) foreach (var y in new[] { b[1], b[4] }) foreach (var z in new[] { b[2], b[5] })
+                    for (int a = 0; a < 3; a++) { var v = A[a * 4] * x + A[a * 4 + 1] * y + A[a * 4 + 2] * z + A[a * 4 + 3]; if (v < bl[a]) bl[a] = v; if (v > bh[a]) bh[a] = v; }
+                return Math.Max(bh[0] - bl[0], Math.Max(bh[1] - bl[1], bh[2] - bl[2])) >= threshold && bh[0] - bl[0] < 5000;
+            }
+            var instRows = new List<object>();
+            var geos = new List<string>();
+            int kept = 0, parts = 0; long bytes = 0;
+            try
+            {
+                for (int gi = 0; gi < bySoc.Count; gi++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var g = bySoc[gi];
+                    geos.Add("");
+                    var bkey = "b:" + g.Key;
+                    if (CacheGet<double[][]>(bkey) is { } pb0 && !g.Any(inst => pb0.Any(b => Big(b, inst.A)))) continue;
+                    await pause(ct);
+                    IReadOnlyList<SourcePart>? src;
+                    using (await acquire(ct)) src = await extract(g.Key, ct);
+                    if (src is not { Count: > 0 }) continue;
+                    var pb = PartBoxesLocal(src);
+                    CachePut(bkey, pb, pb.Length * 48L + 64, out _);
+                    var keep = Enumerable.Range(0, src.Count).Where(pi => g.Any(inst => Big(pb[pi], inst.A))).ToList();
+                    if (keep.Count == 0) continue;
+                    var geo = BuildGeo(keep.Select(pi => src[pi]).ToList(), TexIndex);
+                    var nTri = geo.Parts.Sum(p => p.N);
+                    var calcs = new List<(LayoutInst Inst, InstCalc Calc)>();
+                    foreach (var inst in g)
+                    {
+                        if (!keep.Any(pi => Big(pb[pi], inst.A))) continue;
+                        // 置かれた所の箱 (書いた部品の箱の 8 隅を場所の座標にした箱)
+                        double[] lo = [double.MaxValue, double.MaxValue, double.MaxValue], hi = [double.MinValue, double.MinValue, double.MinValue];
+                        foreach (var b in geo.PartBoxes)
+                            foreach (var x in new[] { b[0], b[3] }) foreach (var y in new[] { b[1], b[4] }) foreach (var z in new[] { b[2], b[5] })
+                                for (int a = 0; a < 3; a++) { var v = inst.A[a * 4] * x + inst.A[a * 4 + 1] * y + inst.A[a * 4 + 2] * z + inst.A[a * 4 + 3]; lo[a] = Math.Min(lo[a], v); hi[a] = Math.Max(hi[a], v); }
+                        calcs.Add((inst, new InstCalc { Lab = new byte[nTri], Lo = lo, Hi = hi }));
+                    }
+                    if (calcs.Count == 0) continue;
+                    geos[gi] = $"g/{gi:D4}.bin";
+                    bytes += WriteSocpakFile(Path.Combine(outDir, "g", $"{gi:D4}.bin"), geo, calcs);
+                    foreach (var (inst, ic) in calcs) instRows.Add(new object[] { inst.Index, gi, inst.A, R3(ic.Lo), R3(ic.Hi), inst.Socpak });
+                    kept++; parts += keep.Count;
+                }
+                // 画像の一覧 (BuildRegionAsync の textures と同じ書き方)
+                List<string> texKeys; lock (_texLock) texKeys = _texKeys.ToList();
+                var textures = texKeys.Select(k => StationView3DTextures.InfoOf(k) is { } ti
+                    ? new { url = ti.File.Length > 0 ? _texUrlBase + ti.File : "", w = ti.W, h = ti.H, repeat = new[] { ti.Tiling, ti.Tiling }, tint = ti.Tint, color = ti.File.Length == 0 }
+                    : new { url = "", w = 0, h = 0, repeat = new[] { 1f, 1f }, tint = new[] { 1f, 1f, 1f }, color = false }).ToList();
+                var json = JsonSerializer.SerializeToUtf8Bytes(new { format = Format, big = threshold, geos, textures, instances = instRows }, JsonOpts);
+                File.WriteAllBytes(Path.Combine(outDir, "region.json"), json);
+                bytes += json.Length;
+            }
+            catch
+            {
+                try { Directory.Delete(outDir, true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+                throw;
+            }
+            return (bySoc.Count, kept, parts, bytes);
+        }
+
         // ===== 歩くモードの裏の補い (2026-11-05、利用者の指示「歩くモードで近く 5 m 以内の部品を裏で先に細かい形で調べる 見つけたら DB に入れる」
         // 「そのエリアに荒いので部品がない場合、細かいのでチェック」「床でなく物体で」「床代わりの何かに対応できる。照明とかパネルとかチューブとか」) =====
         // ビューアが知らせた「粗い形に物体 (面) が何も無い升」(cells: 升の中心の場所の座標 (x, y)。1 m の升) と足元の高さ pos[2] ± zTol について:

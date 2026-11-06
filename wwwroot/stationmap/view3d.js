@@ -34,6 +34,7 @@ if (APP) window.chrome.webview.addEventListener('message', e => {
   if (d.type === 'exteriorView') { onExteriorView(); return; }   // 外から全体が見える形にする (下の「外から見る形」。2026-11-06)
   // マイハンガーの大きさのうち、ハンガーの区画が決まるもの (アプリの StationHangarCatalog.Resolve)。本体の station.json に覚え、行き先の窓はこの大きさだけを出す (hangarSizesOf)
   if (d.type === 'hangarSizes') { const sv = stationSaved ? stationSaved.VIEW : VIEW; if (Array.isArray(d.sizes)) { if (sv) sv.hangarSizesOk = d.sizes; else pendingSizes = d.sizes; } return; }   // 場所のデータ (VIEW) が入る前なら覚えて、入った後に当てる
+  if (d.type === 'bigReady' || d.type === 'bigError') { onBig(d); return; }   // 場所の全部の大きな物体 (下の「場所の全部の大きな物体」)
   if (d.type === 'noteError') { document.getElementById('msg').textContent = 'コメントの印を保存できませんでした: ' + (d.message || ''); return; }
   const w = regionWait.get(d.id); if (!w) return;
   if (d.type === 'regionProgress') showProgress(d.done, d.total);
@@ -1173,7 +1174,7 @@ async function loadRegion(c, r, keep, small) {
     // 索引の数をアプリのログに 1 行出す (事実を数で確かめるため。画面には出さない): 大きさの組ごと (小・中・大・大きな物体) の 部品/三角形。外装、続けて内装
     if (res.stat) {
       const st = res.stat, pt = k => `${st.parts[k]}/${st.tris[k]}`;
-      logApp(`索引 c=${c.map(v => v.toFixed(1)).join(',')} r=${r} 区画 ${st.geos} (使い回し ${st.reused})・置かれた所 ${st.insts}・部品 ${st.partsAll}・かたまり ${res.index.keys.length} (部品/三角形) 外装 小 ${pt(0)} 中 ${pt(1)} 大 ${pt(2)} 大きな物体 ${pt(3)} 内装 小 ${pt(4)} 中 ${pt(5)} 大 ${pt(6)} 大きな物体 ${pt(7)}`);
+      logApp(`索引 c=${c.map(v => v.toFixed(1)).join(',')} r=${r} 区画 ${st.geos} (使い回し ${st.reused})・置かれた所 ${st.insts}・部品 ${st.partsAll}・かたまり ${res.index.keys.length} (部品/三角形) 外装 小 ${pt(0)} 中 ${pt(1)} 大 ${pt(2)} 大きな物体 ${pt(3)} 内装 小 ${pt(4)} 中 ${pt(5)} 大 ${pt(6)} 大きな物体 ${pt(7)} (うち KEEP ${st.keep[0]}/${st.keep[1]}・場所の全部の大きな物体から ${st.big[0]}/${st.big[1]})`);
     }
     ph.worker = res.times; ph.workerAll = (performance.now() - tp) / 1000; tp = performance.now();
     // 区画のファイルはもう要らない (解析の糸が読んで持っている)。アプリに置き場を消してもらう
@@ -1184,6 +1185,7 @@ async function loadRegion(c, r, keep, small) {
     applyRegion(nc, kp, t0);
     // 別の所へ移ったとき (初めに開いたとき・行き先へ飛んだとき・エレベーターなどで遠くへ移ったとき) は、中心のまわりの升のかたまり (形と当たり) が出そろうまで待つ (呼んだ側が、その後に立つ所を決める)。
     // 読み込み直し (keep) は待たない (今出ている物をそのまま出しておき、足りないかたまりは裏で足す)
+    bigCheck();   // 場所の全部の大きな物体 (まだ頼んでいない・場所・色付け・境が替わったときだけ頼む)
     if (!kp) { window.__stage = 'chunks'; await ensureNear(c); }
     ph.scene = (performance.now() - tp) / 1000;
     hideProgress();
@@ -1391,7 +1393,9 @@ function review(small) {
     const key = ix.keys[i], ch = chunks.get(key); keep.add(key);
     if (ch && ch.hash === ix.hash[i]) continue;
     if (failed.has(key + '|' + ix.hash[i])) continue;
-    if (gate && !ch && (ix.cls[i] & 3) === 0) continue;
+    // 小の組でも KEEP (cls の 8。前の keepAlways の部品: エレベーターの扉・はしご・階段・判定の色のある部品・上下が逆の重力の範囲に掛かる部品) は、速さに関係なく読む
+    // (2026-11-06、親の決定: 前の版の動きを戻す。走っている間に 1 m 未満の床の部品の所で床が無くなるため。描く物と当たりは同じかたまりなので、範囲は一致したまま)
+    if (gate && !ch && (ix.cls[i] & 3) === 0 && !(ix.cls[i] & 8)) continue;
     q.push({ key, i, d: E ? cellDist(E, ix.cells, i) : d });
   }
   for (const [key, ch] of [...chunks]) if (!keep.has(key)) dropChunk(ch);
@@ -1490,7 +1494,8 @@ const kindOn = k => { const cb = document.querySelector(`[data-k="${k}"]`); retu
 function addChunk(d) {
   const old = chunks.get(d.key); if (old) dropChunk(old);
   const ch = { key: d.key, cls: d.cls, hash: d.hash, F: d.F, ID: d.ID, LB: d.LB, FL: d.FL, UV: d.UV, TX: d.TX, offs: d.offs, parts: d.parts, labN: d.labN, col: d.col, ST: new Uint32Array(d.ID.length), meshes: [], bytes: d.F.byteLength };
-  const texOn = document.getElementById('texOn').checked, TEXS = cur.textures || [];
+  // 場所の全部の大きな物体のかたまり (d.big) の画像の番号は、大きな物体の textures (bigTex) の番号
+  const texOn = document.getElementById('texOn').checked, TEXS = d.big ? bigTex : (cur.textures || []);
   for (const k of Object.keys(COL)) {
     const [o, n] = ch.offs[k] || [0, 0]; if (!n) continue;
     const a = o / 9, cnt = n / 9, wall = k === 'wall';
@@ -2142,7 +2147,9 @@ window.__standDiag = () => (cur.targets || []).filter(t => t.kind.startsWith('te
 // 読み込む範囲 (既定 150 m: 試験の頁の Whammers の地点と同じ。60 m では、大きな区画は部品を全部描くのに、その中の小さな区画 (エレベーターの扉など) が範囲の外で読まれず、枠だけになった)
 // 先に描く範囲 (行き先のまわり。担当が決めた値)
 const FIRST_R = 30;
-function regionR() { return Math.max(10, +document.getElementById('regionR').value || 150); }
+// (2026-11-06、親の決定: 距離の段が読み込んだ範囲の端で切れないように) 半径は、欄の値と「大を描く距離 (LOADCFG.d3) × 2」の大きいほう。
+// 取り出し直しは立方体の中心から半径の半分 (nearCheck。決まりは変えない) なので、半径 ≥ d3 + 半径の半分 (= d3 × 2) なら、歩いている位置から d3 m までは、取り出し直しの前でも必ず立方体の中にある
+function regionR() { return Math.max(10, +document.getElementById('regionR').value || 150, 2 * LOADCFG.d3); }
 // 読み込み中に行き先を選んだら、今の読み込みが終わってから、その行き先を始める (前は押しても読み込まれなかった)。
 // 行き先を選び直したら、前の行き先の残りの読み込み (裏の ±R) はしない (goGen)
 let goGen = 0, pendingGo = null, focusTk = 0;
@@ -3031,6 +3038,10 @@ function loadCfgChanged(keys) {
     const og = originGen, p = cur;
     workerCall({ type: 'sizes', og, sizes: [LOADCFG.s1, LOADCFG.s2, LOADCFG.s3] }).then(d => { if (d.stale || og !== originGen || p !== cur) return; cur.index = makeIndex(d.index); failed.clear(); review(true); }).catch(e => report('sizes', e));
   }
+  // 大きな物体の境を、持っている大きな物体の境より小さくしたら、アプリに作り直してもらう (bigCheck)
+  if (keys.includes('s3')) bigCheck();
+  // 大を描く距離を大きくして、読み込む範囲 (regionR) が今の地点の半径より大きくなったら、今の位置を中心に取り出し直す (原点・出ているかたまりはそのまま)
+  if (keys.includes('d3') && cur.r < regionR()) loadRegion(focusAbs(), regionR(), true);
   if (keys.some(k => k === 'outDist' || k === 'outFloor')) outRequest();
   review(true);
 }
@@ -3039,3 +3050,28 @@ document.querySelectorAll('input.ld').forEach(inp => {
   inp.addEventListener('change', () => { const v = parseFloat(inp.value); if (!isFinite(v) || v < 0) { inp.value = LOADCFG[k]; return; } LOADCFG[k] = v; loadCfgChanged([k]); });
 });
 document.getElementById('ldReset').onclick = () => { Object.assign(LOADCFG, LOAD_DEF); document.querySelectorAll('input.ld').forEach(inp => { inp.value = LOADCFG[inp.dataset.k]; }); loadCfgChanged(Object.keys(LOAD_DEF)); };
+// ===== 場所の全部の大きな物体 (2026-11-06、利用者の指示「距離に関係なく大きなびったいは書いた方がいいのかも」。親の決定) =====
+// アプリ (StationView3DWindow の BigGetAsync・StationView3D.Session.BuildBigAsync) が、場所の全部の区画から「大きな物体の境」以上の部品だけを取り出して、場所ごとに 1 回作って保存する。
+// ここは {type:'bigGet', site, pal, s3} で頼み、{type:'bigReady', site, pal, s3 (作った境), base} で受け取って解析の糸に渡す (糸が今の地点の索引に足す。view3d-worker.js の「場所の全部の大きな物体」)。
+// 作っている間・作れなかったときは、今までどおり地点の中の大きな物体だけを出す (待たない)。頼むのは、まだ頼んでいない・場所 (SITE)・色付けが替わった・境 (LOADCFG.s3) を持っている物より小さくしたとき
+let bigTex = [], bigHave = null, bigAsk = null;
+const bigWant = () => ({ site: SITE, pal: regionPalReq, s3: LOADCFG.s3 });
+function bigCheck() {
+  if (!APP || !cur) return;
+  const w = bigWant(), ok = b => b && b.site === w.site && b.pal === w.pal && b.s3 <= w.s3;
+  if (ok(bigHave) || (bigAsk && bigAsk.site === w.site && bigAsk.pal === w.pal && bigAsk.s3 <= w.s3)) return;
+  bigAsk = w; window.chrome.webview.postMessage({ type: 'bigGet', site: w.site, pal: w.pal, s3: w.s3 });
+}
+async function onBig(d) {
+  if (d.type === 'bigError') { bigAsk = null; logApp('場所の全部の大きな物体を用意できませんでした: ' + (d.message || '')); return; }
+  const w = bigWant(); if (d.site !== w.site || d.pal !== w.pal) return;   // 頼んだ後に場所・色付けが替わった
+  bigAsk = null;
+  try {
+    const region = await (await fetch(d.base + 'region.json')).json();
+    const og = originGen, res = await workerCall({ type: 'big', og, base: new URL(d.base, location.href).href, region, thr: d.s3, site: d.site, pal: d.pal });
+    bigTex = res.textures || []; bigHave = { site: d.site, pal: d.pal, s3: d.s3 };
+    if (res.stale || og !== originGen || !cur) return;   // 地点が替わった: 次の地点の索引に糸が足す
+    cur.index = makeIndex(res.index); review(false);
+    if (res.stat) logApp(`場所の全部の大きな物体 境 ${d.s3} m: 部品 ${res.stat.bigAll}・今の地点に足した部品/三角形 ${res.stat.big[0]}/${res.stat.big[1]}・読み込み ${res.stat.bigLoad.toFixed(1)} 秒`);
+  } catch (e) { report('big', e); }
+}
