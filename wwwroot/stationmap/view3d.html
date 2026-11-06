@@ -102,7 +102,7 @@ details.more>summary{cursor:pointer;color:#9cf;font-size:12px;margin:4px 0}
 <div><button id="walkBtn">歩くモード: OFF</button> <button id="hereBtn" style="display:inline;width:auto">現在位置</button> <span id="walkInfo"></span><div><button id="runBtn" style="display:inline;width:auto">走る: OFF</button> <button id="stBtn" style="display:inline;width:auto">姿勢: 立つ</button> <button id="ncBtn" style="display:inline;width:auto">すり抜け: OFF</button></div></div>
 </details>
 <details class="sec" id="secRec"><summary>録画</summary>
-<div><button id="recBtn">録画を始める</button> <button id="saveBtn">保存</button> <label style="display:inline">読み込み <input type="file" id="loadF" accept=".json"></label> <span id="recInfo"></span></div>
+<div><button id="recBtn">録画を始める</button> <button id="playBtn">再生</button> <label style="display:inline"><input type="checkbox" id="playConst"> 一定速度</label> <input type="number" id="playSpeed" value="2.8" min="0.1" step="0.1" style="width:4em"> m/秒 <button id="saveBtn">保存</button> <label style="display:inline">読み込み <input type="file" id="loadF" accept=".json"></label> <span id="recInfo"></span></div>
 <div class="note">歩いた道を 0.1 秒ごとに記録する。録画中に Enter で付けたコメントは録画にも入り、再生するとその時刻に出る。すり抜けの ON・OFF も録画に入る</div>
 </details>
 <details class="sec" id="secGuide" open><summary>文字の道案内</summary>

@@ -911,8 +911,16 @@ const recOff = () => rec ? [cur.center[0] - rec.center[0], cur.center[1] - rec.c
 function recStep(dt) { if (!rec) return; recAcc += dt; rec.t += dt; const ro = recOff(); if (recAcc >= 0.1) { recAcc = 0; rec.points.push([+rec.t.toFixed(2), +(wpos.x + ro[0]).toFixed(3), +(wpos.y + ro[1]).toFixed(3), +(wpos.z + ro[2]).toFixed(3), +wyaw.toFixed(4), +wpitch.toFixed(4), stance, noclip ? 1 : 0]); document.getElementById('recInfo').textContent = `録画中 ${rec.points.length} 点`; } }
 function playStep(dt) {
   if (!play.points.length) { play = null; return; }
-  play.t += dt; const P = play.points; while (play.i < P.length - 1 && P[play.i + 1][0] <= play.t) play.i++;
-  const a = P[play.i], b = P[Math.min(play.i + 1, P.length - 1)], f = b[0] > a[0] ? Math.min(1, (play.t - a[0]) / (b[0] - a[0])) : 0;
+  const P = play.points; let a, b, f;
+  if (play.cum) {
+    // 一定速度: 道のり play.d を進め、その道のりの所の 2 点の間を割る。コメントを出す時刻は、その所の録画の時刻
+    const C = play.cum; play.d += play.speed * dt; while (play.i < P.length - 1 && C[play.i + 1] <= play.d) play.i++;
+    a = P[play.i]; b = P[Math.min(play.i + 1, P.length - 1)]; const L = C[Math.min(play.i + 1, P.length - 1)] - C[play.i];
+    f = L > 0 ? Math.min(1, (play.d - C[play.i]) / L) : 0; play.t = a[0] + (b[0] - a[0]) * f;
+  } else {
+    play.t += dt; while (play.i < P.length - 1 && P[play.i + 1][0] <= play.t) play.i++;
+    a = P[play.i]; b = P[Math.min(play.i + 1, P.length - 1)]; f = b[0] > a[0] ? Math.min(1, (play.t - a[0]) / (b[0] - a[0])) : 0;
+  }
   const po = play.center ? [play.center[0] - cur.center[0], play.center[1] - cur.center[1], play.center[2] - cur.center[2]] : [0, 0, 0];
   wpos.set(a[1] + (b[1] - a[1]) * f + po[0], a[2] + (b[2] - a[2]) * f + po[1], a[3] + (b[3] - a[3]) * f + po[2]); wyaw = a[4] + (b[4] - a[4]) * f; wpitch = a[5]; stance = a[6]; noclip = a[7] === 1; updWalkUi();
   { const on = commentShow(); for (const m of cMarks) { const s = play.t >= m.userData.t; m.userData.shown = s; m.visible = s && on; } }
@@ -1915,6 +1923,24 @@ document.getElementById('recBtn').onclick = () => {
   if (rec) { document.getElementById('recBtn').textContent = '録画を始める'; document.getElementById('recInfo').textContent = `録画 ${rec.points.length} 点`; window.__lastRec = rec; rec = null; }
   else { rec = { format: 'scjt-walk-path-1', station: cur.station, label: cur.label, center: cur.center, t: 0, points: [], comments: [] }; document.getElementById('recBtn').textContent = '録画を止める'; }
 };
+// 再生 (2026-11-06、利用者の指摘「録画はいいけど再生がなくない？」): いちばん新しい録画 (録画中ならその途中まで、無ければ最後に読み込んだ録画) を、
+// 保存・読み込みをせずにその場で再生する (読み込みの再生と同じ playStep)。再生中に押すと止める
+function startPlay(r) {
+  if (!r || !Array.isArray(r.points) || !r.points.length) { document.getElementById('recInfo').textContent = '再生する録画がありません'; return; }
+  if (!walk) document.getElementById('walkBtn').click();
+  play = { t: 0, i: 0, points: r.points.slice(), center: r.center }; showComments(r.comments || []);
+  // 一定速度 (2026-11-06、利用者の指示「ついでに一定速度で再生も付けてほしい」): 録画の時刻ではなく、道のりを決めた速さ (m/秒) で進む (止まっていた所は飛ばす)
+  if (document.getElementById('playConst').checked) {
+    const P = play.points, cum = [0];
+    for (let k = 1; k < P.length; k++) cum.push(cum[k - 1] + Math.hypot(P[k][1] - P[k - 1][1], P[k][2] - P[k - 1][2], P[k][3] - P[k - 1][3]));
+    play.cum = cum; play.d = 0; play.speed = Math.max(0.1, +document.getElementById('playSpeed').value || 2.8);
+  }
+}
+document.getElementById('playBtn').onclick = () => {
+  if (play) { play = null; document.getElementById('recInfo').textContent = '再生を止めました'; return; }
+  if (rec) document.getElementById('recBtn').click();   // 録画中なら止めてから再生する
+  startPlay(window.__lastRec);
+};
 document.getElementById('saveBtn').onclick = () => {
   const r = rec || window.__lastRec; if (!r) return;
   const blob = new Blob([JSON.stringify({ format: r.format, station: r.station, label: r.label, center: r.center, points: r.points, comments: r.comments || [] })], { type: 'application/json' });
@@ -1923,8 +1949,7 @@ document.getElementById('saveBtn').onclick = () => {
 document.getElementById('loadF').onchange = async e => {
   const f = e.target.files[0]; if (!f) return; const r = JSON.parse(await f.text());
   if (r.format !== 'scjt-walk-path-1' || !Array.isArray(r.points) || !r.points.length) { document.getElementById('recInfo').textContent = '読めない形'; return; }
-  if (!walk) document.getElementById('walkBtn').click();
-  play = { t: 0, i: 0, points: r.points, center: r.center }; showComments(r.comments || []);
+  window.__lastRec = r; startPlay(r);
 };
 const cut = document.getElementById('cut'); cut.addEventListener('input', () => { clip.constant = +cut.value; document.getElementById('cutv').textContent = cut.value; });
 // ===== 行き先の一覧 (名前は訳。押すと、まだ読み込んでいない所ならそのまわりを読み込み、そこを中心にする) =====
