@@ -954,7 +954,8 @@ function commentMark(cm, co, visible, list = cMarks) {
   const g = new THREE.Group(); const p0 = new THREE.Vector3(cm.pos[0] + co[0], cm.pos[1] + co[1], cm.pos[2] + co[2]), p1 = p0.clone(); p1.z += COMMENT_LIFT;
   const ball = new THREE.Mesh(new THREE.SphereGeometry(0.12), new THREE.MeshBasicMaterial({ color: 0xffee66, depthTest: false })); ball.position.copy(p0); ball.renderOrder = 20;
   const lg = new THREE.BufferGeometry().setFromPoints([p0, p1]); const line = new THREE.Line(lg, new THREE.LineBasicMaterial({ color: 0xffee66, depthTest: false })); line.renderOrder = 20;
-  const sp = textSprite(cm.text); sp.position.copy(p1); sp.position.z += sp.scale.y / 2;   // 札の下の端を線の先に付ける
+  // 文の中の「\n」(逆斜線と n の 2 文字) で行を分ける (2026-11-06、利用者の指示「キャプションに\nが使えるように」)
+  const sp = textSprite(String(cm.text).split('\\n')); sp.position.copy(p1); sp.position.z += sp.scale.y / 2;   // 札の下の端を線の先に付ける
   g.add(ball, line, sp); g.userData.shown = visible; g.visible = visible && commentShow(); g.userData.t = cm.t; g.userData.cat = 'comment'; g.userData.sp = sp; root.add(g); list.push(g);
   return g;
 }
