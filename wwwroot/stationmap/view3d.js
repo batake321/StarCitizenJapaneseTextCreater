@@ -1978,7 +1978,7 @@ document.getElementById('ncBtn').onclick = () => { noclip = !noclip; updWalkUi()
 document.getElementById('recBtn').onclick = () => {
   if (!walk) return;
   if (rec) { document.getElementById('recBtn').textContent = '録画を始める'; document.getElementById('recInfo').textContent = `録画 ${rec.points.length} 点`; window.__lastRec = rec; rec = null; }
-  else { rec = { format: 'scjt-walk-path-1', station: cur.station, label: cur.label, center: cur.center, t: 0, points: [], comments: [] }; document.getElementById('recBtn').textContent = '録画を止める'; }
+  else { rec = { format: 'scjt-walk-path-1', station: recStation(), label: recLabel(), center: cur.center, t: 0, points: [], comments: [] }; document.getElementById('recBtn').textContent = '録画を止める'; }
 };
 // 再生 (2026-11-06、利用者の指摘「録画はいいけど再生がなくない？」): いちばん新しい録画 (録画中ならその途中まで、無ければ最後に読み込んだ録画) を、
 // 保存・読み込みをせずにその場で再生する (読み込みの再生と同じ playStep)。再生中に押すと止める
@@ -1998,14 +1998,23 @@ document.getElementById('playBtn').onclick = () => {
   if (rec) document.getElementById('recBtn').click();   // 録画中なら止めてから再生する
   startPlay(window.__lastRec);
 };
+// 録画の場所 (2026-11-06、利用者の指摘「録画に場所が入ってない」): 前は cur.station・cur.label を入れていたが、地点の表 (cur) にこの 2 つが無く、空のままだった。
+// station = 場所の record (VIEW.station)、label = 窓の見出しの場所の名前 (title)。保存のファイル名は「walk_<場所の名前>_<年月日-時分>.json」(名前に使えない字だけ _ に)
+const recStation = () => (typeof VIEW !== 'undefined' && VIEW && VIEW.station) || '';
+const recLabel = () => (document.getElementById('title').textContent || recStation() || '').trim();
+const recFileName = r => { const d = new Date(), z = n => String(n).padStart(2, '0'); const nm = String(r.label || r.station || 'station').replace(/[\\/:*?"<>|\s]+/g, '_'); return `walk_${nm}_${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}.json`; };
 document.getElementById('saveBtn').onclick = () => {
   const r = rec || window.__lastRec; if (!r) return;
+  if (!r.station) r.station = recStation(); if (!r.label) r.label = recLabel();   // 前の版で録った (場所の入っていない) 録画にも、今の場所を入れる
   const blob = new Blob([JSON.stringify({ format: r.format, station: r.station, label: r.label, center: r.center, points: r.points, comments: r.comments || [] })], { type: 'application/json' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `walk_${r.label.replace(/[^A-Za-z0-9_]/g, '_')}.json`; a.click();
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = recFileName(r); a.click();
 };
 document.getElementById('loadF').onchange = async e => {
   const f = e.target.files[0]; if (!f) return; const r = JSON.parse(await f.text());
   if (r.format !== 'scjt-walk-path-1' || !Array.isArray(r.points) || !r.points.length) { document.getElementById('recInfo').textContent = '読めない形'; return; }
+  // 場所の入っていない古い形の録画 (2026-11-06 より前の版で保存したもの) は、今の場所の録画として再生する (利用者の指示「元々入ってない古い形式も現在地点で再生できるようにして」)。
+  // 場所の入っている録画も、今の場所で再生する (前と同じ)
+  if (!r.station) r.station = recStation(); if (!r.label) r.label = recLabel();
   window.__lastRec = r; startPlay(r);
 };
 const cut = document.getElementById('cut'); cut.addEventListener('input', () => { clip.constant = +cut.value; document.getElementById('cutv').textContent = cut.value; });

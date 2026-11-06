@@ -13,3 +13,4 @@ https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/tag/v2.6.12
 
 **そのほか**
 ・コメントを入れた後に動けなくなる不具合を直しました
+・録画に場所が入るようになりました（前の録画も読み込めば今の場所で再生します）
