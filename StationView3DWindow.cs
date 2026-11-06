@@ -186,7 +186,7 @@ public sealed class StationView3DView : Grid
                 File.WriteAllBytes(Path.Combine(_tempDir, "station.json"), stationJson);
                 // 保存の鍵 (Data.p4k の印と区画の置き方の一覧の版・作った時刻・ゲームの画像の上限 (px。変えると画像の有無・細かさが変わるので別の鍵))・先読みの行き先
                 _p4kKey = stamp.Key;
-                _layoutId = (StationView3D.LayoutDbMeta(StationView3DLayout.DbPath, "format") ?? "") + "|" + (StationView3D.LayoutDbMeta(StationView3DLayout.DbPath, "built_utc") ?? "") + "|tex" + TexMaxPx.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                _layoutId = LayoutIdNow();
                 _targets = TargetsOf(stationJson);
                 var cache = StationView3DCache.Current;
                 cache.SweepStale(_p4kKey, _layoutId);
@@ -217,8 +217,12 @@ public sealed class StationView3DView : Grid
         core.SetVirtualHostNameToFolderMapping(Ship3DExports.CacheHost, folder, CoreWebView2HostResourceAccessKind.Allow);
         Overlay("");
         // URL の debug=1: 設定「マップのデバッグ表示」(App.Config.Station3DDebugView。既定オフ) が入っているとき。ビューアは下部の枠 (#pick) をこのときだけ出す (2026-11-05)
-        core.Navigate($"https://{Ship3DWeb.ViewerHost}/stationmap/view3d.html?data={Uri.EscapeDataString(UrlOf(_tempDir))}&title={Uri.EscapeDataString(_title)}&app=1" + (InTab ? "&tab=1" : "") + (App.Config.Station3DDebugView ? "&debug=1" : "") + (_focusShop is { Length: > 0 } fs ? $"&goto={Uri.EscapeDataString(fs)}" : ""));
+        core.Navigate($"https://{Ship3DWeb.ViewerHost}/stationmap/view3d.html?data={Uri.EscapeDataString(UrlOf(_tempDir))}&title={Uri.EscapeDataString(_title)}&app=1" + (InTab ? "&tab=1" : "") + (App.Config.Station3DDebugView ? "&debug=1" : "") + (_focusShop is { Length: > 0 } fs ? $"&goto={Uri.EscapeDataString(fs)}" : "")
+            + (_exteriorRequested ? "&ext=1" : ""));   // 外から見る形で開くとき: 開いたときの行き先へ飛ばない (view3d.js の始め。2026-11-06)
     }
+
+    // 保存の鍵に入れる区画の置き方の一覧の印 (色付けを入れたとき。StartAsync の _layoutId と、QT の先読み (PrefetchArrivalAsync) が使う)
+    private static string LayoutIdNow() => (StationView3D.LayoutDbMeta(StationView3DLayout.DbPath, "format") ?? "") + "|" + (StationView3D.LayoutDbMeta(StationView3DLayout.DbPath, "built_utc") ?? "") + "|tex" + TexMaxPx.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     // ゲームの画像 (テクスチャ) の長い辺の上限 (px。設定「ステーションのテクスチャ (px)」。0 なら画像なし) と、ビューアが PNG を読む URL の頭 (2026-11-05)
     private static int TexMaxPx => Math.Max(0, App.Config.Station3DTextureMaxPx);
@@ -300,7 +304,7 @@ public sealed class StationView3DView : Grid
             // ビューアが station.json を読んだ後に {type:'hangarSizesGet'} で頼み、{type:'hangarSizes', sizes} で返す。sizes は、場所の入口 (place_hangars) の大きさのうち、
             // OpenHangarAsync と同じ StationHangarCatalog.Resolve で区画が決まるもの。ハンガーの表が作れない・読めないとき (GetAsync の例外) は返さない (ビューアは place_hangars の大きさのまま)
             // 現在位置の印 (開いたとき): 今の現在位置がこの場所の中なら {type:'hereMark'} で返す
-            if (type == "hereMarkGet") { _pageReady = true; await RefreshHereMarkAsync(); if (_hereRequested) await ShowHereNoCaptureAsync(); else if (_exteriorRequested && !_closed) PostExteriorView(); return; }
+            if (type == "hereMarkGet") { _pageReady = true; await RefreshHereMarkAsync(); if (_hereRequested) await ShowHereNoCaptureAsync(); else if (_exteriorRequested && !_closed) await PostExteriorViewAsync(); return; }
             if (type == "hangarSizesGet")
             {
                 try
@@ -362,6 +366,7 @@ public sealed class StationView3DView : Grid
             var progress = new Progress<(int Done, int Total)>(p => Post(new { type = "regionProgress", id, done = p.Done, total = p.Total }));
             // ビューアが頼んだので、先読みは止める。前の地点の手放していない置き場 (読み込みに失敗して regionLoaded が来なかったもの) も手放す
             _viewerBusy = true; _lastCenter = c; _radii.Add(rad); _walkCenters[site] = c;
+            if (site.Length == 0) lock (s_seenLock) { s_seenRadii.Add(rad); s_seenPal = palette; }
             _idleTimer?.Dispose(); _idleTimer = null;
             await StopPrefetchAsync();
             ReleaseLeases();
@@ -517,6 +522,7 @@ public sealed class StationView3DView : Grid
         var site = r.TryGetProperty("site", out var sv) ? sv.GetString() ?? "" : "";
         var palette = !(r.TryGetProperty("pal", out var pv) && pv.ValueKind == JsonValueKind.False);
         var s3 = r.TryGetProperty("s3", out var tv) && tv.TryGetDouble(out var t3) && t3 >= 0 ? t3 : 20;
+        if (site.Length == 0) lock (s_seenLock) s_seenS3 = s3;
         var session = site.Length == 0 ? _session : _hangarSessions.GetValueOrDefault(site);
         var extract = palette ? _extract : _extractPlain;
         if (session == null || extract == null) { Post(new { type = "bigError", site, pal = palette, message = "用意が終わっていません" }); return; }
@@ -1082,16 +1088,166 @@ public sealed class StationView3DView : Grid
     // ビューアへ {type:'exteriorView'} を送る (view3d.js の onExteriorView。今ある外部視点 (外から見たときの印と見出し) になる所まで引くだけで、新しい描き方は無い)。
     // ページがまだ用意できていなければ (station.json を読んで hereMarkGet を送る前)、用意できたときに送る。後から頼まれたほう (RequestHere か、これ) だけを行う
     private bool _exteriorRequested;
-    public void RequestExterior()
+    private (double X, double Y, double Z)? _exteriorFrom;
+    // from: QT から出たときの、飛んできた所 (全体の座標。出発地、取れなければ最後に取った座標)。あれば、ステーションの中心からその向きへ離れた所から中心を向く (MapPanel の QT の到着)
+    public void RequestExterior((double X, double Y, double Z)? from = null)
     {
         _exteriorRequested = true;
+        _exteriorFrom = from;
         _hereRequested = false;
-        if (_pageReady && !_closed) PostExteriorView();
+        if (_pageReady && !_closed) _ = PostExteriorViewAsync();
     }
-    private void PostExteriorView()
+    // (2026-11-06、利用者の指示「全体の80% を占める感じで画面の中心をステーションの中心にそろえて出してくれるとキレイ」
+    //  「QT 時には目的地が station ならQT 宙に読み込んでおいて、自分の飛んでいく方向から中心を向って向いた外部からの視点で QT から離脱したときに出してほしい。」。親の決定)
+    // ビューアへ {type:'exteriorView', lo, hi, at, dir} を送る (ExteriorPlanAsync。作れなければ箱なしの {type:'exteriorView'} = 前の決まり)
+    private async Task PostExteriorViewAsync()
     {
         _exteriorRequested = false;
-        Post(new { type = "exteriorView" });
+        var from = _exteriorFrom; _exteriorFrom = null;
+        ExteriorPlan? plan = null;
+        try { if (_stationLayout is { } lay) plan = await ExteriorPlanAsync(_record, lay, from, LayoutIdOf(_palette), _p4kKey); }
+        catch (Exception ex) when (ex is not OutOfMemoryException) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{_title}」の外から見る形の構図を決められませんでした: {ex.Message}"); }
+        if (_closed) return;
+        if (plan == null) Post(new { type = "exteriorView" });
+        else Post(new { type = "exteriorView", lo = plan.Lo, hi = plan.Hi, at = plan.At, dir = plan.Dir });
+    }
+
+    // ===== 外から見る形の構図 (2026-11-06。親の決定) =====
+    // Lo・Hi: ステーションの全体の箱 (場所の座標)。場所の全部の大きな物体 (StationView3DCache の FindBig。保存してあれば) の置かれた所の箱を合わせた範囲。
+    //   無ければ、区画の置き方の一覧の箱 (LayoutDbBox と同じ一覧 = Layout.Instances の Lo・Hi) を合わせた範囲。ただし、どれかの辺が ExteriorBoxMax m 以上の箱は入れない
+    //   (Orison の一覧の箱を全部合わせると 180 × 168 × 12,608,649 m になる (配る一覧の写しで確かめた)。大きな物体の x の幅 5,000 m 未満の決まりと同じ値)。
+    // At: 読み込む地点の中心。区画の置き方の一覧の箱 (辺が ExteriorBoxMax m 未満) を合わせた範囲の中心にいちばん近い、区画の箱 (辺が ExteriorBoxMax m 未満のもの) の中の点 (区画の無い所へ移らない)。
+    // Dir: from (全体の座標) があれば、場所の座標に直した点から全体の箱の中心への向きの逆 (中心からその点への向き。正規化)。
+    //   直し方は RedirectAsync と同じ (RootOfAsync の GlobalXf の逆。自転する場所は今の時刻の自転の角度)。直せなければ null (ビューアは今の向きのまま)
+    internal sealed record ExteriorPlan(double[] Lo, double[] Hi, double[] At, double[]? Dir);
+    private const double ExteriorBoxMax = 5000;
+    private static async Task<ExteriorPlan?> ExteriorPlanAsync(string record, StationView3D.Layout layout, (double X, double Y, double Z)? from, string layoutId, string p4kKey)
+    {
+        double[] lo = [double.MaxValue, double.MaxValue, double.MaxValue], hi = [double.MinValue, double.MinValue, double.MinValue];
+        var any = false;
+        void Add(double[] a, double[] b) { for (int i = 0; i < 3; i++) { lo[i] = Math.Min(lo[i], a[i]); hi[i] = Math.Max(hi[i], b[i]); } any = true; }
+        var cache = StationView3DCache.Current;
+        double s3; lock (s_seenLock) s3 = s_seenS3;
+        if (cache.Enabled && cache.FindBig(record, p4kKey, layoutId, s3, out _, out var bkey) is { } hit)
+        {
+            try
+            {
+                var bytes = await File.ReadAllBytesAsync(Path.Combine(hit.Dir, "region.json"));
+                using var doc = JsonDocument.Parse(bytes);
+                if (doc.RootElement.TryGetProperty("instances", out var ins) && ins.ValueKind == JsonValueKind.Array)
+                    foreach (var row in ins.EnumerateArray())
+                    {
+                        if (row.GetArrayLength() < 5) continue;
+                        var a = row[3].EnumerateArray().Select(x => x.GetDouble()).ToArray(); var b = row[4].EnumerateArray().Select(x => x.GetDouble()).ToArray();
+                        if (a.Length == 3 && b.Length == 3) Add(a, b);
+                    }
+            }
+            catch (Exception e) when (e is IOException or JsonException or InvalidOperationException) { }
+            finally { cache.Release(bkey); }
+        }
+        var small = layout.Instances.Where(i => i.Lo is { Length: 3 } && i.Hi is { Length: 3 } && i.Hi[0] - i.Lo[0] < ExteriorBoxMax && i.Hi[1] - i.Lo[1] < ExteriorBoxMax && i.Hi[2] - i.Lo[2] < ExteriorBoxMax).ToList();
+        // 区画の置き方の一覧の箱 (辺が ExteriorBoxMax 未満のもの) を合わせた範囲の中心。読み込む地点 (At) はこれで決める (大きな物体の有無で変わらないので、QT の先読みで保存した地点がそのまま使える)
+        double[] llo = [double.MaxValue, double.MaxValue, double.MaxValue], lhi = [double.MinValue, double.MinValue, double.MinValue];
+        foreach (var i in small) for (int k = 0; k < 3; k++) { llo[k] = Math.Min(llo[k], i.Lo![k]); lhi[k] = Math.Max(lhi[k], i.Hi![k]); }
+        if (!any) foreach (var i in small) Add(i.Lo!, i.Hi!);
+        if (!any) return null;
+        var c = new[] { (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2 };
+        var lc = small.Count > 0 ? new[] { (llo[0] + lhi[0]) / 2, (llo[1] + lhi[1]) / 2, (llo[2] + lhi[2]) / 2 } : c;
+        double[] at = lc; var bd = double.MaxValue;
+        foreach (var i in small)
+        {
+            var p = new[] { Math.Clamp(lc[0], i.Lo![0], i.Hi![0]), Math.Clamp(lc[1], i.Lo[1], i.Hi[1]), Math.Clamp(lc[2], i.Lo[2], i.Hi[2]) };
+            var d = (p[0] - lc[0]) * (p[0] - lc[0]) + (p[1] - lc[1]) * (p[1] - lc[1]) + (p[2] - lc[2]) * (p[2] - lc[2]);
+            if (d < bd) { bd = d; at = p; }
+        }
+        double[]? dir = null;
+        if (from is { } f && Ship3DExports.CurrentStamp() is { } stamp && await RootOfAsync(record, stamp) is { } root)
+        {
+            var unix = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+            double? theta = 0;
+            if (root.Spins) theta = BodyRecordOfUuid(root.SpinUuid) is { } body ? root.CorrectedTheta(unix, body, App.Config.MapSpinCorrections) : null;
+            if (theta is { } th)
+            {
+                var q = root.GlobalXf(StationIndex.DefaultRule, th).Inverse().Apply(f);
+                var v = new[] { q.X - c[0], q.Y - c[1], q.Z - c[2] };
+                var l = Math.Sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                if (l > 1e-6) dir = [v[0] / l, v[1] / l, v[2] / l];
+            }
+        }
+        return new ExteriorPlan(lo, hi, at, dir);
+    }
+
+    // ===== QT の目的地の先読み (2026-11-06、利用者の指示「QT 時には目的地が station ならQT 宙に読み込んでおいて」。親の決定) =====
+    // MapPanel が QT の移動中に呼ぶ。表示は変えない。その場所の 3D を外から見る形で開いたときに頼む物を、裏で作って保存する (StationView3DCache):
+    //   地点: 外から見る形の読み込む地点の中心 (ExteriorPlanAsync の At) で、ビューアが使った半径 (s_seenRadii。まだ無ければ 30・300 m) ごと (先読み (PrefetchAsync) と同じ作り方・保存の仕方)。
+    //   場所の全部の大きな物体: ビューアが使った境 (s_seenS3。まだ無ければ 20 m)。
+    // 色付けはビューアが最後に頼んだもの (s_seenPal)。同じ場所は同時に 1 本だけ。場所の中身の一覧 (DB) がまだ今の Data.p4k の物でなければしない。
+    // 区画の取り出しは 1 本ずつ (CPU が高い間は待つ)。保存しない設定 (上限 0) ならしない。かかった時間はログに 1 行出す
+    private static readonly object s_seenLock = new();
+    private static readonly SortedSet<double> s_seenRadii = new();
+    private static double s_seenS3 = 20;
+    private static bool s_seenPal = true;
+    private static readonly HashSet<string> s_prefetching = new(StringComparer.Ordinal);
+    private static readonly SemaphoreSlim s_prefetchGate = new(1, 1);
+    public static async Task PrefetchArrivalAsync(string record, string name, CancellationToken ct = default)
+    {
+        lock (s_prefetching) if (!s_prefetching.Add(record)) return;
+        var cache = StationView3DCache.Current;
+        Interlocked.Increment(ref s_open);
+        try
+        {
+            if (!cache.Enabled || Ship3DExports.CurrentStamp() is not { } stamp) return;
+            List<double> radii; double s3; bool palette;
+            lock (s_seenLock) { radii = s_seenRadii.Count > 0 ? s_seenRadii.ToList() : [30, 300]; s3 = s_seenS3; palette = s_seenPal; }
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var built = await Task.Run(async () =>
+            {
+                var db = StationView3DLayout.DbPath;
+                if (StationView3D.ReadLayoutDb(db, StationView3DLayout.GameKey(stamp), record) is not { } layout) return -1;
+                var layoutId = palette ? LayoutIdNow() : LayoutIdNow() + StationView3DCache.NoPaletteSuffix;
+                var plan = await ExteriorPlanAsync(record, layout, null, layoutId, stamp.Key);
+                if (plan == null) return -1;
+                var ini = Path.Combine(Path.GetDirectoryName(stamp.Path) ?? "", "data", "Localization", "japanese_(japan)", "global.ini");
+                var loc = new StationView3D.Loc(ini, Path.Combine(DetailPanel.WorkDir(), "translations.db"));
+                var session = new StationView3D.Session(layout, "", loc, terminalLabel: StationTerminalKinds.Label, texUrlBase: TexUrlBase);
+                var extract = StationView3D.OwnExtractor(stamp.Path, m => App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{name}」 (QT の先読み) {m}"),
+                    texMaxPx: TexMaxPx, texFolder: Path.Combine(Ship3DExports.Folder, StationView3DTextures.FolderName), palette: palette);
+                async Task<IDisposable> Acquire(CancellationToken t) { while (Ship3DExports.CpuHighNow) await Task.Delay(500, t); await s_prefetchGate.WaitAsync(t); return new Release(() => s_prefetchGate.Release()); }
+                int n = 0;
+                foreach (var r in radii)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var key = StationView3DCache.KeyOf(record, stamp.Key, layoutId, plan.At, r);
+                    if (cache.TryGet(key, record, stamp.Key, layoutId, plan.At, r) is { }) { cache.Release(key); continue; }
+                    if (!cache.CanStore(PrefetchEstimateBytes)) break;
+                    var stage = cache.BeginStage(key);
+                    var st = await session.BuildRegionAsync(plan.At, r, stage, extract, Acquire, null, ct, palette);
+                    if (cache.Commit(stage, key, record, stamp.Key, layoutId, plan.At, r, st.Socpaks, st.Missing) is { }) cache.Release(key); else StationView3DCache.TryDelete(stage);
+                    n++;
+                }
+                if (cache.FindBig(record, stamp.Key, layoutId, s3, out _, out var bk) is { }) cache.Release(bk);
+                else
+                {
+                    var bkey = StationView3DCache.KeyOfBig(record, stamp.Key, layoutId, s3);
+                    if (cache.CanStore(PrefetchEstimateBytes))
+                    {
+                        var stage = cache.BeginStage(bkey);
+                        var st = await session.BuildBigAsync(s3, stage, extract, Acquire, _ => Task.CompletedTask, ct);
+                        if (cache.Commit(stage, bkey, record + StationView3DCache.BigSuffix, stamp.Key, layoutId, [s3], 0, st.Socpaks, 0) is { }) cache.Release(bkey); else StationView3DCache.TryDelete(stage);
+                        n++;
+                    }
+                }
+                return n;
+            }, ct);
+            if (built > 0) App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{name}」を QT の間に先読みして保存しました ({built} 件・{sw.Elapsed.TotalSeconds:F1} 秒)");
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) when (ex is not OutOfMemoryException) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[ステーションの 3D (新しい方式)] 「{name}」の QT の先読みを止めました: {ex.Message}"); }
+        finally
+        {
+            lock (s_prefetching) s_prefetching.Remove(record);
+            if (Interlocked.Decrement(ref s_open) <= 0) { s_open = 0; SocpakExporter.ReleaseShared(); }
+        }
     }
     private async Task ShowHereNoCaptureAsync()
     {

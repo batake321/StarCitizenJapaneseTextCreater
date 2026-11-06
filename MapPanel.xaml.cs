@@ -561,6 +561,49 @@ public partial class MapPanel : UserControl
         });
     }
 
+    // ===== QT の目的地のステーション (2026-11-06、利用者の指示「QT 時には目的地が station ならQT 宙に読み込んでおいて、自分の飛んでいく方向から中心を向って向いた外部からの視点で
+    //  QT から離脱したときに出してほしい。」。親の決定) =====
+    // 移動中 (Game.log の "move"・"exit") に、QT の目的地 (ComputeQt の Target) のステーション (StationWith3DOf) と、出発地 (ComputeQt の From。無ければ最後に取った座標) を覚え、
+    // そのステーションの 3D の読み込み (外から見る形の地点・場所の全部の大きな物体) を裏で作って保存する (StationView3DView.PrefetchArrivalAsync)。表示は変えない。
+    // QT から出た ("arrive") ら、覚えたステーションの 3D を外から見る形で出す。向きは、ステーションの中心から出発地の向きに離れた所から中心を向く。
+    // 出す先は着陸場に着いたとき (ShowArrivedExterior) と同じ (3D の別ウィンドウが開いていればそこ、無ければ［マップ］タブ。窓を前に出さず、タブも選ばない)
+    private (ShopTreeNode Station, (double X, double Y, double Z)? From)? _qtArrive;
+    private void StartQtPrefetch()
+    {
+        _ = Dispatcher.InvokeAsync(async () =>
+        {
+            try
+            {
+                var tree = _tree ?? await GetTreeAsync();
+                if (tree == null || tree.IsEmpty) return;
+                if (ComputeQt(tree) is not { } qt || StationWith3DOf(qt.Target) is not { } st) { _qtArrive = null; return; }
+                _qtArrive = (st, qt.From);
+                _ = StationView3DView.PrefetchArrivalAsync(st.RecordName, st.Name);
+            }
+            catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] QT の目的地の 3D を先読みできませんでした: {ex.Message}"); }
+        });
+    }
+    private void ShowQtArrivalExterior()
+    {
+        _ = Dispatcher.InvokeAsync(async () =>
+        {
+            try
+            {
+                if (_qtArrive is not { } qa) return;
+                _qtArrive = null;
+                var tree = _tree ?? await GetTreeAsync();
+                if (tree == null || tree.IsEmpty) return;
+                var cur = App.Config.MapCurrent;
+                var from = qa.From ?? (cur.Utc > 0 ? (cur.X, cur.Y, cur.Z) : null);
+                _lastInside = null;
+                var st = qa.Station;
+                if (StationView3DShops.ShowInOpenWindow(st.RecordName, st.Name, tree, null, activate: false, exterior: true, from: from)) return;
+                ShowPlace3D(st.RecordName, st.Name, tree, null, exterior: true, from: from);
+            }
+            catch (Exception ex) { App.AppendStartupLog(App.Config.WorkingDirectory, $"[マップ] QT の目的地のステーションの 3D を出せませんでした: {ex.Message}"); }
+        });
+    }
+
     private bool LeftStation(ShopTree tree, ShopTreeNode station)
     {
         if (QuantumStateProvider?.Invoke()?.LeftLandingRaw is not { Length: > 0 } raw) return false;
@@ -661,6 +704,9 @@ public partial class MapPanel : UserControl
     {
         // 着陸場に着いた (ゲームログの「到着」と同じとき): そのステーションの 3D を外から見る形で出す (ShowArrivedExterior。座標を取らないので、自動の取得の設定に関係なく動く)
         if (kind == "land") ShowArrivedExterior();
+        // QT の目的地が 3D のあるステーションなら、移動中に裏で読み込んでおき (StartQtPrefetch)、QT から出たら外から見る形で出す (ShowQtArrivalExterior)。自動の取得の設定に関係なく動く
+        if (kind == "move" || kind == "exit") StartQtPrefetch();
+        if (kind == "arrive") ShowQtArrivalExterior();
         if (!App.Config.MapAutoCapture) return;
         if (kind == "move") { OnQuantumMoving(); return; }
         if (kind == "exit") { OnQuantumTakeoffExit(); return; }
@@ -1555,7 +1601,8 @@ public partial class MapPanel : UserControl
     private ShopTree? _place3DTree;
     // here: 出した後に、その 3D で現在位置の所を出す (StationView3DView.RequestHere。GoHere3DAsync)
     // exterior: 出した後に、その 3D を外から全体が見える形にする (StationView3DView.RequestExterior。GoHere3DAsync の近くのステーション。2026-11-06)。同じ場所を出していれば出し直さない
-    private void ShowPlace3D(string recordName, string name, ShopTree? tree, string? focusShop, bool here = false, bool exterior = false)
+    // from: 外から見る形で、ステーションの中心からこの点 (全体の座標) の向きに離れた所から見る (QT から出たとき。ShowQtArrivalExterior。2026-11-06)
+    private void ShowPlace3D(string recordName, string name, ShopTree? tree, string? focusShop, bool here = false, bool exterior = false, (double X, double Y, double Z)? from = null)
     {
         if (_place3D == null || _place3D.Record != recordName || focusShop != null)
         {
@@ -1574,7 +1621,7 @@ public partial class MapPanel : UserControl
         webMap.Visibility = Visibility.Collapsed;
         pnlPlace.Visibility = Visibility.Visible;
         if (here) _place3D.RequestHere();
-        else if (exterior) _place3D.RequestExterior();
+        else if (exterior) _place3D.RequestExterior(from);
     }
 
     // 星系図を出す。［星系図に戻る］・3D から遠ざかり切ったとき。

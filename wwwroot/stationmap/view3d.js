@@ -31,7 +31,7 @@ if (APP) window.chrome.webview.addEventListener('message', e => {
   if (d.type === 'notes') { onNotes(d); return; }
   if (d.type === 'noteAdded') { onNoteAdded(d); return; }
   if (d.type === 'exterior') { onExterior(d); return; }   // 外から見たときの印 (着陸パッド・ハンガー・ドッキングポート。下の「外から見たときの印と見出し」)
-  if (d.type === 'exteriorView') { onExteriorView(); return; }   // 外から全体が見える形にする (下の「外から見る形」。2026-11-06)
+  if (d.type === 'exteriorView') { onExteriorView(d); return; }   // 外から全体が見える形にする (下の「外から見る形」。2026-11-06)
   // マイハンガーの大きさのうち、ハンガーの区画が決まるもの (アプリの StationHangarCatalog.Resolve)。本体の station.json に覚え、行き先の窓はこの大きさだけを出す (hangarSizesOf)
   if (d.type === 'hangarSizes') { const sv = stationSaved ? stationSaved.VIEW : VIEW; if (Array.isArray(d.sizes)) { if (sv) sv.hangarSizesOk = d.sizes; else pendingSizes = d.sizes; } return; }   // 場所のデータ (VIEW) が入る前なら覚えて、入った後に当てる
   if (d.type === 'bigReady' || d.type === 'bigError') { onBig(d); return; }   // 場所の全部の大きな物体 (下の「場所の全部の大きな物体」)
@@ -2438,7 +2438,8 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { }, ex
   let dotZoom = 1;
   const dotRadius = m => 2.5 * DOT_SCALE * dotZoom;
   const DOT_R = 4;         // 見出しで隠さない印の点の半径 (見出しの置き方で見る。点の半径に、この値との大きいほうを使う)
-  const HOME_FILL = 0.75;  // 基準の距離: 印が画面の真ん中 HOME_FILL の範囲に入るいちばん近い距離 (旧方式の初めの位置の fitRadius)
+  const HOME_FILL = 0.75;
+  const EXT_FILL = 0.8;   // 外から見る形で、全体の箱が画面の縦・横に占める割合 (2026-11-06、利用者の指示「全体の80% を占める感じ」)  // 基準の距離: 印が画面の真ん中 HOME_FILL の範囲に入るいちばん近い距離 (旧方式の初めの位置の fitRadius)
   const capPool = [];
   const widthCache = new Map();
   function capEl(i) {
@@ -2863,8 +2864,26 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { }, ex
   let got = false;   // 印の知らせ ({type:'exterior'}) が届いたか (extReady)
   requestExterior = () => { marks = []; got = false; clear(); if (APP) window.chrome.webview.postMessage({ type: 'exteriorGet' }); };
   extReady = () => got;
-  extFit = () => {
+  // (2026-11-06、利用者の指示「全体の80% を占める感じで画面の中心をステーションの中心にそろえて出してくれるとキレイ」「自分の飛んでいく方向から中心を向って向いた外部からの視点」。親の決定)
+  // アプリが全体の箱 (d.lo・d.hi。場所の全部の大きな物体の範囲、無ければ区画の置き方の一覧の箱。場所の座標) を渡したときは、箱の中心を回す中心 (画面の中心) にし、
+  // 箱の 8 隅が画面の縦・横の EXT_FILL の範囲に入るいちばん近い距離まで引く (いちばんはみ出す向きで EXT_FILL)。向きは今の向きのまま。d.dir (場所の座標の向き。中心からカメラへ) があればその向き。
+  // 箱が無ければ、前の決まり (印とステーションの中心が HOME_FILL に入る距離) のまま
+  extFit = d => {
     const cc = toV(cur.center);
+    if (d && Array.isArray(d.lo) && Array.isArray(d.hi)) {
+      const lo = toV(d.lo).sub(cc), hi = toV(d.hi).sub(cc);
+      tgt.copy(lo).add(hi).multiplyScalar(0.5);
+      if (Array.isArray(d.dir) && d.dir.length === 3) { const v = toV(d.dir); if (v.lengthSq() > 1e-12) { v.normalize(); az = Math.atan2(v.y, v.x); el2 = Math.asin(Math.max(-1, Math.min(1, v.z))); } }
+      dist = 1; upd(); cam.updateMatrixWorld();
+      // カメラの向き (前・右・上)。隅 p (中心からの相対) の前の成分 z・横 x・縦 y について、d − z ≥ |x| / (EXT_FILL · tan(横の半分の角))、|y| / (EXT_FILL · tan(縦の半分の角))
+      const fwd = cam.getWorldDirection(new THREE.Vector3()), up = cam.up.clone(), right = new THREE.Vector3().crossVectors(fwd, up).normalize(); up.crossVectors(right, fwd).normalize();
+      const tv = Math.tan(cam.fov * Math.PI / 360), th = tv * cam.aspect; let need = 1;
+      for (const x of [lo.x, hi.x]) for (const y of [lo.y, hi.y]) for (const z of [lo.z, hi.z]) {
+        const p = new THREE.Vector3(x, y, z).sub(tgt), pz = p.dot(fwd);
+        need = Math.max(need, pz + Math.abs(p.dot(right)) / (EXT_FILL * th), pz + Math.abs(p.dot(up)) / (EXT_FILL * tv));
+      }
+      dist = need; upd(); return;
+    }
     const ctr = got ? center : Array.isArray(VIEW?.center) && VIEW.center.length === 3 ? toV(VIEW.center) : cc;
     tgt.copy(ctr).sub(cc); upd();
     const pts = marks.map(m => m.pos.clone().sub(cc)); pts.push(tgt.clone());
@@ -2949,10 +2968,13 @@ let lastFrame = performance.now(), lastRender = 0; window.__frameMax = 0; window
       if (f) { startAt = f; first = btns.find(b => b._t === f); }
     }
     first = first || btns[0];
-    if (first) first.click();
+    // 外から見る形で開いたとき (?ext=1。アプリが外から見る形を頼んで開いた): 行き先へは飛ばず、外から見る形の知らせ (exteriorView) で読み込む。
+    // 知らせが FAIL_HOLD_MS たっても来ず、地点も読み込んでいなければ、今までの行き先へ飛ぶ
+    if (qs.get('ext') === '1') { const f0 = first; setTimeout(() => { if (!cur && !loading && !pendingExtView && f0) f0.click(); }, FAIL_HOLD_MS); }
+    else if (first) first.click();
     // 行き先の無い場所 (端末・店・乗り場のデータが無い所): 区画を置いた所の真ん中のまわりを出す
-    else if (VIEW.center) { document.getElementById('msg').textContent = ''; loadRegion(VIEW.center.slice(), regionR()); }
-    else document.getElementById('msg').textContent = 'この場所には飛ぶ先がありません';
+    else if (!first && VIEW.center) { document.getElementById('msg').textContent = ''; loadRegion(VIEW.center.slice(), regionR()); }
+    else if (!first) document.getElementById('msg').textContent = 'この場所には飛ぶ先がありません';
   } catch (e) { document.getElementById('msg').textContent = '読み込めませんでした: ' + e.message; report('start', e); }
 })();
 document.getElementById('hangarLeave').onclick = () => leaveHangar();
@@ -3092,12 +3114,18 @@ function onHere(d) {
 // マイハンガーの中を出しているときは、ステーションへ戻り、入るときに乗った乗り場のまわりを読み込んでから引く (読み込めなければやめる)。
 // 待っている間に［現在位置］の知らせ (here) が来たら、そちらを先にしてやめる (onHere)。
 // ［マップ］タブの中では、引いた距離の 2 倍が LEAVE_DIST より大きければ、星系図に戻る距離 (leaveDist) をそこまで広げる
-let pendingExtView = false, pendingExtSince = 0, pendingExtMarksSince = 0;
-function onExteriorView() { pendingExtView = true; pendingExtMarksSince = 0; hereStart = 'no'; pendingHere = null; runExteriorView(); }
+// (2026-11-06 の直し。利用者の報告「checkmate についたとき checkmate が出たが、内部。」: 開いたときの行き先 (艦隊マネージャーの前) の読み込み (±30 m → ±300 m) が
+//  90 秒ほど続き、その間「読み込み中」で待ったまま FAIL_HOLD_MS で待つのをやめ、中から見る形のままだった。親の決定)
+//   アプリの知らせ d: { lo, hi (全体の箱), at (読み込む地点の中心: ステーションの中心にいちばん近い、区画の箱の中の点), dir (QT から出たとき: 中心からカメラへの向き) }。どれも場所の座標。
+//   読み込み中は、終わるまで待つ (待つのをやめない)。場所のデータ (VIEW) が無いままのときだけ FAIL_HOLD_MS で待つのをやめる。
+//   今の地点の立方体の中心から at が半径の半分より離れていれば (開いたときを含む)、at のまわりを ±FIRST_R m 読み込んでから引き、続けて ±読み込む範囲を裏で読み込む (行き先へ飛ぶときと同じ順)。
+//   外から見る形で開いたとき (URL の ext=1) は、開いたときの行き先へは飛ばない (始めの処理)。
+let pendingExtView = false, pendingExtSince = 0, pendingExtMarksSince = 0, pendingExt = null;
+function onExteriorView(d) { pendingExtView = true; pendingExt = d || {}; pendingExtMarksSince = 0; hereStart = 'no'; pendingHere = null; runExteriorView(); }
 function runExteriorView() {
   if (!pendingExtView) return;
   if (!pendingExtSince) pendingExtSince = performance.now();
-  if (!VIEW || !cur || loading || pendingGo) { if (performance.now() - pendingExtSince < FAIL_HOLD_MS) setTimeout(runExteriorView, 300); else pendingExtSince = 0; return; }
+  if (!VIEW || loading || pendingGo) { if (VIEW || performance.now() - pendingExtSince < FAIL_HOLD_MS) setTimeout(runExteriorView, 300); else pendingExtSince = 0; return; }
   pendingExtSince = 0;
   if (SITE) {
     const back = hangarBack ? hangarBack.pos.slice() : null;
@@ -3108,13 +3136,27 @@ function runExteriorView() {
     loadRegion(back, regionR()).then(() => { if (cur === before) pendingExtView = false; else runExteriorView(); });
     return;
   }
-  if (!extReady()) {
+  const d = pendingExt || {}, box = Array.isArray(d.lo) && Array.isArray(d.hi);
+  const at = Array.isArray(d.at) && d.at.length === 3 ? d.at : !cur && Array.isArray(VIEW.center) ? VIEW.center : null;
+  if (at && (!cur || at.some((v, a) => Math.abs(v - cur.cc[a]) > cur.r / 2))) {
+    if (walk) document.getElementById('walkBtn').click();
+    const gen = ++goGen, r = regionR(), first = Math.min(FIRST_R, r), want = d;
+    loadRegion(at.slice(), first).then(() => {
+      if (!cur || gen !== goGen || pendingExt !== want || !pendingExtView) return;
+      pendingExtView = false; pendingExtMarksSince = 0; extFit(d); leaveDist = Math.max(LEAVE_DIST, dist * 2);
+      if (r > first) return loadRegion(at.slice(), r, true, true);
+    });
+    return;
+  }
+  if (!cur) { pendingExtView = false; return; }
+  // 全体の箱が無いとき (前の決まり) は、印の知らせを FAIL_HOLD_MS まで待つ
+  if (!box && !extReady()) {
     if (!pendingExtMarksSince) pendingExtMarksSince = performance.now();
     if (performance.now() - pendingExtMarksSince < FAIL_HOLD_MS) { setTimeout(runExteriorView, 300); return; }
   }
   pendingExtView = false; pendingExtMarksSince = 0;
   if (walk) document.getElementById('walkBtn').click();
-  extFit();
+  extFit(d);
   leaveDist = Math.max(LEAVE_DIST, dist * 2);
 }
 // マイハンガーの中から、ステーションへ戻る (［現在位置］で移るとき。移る先は呼ぶ側が決める)

@@ -141,9 +141,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v2.6.12-win-x64.zip (最新 v2.6.12 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.6.12/StarCitizenJapaneseTextCreater-v2.6.12-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v2.6.13-win-x64.zip (最新 v2.6.13 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.6.13/StarCitizenJapaneseTextCreater-v2.6.13-win-x64.zip)**
 >
-> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.6.12-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
+> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.6.13-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
 >
 > **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/21 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.2.0/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
 
@@ -1057,7 +1057,14 @@ MIT License
 
 新しい版が上です。前の版の分は畳んであります（▶ を押すと開きます）。
 
-### 🚀 v2.6.12 更新内容
+### 🚀 v2.6.13 更新内容
+
+- **QT でステーションへ向かうとき**: QT の目的地がステーションなら、移動中にそのステーションの 3D を裏で読み込んでおき、QT から出たときに、飛んできた向きからステーションの中心を見る外からの視点で出します
+- **外から見た 3D の構図**: ステーション全体の中心を画面の中心にそろえ、全体が画面の約 80 % を占める距離から見ます
+- **着いたときの 3D**: 着陸場に着いたときに、外から見る形でなく中から見る形で出ていたのを直しました
+
+<details>
+<summary>v2.6.12 更新内容</summary>
 
 - **コメントの編集**: 3D のコメントの札を押すと、文を直せます（空にすると消します）。文の中に「\n」と打つと、そこで行を分けます
 - **コメントの札の高さ**: 札を、印の玉のすぐ上に出すようにしました（前は 1.5 m 上で、近くで見えませんでした）
@@ -1066,6 +1073,8 @@ MIT License
 - **向きの滑らかさ**: 3D の「歩くモード」に「向きの滑らかさ」（秒）を足しました。歩くときと再生のときに、向きの変わり方を滑らかにします（0 で今までどおり）
 - **録画の場所**: 録画に場所が入っていなかったのを直しました。保存のファイル名は「walk_場所の名前_年月日-時分.json」です。場所の入っていない前の録画も、読み込むと今の場所で再生します
 - **コメントの入力で動けなくなる不具合**: コメントの欄を閉じた後にキーが効かなくなっていたのを直しました。日本語の変換中の Enter・Esc で欄が閉じないようにしました
+
+</details>
 
 <details>
 <summary>v2.6.11 更新内容</summary>
