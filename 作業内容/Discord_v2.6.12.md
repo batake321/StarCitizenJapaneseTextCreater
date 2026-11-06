@@ -1,4 +1,4 @@
-**StarCitizenJapaneseTextCreater v2.6.12 を公開しました（2026-11-06）**
+**StarCitizenJapaneseTextCreater v2.6.12 を公開しました（2026-11-06 22:00）**
 https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/tag/v2.6.12
 （アプリの自動更新からも入れられます）
 
