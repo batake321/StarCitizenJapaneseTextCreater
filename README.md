@@ -141,9 +141,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v2.6.9-win-x64.zip (最新 v2.6.9 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.6.9/StarCitizenJapaneseTextCreater-v2.6.9-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v2.6.10-win-x64.zip (最新 v2.6.10 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.6.10/StarCitizenJapaneseTextCreater-v2.6.10-win-x64.zip)**
 >
-> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.6.9-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
+> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.6.10-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
 >
 > **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/21 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.2.0/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
 
@@ -1057,11 +1057,21 @@ MIT License
 
 新しい版が上です。前の版の分は畳んであります（▶ を押すと開きます）。
 
-### 🚀 v2.6.9 更新内容
+### 🚀 v2.6.10 更新内容
+
+- **ステーションの 3D の読み込み**: 形と当たり判定を、場所を 10 m の升に分けて一緒に持つ形に作り替えました。歩いている位置からの距離で、50 m 以内は全部、100 m 以内は 1 m 以上、150 m 以内は 5 m 以上の部品を描き、10 m 進むごと・エレベーターなどで移った後に、近くなった所を足して遠ざかった所を捨てます。歩いている途中の引っかかりと、Checkmate など部品の多い場所で読み込めなかったのを直しました
+- **外判定**: 見ている位置のまわりに何も無い向きがあれば「外」として、着陸パッドなどのキャプションを出し、ステーションの外装を全部描きます（内装は描きません）。足の下 0.5 m 以内に床があれば「中」です
+- **読み込みの調整**: 3D の左の欄に、描く距離・部品の大きさの境・見直す間隔などを変えられる項目を足しました
+- 読み込みが済む前に出ていた水色の線を出さなくしました
+
+<details>
+<summary>v2.6.9 更新内容</summary>
 
 - **着いたステーションの外観の 3D**: Game.log で着陸場に着いたとき（ゲームログの「到着」と同じとき）は、座標を取らなくても、着いたステーションの 3D を外から見た形で出します
 - **星系図に戻らない不具合**: 量子ジャンプの途中に現在位置を取ったとき、［マップ］タブのステーションの 3D が星系図に戻らなかったのを直しました。自動の取得でも、出ている 3D が今いる位置に合わなければ星系図に戻ります
 - **ステーションを出た後の判定**: 建物の中で現在位置を取った後に外で取ったときは、すぐ「そのステーションから出た後」として、外から見た 3D を出さなくしました（今までは、少し離れるまで出ていました）
+
+</details>
 
 <details>
 <summary>v2.6.8 更新内容</summary>

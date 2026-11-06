@@ -82,6 +82,22 @@ details.more>summary{cursor:pointer;color:#9cf;font-size:12px;margin:4px 0}
 <div>読み込む範囲: 中心から ± <input type="number" id="regionR" value="150" step="10" min="10" style="width:60px"> m の立方体</div>
 <button id="reloadHere" style="display:inline;width:auto">今の中心で読み込み直す</button>
 </details>
+<!-- 読み込みの調整 (2026-11-06、利用者の指示「今言った距離で作って、調整可能なようにページに設定を足すのは不可能なの？」。view3d.js の LOADCFG。値は localStorage の view3d.load に覚える) -->
+<details class="sec" id="secTune"><summary>読み込みの調整</summary>
+<table class="ops">
+<tr><th>全部を描く距離</th><td><input type="number" class="ld" data-k="d1" step="10" min="0" style="width:60px"> m</td></tr>
+<tr><th>中・大を描く距離</th><td><input type="number" class="ld" data-k="d2" step="10" min="0" style="width:60px"> m</td></tr>
+<tr><th>大を描く距離</th><td><input type="number" class="ld" data-k="d3" step="10" min="0" style="width:60px"> m</td></tr>
+<tr><th>小と中の境</th><td><input type="number" class="ld" data-k="s1" step="0.5" min="0" style="width:60px"> m</td></tr>
+<tr><th>中と大の境</th><td><input type="number" class="ld" data-k="s2" step="1" min="0" style="width:60px"> m</td></tr>
+<tr><th>大きな物体の境</th><td><input type="number" class="ld" data-k="s3" step="5" min="0" style="width:60px"> m</td></tr>
+<tr><th>見直す間隔</th><td><input type="number" class="ld" data-k="step" step="1" min="1" style="width:60px"> m</td></tr>
+<tr><th>細かい物を読む速さの上限</th><td><input type="number" class="ld" data-k="speed" step="0.1" min="0" style="width:60px"> m/秒</td></tr>
+<tr><th>外判定の距離</th><td><input type="number" class="ld" data-k="outDist" step="10" min="0" style="width:60px"> m</td></tr>
+<tr><th>外判定の床の距離</th><td><input type="number" class="ld" data-k="outFloor" step="0.1" min="0" style="width:60px"> m</td></tr>
+</table>
+<button id="ldReset" style="display:inline;width:auto">初めの値に戻す</button>
+</details>
 <details class="sec" id="secWalk" open><summary>歩くモード</summary>
 <div><button id="walkBtn">歩くモード: OFF</button> <button id="hereBtn" style="display:inline;width:auto">現在位置</button> <span id="walkInfo"></span><div><button id="runBtn" style="display:inline;width:auto">走る: OFF</button> <button id="stBtn" style="display:inline;width:auto">姿勢: 立つ</button> <button id="ncBtn" style="display:inline;width:auto">すり抜け: OFF</button></div></div>
 </details>

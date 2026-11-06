@@ -1,18 +1,61 @@
 // ステーションの 3D (新しい方式) の、地点の区画の読み取り・解析を画面の糸の外で行う (2026-11-04、利用者の指摘「移動して読み込む時止まるのはどうにかなる？」)。
-// view3d.js の buildCur・当たり判定の升目を作る所を、ここへ移した (計算の中身は同じ)。
-// 受け取る: { type:'build', id, base (地点の置き場の URL), region (region.json), c (中心), r, keys: { col, ocol, labk }, names (色の種類の名前) }
-// 返す: { type:'progress', id, done, total } (読んだ区画の数)、{ type:'boxes', id, boxes } (外形: 描く部品の箱の線。中心からの相対、Float32Array)、
-//       { type:'done', id, buf, uvbuf, texbuf, offs, ioffs, labs, uoffs, toffs, parts, ladders, elevDoors, stairs, fz, fa, pidx, lightParts, coarse, times }、{ type:'error', id, message }
-//       (buf = COLK の三角形の位置 (9 float) と ioffs (三角形 → 部品の番号) だけ。labs[k] = 判定の色 k (floor2・slope2・tube2・counter2) の三角形の、buf の中の位置 b の並び (Uint32Array、昇順)。
-//        判定の色の三角形の位置の複製と輪郭線は持たない (2026-11-05、親の決定。描いていない))
-//       (uvbuf・texbuf = COLK の種類ごとの UV (三角形の角ごと float32 x6) と画像の番号 (三角形ごと int32。region.json の textures の番号。-1 = 無し) の別の ArrayBuffer (UV が無ければ null)。
-//        uoffs[k]・toffs[k] = [その中の位置 (要素), 長さ]。COLK の中は画像の番号の順)
-//       (coarse = 当たり判定の荒い区切り { all, fl, bigAll, bigFl }。升は画面の側が引いたときに作る)
+// ===== 升ごとに持つ形 (2026-11-06 の作り替え) =====
+// (利用者の指示「広いところならいいが、ステーション内なら 150m もみても仕方なくないか？ ほんらい遠いところも小さいパーツは省くべきで、近くなったら疲労、遠ざかったら捨てるが 50m 単位3段階くらいじゃないか？
+//  開けたとこでも150m 以上先は逆に建物など大まかなものが取れた方がいいし」「50 / 100 / 150 で区切り、10m 移動ごと、エレベータやリフトや階段はしごリフト移動ごとに見直し」
+//  「細かく書く範囲戸当たり判定は一致しないとだめではないのか？ 読み込みで止まるんだからどっちかが短ければ意味ないよな？」。親の決定)
+// 前は、地点 (中心・半径の立方体) の全部の三角形を 1 つの ArrayBuffer にまとめて画面の側へ渡していた (Checkmate の ±150 m で約 5,700 万三角形・2.3 GB)。
+// 今は、地点の区画のファイル (g/<番号>.bin) をこの糸が持ったままにし、部品を「升 × 部品の大きさの組 × 外装・内装」のかたまりに分けた索引だけを先に返し、
+// 画面の側が頼んだかたまり (升のかたまり) だけを、その都度作って渡す。かたまりには「描く形」と「当たり」が一緒に入る (描く範囲と当たりの範囲は、同じかたまりの出し入れで決まる)。
+//   升: 場所の座標で固定の格子。1 辺 CELL m の立方体 (x・y・z とも floor(場所の座標 / CELL))。
+//   部品の大きさ = 置かれた部品の箱 (区画のファイルの部品の箱の 8 隅を場所の座標にした箱) のいちばん長い辺。組は 小 (0)・中 (1)・大 (2)・大きな物体 (3)。境は画面の側が渡す (sizes = [小と中, 中と大, 大きな物体])。
+//   1 つの部品は、箱の中心の入る升 1 つに入れる (升をまたぐ部品も丸ごとその升のかたまりに入る。三角形は切らない)。
+//   外装・内装: 区画 (socpak) のパスの語で決める (socInterior。前の「読む部品を選ぶ」と同じ決まり)。かたまりの種類 cls = 大きさの組 + (内装なら 4)。
+// 受け取る:
+//   { type:'build', id, og, base (地点の置き場の URL), region (region.json), o (座標の原点 = 画面の側の cur.center), c・r (地点の立方体の中心・半径), keys: { col, ocol, labk }, names, pal, site, sizes }
+//     → { type:'progress', id, done, total } (用意した区画のファイルの数)、{ type:'done', id, index, textures, texGen, ladders, elevDoors, stairs, fz, fa, lightParts, entParts, stat, times }
+//     (index = { keys: ['ix,iy,iz,cls', …], cells (Int32Array x3), cls (Uint8Array), tris (Uint32Array), parts (Uint32Array), hash (Uint32Array) }。hash = かたまりの中身 (部品の並び) の印。
+//      地点を読み直しても、同じ鍵で hash が同じなら、画面の側はそのかたまりを作り直さない)
+//   { type:'sizes', id, og, sizes } → { type:'index', id, index, stat } (部品の大きさの境を変えたとき。索引を分け直す)
+//   { type:'chunk', id, og, key } → { type:'chunk', id, og, key, hash, cls, texGen, F, ID, LB, FL, UV, TX, offs, parts, labN, box, col: { g2, g16, big } } (無ければ { type:'chunk', id, og, key, missing: true })
+//     F = 三角形の位置 (原点 o からの相対。float32 x9)。COLK の種類ごとに offs[k] = [F の中の位置, 長さ]。種類の中は画像の番号の順 (-1 が先)。
+//     ID = 三角形 → かたまりの中の部品の番号、LB = 三角形の判定の色 (LABK の番号)、UV・TX = UV (x6) と画像の番号 (無ければ null)、box[k] = 種類ごとの箱 [lo, hi]。
+//     FL = 三角形の当たりの印 (UP・DOWN・DOOR・FLR・OK1・OK2)、col = 当たりの索引 (下の「当たり」)
+//   { type:'part', id, og, key ('インスタンス:部品の番号') } → { type:'part', id, tris (Float32Array。原点からの相対), lab (Uint8Array), part } (部品の強調用。無ければ missing)
+//   { type:'out', id, og, kind:'scan', p, dist, floor, foot } → { type:'out', id, outside } / { kind:'cross', a, b } → { type:'out', id, hit } (外判定。下の「外判定」)
+//   { type:'wpurge', id } → { type:'wstat', id, used } (前の形の保存 (解析の結果を丸ごと OPFS に置いていたもの) を消す)
+// 失敗は { type:'error', id, message }
+// 前にあった、解析の結果の丸ごとの保存 (WC)・大きい ArrayBuffer を分けて渡す処理 (postDone・xferHead など。2026-11-06) は、1 つの大きなかたまりを作らなくなったので外した
 'use strict';
-const geoCache = new Map();
-async function loadGeo(base, region, gi) {
-  if (geoCache.has(gi)) return geoCache.get(gi);
-  const url = base + region.geos[gi];
+const CELL = 10;
+// 外装か内装かは、区画 (socpak) のパス (region.json の instances の 6 番目。ObjectContainers の下の相対パスの小文字) のフォルダの名前で決める (ファイルの名前は見ない):
+//   外装: フォルダの名前を _ で分けた語に EXT_WORDS がある (ext・ext_cargo・reststop_ext・hab_a_ext など)。
+//   内装: 外装でなく、フォルダの名前の語に INT_WORDS がある (int・reststop_int・hab_a_int など) か、パスが INT_DIRS のどれかで始まる。
+//   どちらでもない区画は外装として扱う
+const PICK = {
+  EXT_WORDS: ['ext', 'exterior'], INT_WORDS: ['int', 'interior', 'interiors'],
+  INT_DIRS: ['pu/loc/mod/common/hab/', 'pu/loc/mod/common/medical/', 'setup/spawn_closet/', 'setup/vent_spawncloset/'],
+};
+// 区画のパス → 内装か (true = 内装。外装・どちらでもない = false)
+function socInterior(path) {
+  const words = new Set(); for (const seg of path.split('/').slice(0, -1)) for (const w of seg.split('_')) words.add(w);
+  if (PICK.EXT_WORDS.some(w => words.has(w))) return false;
+  return PICK.INT_WORDS.some(w => words.has(w)) || PICK.INT_DIRS.some(d => path.startsWith(d));
+}
+// 階段の部品 (名前の語に stair・stairs があり、手すり・柱・飾りの語の無いもの。アプリの StationFloorBuilder.IsStairMesh と同じ決まり)
+const STAIR_NOT = new Set(['rail', 'railing', 'decal', 'wall', 'structure', 'strut', 'divider', 'platform', 'cap', 'capplate', 'addon', 'sign', 'cover']);
+const COS_WALK_INV = Math.cos(46 * Math.PI / 180);
+// ===== 当たり =====
+// (2026-11-06、利用者の指摘 (升を踏んだその場で作る形について)「馬鹿なやり方だと思うのは俺だけか？」「止まるのは当たり前だよな？」。親の決定: 当たりは、升を用意するときに一緒に作る)
+// かたまりの三角形ごとに印 FL を付け、xy の升目の索引 col を作って一緒に渡す。画面の側 (view3d.js の cellTris) は、引いた升の入る索引の一覧から、印と升の条件 (前の升目と同じ条件) で選ぶだけ。
+//   印: UP = 上向き (cz > 0)、DOWN = 下向き (cz < 0)、DOOR = ドアの部品 (名前の語に door・doors があり elevator の無い部品)、FLR = 判定の床 (判定の色が floor2・tube2)、
+//       OK1 = 1 m の升の数が 4096 以下、OK2 = 2 m の升の数が 1024 以下 (前の升目の上限と同じ)
+//   索引: 三角形の掛かる 2 m の升 (floor(x/2), floor(y/2)。原点からの相対) の数が BIG2 以下なら g2 (2 m の升ごとの一覧) に、それより大きく 16 m の升の数が BIG16 以下なら g16 (16 m の升ごとの一覧) に、
+//       それより大きい三角形は big (並び) に入れる (どの三角形も 3 つのどれか 1 つに入る)。形: 並べた鍵 (I × 100003 + J)・始まり・中身 (三角形の位置 b)
+const UP = 1, DOWN = 2, DOOR = 4, FLR = 8, OK1 = 16, OK2 = 32, BIG2 = 64, BIG16 = 64;
+let GEO = new Map();   // 区画 (socpak) のパス → 読んだ区画のファイル (今の地点の分。次の地点で同じ区画・同じ置かれた所がそろっていれば使い回す)
+let R = null;          // 今の地点 (索引)
+let TEXGEN = 0;        // 画像の番号の並びの代 (region.json の textures の並びが前の地点と合わなくなるたびに増える。かたまりに付けて返す)
+async function fetchGeo(url) {
   const resp = await fetch(url);
   const buf = await resp.arrayBuffer();
   if (!resp.ok || buf.byteLength < 24) throw new Error(`区画のファイルを読めませんでした: ${url} (応答 ${resp.status}・${buf.byteLength} バイト)`);
@@ -21,471 +64,439 @@ async function loadGeo(base, region, gi) {
   const hp = Number(dv.getBigInt64(8, true)), jl = dv.getInt32(16, true); const head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, hp, jl)));
   const g = { buf, base: 24, parts: head.parts, inst: new Map(head.inst.map(x => [x[0], x])), triStart: [] };
   let s = 0; for (const p of g.parts) { g.triStart.push(s); s += p[5]; } g.tris = s;
-  geoCache.set(gi, g); return g;
+  return g;
 }
 function worldVerts(P, A) {
   const W = new Float64Array(P.length);
   for (let i = 0; i < P.length; i += 3) { const x = P[i], y = P[i + 1], z = P[i + 2]; W[i] = A[0] * x + A[1] * y + A[2] * z + A[3]; W[i + 1] = A[4] * x + A[5] * y + A[6] * z + A[7]; W[i + 2] = A[8] * x + A[9] * y + A[10] * z + A[11]; }
   return W;
 }
-function lineIndex(g, ii) {
-  const key = JSON.stringify(ii[2]); g.lineIdx ??= new Map(); if (g.lineIdx.has(key)) return g.lineIdx.get(key); const res = {};
-  for (const [lk, l] of Object.entries(ii[2])) { const tr = new Uint32Array(g.buf, g.base + l[0], l[1] * 3); const m = new Map(); for (let q = 0; q < l[1]; q++) { let a = m.get(tr[q * 3]); if (!a) m.set(tr[q * 3], a = []); a.push(q); } res[lk] = m; }
-  g.lineIdx.set(key, res); return res;
+// 部品の名前から決まるもの (区画の部品 p に 1 回だけ求めて覚える。同じ区画が何か所にも置かれる):
+//   light = 名前の語に light、cat = 種類 (light は除外、種類 other で名前の語に door・doors があればドア)、
+//   door = 当たりのドア (名前の語に door・doors があり elevator の無い部品。前の view3d.js の triIsDoor と同じ決まり)、ladder・stair = はしご・階段の部品か
+function metaOf(p) {
+  let m = p.__m;
+  if (!m) {
+    const w = p[0].split('_'), light = w.includes('light'), dw = w.some(x => x === 'door' || x === 'doors');
+    m = p.__m = { light, cat: light ? 'excluded' : p[1] === 'other' && dw ? 'door' : p[1], door: dw && !w.includes('elevator'), ladder: w.includes('ladder'), stair: w.some(x => x === 'stair' || x === 'stairs') && !w.some(x => STAIR_NOT.has(x)) };
+  }
+  return m;
 }
-// 升目 (Map: 鍵 → 三角形の位置の一覧) を、並べた鍵・始まり・中身の配列にする (画面の糸へ移せる形)
-function flat(map) {
-  const keys = Float64Array.from(map.keys()).sort();
-  const starts = new Uint32Array(keys.length + 1); let n = 0;
-  for (let i = 0; i < keys.length; i++) { starts[i] = n; n += map.get(keys[i]).length; } starts[keys.length] = n;
-  const items = new Uint32Array(n); let k = 0;
-  for (let i = 0; i < keys.length; i++) for (const b of map.get(keys[i])) items[k++] = b;
-  return { keys, starts, items };
+const isLight = p => metaOf(p).light;
+const catOf = p => metaOf(p).cat;
+// 上下が逆の重力の範囲 (region.json の gravity の up。2026-11-04、利用者が決めた案 1「重力が上向きの範囲では、下向きの面を床にし、上向きの面は床にしない」):
+// 範囲の中 (三角形の重心) では、上向きの床 (判定 floor2) を床にせず、下向きの面 (法線 z ≤ -COS_WALK_INV) を床 (floor2) にする。
+// アプリの判定 2 (同じ平面の形をまとめる) はせず、三角形ごとに決める (範囲の外は今までどおり)
+function upVolsOf(region) {
+  return (region.gravity || []).filter(g => g[0] === 'up').map(([, W, size, poly, h]) => {
+    const a = W[0], b = W[1], d = W[2], e = W[4], f = W[5], g2 = W[6], hh = W[8], i = W[9], j = W[10];
+    const det = a * (f * j - g2 * i) - b * (e * j - g2 * hh) + d * (e * i - f * hh);
+    const Rm = [(f * j - g2 * i) / det, (d * i - b * j) / det, (b * g2 - d * f) / det, (g2 * hh - e * j) / det, (a * j - d * hh) / det, (d * e - a * g2) / det, (e * i - f * hh) / det, (b * hh - a * i) / det, (a * f - b * e) / det];
+    // 範囲の箱 (場所の座標の AABB。部品の箱と比べて、掛からない部品は見ない)
+    const corners = size ? [[-1, -1, -1], [1, -1, -1], [-1, 1, -1], [1, 1, -1], [-1, -1, 1], [1, -1, 1], [-1, 1, 1], [1, 1, 1]].map(([x, y, z]) => [x * size[0] / 2, y * size[1] / 2, z * size[2] / 2])
+      : poly.flatMap(q => [[q[0], q[1], 0], [q[0], q[1], h]]);
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const [x, y, z] of corners) for (let k = 0; k < 3; k++) { const v = W[k * 4] * x + W[k * 4 + 1] * y + W[k * 4 + 2] * z + W[k * 4 + 3]; lo[k] = Math.min(lo[k], v); hi[k] = Math.max(hi[k], v); }
+    return { W, R: Rm, size, poly, h, lo, hi };
+  }).filter(v => isFinite(v.R[0]));
 }
-// 升目用の開いた番地の表 (鍵 = 升目の番号 (倍精度の整数)。空きは NaN)。数えて → 並べた鍵・始まり・中身の配列にする
-function tableHash(key, mask) {
-  const lo = key >>> 0, hi = Math.floor(key / 4294967296) | 0;
-  return (Math.imul(lo ^ Math.imul(hi, 0x85ebca6b), 0x9E3779B1) >>> 7) & mask;
+function inUp(upVols, x, y, z) {
+  return upVols.some(v => {
+    if (x < v.lo[0] || x > v.hi[0] || y < v.lo[1] || y > v.hi[1] || z < v.lo[2] || z > v.hi[2]) return false;
+    const px = x - v.W[3], py = y - v.W[7], pz = z - v.W[11], Rm = v.R;
+    const lx = Rm[0] * px + Rm[1] * py + Rm[2] * pz, ly = Rm[3] * px + Rm[4] * py + Rm[5] * pz, lz = Rm[6] * px + Rm[7] * py + Rm[8] * pz;
+    if (v.size) return Math.abs(lx) <= v.size[0] / 2 && Math.abs(ly) <= v.size[1] / 2 && Math.abs(lz) <= v.size[2] / 2;
+    if (lz < 0 || lz > v.h) return false;
+    let inside = false; const P_ = v.poly;
+    for (let k = 0, m = P_.length - 1; k < P_.length; m = k++) if ((P_[k][1] > ly) !== (P_[m][1] > ly) && lx < (P_[m][0] - P_[k][0]) * (ly - P_[k][1]) / (P_[m][1] - P_[k][1]) + P_[k][0]) inside = !inside;
+    return inside;
+  });
 }
-function makeTable() { const cap = 1 << 16; return { cap, n: 0, keys: new Float64Array(cap).fill(NaN), cnt: new Uint32Array(cap), pos: null }; }
-function tableSlot(T, key) {
-  const mask = T.cap - 1; let h = tableHash(key, mask);
-  while (T.keys[h] !== key) { if (T.keys[h] !== T.keys[h]) return -1; h = (h + 1) & mask; }
-  return h;
-}
-function tableCount(T, key) {
-  const mask = T.cap - 1; let h = tableHash(key, mask), k;
-  while ((k = T.keys[h]) !== key) {
-    if (k !== k) {
-      T.keys[h] = key; T.cnt[h] = 1;
-      if (++T.n * 2 > T.cap) tableGrow(T);
-      return;
+// 部品 (地点 Rg の ri 番目) の点 (場所の座標)・三角形の番号・判定の色。判定の色は、前の buildCur と同じ決まりで直したもの:
+//   名前に light のある部品で、アプリの判定の色が 1 つも無いものは、色なし (除外のまま)。(2026-11-04、利用者の決定「上場の高さが床とほぼ同じ物体は除去しない」: 色の付いたものは色を使う)
+//   上下が逆の重力の範囲の中の三角形は、下向きの面を床にし、上向きの床を床にしない
+function partGeom(Rg, ri) {
+  const cd = Rg.cand[Rg.CI[ri]], pi = Rg.PI[ri], g = cd.g, p = g.parts[pi];
+  const P = new Float32Array(g.buf, g.base + p[2], p[3] * 3), I = p[8] === 2 ? new Uint16Array(g.buf, g.base + p[4], p[5] * 3) : new Uint32Array(g.buf, g.base + p[4], p[5] * 3);
+  let lab = new Uint8Array(g.buf, g.base + cd.ii[1] + g.triStart[pi], p[5]), lightEx = false;
+  if (isLight(p) && !lab.some(v => v)) { lab = new Uint8Array(p[5]); lightEx = true; }
+  const W = worldVerts(P, cd.A);
+  if (Rg.upVols.length && Rg.FLOOR2 > 0 && !lightEx) {
+    let lab2 = null;
+    for (let t = 0; t < p[5]; t++) {
+      const v0 = I[t * 3] * 3, v1 = I[t * 3 + 1] * 3, v2 = I[t * 3 + 2] * 3;
+      const cx = (W[v0] + W[v1] + W[v2]) / 3, cy = (W[v0 + 1] + W[v1 + 1] + W[v2 + 1]) / 3, cz = (W[v0 + 2] + W[v1 + 2] + W[v2 + 2]) / 3;
+      if (!inUp(Rg.upVols, cx, cy, cz)) continue;
+      const ux = W[v1] - W[v0], uy = W[v1 + 1] - W[v0 + 1], uz = W[v1 + 2] - W[v0 + 2], wx = W[v2] - W[v0], wy = W[v2 + 1] - W[v0 + 1], wz = W[v2 + 2] - W[v0 + 2];
+      const nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx, nl = Math.hypot(nx, ny, nz); if (!(nl > 0)) continue;
+      const want = nz / nl <= -COS_WALK_INV ? Rg.FLOOR2 : lab[t] === Rg.FLOOR2 ? 0 : lab[t];
+      if (want !== lab[t]) { lab2 ??= Uint8Array.from(lab); lab2[t] = want; }
     }
-    h = (h + 1) & mask;
+    if (lab2) lab = lab2;
   }
-  T.cnt[h]++;
+  return { cd, pi, p, P, I, W, lab };
 }
-function tableGrow(T) {
-  const oc = T.cap, ok = T.keys, on = T.cnt; T.cap = oc * 2; T.keys = new Float64Array(T.cap).fill(NaN); T.cnt = new Uint32Array(T.cap);
-  const mask = T.cap - 1;
-  for (let i = 0; i < oc; i++) { const k = ok[i]; if (k !== k) continue; let h = tableHash(k, mask); while (T.keys[h] === T.keys[h]) h = (h + 1) & mask; T.keys[h] = k; T.cnt[h] = on[i]; }
+// 部品の大きさの境 sizes で、部品を「升 × 大きさの組 × 外装・内装」のかたまりに分ける (索引)。三角形の無い部品は入れない
+function bucket(Rg, sizes) {
+  const [s1, s2, s3] = sizes; const B = new Map(); const BX = Rg.BX;
+  const stat = { parts: [0, 0, 0, 0, 0, 0, 0, 0], tris: [0, 0, 0, 0, 0, 0, 0, 0] };
+  for (let ri = 0; ri < Rg.n; ri++) {
+    const cd = Rg.cand[Rg.CI[ri]], nt = cd.g.parts[Rg.PI[ri]][5]; if (!nt) continue;
+    const o = ri * 6, size = Math.max(BX[o + 3] - BX[o], BX[o + 4] - BX[o + 1], BX[o + 5] - BX[o + 2]);
+    const cls = (size >= s3 ? 3 : size >= s2 ? 2 : size >= s1 ? 1 : 0) | (cd.interior ? 4 : 0);
+    const ix = Math.floor((BX[o] + BX[o + 3]) / 2 / CELL), iy = Math.floor((BX[o + 1] + BX[o + 4]) / 2 / CELL), iz = Math.floor((BX[o + 2] + BX[o + 5]) / 2 / CELL);
+    const key = ix + ',' + iy + ',' + iz + ',' + cls;
+    let a = B.get(key); if (!a) B.set(key, a = { ix, iy, iz, cls, list: [], tris: 0, hash: 0 });
+    a.list.push(ri); a.tris += nt; stat.parts[cls]++; stat.tris[cls] += nt;
+  }
+  // 中身の印 (FNV-1a): 色付け・部品 (インスタンスの番号と部品の番号) の並び
+  const n = B.size, keys = new Array(n), cells = new Int32Array(n * 3), cls = new Uint8Array(n), tris = new Uint32Array(n), parts = new Uint32Array(n), hash = new Uint32Array(n);
+  let q = 0;
+  for (const [key, a] of B) {
+    let h = Rg.pal ? 0x811c9dc5 : 0x9dc5811c;
+    const mix = v => { for (let s = 0; s < 32; s += 8) { h ^= (v >>> s) & 255; h = Math.imul(h, 0x01000193); } };
+    for (const ri of a.list) { mix(Rg.cand[Rg.CI[ri]].inst[0] | 0); mix(Rg.PI[ri]); }
+    a.hash = h >>> 0;
+    keys[q] = key; cells[q * 3] = a.ix; cells[q * 3 + 1] = a.iy; cells[q * 3 + 2] = a.iz; cls[q] = a.cls; tris[q] = a.tris; parts[q] = a.list.length; hash[q] = a.hash; q++;
+  }
+  Rg.buckets = B; Rg.sizes = sizes.slice();
+  return { index: { keys, cells, cls, tris, parts, hash }, stat };
 }
-function tableLayout(T) {
-  let keys = new Float64Array(T.n); let q = 0, kmin = Infinity, kmax = -Infinity;
-  for (let i = 0; i < T.cap; i++) { const k = T.keys[i]; if (k === k) { keys[q++] = k; if (k < kmin) kmin = k; if (k > kmax) kmax = k; } }
-  // 鍵が 32 ビット整数に収まるなら Int32Array にする (値は同じ。引くのは二分探しで型を問わない。メモリが半分)
-  if (kmin >= -2147483648 && kmax <= 2147483647) keys = Int32Array.from(keys);
-  keys.sort();
-  const starts = new Uint32Array(T.n + 1); let tot = 0; T.pos = new Uint32Array(T.cap);
-  for (let i = 0; i < T.n; i++) { const sl = tableSlot(T, keys[i]); starts[i] = tot; T.pos[sl] = tot; tot += T.cnt[sl]; }
-  starts[T.n] = tot;
-  const items = new Uint32Array(tot);
-  return { items, grid: { keys, starts, items } };
-}
-// ===== 解析の結果のディスク保存 (WC) =====
-// (2026-11-04、利用者の指示「先読み、キャッシュ化 HDD 容量設定が空いていればファイル保存など早く動かす仕組みを入れて」)
-// 'done' の知らせ (描く形のバッファ・当たり判定の升目・部品の一覧など) を、そのまま保存して次に使う。
-//   保存の形: 知らせの中の ArrayBuffer・型付き配列は 1 つの data.bin に並べ、残り (数・文字・配列・入れ子) は meta.json の skeleton に JSON で書く。
-//     知らせの項目が増減しても、そのまま保存・復元できる (項目を名前で決めていない)。数の NaN・Infinity・-0・undefined は印を付けて書き、同じ値に戻す。
-//   置き場: ブラウザのオリジンの私的なファイル領域 (OPFS。WebView2 の利用者データのフォルダ = 作業ディレクトリの webview2_ship3d の中) の w-<鍵>\ (data.bin・meta.json)。
-//     meta.json は最後に書く (途中で止まったものは使わない)。
-//   鍵: アプリが渡す鍵 (wcache.key = 地点の保存と同じ鍵) + 中心・半径 + 色の種類の名前 (keys・names) + この解析の糸のスクリプト自身の SHA-256 (中身が変わったら別の鍵)。
-//   容量: アプリが渡す budget (バイト。上限 − 地点の保存の分) に収める。超えたら最後に使った時刻が古いものから消す。budget が 0 以下なら全部消す。
-//     アプリが渡す free (保存先のドライブの空き) が、保存する大きさ + WC_RESERVE に足りなければ保存しない。
-const WC_RESERVE = 3 * 1024 * 1024 * 1024, WC_CHUNK = 256 * 1024 * 1024, WC_VERSION = 1;
-const WC = (() => {
-  const TA = { Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array, BigUint64Array };
-  const enc = new TextEncoder(), dec = new TextDecoder();
-  // 保存先 (OPFS)。試しの道具は self.__wcBackend で差し替える (handle: getSize/read/write/truncate/close の同期の取っ手)
-  const opfs = {
-    async root() { return await navigator.storage.getDirectory(); },
-    async list() { const out = []; const root = await this.root(); for await (const [name] of root.entries()) if (name.startsWith('w-')) out.push(name); return out; },
-    async handle(entry, file, create) {
-      const root = await this.root(); let d, fh;
-      try { d = await root.getDirectoryHandle(entry, { create }); fh = await d.getFileHandle(file, { create }); }
-      catch (e) { if (e && e.name === 'NotFoundError') return null; throw e; }
-      return await fh.createSyncAccessHandle();
-    },
-    async remove(entry) { const root = await this.root(); try { await root.removeEntry(entry, { recursive: true }); } catch (e) { if (!(e && e.name === 'NotFoundError')) throw e; } },
+// 当たりの印と索引 (上の「当たり」)。F = かたまりの三角形の位置、FL = 印 (DOOR・FLR は入れてある。ここで UP・DOWN・OK1・OK2 を足す)
+function buildCol(F, nTri, FL) {
+  const lvl = new Uint8Array(nTri), big = [], RG = new Int32Array(nTri * 4);
+  // bb[L] = 段 L (0 = 2 m、1 = 16 m) の升の番号の範囲 [a の最小, 最大, c の最小, 最大]
+  const bb = [[Infinity, -Infinity, Infinity, -Infinity], [Infinity, -Infinity, Infinity, -Infinity]];
+  for (let q = 0; q < nTri; q++) {
+    const b = q * 9;
+    const x0 = Math.min(F[b], F[b + 3], F[b + 6]), x1 = Math.max(F[b], F[b + 3], F[b + 6]), y0 = Math.min(F[b + 1], F[b + 4], F[b + 7]), y1 = Math.max(F[b + 1], F[b + 4], F[b + 7]);
+    const cz = (F[b + 3] - F[b]) * (F[b + 7] - F[b + 1]) - (F[b + 4] - F[b + 1]) * (F[b + 6] - F[b]);
+    const n1 = (Math.floor(x1) - Math.floor(x0) + 1) * (Math.floor(y1) - Math.floor(y0) + 1);
+    let a0 = Math.floor(x0 / 2), a1 = Math.floor(x1 / 2), c0 = Math.floor(y0 / 2), c1 = Math.floor(y1 / 2);
+    const n2 = (a1 - a0 + 1) * (c1 - c0 + 1);
+    FL[q] |= (cz > 0 ? UP : 0) | (cz < 0 ? DOWN : 0) | (n1 <= 4096 ? OK1 : 0) | (n2 <= 1024 ? OK2 : 0);
+    let L = 0;
+    if (!(n2 <= BIG2)) { a0 = Math.floor(x0 / 16); a1 = Math.floor(x1 / 16); c0 = Math.floor(y0 / 16); c1 = Math.floor(y1 / 16); L = (a1 - a0 + 1) * (c1 - c0 + 1) <= BIG16 ? 1 : 2; }
+    lvl[q] = L;
+    if (L === 2) { big.push(b); continue; }
+    RG[q * 4] = a0; RG[q * 4 + 1] = a1; RG[q * 4 + 2] = c0; RG[q * 4 + 3] = c1;
+    const B = bb[L]; if (a0 < B[0]) B[0] = a0; if (a1 > B[1]) B[1] = a1; if (c0 < B[2]) B[2] = c0; if (c1 > B[3]) B[3] = c1;
+  }
+  // 升の番号の範囲が広すぎるとき (とても遠くまで散らばったかたまり) は、表を作らずに Map で数える (結果は同じ)
+  const gridMap = L => {
+    const m = new Map();
+    for (let q = 0; q < nTri; q++) { if (lvl[q] !== L) continue; const r = q * 4; for (let a = RG[r]; a <= RG[r + 1]; a++) for (let c = RG[r + 2]; c <= RG[r + 3]; c++) { const key = a * 100003 + c; m.set(key, (m.get(key) || 0) + 1); } }
+    let keys = Float64Array.from(m.keys()), kmin = Infinity, kmax = -Infinity;
+    for (const k of keys) { if (k < kmin) kmin = k; if (k > kmax) kmax = k; }
+    if (keys.length && kmin >= -2147483648 && kmax <= 2147483647) keys = Int32Array.from(keys);
+    keys.sort();
+    const starts = new Uint32Array(keys.length + 1), at = new Map(); let tot = 0;
+    for (let i = 0; i < keys.length; i++) { starts[i] = tot; at.set(keys[i], tot); tot += m.get(keys[i]); }
+    starts[keys.length] = tot;
+    const items = new Uint32Array(tot);
+    for (let q = 0; q < nTri; q++) { if (lvl[q] !== L) continue; const r = q * 4, b = q * 9; for (let a = RG[r]; a <= RG[r + 1]; a++) for (let c = RG[r + 2]; c <= RG[r + 3]; c++) { const key = a * 100003 + c, p = at.get(key); items[p] = b; at.set(key, p + 1); } }
+    return { keys, starts, items };
   };
-  const be = () => self.__wcBackend || opfs;
-  const available = () => !!self.__wcBackend || (typeof navigator !== 'undefined' && navigator.storage && typeof navigator.storage.getDirectory === 'function');
-  const withLock = fn => (typeof navigator !== 'undefined' && navigator.locks) ? navigator.locks.request('scjt-wcache', fn) : fn();
-  let verP = null;
-  const version = () => verP ??= (async () => {
-    if (self.__wcVersion) return self.__wcVersion;
-    const txt = await (await fetch(self.location.href)).text();
-    return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(txt)))).slice(0, 16);
-  })();
-  const hex = u => Array.from(u, x => x.toString(16).padStart(2, '0')).join('');
-  async function keyOf(wc, c, r, keys, names) {
-    const s = JSON.stringify([WC_VERSION, wc.key, c, r, keys, names, await version()]);
-    return 'w-' + hex(new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(s)))).slice(0, 32);
+  // 段 L の索引: 升の番号の範囲の表 (幅 × 高さ) で数えて詰め、中身のある升だけを鍵の昇順 (a の昇順・c の昇順) に並べる。升の中身は三角形の順
+  const grid = L => {
+    const B = bb[L]; if (!(B[0] <= B[1])) return { keys: new Int32Array(0), starts: new Uint32Array(1), items: new Uint32Array(0) };
+    const A0 = B[0], C0 = B[2], Wd = B[1] - A0 + 1, Hd = B[3] - C0 + 1, NC = Wd * Hd;
+    if (!(NC <= 8000000)) return gridMap(L);
+    const cnt = new Uint32Array(NC + 1);
+    for (let q = 0; q < nTri; q++) { if (lvl[q] !== L) continue; const r = q * 4; for (let a = RG[r] - A0; a <= RG[r + 1] - A0; a++) for (let c = RG[r + 2] - C0; c <= RG[r + 3] - C0; c++) cnt[a * Hd + c + 1]++; }
+    let used = 0; for (let i = 0; i < NC; i++) { if (cnt[i + 1]) used++; cnt[i + 1] += cnt[i]; }
+    const items = new Uint32Array(cnt[NC]), at = cnt.slice(0, NC);
+    for (let q = 0; q < nTri; q++) { if (lvl[q] !== L) continue; const r = q * 4, b = q * 9; for (let a = RG[r] - A0; a <= RG[r + 1] - A0; a++) for (let c = RG[r + 2] - C0; c <= RG[r + 3] - C0; c++) items[at[a * Hd + c]++] = b; }
+    let keys = new Float64Array(used); const starts = new Uint32Array(used + 1); let k = 0, kmin = Infinity, kmax = -Infinity;
+    for (let a = 0; a < Wd; a++) for (let c = 0; c < Hd; c++) { const i = a * Hd + c; if (cnt[i + 1] === cnt[i]) continue; const key = (a + A0) * 100003 + (c + C0); keys[k] = key; starts[k] = cnt[i]; k++; if (key < kmin) kmin = key; if (key > kmax) kmax = key; }
+    starts[used] = cnt[NC];
+    // 鍵が 32 ビット整数に収まるなら Int32Array にする (値は同じ)
+    if (used && kmin >= -2147483648 && kmax <= 2147483647) keys = Int32Array.from(keys);
+    return { keys, starts, items };
+  };
+  return { g2: grid(0), g16: grid(1), big: Uint32Array.from(big) };
+}
+// かたまり (鍵 key) を作る。部品の並び・種類ごとのまとめ方・画像の番号の順・判定の色は、前の buildCur と同じ決まり (範囲がかたまりの部品だけになった)
+function buildChunk(Rg, key) {
+  const bk = Rg.buckets.get(key); if (!bk) return null;
+  const COLK = Rg.COLK, LABK = Rg.LABK, names = Rg.names, o = Rg.o;
+  const baseN = {}, texCnt = {}; for (const k of COLK) { baseN[k] = 0; texCnt[k] = new Map(); }
+  const geo = bk.list.map(ri => partGeom(Rg, ri));
+  let anyUv = false;
+  for (const s of geo) {
+    const p = s.p, k = catOf(p); baseN[k] += p[5];
+    const tc = texCnt[k]; if (p[11] >= 0) { const T = new Int32Array(s.cd.g.buf, s.cd.g.base + p[11], p[5]); for (let t = 0; t < p[5]; t++) tc.set(T[t], (tc.get(T[t]) || 0) + 1); } else tc.set(-1, (tc.get(-1) || 0) + p[5]);
+    // (2026-11-05) UV の無い部品でも画像の番号 (場所のパレットの色だけの項目) があれば作る (その部品の UV は 0 のまま)
+    if (p[10] >= 0 || p[11] >= 0) anyUv = true;
   }
-  async function readAll(h) { const n = h.getSize(); const u = new Uint8Array(n); let at = 0; while (at < n) { const k = h.read(u.subarray(at, Math.min(n, at + WC_CHUNK)), { at }); if (!(k > 0)) throw new Error('short read'); at += k; } return u; }
-  async function writeAll(h, u, at) { for (let o = 0; o < u.length; o += WC_CHUNK) { const part = u.subarray(o, Math.min(u.length, o + WC_CHUNK)); let w = 0; while (w < part.length) { const k = h.write(part.subarray(w), { at: at + o + w }); if (!(k > 0)) throw new Error('short write'); w += k; } } }
-  async function readMeta(entry) {
-    const h = await be().handle(entry, 'meta.json', false); if (!h) return null;
-    try { return JSON.parse(dec.decode(await readAll(h))); } catch (_) { return null; } finally { h.close(); }
+  let pos = 0; const offs = {};
+  for (const k of COLK) { offs[k] = [pos * 9, baseN[k] * 9]; pos += baseN[k]; }
+  const nTri = pos;
+  const F = new Float32Array(nTri * 9), ID = new Uint32Array(nTri), LB = new Uint8Array(nTri), FL = new Uint8Array(nTri);
+  const UV = anyUv ? new Float32Array(nTri * 6) : null, TX = anyUv ? new Int32Array(nTri) : null;
+  // 種類の中の書く位置は画像の番号ごと (番号の昇順。-1 が先)
+  const wq = {};
+  for (const k of COLK) { const m = new Map(); let q = 0; for (const id of [...texCnt[k].keys()].sort((a, b) => a - b)) { m.set(id, q); q += texCnt[k].get(id); } wq[k] = m; }
+  const parts = [], labN = new Array(LABK.length).fill(0), box = {};
+  // 種類ごとの箱 (返すのは低い角。高い角は .hi)
+  const bx0 = k => { let b = box[k]; if (!b) { b = box[k] = [[Infinity, Infinity, Infinity], [-Infinity, -Infinity, -Infinity]]; } const lo = b[0]; lo.hi = b[1]; return lo; };
+  const FLOOR2 = LABK.indexOf('floor2'), TUBE2 = LABK.indexOf('tube2');
+  for (const s of geo) {
+    const { cd, pi, p, I, W, lab } = s, g = cd.g, id_ = parts.length, k = catOf(p), door = metaOf(p).door;
+    const UVs = p[10] >= 0 ? new Float32Array(g.buf, g.base + p[10], p[3] * 2) : null, TXs = p[11] >= 0 ? new Int32Array(g.buf, g.base + p[11], p[5]) : null;
+    const qk = wq[k], ob = offs[k][0] / 9, cnt = {}, lo = bx0(k), hi = lo.hi;
+    let ltid = NaN, lq = 0;   // 今の画像の番号と、その番号の次に書く位置 (番号が替わるとき・部品の終わりに qk へ戻す)
+    for (let t = 0; t < p[5]; t++) {
+      const tid = TXs ? TXs[t] : -1;
+      if (tid !== ltid) { if (ltid === ltid) qk.set(ltid, lq); ltid = tid; lq = qk.get(tid); }
+      const q = ob + lq++;
+      let w = q * 9;
+      for (let c3 = 0; c3 < 3; c3++) { const v = I[t * 3 + c3] * 3; for (let a = 0; a < 3; a++) { const x = F[w++] = W[v + a] - o[a]; if (x < lo[a]) lo[a] = x; if (x > hi[a]) hi[a] = x; } }
+      ID[q] = id_; LB[q] = lab[t];
+      FL[q] = (door ? DOOR : 0) | (lab[t] && (lab[t] === FLOOR2 || lab[t] === TUBE2) ? FLR : 0);
+      if (anyUv) { TX[q] = tid; if (UVs) { let u = q * 6; for (let c3 = 0; c3 < 3; c3++) { const vi = I[t * 3 + c3] * 2; UV[u++] = UVs[vi]; UV[u++] = UVs[vi + 1]; } } }
+      if (lab[t]) { const lk = LABK[lab[t]]; cnt[lk] = (cnt[lk] || 0) + 1; labN[lab[t]]++; }
+    }
+    if (ltid === ltid) qk.set(ltid, lq);
+    const sp = (cd.inst[5] || '').split('/').pop();
+    // [インスタンスの番号, 部品の名前, 種類, 判定の面の数, 区画の名前, '', 区画の中の部品の番号]
+    parts.push([cd.inst[0], p[0], k, Object.entries(cnt).map(([kk, n]) => `${names[kk]} ${n}`).join(', ') || '歩ける面に色なし', sp, '', pi]);
   }
-  async function writeMeta(entry, meta) {
-    const h = await be().handle(entry, 'meta.json', true);
-    try { const u = enc.encode(JSON.stringify(meta)); h.truncate(0); await writeAll(h, u, 0); h.flush && h.flush(); } finally { h.close(); }
+  const col = buildCol(F, nTri, FL);
+  const msg = { type: 'chunk', key, hash: bk.hash, cls: bk.cls, texGen: Rg.texGen, F, ID, LB, FL, UV, TX, offs, parts, labN, box, col };
+  const tr = [F.buffer, ID.buffer, LB.buffer, FL.buffer, col.g2.keys.buffer, col.g2.starts.buffer, col.g2.items.buffer, col.g16.keys.buffer, col.g16.starts.buffer, col.g16.items.buffer, col.big.buffer];
+  if (UV) tr.push(UV.buffer, TX.buffer);
+  return { msg, tr };
+}
+// ===== 外判定 =====
+// (2026-11-06、利用者の指示「外に出てるのに外判定がない。宇宙空間にあって xyz 各方向 +/-200m のどちらかに何もなければ外判定がいいかな？」
+//  「外判定に一個追加。外でも足の 0.5m 以内に床があれば中判定。 ORISON などの屋外想定」「モード関係なく、足位置の想定があるだろ？」。親の決定)
+// 見ている位置 p (場所の座標) から x・y・z の ＋・− の 6 つの向きへ dist m の線分を引き、地点の部品の三角形に 1 つも当たらない向きが 1 つでもあれば「外」、6 つ全部が当たれば「中」。
+//   地点の立方体 (中心 c から ±r m) の外へ出る線分は、立方体の端までで見る (端に届いたら「何も無い」)。見ている位置が立方体の外なら「外」(前の view3d.js の outScan と同じ決まり)。
+//   「外」でも、足 foot の下 floor m 以内に立てる面があれば「中」(foot.mode 'g' = 上向きの面で高さが足の floor m 下〜0.05 m 上、'c' = 上下が逆: 下向きの面 (ドア以外) で高さが足の 0.05 m 下より上〜floor m 上)。
+// 前は画面の側が、読み込んである三角形だけで見ていた。今は、読み込むかたまりを外判定で変える (「外」のときは内装の区画を読まない) ので、読み込みに左右されないよう、
+// この糸が地点の全部の部品 (大きさ・距離に関係なく) で見る: 部品の箱で絞ってから、その部品の三角形に当てる
+const OUT_EPS = 0.01;
+function outGeom(Rg, cache, ri) {
+  let t = cache.get(ri);
+  if (!t) { const s = partGeom(Rg, ri); t = { W: s.W, I: s.I, n: s.p[5], door: metaOf(s.p).door }; cache.set(ri, t); }
+  return t;
+}
+function outFloor(Rg, cache, foot, floor) {
+  const [x, y, z] = foot.p, up = foot.mode !== 'c', zl = up ? z - floor : z - 0.05, zh = up ? z + 0.05 : z + floor, BX = Rg.BX, o = Rg.o, E = OUT_EPS;
+  for (let ri = 0; ri < Rg.n; ri++) {
+    const q = ri * 6;
+    if (BX[q] - E > x || BX[q + 3] + E < x || BX[q + 1] - E > y || BX[q + 4] + E < y || BX[q + 2] - E > zh || BX[q + 5] + E < zl) continue;
+    const { W, I, n, door } = outGeom(Rg, cache, ri);
+    if (!up && door) continue;
+    for (let t = 0; t < n; t++) {
+      const v0 = I[t * 3] * 3, v1 = I[t * 3 + 1] * 3, v2 = I[t * 3 + 2] * 3;
+      const e1x = W[v1] - W[v0], e1y = W[v1 + 1] - W[v0 + 1], e2x = W[v2] - W[v0], e2y = W[v2 + 1] - W[v0 + 1], den = e1x * e2y - e2x * e1y; if (Math.abs(den) < 1e-12) continue;
+      if (up ? !(den > 0) : !(den < 0)) continue;
+      // 升の数の上限 (画面の側の升と同じ: 上向きは 1 m の升で 4096、下向きは 2 m の升で 1024)
+      const sc = up ? 1 : 2, x0 = Math.min(W[v0], W[v1], W[v2]) - o[0], x1 = Math.max(W[v0], W[v1], W[v2]) - o[0], y0 = Math.min(W[v0 + 1], W[v1 + 1], W[v2 + 1]) - o[1], y1 = Math.max(W[v0 + 1], W[v1 + 1], W[v2 + 1]) - o[1];
+      if ((Math.floor(x1 / sc) - Math.floor(x0 / sc) + 1) * (Math.floor(y1 / sc) - Math.floor(y0 / sc) + 1) > (up ? 4096 : 1024)) continue;
+      const wx = x - W[v0], wy = y - W[v0 + 1], s = (wx * e2y - e2x * wy) / den, u = (e1x * wy - wx * e1y) / den; if (s < 0 || u < 0 || s + u > 1) continue;
+      const zt = W[v0 + 2] + s * (W[v1 + 2] - W[v0 + 2]) + u * (W[v2 + 2] - W[v0 + 2]);
+      if (up ? zt >= zl && zt <= zh : zt > zl && zt <= zh) return true;
+    }
   }
-  // 知らせ → { skeleton, bufs: [ArrayBuffer] }
-  function encode(msg) {
-    const bufs = [], idx = new Map();
-    const add = ab => { let i = idx.get(ab); if (i === undefined) { i = bufs.length; bufs.push(ab); idx.set(ab, i); } return i; };
-    const walk = v => {
-      if (v === null || typeof v === 'boolean' || typeof v === 'string') return v;
-      if (typeof v === 'number') return Number.isFinite(v) && !Object.is(v, -0) ? v : { $n: Object.is(v, -0) ? '-0' : String(v) };
-      if (v === undefined) return { $u: 1 };
-      if (v instanceof ArrayBuffer) return { $ab: add(v) };
-      if (ArrayBuffer.isView(v)) {
-        if (v instanceof DataView || !TA[v.constructor.name] || !(v.buffer instanceof ArrayBuffer)) throw new Error('unsupported view');
-        return { $ta: v.constructor.name, b: add(v.buffer), o: v.byteOffset, l: v.length };
+  return false;
+}
+function outScan(Rg, m) {
+  const P = m.p, cc = Rg.c, r = Rg.r, BX = Rg.BX, E = OUT_EPS, cache = new Map();
+  if (Math.abs(P[0] - cc[0]) > r || Math.abs(P[1] - cc[1]) > r || Math.abs(P[2] - cc[2]) > r) return true;
+  if (m.foot && outFloor(Rg, cache, m.foot, m.floor)) return false;
+  for (let d = 0; d < 6; d++) {
+    const a = d >> 1, sg = d & 1 ? -1 : 1, b1 = (a + 1) % 3, b2 = (a + 2) % 3, p1 = P[b1], p2 = P[b2];
+    const L = Math.min(m.dist, sg > 0 ? cc[a] + r - P[a] : P[a] - (cc[a] - r)), lo = sg > 0 ? P[a] : P[a] - L, hi = sg > 0 ? P[a] + L : P[a];
+    // 線分に箱の掛かる部品を、近い順に
+    const cs = [];
+    for (let ri = 0; ri < Rg.n; ri++) {
+      const q = ri * 6;
+      if (BX[q + b1] - E > p1 || BX[q + 3 + b1] + E < p1 || BX[q + b2] - E > p2 || BX[q + 3 + b2] + E < p2 || BX[q + 3 + a] + E < lo || BX[q + a] - E > hi) continue;
+      cs.push(ri);
+    }
+    cs.sort((x, y) => sg > 0 ? BX[x * 6 + a] - BX[y * 6 + a] : BX[y * 6 + 3 + a] - BX[x * 6 + 3 + a]);
+    let found = false;
+    for (const ri of cs) {
+      const { W, I, n } = outGeom(Rg, cache, ri);
+      for (let t = 0; t < n && !found; t++) {
+        const v0 = I[t * 3] * 3, v1 = I[t * 3 + 1] * 3, v2 = I[t * 3 + 2] * 3;
+        // 三角形に線分が当たるか: 線分に垂直な面での三角形の中か → その点の、線分の向きの座標が線分の中か (前の outScan と同じ求め方)
+        const u0 = W[v0 + b1], u1 = W[v1 + b1], u2 = W[v2 + b1]; if ((u0 < p1 && u1 < p1 && u2 < p1) || (u0 > p1 && u1 > p1 && u2 > p1)) continue;
+        const w0 = W[v0 + b2], w1 = W[v1 + b2], w2 = W[v2 + b2]; if ((w0 < p2 && w1 < p2 && w2 < p2) || (w0 > p2 && w1 > p2 && w2 > p2)) continue;
+        const a0 = W[v0 + a], a1 = W[v1 + a], a2 = W[v2 + a]; if ((a0 < lo && a1 < lo && a2 < lo) || (a0 > hi && a1 > hi && a2 > hi)) continue;
+        const e1u = u1 - u0, e1w = w1 - w0, e2u = u2 - u0, e2w = w2 - w0, den = e1u * e2w - e2u * e1w; if (Math.abs(den) < 1e-12) continue;
+        const du = p1 - u0, dw = p2 - w0, s = (du * e2w - e2u * dw) / den, t2 = (e1u * dw - du * e1w) / den; if (s < 0 || t2 < 0 || s + t2 > 1) continue;
+        const v = a0 + s * (a1 - a0) + t2 * (a2 - a0);
+        if (sg > 0 ? v > P[a] && v <= hi : v < P[a] && v >= lo) found = true;
       }
-      if (Array.isArray(v)) { const a = new Array(v.length); for (let i = 0; i < v.length; i++) a[i] = walk(v[i]); return a; }
-      if (typeof v === 'object' && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null)) {
-        const o = {}; for (const k of Object.keys(v)) { if (k.startsWith('$')) throw new Error('unsupported key ' + k); o[k] = walk(v[k]); } return o;
-      }
-      throw new Error('unsupported value ' + typeof v);
-    };
-    return { skeleton: walk(msg), bufs };
+      if (found) break;
+    }
+    if (!found) return true;
   }
-  function decode(skeleton, bufs) {
-    const walk = v => {
-      if (v === null || typeof v !== 'object') return v;
-      if (Array.isArray(v)) { const a = new Array(v.length); for (let i = 0; i < v.length; i++) a[i] = walk(v[i]); return a; }
-      if ('$n' in v) return v.$n === '-0' ? -0 : Number(v.$n);
-      if ('$u' in v) return undefined;
-      if ('$ab' in v) return bufs[v.$ab];
-      if ('$ta' in v) return new TA[v.$ta](bufs[v.b], v.o, v.l);
-      const o = {}; for (const k of Object.keys(v)) o[k] = walk(v[k]); return o;
-    };
-    return walk(skeleton);
+  return false;
+}
+// 前に外判定した位置 a から今の位置 b までの線分が、地点の部品の三角形に当たるか (ドア・壁を通り抜けたか。前の view3d.js の outCross と同じ求め方)
+function outCross(Rg, A_, B_) {
+  const [ax, ay, az] = A_, [bx, by, bz] = B_, dx = bx - ax, dy = by - ay, dz = bz - az, BX = Rg.BX, E = OUT_EPS, cache = new Map();
+  const x0 = Math.min(ax, bx), x1 = Math.max(ax, bx), y0 = Math.min(ay, by), y1 = Math.max(ay, by), z0 = Math.min(az, bz), z1 = Math.max(az, bz);
+  for (let ri = 0; ri < Rg.n; ri++) {
+    const q = ri * 6;
+    if (BX[q] - E > x1 || BX[q + 3] + E < x0 || BX[q + 1] - E > y1 || BX[q + 4] + E < y0 || BX[q + 2] - E > z1 || BX[q + 5] + E < z0) continue;
+    const { W, I, n } = outGeom(Rg, cache, ri);
+    for (let t = 0; t < n; t++) {
+      const v0 = I[t * 3] * 3, v1 = I[t * 3 + 1] * 3, v2 = I[t * 3 + 2] * 3;
+      const tx0 = W[v0], tx1 = W[v1], tx2 = W[v2]; if ((tx0 < x0 && tx1 < x0 && tx2 < x0) || (tx0 > x1 && tx1 > x1 && tx2 > x1)) continue;
+      const ty0 = W[v0 + 1], ty1 = W[v1 + 1], ty2 = W[v2 + 1]; if ((ty0 < y0 && ty1 < y0 && ty2 < y0) || (ty0 > y1 && ty1 > y1 && ty2 > y1)) continue;
+      const tz0 = W[v0 + 2], tz1 = W[v1 + 2], tz2 = W[v2 + 2]; if ((tz0 < z0 && tz1 < z0 && tz2 < z0) || (tz0 > z1 && tz1 > z1 && tz2 > z1)) continue;
+      const e1x = tx1 - tx0, e1y = ty1 - ty0, e1z = tz1 - tz0, e2x = tx2 - tx0, e2y = ty2 - ty0, e2z = tz2 - tz0;
+      const px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x, det = e1x * px + e1y * py + e1z * pz; if (Math.abs(det) < 1e-12) continue;
+      const inv = 1 / det, sx = ax - tx0, sy = ay - ty0, sz = az - tz0; const u = (sx * px + sy * py + sz * pz) * inv; if (u < 0 || u > 1) continue;
+      const qx = sy * e1z - sz * e1y, qy = sz * e1x - sx * e1z, qz = sx * e1y - sy * e1x; const v = (dx * qx + dy * qy + dz * qz) * inv; if (v < 0 || u + v > 1) continue;
+      const tt = (e2x * qx + e2y * qy + e2z * qz) * inv; if (tt > 0 && tt < 1) return true;
+    }
   }
-  function uniqueBuffers(msg) {
-    const seen = new Set(), out = [];
-    const walk = v => {
-      if (v === null || typeof v !== 'object') return;
-      if (v instanceof ArrayBuffer) { if (!seen.has(v)) { seen.add(v); out.push(v); } return; }
-      if (ArrayBuffer.isView(v)) { if (!seen.has(v.buffer)) { seen.add(v.buffer); out.push(v.buffer); } return; }
-      if (Array.isArray(v)) { for (const x of v) walk(x); return; }
-      for (const k of Object.keys(v)) walk(v[k]);
-    };
-    walk(msg); return out;
+  return false;
+}
+// ===== 地点の索引を作る =====
+async function build(m) {
+  const { id, base, region, o, c, r, keys, names, og } = m, pal = !!m.pal, site = m.site || '';
+  const times = {}; let tp = performance.now(); const lap = k => { const t = performance.now(); times[k] = (t - tp) / 1000; tp = t; };
+  const lo = c.map(v => v - r), hi = c.map(v => v + r);
+  const ins = region.instances.filter(i => i[3][0] <= hi[0] && i[4][0] >= lo[0] && i[3][1] <= hi[1] && i[4][1] >= lo[1] && i[3][2] <= hi[2] && i[4][2] >= lo[2]);
+  // 区画のファイル: 前の地点と同じ場所・同じ色付けで、画像の番号の並びが合い (region.json の textures の重なる所が同じ)、同じ区画で要る置かれた所がそろっていれば、前に読んだものを使い回す
+  const texNew = region.textures || []; let compat = !!R && R.site === site && R.pal === pal;
+  if (compat) { const tOld = R.textures, n = Math.min(tOld.length, texNew.length); for (let i = 0; i < n && compat; i++) if (JSON.stringify(tOld[i]) !== JSON.stringify(texNew[i])) compat = false; }
+  const textures = compat && R.textures.length > texNew.length ? R.textures : texNew, texGen = compat ? R.texGen : ++TEXGEN;
+  const need = new Map();
+  for (const i of ins) { let s = need.get(i[1]); if (!s) need.set(i[1], s = { sp: i[5] || '', ids: [] }); s.ids.push(i[0]); }
+  const geoNew = new Map(), byGi = new Map(); let done = 0, reused = 0;
+  for (const [gi, nd] of need) {
+    let g = compat && nd.sp ? GEO.get(nd.sp) : null;
+    if (g && !nd.ids.every(x => g.inst.has(x))) g = null;
+    if (g) reused++; else g = await fetchGeo(base + region.geos[gi]);
+    byGi.set(gi, g); if (nd.sp) geoNew.set(nd.sp, g);
+    self.postMessage({ type: 'progress', id, done: ++done, total: need.size });
   }
-  // 全部の保存の合計 (バイト) と一覧 [{ entry, meta }]
-  async function scan() {
-    const res = []; let used = 0;
-    for (const entry of await be().list()) { const meta = await readMeta(entry); if (!meta || typeof meta.bytes !== 'number') { await be().remove(entry); continue; } used += meta.bytes; res.push({ entry, meta }); }
-    return { used, items: res };
+  lap('read');
+  // 区画 (インスタンス) の選び方 (前と同じ): 部品の箱 (8 隅) の 1 つでも立方体に掛かり、その箱の x の幅が 5000 m 未満のインスタンス。選んだ区画の部品は全部、索引に入れる
+  const cand = [], CI = [], PI = [], BXs = [];
+  for (const inst of ins) {
+    const g = byGi.get(inst[1]), A = inst[2], ii = g.inst.get(inst[0]); if (!ii) continue;
+    const bx = new Float64Array(g.parts.length * 6); let hit = false;
+    for (let pi = 0; pi < g.parts.length; pi++) {
+      const p = g.parts[pi];
+      const bl = [Infinity, Infinity, Infinity], bh = [-Infinity, -Infinity, -Infinity];
+      for (const x of [p[6][0], p[7][0]]) for (const y of [p[6][1], p[7][1]]) for (const z of [p[6][2], p[7][2]]) for (let a = 0; a < 3; a++) { const v = A[a * 4] * x + A[a * 4 + 1] * y + A[a * 4 + 2] * z + A[a * 4 + 3]; if (v < bl[a]) bl[a] = v; if (v > bh[a]) bh[a] = v; }
+      bx.set(bl, pi * 6); bx.set(bh, pi * 6 + 3);
+      if (bl[0] <= hi[0] && bh[0] >= lo[0] && bl[1] <= hi[1] && bh[1] >= lo[1] && bl[2] <= hi[2] && bh[2] >= lo[2] && bh[0] - bl[0] < 5000) hit = true;
+    }
+    if (!hit) continue;
+    const ci = cand.length; cand.push({ inst, g, ii, A, interior: socInterior(inst[5] || '') });
+    for (let pi = 0; pi < g.parts.length; pi++) { CI.push(ci); PI.push(pi); }
+    BXs.push(bx);
   }
-  // budget に収める (最後に使った時刻が古いものから消す。keep は消さない)。収めた後の合計を返す
-  async function enforce(budget, keep, extra) {
-    return await withLock(async () => {
-      let { used, items } = await scan();
-      items.sort((a, b) => (a.meta.lastUsed || 0) - (b.meta.lastUsed || 0));
-      for (const it of items) {
-        if (used + (extra || 0) <= Math.max(0, budget)) break;
-        if (it.entry === keep) continue;
-        await be().remove(it.entry); used -= it.meta.bytes;
-      }
-      return used;
-    });
-  }
-  // 保存したものがあれば復元した知らせ (無い・合わない・読めない = null)
-  async function load(entry, expectKey) {
-    try {
-      const meta = await readMeta(entry); if (!meta || meta.wk !== expectKey || meta.v !== WC_VERSION) return null;
-      const h = await be().handle(entry, 'data.bin', false); if (!h) return null;
-      try {
-        const total = meta.bufs.reduce((s, b) => s + b.len, 0);
-        if (h.getSize() !== total) return null;
-        const bufs = meta.bufs.map(b => new ArrayBuffer(b.len));
-        for (let i = 0; i < bufs.length; i++) {
-          const u = new Uint8Array(bufs[i]); let at = 0;
-          while (at < u.length) { const k = h.read(u.subarray(at, Math.min(u.length, at + WC_CHUNK)), { at: meta.bufs[i].off + at }); if (!(k > 0)) return null; at += k; }
+  const n = CI.length, BX = new Float64Array(n * 6); { let at = 0; for (const b of BXs) { BX.set(b, at); at += b.length; } }
+  const LABK = keys.labk, FLOOR2 = LABK.indexOf('floor2'), upVols = upVolsOf(region);
+  const Rg = { og, o, c, r, pal, site, textures, texGen, cand, n, CI: Uint32Array.from(CI), PI: Uint32Array.from(PI), BX, upVols, FLOOR2, COLK: keys.col, LABK, names, buckets: null, sizes: null, instCi: new Map(cand.map((cd, i) => [cd.inst[0], i])) };
+  // 地点の全体で使うもの (部品の形以外の仕組みが使う。どのかたまりを読んでいるかに関係なく、地点の全部の部品から作る):
+  //   はしご・エレベーターの扉・階段の箱、判定の床の高さと広さ (フロアの一覧 fz・fa)、名前に light のある部品の名前
+  const ladders = [], elevDoors = [], stairs = [], fz = [], fa = [], lightParts = new Set();
+  for (let ri = 0; ri < n; ri++) {
+    const cd = cand[CI[ri]], pi = PI[ri], g = cd.g, p = g.parts[pi], nm = metaOf(p);
+    if (nm.light) lightParts.add(p[0]);
+    const isLadder = nm.ladder, isElevDoor = !!p[9], isStair = nm.stair;
+    const q = ri * 6;
+    let floorish = FLOOR2 > 0 && new Uint8Array(g.buf, g.base + cd.ii[1] + g.triStart[pi], p[5]).includes(FLOOR2);
+    // 上下が逆の重力の範囲の箱に掛かる部品は、判定の色が無くても床になりうる
+    if (!floorish && FLOOR2 > 0) floorish = upVols.some(v => BX[q] - OUT_EPS <= v.hi[0] && BX[q + 3] + OUT_EPS >= v.lo[0] && BX[q + 1] - OUT_EPS <= v.hi[1] && BX[q + 4] + OUT_EPS >= v.lo[1] && BX[q + 2] - OUT_EPS <= v.hi[2] && BX[q + 5] + OUT_EPS >= v.lo[2]);
+    if (!(isLadder || isElevDoor || isStair || floorish)) continue;
+    const { I, W, lab } = partGeom(Rg, ri);
+    const bl = [Infinity, Infinity, Infinity], bh = [-Infinity, -Infinity, -Infinity];
+    for (let t = 0; t < p[5]; t++) {
+      const vs = [I[t * 3] * 3, I[t * 3 + 1] * 3, I[t * 3 + 2] * 3];
+      for (const v of vs) for (let a = 0; a < 3; a++) { if (W[v + a] < bl[a]) bl[a] = W[v + a]; if (W[v + a] > bh[a]) bh[a] = W[v + a]; }
+      if (lab[t] && lab[t] === FLOOR2) {
+        let inreg = true; for (let a = 0; a < 3 && inreg; a++) { const mn = Math.min(W[vs[0] + a], W[vs[1] + a], W[vs[2] + a]), mx = Math.max(W[vs[0] + a], W[vs[1] + a], W[vs[2] + a]); if (!(mn <= hi[a] && mx >= lo[a])) inreg = false; }
+        if (inreg) {
+          fz.push((W[vs[0] + 2] + W[vs[1] + 2] + W[vs[2] + 2]) / 3);
+          const ux = W[vs[1]] - W[vs[0]], uy = W[vs[1] + 1] - W[vs[0] + 1], uz = W[vs[1] + 2] - W[vs[0] + 2], vx = W[vs[2]] - W[vs[0]], vy = W[vs[2] + 1] - W[vs[0] + 1], vz = W[vs[2] + 2] - W[vs[0] + 2];
+          fa.push(Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) / 2);
         }
-        const msg = decode(meta.skeleton, bufs);
-        meta.lastUsed = Date.now(); try { await writeMeta(entry, meta); } catch (_) { }
-        return msg;
-      } finally { h.close(); }
-    } catch (_) { return null; }
+      }
+    }
+    const rel = b => b.map((v, a) => +(v - o[a]).toFixed(3));
+    if (isLadder) ladders.push([p[0], cd.inst[0], rel(bl), rel(bh)]);
+    // エレベーターの扉 (アプリの BuildGeo が見分けて parts の 10 番目を付けたもの) の箱と前の向き [名前, 箱の低い角, 高い角, [fx, fy] | null] (箱は原点からの相対。向きは場所の座標の xy、正規化)。
+    // エレベーターで移った先の立つ所に使う (view3d.js の elevPlace。2026-11-05、利用者の指示「指示はドアの向きを見て」)
+    if (isElevDoor) {
+      let fwd = null; const [vx, vy, vz] = p[9], A = cd.A; const fx = A[0] * vx + A[1] * vy + A[2] * vz, fy = A[4] * vx + A[5] * vy + A[6] * vz, l = Math.hypot(fx, fy); if (l > 1e-6) fwd = [+(fx / l).toFixed(4), +(fy / l).toFixed(4)];
+      elevDoors.push([p[0], rel(bl), rel(bh), fwd]);
+    }
+    // 階段の部品の箱 [名前, 低い角, 高い角]。行き先の一覧の「階段」に使う (2026-11-04、利用者の決定「作り直す」)
+    if (isStair && bh[2] - bl[2] >= 0.5) stairs.push([p[0], rel(bl), rel(bh)]);
   }
-  // 保存する。保存したら合計 (バイト)、しなかったら null
-  async function save(entry, expectKey, msg, wc) {
-    try {
-      const { skeleton, bufs } = encode(msg);
-      let off = 0; const tab = bufs.map(b => { const t = { off, len: b.byteLength }; off += b.byteLength; return t; });
-      const size = off + 4096;
-      if (!(wc.budget > 0) || size > wc.budget) return null;
-      if (typeof wc.free === 'number' && wc.free - size < WC_RESERVE) return null;
-      const used = await enforce(wc.budget, entry, size);
-      await be().remove(entry);   // 同じ鍵の古い・書きかけを消してから書く
-      const h = await be().handle(entry, 'data.bin', true);
-      if (!h) return null;
-      try {
-        h.truncate(0);
-        for (let i = 0; i < bufs.length; i++) await writeAll(h, new Uint8Array(bufs[i]), tab[i].off);
-        h.flush && h.flush();
-      } finally { h.close(); }
-      const meta = { v: WC_VERSION, wk: expectKey, bytes: off, bufs: tab, skeleton, lastUsed: Date.now(), created: Date.now() };
-      await writeMeta(entry, meta);
-      return used + off;
-    } catch (e) { try { await be().remove(entry); } catch (_) { } return null; }
-  }
-  // 保存があり、中身の大きさがそろっているか (読まずに調べる)
-  async function has(entry) {
-    try { const meta = await readMeta(entry); if (!meta || meta.v !== WC_VERSION) return false; const h = await be().handle(entry, 'data.bin', false); if (!h) return false; try { return h.getSize() === meta.bufs.reduce((s, b) => s + b.len, 0); } finally { h.close(); } } catch (_) { return false; }
-  }
-  return { available, keyOf, load, save, enforce, scan, encode, decode, uniqueBuffers, has };
-})();
-self.__WC = WC;
-
+  // 店の入口の部品 (region.json の entrances の [インスタンス, 部品の番号]) のうち、この地点の索引にあるもの ('インスタンス:部品の番号')
+  const entParts = [];
+  for (const e of region.entrances || []) for (const x of e.list || []) { const ci = Rg.instCi.get(x[0]); if (ci !== undefined && x[1] < cand[ci].g.parts.length) entParts.push(x[0] + ':' + x[1]); }
+  lap('meta');
+  const { index, stat } = bucket(Rg, m.sizes);
+  lap('index');
+  // 入れ替え (ここまでは前の地点のまま、かたまりの頼みに答えられる)
+  R = Rg; GEO = geoNew;
+  stat.geos = need.size; stat.reused = reused; stat.insts = cand.length; stat.partsAll = n;
+  self.postMessage({ type: 'done', id, index, textures, texGen, ladders, elevDoors, stairs, fz, fa, lightParts: [...lightParts], entParts, stat, times },
+    [index.cells.buffer, index.cls.buffer, index.tris.buffer, index.parts.buffer, index.hash.buffer]);
+}
+// 前の形の保存 (解析の結果の丸ごとの保存。OPFS の w-<鍵>\) を消す。全部消せたら 0、分からなければ null
+async function wpurge() {
+  try {
+    if (typeof navigator === 'undefined' || !navigator.storage || typeof navigator.storage.getDirectory !== 'function') return null;
+    const root = await navigator.storage.getDirectory(); const names = [];
+    for await (const [name] of root.entries()) if (name.startsWith('w-')) names.push(name);
+    let left = 0;
+    for (const nm of names) { try { await root.removeEntry(nm, { recursive: true }); } catch (e) { if (!(e && e.name === 'NotFoundError')) left++; } }
+    return left ? null : 0;
+  } catch (_) { return null; }
+}
 self.onmessage = async e => {
   const m = e.data;
-  // 保存の合計を budget に収めて、合計を返す (budget が 0 以下なら全部消す)。画面の側が地点を頼む前・後に使う
-  if (m.type === 'wstat') { let used = null; try { if (WC.available()) used = await WC.enforce(m.budget || 0, null, 0); } catch (_) { } self.postMessage({ type: 'wstat', id: m.id, used }); return; }
-  if (m.type !== 'build') return;
-  const { id, base, region, c, r, keys, names } = m;
-  const COLK = keys.col, OCOLK = keys.ocol, LABK = keys.labk;
-  const times = {}; let tp = performance.now(); const lap = k => { const t = performance.now(); times[k] = (t - tp) / 1000; tp = t; };
   try {
-    // 保存したものがあれば、それを返す (解析しない)。wcache = { key (アプリの鍵。無ければ保存しない), budget, free }。prewarm なら結果は返さず保存だけ
-    const wc = m.wcache; let wkey = null;
-    if (wc && wc.key && WC.available()) {
-      try {
-        wkey = await WC.keyOf(wc, c, r, keys, names);
-        const used0 = await WC.enforce(wc.budget || 0, wkey, 0);
-        const t0 = performance.now();
-        if (m.prewarm) { const mt = await WC.has(wkey); if (mt) { self.postMessage({ type: 'done', id, prewarm: true, wcache: { hit: true, used: used0 } }); return; } }
-        else {
-          const hit = await WC.load(wkey, wkey);
-          if (hit) { hit.times = { ...(hit.times || {}), cacheLoad: (performance.now() - t0) / 1000 }; hit.id = id; hit.wcache = { hit: true, used: used0 }; self.postMessage(hit, WC.uniqueBuffers(hit)); return; }
-        }
-      } catch (_) { wkey = null; }
+    if (m.type === 'wpurge') { self.postMessage({ type: 'wstat', id: m.id, used: await wpurge() }); return; }
+    if (m.type === 'build') { await build(m); return; }
+    if (m.type === 'sizes') {
+      if (!R || R.og !== m.og) { self.postMessage({ type: 'index', id: m.id, stale: true }); return; }
+      const { index, stat } = bucket(R, m.sizes);
+      self.postMessage({ type: 'index', id: m.id, index, stat }, [index.cells.buffer, index.cls.buffer, index.tris.buffer, index.parts.buffer, index.hash.buffer]);
+      return;
     }
-    geoCache.clear();
-    const lo = c.map(v => v - r), hi = c.map(v => v + r);
-    const ins = region.instances.filter(i => i[3][0] <= hi[0] && i[4][0] >= lo[0] && i[3][1] <= hi[1] && i[4][1] >= lo[1] && i[3][2] <= hi[2] && i[4][2] >= lo[2]);
-    const sel = [];
-    const geoN = new Set(ins.map(i => i[1])).size, geoDone = new Set();
-    const boxes = [];
-    // 区画 (インスタンス) の選び方: 部品の箱 (8 隅) の 1 つでも立方体に掛かり、その箱の x の幅が 5000 m 未満のインスタンス。選んだ区画の部品は全部描く (view3d.js と同じ)
-    for (const inst of ins) {
-      const g = await loadGeo(base, region, inst[1]); const A = inst[2];
-      if (!geoDone.has(inst[1])) { geoDone.add(inst[1]); self.postMessage({ type: 'progress', id, done: geoDone.size, total: geoN }); }
-      const ii = g.inst.get(inst[0]); if (!ii) continue;
-      const pboxes = [];
-      let hit = false;
-      for (let pi = 0; pi < g.parts.length; pi++) {
-        const p = g.parts[pi];
-        const bl = [Infinity, Infinity, Infinity], bh = [-Infinity, -Infinity, -Infinity];
-        for (const x of [p[6][0], p[7][0]]) for (const y of [p[6][1], p[7][1]]) for (const z of [p[6][2], p[7][2]]) for (let a = 0; a < 3; a++) { const v = A[a * 4] * x + A[a * 4 + 1] * y + A[a * 4 + 2] * z + A[a * 4 + 3]; if (v < bl[a]) bl[a] = v; if (v > bh[a]) bh[a] = v; }
-        pboxes.push([bl, bh]);
-        if (bl[0] <= hi[0] && bh[0] >= lo[0] && bl[1] <= hi[1] && bh[1] >= lo[1] && bl[2] <= hi[2] && bh[2] >= lo[2] && bh[0] - bl[0] < 5000) hit = true;
-      }
-      if (!hit) continue;
-      // 外形: 部品の箱の 12 本の辺 (2026-11-04、利用者の案「外形だけ先に書くとか」。細かい形の前に、先に描く)
-      for (const [bl, bh] of pboxes) {
-        if (bh[0] - bl[0] > 2000 || bh[1] - bl[1] > 2000) continue;
-        const X = [bl[0] - c[0], bh[0] - c[0]], Y = [bl[1] - c[1], bh[1] - c[1]], Z = [bl[2] - c[2], bh[2] - c[2]];
-        for (const y of Y) for (const z of Z) boxes.push(X[0], y, z, X[1], y, z);
-        for (const x of X) for (const z of Z) boxes.push(x, Y[0], z, x, Y[1], z);
-        for (const x of X) for (const y of Y) boxes.push(x, y, Z[0], x, y, Z[1]);
-      }
-      for (let pi = 0; pi < g.parts.length; pi++) {
-        const p = g.parts[pi];
-        const P = new Float32Array(g.buf, g.base + p[2], p[3] * 3), I = p[8] === 2 ? new Uint16Array(g.buf, g.base + p[4], p[5] * 3) : new Uint32Array(g.buf, g.base + p[4], p[5] * 3);
-        sel.push([inst, g, pi, P, I, ii, A]);
-      }
+    if (m.type === 'chunk') {
+      const res = R && R.og === m.og ? buildChunk(R, m.key) : null;
+      if (!res) { self.postMessage({ type: 'chunk', id: m.id, og: m.og, key: m.key, missing: true }); return; }
+      res.msg.id = m.id; res.msg.og = m.og;
+      self.postMessage(res.msg, res.tr);
+      return;
     }
-    const bx = new Float32Array(boxes); self.postMessage({ type: 'boxes', id, boxes: bx }, [bx.buffer]);
-    lap('read');
-    // ===== buildCur (view3d.js と同じ) =====
-    const parts = [], baseN = {}, overN = {};
-    for (const k of COLK) baseN[k] = 0; for (const k of OCOLK) overN[k] = 0;
-    const fz = [], fa = [];
-    const isLight = p => p[0].split('_').includes('light');
-    const catOf = p => isLight(p) ? 'excluded' : p[1] === 'other' && p[0].split('_').some(w => w === 'door' || w === 'doors') ? 'door' : p[1];
-    const lightParts = new Set();
-    // 上下が逆の重力の範囲 (region.json の gravity の up。2026-11-04、利用者が決めた案 1「重力が上向きの範囲では、下向きの面を床にし、上向きの面は床にしない」):
-    // 範囲の中 (三角形の重心) では、上向きの床 (判定 floor2) を床にせず、下向きの面 (法線 z ≤ -COS_WALK_INV) を床 (floor2) にする。
-    // アプリの判定 2 (同じ平面の形をまとめる) はせず、三角形ごとに決める (範囲の外は今までどおり)
-    const COS_WALK_INV = Math.cos(46 * Math.PI / 180);
-    const FLOOR2 = LABK.indexOf('floor2');
-    const upVols = (region.gravity || []).filter(g => g[0] === 'up').map(([, W, size, poly, h]) => {
-      const a = W[0], b = W[1], d = W[2], e = W[4], f = W[5], g2 = W[6], hh = W[8], i = W[9], j = W[10];
-      const det = a * (f * j - g2 * i) - b * (e * j - g2 * hh) + d * (e * i - f * hh);
-      const R = [(f * j - g2 * i) / det, (d * i - b * j) / det, (b * g2 - d * f) / det, (g2 * hh - e * j) / det, (a * j - d * hh) / det, (d * e - a * g2) / det, (e * i - f * hh) / det, (b * hh - a * i) / det, (a * f - b * e) / det];
-      // 範囲の箱 (場所の座標の AABB。部品の箱と比べて、掛からない部品は見ない)
-      const corners = size ? [[-1, -1, -1], [1, -1, -1], [-1, 1, -1], [1, 1, -1], [-1, -1, 1], [1, -1, 1], [-1, 1, 1], [1, 1, 1]].map(([x, y, z]) => [x * size[0] / 2, y * size[1] / 2, z * size[2] / 2])
-        : poly.flatMap(q => [[q[0], q[1], 0], [q[0], q[1], h]]);
-      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-      for (const [x, y, z] of corners) for (let k = 0; k < 3; k++) { const v = W[k * 4] * x + W[k * 4 + 1] * y + W[k * 4 + 2] * z + W[k * 4 + 3]; lo[k] = Math.min(lo[k], v); hi[k] = Math.max(hi[k], v); }
-      return { W, R, size, poly, h, lo, hi };
-    }).filter(v => isFinite(v.R[0]));
-    const inUp = (x, y, z) => upVols.some(v => {
-      if (x < v.lo[0] || x > v.hi[0] || y < v.lo[1] || y > v.hi[1] || z < v.lo[2] || z > v.hi[2]) return false;
-      const px = x - v.W[3], py = y - v.W[7], pz = z - v.W[11], R = v.R;
-      const lx = R[0] * px + R[1] * py + R[2] * pz, ly = R[3] * px + R[4] * py + R[5] * pz, lz = R[6] * px + R[7] * py + R[8] * pz;
-      if (v.size) return Math.abs(lx) <= v.size[0] / 2 && Math.abs(ly) <= v.size[1] / 2 && Math.abs(lz) <= v.size[2] / 2;
-      if (lz < 0 || lz > v.h) return false;
-      let inside = false; const P_ = v.poly;
-      for (let k = 0, m = P_.length - 1; k < P_.length; m = k++) if ((P_[k][1] > ly) !== (P_[m][1] > ly) && lx < (P_[m][0] - P_[k][0]) * (ly - P_[k][1]) / (P_[m][1] - P_[k][1]) + P_[k][0]) inside = !inside;
-      return inside;
-    });
-    // (2026-11-04、利用者の決定「上場の高さが床とほぼ同じ物体は除去しない」) 名前に light のある部品でも、アプリの判定で色の付いたもの
-    // (上面の高さがまわりの床とほぼ同じで、除外の決まりを当てずに判定したもの) は、色を使い、ほかの部品と同じに扱う (lightEx は除外のままの部品)
-    const lightEx = new Set();
-    // 画像 (2026-11-05、利用者の指示「引いたときは色はビットマップ貼り付けにしてほしい」): 区画のファイルの parts の 11 番目 (UV の位置。点ごとの float32 x2) と
-    // 12 番目 (画像の番号の位置。三角形ごとの int32。region.json の textures の番号。-1 = 無し)。COLK の種類ごとに、三角形を画像の番号の順 (-1 が先) に並べて詰め、
-    // ioffs も同じ並びで作る (押した部品の引き当て = 三角形の番号 → ioffs は崩れない)。uoffs[k] = [UV の位置, 三角形の数 × 6]、toffs[k] = [画像の番号の位置, 三角形の数] (int32)。
-    // 判定の色 (OCOLK)・輪郭・当たり判定の荒い区切りは今のまま (三角形の位置 b で引くので、COLK の中の並びが変わっても結果は同じ)
-    const texCnt = {}; for (const k of COLK) texCnt[k] = new Map();
-    for (const s of sel) {
-      const [inst, g, pi, P, I, ii, A] = s; const p = g.parts[pi]; baseN[catOf(p)] += p[5];
-      { const tc = texCnt[catOf(p)]; if (p[11] >= 0) { const T = new Int32Array(g.buf, g.base + p[11], p[5]); for (let t = 0; t < p[5]; t++) tc.set(T[t], (tc.get(T[t]) || 0) + 1); } else tc.set(-1, (tc.get(-1) || 0) + p[5]); }
-      let lab = new Uint8Array(g.buf, g.base + ii[1] + g.triStart[pi], p[5]);
-      if (isLight(p) && !lab.some(v => v)) { lab = new Uint8Array(p[5]); lightEx.add(s); }
-      if (upVols.length && FLOOR2 > 0 && !lightEx.has(s)) {
-        const W = worldVerts(P, A);
-        let lab2 = null;
-        for (let t = 0; t < p[5]; t++) {
-          const v0 = I[t * 3] * 3, v1 = I[t * 3 + 1] * 3, v2 = I[t * 3 + 2] * 3;
-          const cx = (W[v0] + W[v1] + W[v2]) / 3, cy = (W[v0 + 1] + W[v1 + 1] + W[v2 + 1]) / 3, cz = (W[v0 + 2] + W[v1 + 2] + W[v2 + 2]) / 3;
-          if (!inUp(cx, cy, cz)) continue;
-          const ux = W[v1] - W[v0], uy = W[v1 + 1] - W[v0 + 1], uz = W[v1 + 2] - W[v0 + 2], wx = W[v2] - W[v0], wy = W[v2 + 1] - W[v0 + 1], wz = W[v2 + 2] - W[v0 + 2];
-          const nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx, nl = Math.hypot(nx, ny, nz); if (!(nl > 0)) continue;
-          const want = nz / nl <= -COS_WALK_INV ? FLOOR2 : lab[t] === FLOOR2 ? 0 : lab[t];
-          if (want !== lab[t]) { lab2 ??= Uint8Array.from(lab); lab2[t] = want; }
-        }
-        if (lab2) lab = lab2;
-      }
-      s.push(lab);
-      if (isLight(p)) lightParts.add(p[0]);
-      for (let t = 0; t < p[5]; t++) if (lab[t]) overN[LABK[lab[t]]]++;
+    if (m.type === 'part') {
+      let ri = -1;
+      if (R && R.og === m.og) { const [a, b] = String(m.key).split(':'), ci = R.instCi.get(+a), pi = +b; if (ci !== undefined) for (let k = 0; k < R.n; k++) if (R.CI[k] === ci && R.PI[k] === pi) { ri = k; break; } }
+      if (ri < 0) { self.postMessage({ type: 'part', id: m.id, missing: true }); return; }
+      const { cd, pi, p, I, W, lab } = partGeom(R, ri), o = R.o, tris = new Float32Array(p[5] * 9), cnt = {};
+      for (let t = 0; t < p[5]; t++) { for (let k = 0; k < 3; k++) { const v = I[t * 3 + k] * 3; for (let a = 0; a < 3; a++) tris[t * 9 + k * 3 + a] = W[v + a] - o[a]; } if (lab[t]) { const lk = R.LABK[lab[t]]; cnt[lk] = (cnt[lk] || 0) + 1; } }
+      const part = [cd.inst[0], p[0], catOf(p), Object.entries(cnt).map(([kk, n]) => `${R.names[kk]} ${n}`).join(', ') || '歩ける面に色なし', (cd.inst[5] || '').split('/').pop(), '', pi];
+      const labOut = Uint8Array.from(lab);
+      self.postMessage({ type: 'part', id: m.id, tris, lab: labOut, part }, [tris.buffer, labOut.buffer]);
+      return;
     }
-    // buf は COLK の三角形の位置 (9 float) と ioffs (部品の番号) だけ。判定の色 (OCOLK) は三角形の位置の複製を持たず、元の三角形の位置 b の並び labs[k] (Uint32Array。b の昇順) で持つ
-    // (2026-11-05、親の決定: Orison ±150 m で buf が 1.92 GB と postMessage の上限 2 GB に迫ったため。輪郭線 (loffs) も描いていないので作らない)
-    let pos = 0; const offs = {}, ioffs = {}, uoffs = {}, toffs = {};
-    for (const k of COLK) { offs[k] = [pos, baseN[k] * 9]; pos += baseN[k] * 9; }
-    for (const k of COLK) { ioffs[k] = [pos, baseN[k]]; pos += baseN[k]; }
-    const labs = {}, wlab = {};
-    for (const k of OCOLK) { labs[k] = new Uint32Array(overN[k]); wlab[k] = 0; }
-    // UV・画像の番号の列は buf とは別の ArrayBuffer (uvbuf・texbuf。buf は位置・ioffs・OCOLK・輪郭だけで、前と同じ中身)。1 つの ArrayBuffer が 2 GB (postMessage の上限) を超えないため。
-    // どの部品にも UV も画像の番号も無い (画像なしの設定) なら作らない (null。長さ 0)。
-    // (2026-11-05) UV の無い部品でも画像の番号 (場所のパレットの色だけの項目) があれば作る (その部品の UV は 0 のまま)
-    const anyUv = sel.some(s => s[1].parts[s[2]][10] >= 0 || s[1].parts[s[2]][11] >= 0);
-    let upos = 0, tpos = 0;
-    for (const k of COLK) { uoffs[k] = [upos, anyUv ? baseN[k] * 6 : 0]; upos += uoffs[k][1]; }
-    for (const k of COLK) { toffs[k] = [tpos, anyUv ? baseN[k] : 0]; tpos += toffs[k][1]; }
-    const buf = new ArrayBuffer(pos * 4); const F = new Float32Array(buf), U = new Uint32Array(buf);
-    const uvbuf = anyUv ? new ArrayBuffer(upos * 4) : null, texbuf = anyUv ? new ArrayBuffer(tpos * 4) : null;
-    const FU = uvbuf ? new Float32Array(uvbuf) : null, S = texbuf ? new Int32Array(texbuf) : null;
-    // COLK の中の書く位置は画像の番号ごと (番号の昇順。-1 が先): 三角形の通し番号 q → 位置 offs + q*9・ioffs + q・uoffs + q*6・toffs + q
-    const wq = {};
-    for (const k of COLK) { const m = new Map(); let q = 0; for (const id of [...texCnt[k].keys()].sort((a, b) => a - b)) { m.set(id, q); q += texCnt[k].get(id); } wq[k] = m; }
-    const pbox = [];
-    for (const s of sel) {
-      const [inst, g, pi, P, I, ii, A, lab] = s; const p = g.parts[pi]; const id_ = parts.length;
-      const W = worldVerts(P, A);
-      const bl = [Infinity, Infinity, Infinity], bh = [-Infinity, -Infinity, -Infinity];
-      const cnt = {};
-      const k = catOf(p);
-      const UV = p[10] >= 0 ? new Float32Array(g.buf, g.base + p[10], p[3] * 2) : null, TX = p[11] >= 0 ? new Int32Array(g.buf, g.base + p[11], p[5]) : null;
-      const qk = wq[k], ob = offs[k][0], ib = ioffs[k][0], ub = uoffs[k][0], tb = toffs[k][0];
-      for (let t = 0; t < p[5]; t++) {
-        const vs = [I[t * 3] * 3, I[t * 3 + 1] * 3, I[t * 3 + 2] * 3];
-        const tid = TX ? TX[t] : -1; const q = qk.get(tid); qk.set(tid, q + 1);
-        let o = ob + q * 9;
-        for (const v of vs) for (let a = 0; a < 3; a++) { F[o++] = W[v + a] - c[a]; if (W[v + a] < bl[a]) bl[a] = W[v + a]; if (W[v + a] > bh[a]) bh[a] = W[v + a]; }
-        U[ib + q] = id_;
-        if (anyUv) { S[tb + q] = tid; if (UV) { let u = ub + q * 6; for (const v of vs) { const vi = v / 3 * 2; FU[u++] = UV[vi]; FU[u++] = UV[vi + 1]; } } }
-        if (lab[t]) {
-          const lk = LABK[lab[t]]; cnt[lk] = (cnt[lk] || 0) + 1;
-          labs[lk][wlab[lk]++] = ob + q * 9;
-          if (lk === 'floor2') {
-            let inreg = true; for (let a = 0; a < 3 && inreg; a++) { const mn = Math.min(W[vs[0] + a], W[vs[1] + a], W[vs[2] + a]), mx = Math.max(W[vs[0] + a], W[vs[1] + a], W[vs[2] + a]); if (!(mn <= hi[a] && mx >= lo[a])) inreg = false; }
-            if (inreg) {
-              fz.push((W[vs[0] + 2] + W[vs[1] + 2] + W[vs[2] + 2]) / 3);
-              const ux = W[vs[1]] - W[vs[0]], uy = W[vs[1] + 1] - W[vs[0] + 1], uz = W[vs[1] + 2] - W[vs[0] + 2], vx = W[vs[2]] - W[vs[0]], vy = W[vs[2] + 1] - W[vs[0] + 1], vz = W[vs[2] + 2] - W[vs[0] + 2];
-              fa.push(Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) / 2);
-            }
-          }
-        }
-      }
-      const sp = (inst[5] || '').split('/').pop();
-      parts.push([inst[0], p[0], k, Object.entries(cnt).map(([kk, n]) => `${names[kk]} ${n}`).join(', ') || '歩ける面に色なし', sp, '']);
-      // 4 番目: エレベーターの扉の前 (ロビー側) の向き (場所の座標の xy、正規化)。区画のファイルの parts の 10 番目 (socpak の枠の向き) をインスタンスの行列 A で回したもの。無い・xy の成分が無ければ null。
-      // 5 番目: エレベーターの扉か (parts の 10 番目があるか。扉の見分け (名前の語に elevator と door/doors、または door/doors があり部品の種類に "/elev/") はアプリの BuildGeo が行う。
-      //   部品の種類 (CgfPath) は区画のファイルに無いので、糸では見分けない。2026-11-05、親の決定)
-      let fwd = null; const isElevDoor = !!p[9];
-      if (p[9]) { const [vx, vy, vz] = p[9]; const fx = A[0] * vx + A[1] * vy + A[2] * vz, fy = A[4] * vx + A[5] * vy + A[6] * vz, l = Math.hypot(fx, fy); if (l > 1e-6) fwd = [+(fx / l).toFixed(4), +(fy / l).toFixed(4)]; }
-      pbox.push([bl, bh, p[0].split('_'), fwd, isElevDoor]);
+    if (m.type === 'out') {
+      if (!R || R.og !== m.og) { self.postMessage({ type: 'out', id: m.id, stale: true }); return; }
+      if (m.kind === 'scan') self.postMessage({ type: 'out', id: m.id, outside: outScan(R, m) });
+      else self.postMessage({ type: 'out', id: m.id, hit: outCross(R, m.a, m.b) });
+      return;
     }
-    const ladders = [];
-    pbox.forEach(([bl, bh, w], i) => { if (w.includes('ladder')) ladders.push([parts[i][1], parts[i][0], bl.map((v, a) => +(v - c[a]).toFixed(3)), bh.map((v, a) => +(v - c[a]).toFixed(3))]); });
-    // エレベーターの扉 (アプリの BuildGeo が見分けて parts の 10 番目を付けたもの。pbox の 5 番目) の箱と前の向き [名前, 箱の低い角, 高い角, [fx, fy] | null] (箱は中心からの相対。向きは場所の座標の xy、正規化)。
-    // エレベーターで移った先の立つ所に使う (view3d.js の elevPlace。2026-11-05、利用者の指示「指示はドアの向きを見て」)
-    const elevDoors = [];
-    pbox.forEach(([bl, bh, w, fwd, isElevDoor], i) => { if (isElevDoor) elevDoors.push([parts[i][1], bl.map((v, a) => +(v - c[a]).toFixed(3)), bh.map((v, a) => +(v - c[a]).toFixed(3)), fwd]); });
-    // 階段の部品 (名前の語に stair・stairs があり、手すり・柱・飾りの語の無いもの。アプリの StationFloorBuilder.IsStairMesh と同じ決まり) の箱 [名前, 低い角, 高い角] (中心からの相対)。
-    // 行き先の一覧の「階段」に使う (2026-11-04、利用者の決定「作り直す」)
-    const STAIR_NOT = new Set(['rail', 'railing', 'decal', 'wall', 'structure', 'strut', 'divider', 'platform', 'cap', 'capplate', 'addon', 'sign', 'cover']);
-    const stairs = [];
-    pbox.forEach(([bl, bh, w], i) => { if (w.some(x => x === 'stair' || x === 'stairs') && !w.some(x => STAIR_NOT.has(x)) && bh[2] - bl[2] >= 0.5) stairs.push([parts[i][1], bl.map((v, a) => +(v - c[a]).toFixed(3)), bh.map((v, a) => +(v - c[a]).toFixed(3))]); });
-    const pidx = sel.map((s, i) => [s[0][0] + ':' + s[2], i]);
-    // 判定の三角形の位置を b の昇順に (COLK の中は画像の番号の順なので、部品の順 = b の順ではない。画像なしなら部品の順 = b の順で、並べ替えても同じ)
-    for (const k of OCOLK) labs[k].sort();
-    geoCache.clear();
-    lap('buildCur');
-    // ===== 当たり判定の荒い区切り (coarse) =====
-    // (2026-11-05、利用者の指示「当たり判定も範囲を決めればメモリ節約になるんじゃない？」「物理的にいけないところを省いて、直線で」)
-    // 以前はここで 1 m (頭の上は 2 m) の升目 f・c・w・fl を全部作って渡していた (Seraphim ±30 m で約 4 GB・約 124 秒)。
-    // 今は 16 m の箱 (鍵 = floor(x/16) × 100003 + floor(y/16)。中心からの相対) ごとに、箱に掛かる三角形の位置 b を並べた一覧だけを作る。
-    // 升そのものは、画面の側 (view3d.js の cellGet) が升を引いたときに、その升の入る箱の一覧から以前の升目と同じ条件で選んで作る (中身・並びは以前の升目と同じ)。
-    //   all: COLK の全三角形 (f・c・w の元。ドアも入れる。ドアを除くのは画面の側)、fl: 判定が floor2・tube2 の三角形 (判定の床の元。labs の b の並び。元の三角形 (COLK) の位置)。
-    //   big: 16 m の箱で 64 箱を超える大きな三角形 (親の決定) は、箱の一覧に入れず別の並び (bigAll・bigFl) に入れる。升を作るときは箱の一覧と big の両方を見る
-    //   (ここで三角形を落とすことはしない。以前の升目の上限 (1 m の升で 4096・2 m で 1024) は画面の側が升を作るときに同じ条件で掛ける)。
-    // 形: tableLayout と同じ (並べた鍵 keys・始まり starts・中身 items)。2 回走査 (数える → 詰める)。中身の並びは三角形の位置 b の昇順 (all は COLK の順・三角形の順 = b の順。fl は floor2 の b の昇順、続けて tube2 の b の昇順)
-    const BOX = 16, BIG_BOXES = 64;
-    const csweep = (add, big, only) => {
-      const one = b => {
-        const I0 = Math.floor(Math.min(F[b], F[b + 3], F[b + 6]) / BOX), I1 = Math.floor(Math.max(F[b], F[b + 3], F[b + 6]) / BOX), J0 = Math.floor(Math.min(F[b + 1], F[b + 4], F[b + 7]) / BOX), J1 = Math.floor(Math.max(F[b + 1], F[b + 4], F[b + 7]) / BOX);
-        if ((I1 - I0 + 1) * (J1 - J0 + 1) > BIG_BOXES) { big(b); return; }
-        for (let I = I0; I <= I1; I++) for (let J = J0; J <= J1; J++) add(I * 100003 + J, b);
-      };
-      if (only === 0) { for (const k of COLK) { const [o, n] = offs[k]; for (let t = 0; t < n / 9; t++) one(o + t * 9); } }
-      else for (const k of ['floor2', 'tube2']) { const L = labs[k]; if (L) for (let i = 0; i < L.length; i++) one(L[i]); }
-    };
-    const coarseOf = gi => {
-      const T = makeTable(); const bigs = [];
-      csweep(key => tableCount(T, key), b => bigs.push(b), gi);
-      const out = tableLayout(T);
-      csweep((key, b) => { out.items[T.pos[tableSlot(T, key)]++] = b; }, () => { }, gi);
-      T.keys = null; T.cnt = null; T.pos = null;
-      return { grid: out.grid, big: Uint32Array.from(bigs) };
-    };
-    const ca = coarseOf(0), cf = coarseOf(1);
-    const coarse = { all: ca.grid, fl: cf.grid, bigAll: ca.big, bigFl: cf.big };
-    lap('coarse');
-    const tr = [buf];
-    if (uvbuf) tr.push(uvbuf, texbuf);
-    for (const k of OCOLK) tr.push(labs[k].buffer);
-    for (const g of [coarse.all, coarse.fl]) tr.push(g.keys.buffer, g.starts.buffer, g.items.buffer);
-    tr.push(coarse.bigAll.buffer, coarse.bigFl.buffer);
-    const out = { type: 'done', id, buf, uvbuf, texbuf, offs, ioffs, labs, uoffs, toffs, parts, ladders, elevDoors, stairs, fz, fa, pidx, lightParts: [...lightParts], coarse, times };
-    // 保存する (転送すると中身が消えるので、先に書く)。保存した中身は times を除いた知らせ。書いた時間は times.cacheSave
-    let wused = null;
-    if (wkey) { const t1 = performance.now(); const { times: _t, id: _i, ...stored } = out; wused = await WC.save(wkey, wkey, { type: 'done', ...stored }, wc); times.cacheSave = (performance.now() - t1) / 1000; }
-    if (m.prewarm) { self.postMessage({ type: 'done', id, prewarm: true, wcache: { hit: false, used: wused } }); return; }
-    out.wcache = { hit: false, used: wused };
-    self.postMessage(out, tr);
   } catch (err) {
-    geoCache.clear();
-    self.postMessage({ type: 'error', id, message: String(err && err.message || err) });
+    self.postMessage({ type: 'error', id: m.id, kind: m.type, key: m.key, message: String(err && err.message || err) });
   }
 };

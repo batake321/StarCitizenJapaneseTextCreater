@@ -3,6 +3,7 @@
 //   ?data=<一時の置き場の URL (最後に /)> の station.json (案内するもの・乗り場・前の地図の階の名前。StationView3D.Session.StationJson)。
 //   地点は、アプリ (StationView3DWindow) に {type:'region', id, c, r} を送り、まわり ±r m の区画をその場で取り出して作ってもらう。
 //   出来たら ({type:'regionReady', base}) base の region.json と g/<番号>.bin を読み、読み終えたら {type:'regionLoaded'} を送る (アプリが消す)。
+//   形は、地点を丸ごとではなく「升のかたまり」ごとに出し入れする (2026-11-06 の作り替え。下の「当たり」「升のかたまりの出し入れ」)
 //   アプリの外で試すときは ?region=<地点の置き場の URL> (前もって作った地点。その地点だけ)
 import * as THREE from 'three';
 const report = (where, e) => { try { window.chrome?.webview?.postMessage({ type: 'error', source: 'station3d', message: `[新しい方式] ${where}: ${e && e.stack || e}` }); } catch (_) { } console.error(where, e); };
@@ -78,7 +79,7 @@ let ghostG = null, selFloor = null;
 // 部品は丸ごと消さず、three.js の clippingPlanes で面で切って描く。押したとき・歩くモードの当たりも、切った後の見える所だけにする)
 const visZ = z => z <= clip.constant + 1e-6 && z >= -clipLo.constant - 1e-6;
 let root = new THREE.Group(); scene.add(root); const groups = {}; let shpG = null, hiM = null;
-let cur = null, curBuf = null;
+let cur = null;
 const tgt = new THREE.Vector3(); let dist = 40, az = 0.8, el2 = 0.6;
 function upd() { cam.position.set(tgt.x + dist * Math.cos(el2) * Math.cos(az), tgt.y + dist * Math.cos(el2) * Math.sin(az), tgt.z + dist * Math.sin(el2)); cam.lookAt(tgt); }
 let drag = null, moved = 0; const cv = R.domElement;
@@ -159,77 +160,69 @@ const JUMP_V = 4.43, GRAV = 9.81, CLIMB = 2.52, LADDER_V = 1.5;
 let vz = 0, air = false, onLadder = null;
 let rec = null, play = null, noclip = false;
 let walk = false, run = false, wyaw = 0, wpitch = 0, wpos = new THREE.Vector3();
-// ===== 当たり判定の升 (引いたときだけ作る) =====
-// (2026-11-05、利用者の指示「当たり判定も範囲を決めればメモリ節約になるんじゃない？」「物理的にいけないところを省いて、直線で」)
-// 以前は解析の糸 (view3d-worker.js) が 1 m (頭の上は 2 m) の升目 f・c・w・fl を全部作って渡していた (Seraphim ±30 m で約 4 GB)。
-// 今は解析の糸が渡すのは荒い区切り coarse (16 m の箱ごとの三角形の位置 b の一覧 all・fl と、64 箱を超える大きな三角形の並び bigAll・bigFl) だけ。
-// 升は cellGet(kind, i, j) で初めて引いたときに、その升の入る 16 m の箱の一覧と big から、以前の升目と同じ条件で三角形を選んで作り、cells に持つ (2 回目からは cells から返す)。
+// ===== 当たり (升のかたまりと一緒に受け取る) =====
+// (2026-11-06 の作り替え。利用者の指摘 (升を踏んだその場で作る形について)「馬鹿なやり方だと思うのは俺だけか？」「止まるのは当たり前だよな？」
+//  「細かく書く範囲戸当たり判定は一致しないとだめではないのか？ 読み込みで止まるんだからどっちかが短ければ意味ないよな？」。親の決定)
+// 前は、地点の全部の三角形を 1 つの ArrayBuffer (curBuf) で持ち、当たりの升 (1 m。頭の上は 2 m) は、歩いて初めて引いたその場で、荒い区切り (coarse) から選んで作っていた (三角形の多い所で止まった)。
+// 今は、形を「升のかたまり」(下の「升のかたまりの出し入れ」。view3d-worker.js が作る) ごとに受け取り、かたまりには描く形と当たりが一緒に入っている:
+//   ch.F = 三角形の位置 (原点 cur.center からの相対。float32 x9)、ch.FL = 三角形ごとの当たりの印、ch.col = xy の升目の索引 (g2 = 2 m の升ごと、g16 = 16 m の升ごと、big = 大きな三角形)。
+// かたまりを出すとき (colAdd) に索引を G2・G16・GBIG へつなぎ、捨てるとき (colDrop) に外す。歩いている最中に踏んだその場で作るものは無い。
+// 升を引く (cellTris) ときは、その升の入る 2 m・16 m の升の一覧と大きな三角形から、印と升の条件で選ぶ。条件は前の升目 (cellGet) と同じ:
 //   f (足元): 上向き (cz > 0)・1 m の升・升の数 ≤ 4096。ドアも入れる
 //   c (頭の上): 下向き (cz < 0)・2 m の升 (floor(x/2))・升の数 ≤ 1024。ドア (名前に door・doors があり elevator の無い部品) は入れない
 //   w (横): ドア以外の全部・1 m の升・升の数 ≤ 4096
-//   fl (判定の床): floor2・tube2 の三角形・1 m の升・升の数 ≤ 4096
-// 升の中身の並びは三角形の位置 b の昇順 (以前の升目と同じ)。作った升は捨てない (親の決定。読み込み直しで中心が変わるときは全部捨てる: 鍵がずれるため)
-// 形 (coarse.all・coarse.fl): 並べた鍵 (I × 100003 + J)・始まり・中身 (三角形の位置)。引くのは二分探し
-// ----- CELLS_BEGIN (この印の間は試しの道具が切り出して使う。cur・curBuf・COL・coarse だけを使う) -----
-let coarse = null;
-// a: 歩くモードの「粗い形に物体が無い升」を探す用 (ドアも含む全部の三角形。1 m。利用者の指示「床でなく物体で」)
-const cells = { f: new Map(), c: new Map(), w: new Map(), fl: new Map(), a: new Map() };
-const CELL_BOX = 16;
-// ドアの部品か (worker の以前の isDoor と同じ決まり)。cur.parts の添字ごと。地点を替えたら作り直す
-let doorParts = null;
-function cellReset() { for (const m of Object.values(cells)) m.clear(); doorParts = null; }
-function boxGet(g, key) {
-  if (!g) return null; const K = g.keys; let lo = 0, hi = K.length - 1;
-  while (lo <= hi) { const m = (lo + hi) >> 1, v = K[m]; if (v === key) return g.items.subarray(g.starts[m], g.starts[m + 1]); if (v < key) lo = m + 1; else hi = m - 1; }
-  return null;
+//   fl (判定の床): 判定の色が floor2・tube2 の三角形・1 m の升・升の数 ≤ 4096
+//   a (物体): 全部 (ドアも)・1 m の升・升の数 ≤ 4096 (歩くモードの「粗い形に物体が無い升」を探す用。利用者の指示「床でなく物体で」)
+// ----- CELLS_BEGIN (この印の間は試しの道具が切り出して使う。ほかの変数を使わない) -----
+const UP = 1, DOWN = 2, DOOR = 4, FLR = 8, OK1 = 16, OK2 = 32;
+const G2 = new Map(), G16 = new Map(), GBIG = [];
+function colAdd(ch) {
+  const put = (G, g) => { const K = g.keys, S = g.starts; for (let q = 0; q < K.length; q++) { let a = G.get(K[q]); if (!a) G.set(K[q], a = []); a.push({ ch, it: g.items, s: S[q], e: S[q + 1] }); } };
+  put(G2, ch.col.g2); put(G16, ch.col.g16);
+  if (ch.col.big.length) GBIG.push({ ch, it: ch.col.big, s: 0, e: ch.col.big.length });
 }
-// 三角形の位置 b の部品がドアか (b の入る種類の範囲 cur.offs[k] から、三角形の番号 → 部品の添字 (cur.ioffs[k]) を引く)
-function triIsDoor(b) {
-  if (!doorParts) doorParts = cur.parts.map(q => { const w = q[1].split('_'); return w.some(x => x === 'door' || x === 'doors') && !w.includes('elevator'); });
-  for (const k of Object.keys(COL)) {
-    const [o, n] = cur.offs[k]; if (b < o || b >= o + n) continue;
-    const io = cur.ioffs[k]; return doorParts[new Uint32Array(curBuf, io[0] * 4, io[1])[(b - o) / 9]];
-  }
-  return false;
+function colDrop(ch) {
+  const cut = (G, g) => { for (const k of g.keys) { const a = G.get(k); if (!a) continue; const b = a.filter(s => s.ch !== ch); if (b.length) G.set(k, b); else G.delete(k); } };
+  cut(G2, ch.col.g2); cut(G16, ch.col.g16);
+  for (let i = GBIG.length - 1; i >= 0; i--) if (GBIG[i].ch === ch) GBIG.splice(i, 1);
 }
-// 升 (kind, i, j) に入る三角形か (以前の worker の sweep と同じ条件)
-function triInCell(F, kind, b, i, j) {
-  const x0 = Math.min(F[b], F[b + 3], F[b + 6]), x1 = Math.max(F[b], F[b + 3], F[b + 6]), y0 = Math.min(F[b + 1], F[b + 4], F[b + 7]), y1 = Math.max(F[b + 1], F[b + 4], F[b + 7]);
-  if (kind === 'c') {
-    const cz = (F[b + 3] - F[b]) * (F[b + 7] - F[b + 1]) - (F[b + 4] - F[b + 1]) * (F[b + 6] - F[b]); if (!(cz < 0)) return false;
-    if (triIsDoor(b)) return false;
-    const a0 = Math.floor(x0 / 2), a1 = Math.floor(x1 / 2), c0 = Math.floor(y0 / 2), c1 = Math.floor(y1 / 2);
-    return (a1 - a0 + 1) * (c1 - c0 + 1) <= 1024 && a0 <= i && i <= a1 && c0 <= j && j <= c1;
+function colReset() { G2.clear(); G16.clear(); GBIG.length = 0; }
+// 升 (kind, i, j。c は 2 m の升の番号、ほかは 1 m) に入る三角形を CT.C (かたまり)・CT.B (かたまりの F の中の位置) に並べ、数を返す (次に引くまで使える)
+const CT = { C: [], B: [] };
+function cellTris(kind, i, j) {
+  const two = kind === 'c', i2 = two ? i : Math.floor(i / 2), j2 = two ? j : Math.floor(j / 2);
+  const need = kind === 'f' ? UP | OK1 : two ? DOWN | OK2 : kind === 'fl' ? FLR | OK1 : OK1, mask = two || kind === 'w' ? need | DOOR : need;
+  let n = 0;
+  for (let li = 0; li < 3; li++) {
+    const a = li === 0 ? G2.get(i2 * 100003 + j2) : li === 1 ? G16.get(Math.floor(i2 / 8) * 100003 + Math.floor(j2 / 8)) : GBIG; if (!a) continue;
+    for (let s = 0; s < a.length; s++) {
+      const S = a[s], ch = S.ch, F = ch.F, FL = ch.FL, it = S.it;
+      for (let p = S.s; p < S.e; p++) {
+        const b = it[p]; if ((FL[b / 9] & mask) !== need) continue;
+        const x0 = Math.min(F[b], F[b + 3], F[b + 6]), x1 = Math.max(F[b], F[b + 3], F[b + 6]), y0 = Math.min(F[b + 1], F[b + 4], F[b + 7]), y1 = Math.max(F[b + 1], F[b + 4], F[b + 7]);
+        if (two ? Math.floor(x0 / 2) > i || Math.floor(x1 / 2) < i || Math.floor(y0 / 2) > j || Math.floor(y1 / 2) < j : Math.floor(x0) > i || Math.floor(x1) < i || Math.floor(y0) > j || Math.floor(y1) < j) continue;
+        CT.C[n] = ch; CT.B[n] = b; n++;
+      }
+    }
   }
-  const i0 = Math.floor(x0), i1 = Math.floor(x1), j0 = Math.floor(y0), j1 = Math.floor(y1);
-  if ((i1 - i0 + 1) * (j1 - j0 + 1) > 4096 || i < i0 || i > i1 || j < j0 || j > j1) return false;
-  if (kind === 'f') return (F[b + 3] - F[b]) * (F[b + 7] - F[b + 1]) - (F[b + 4] - F[b + 1]) * (F[b + 6] - F[b]) > 0;
-  if (kind === 'w') return !triIsDoor(b);
-  return true;   // fl・a
-}
-// 升 (kind, i, j。c は 2 m の升の番号、ほかは 1 m) の三角形の位置の並び (b の昇順)。無ければ null。初めて引いたときに作って cells に持つ
-function cellGet(kind, i, j) {
-  if (!coarse) return null;
-  const M = cells[kind], key = i * 100003 + j; const got = M.get(key); if (got !== undefined) return got;
-  const F = new Float32Array(curBuf);
-  const s = kind === 'c' ? 2 : 1;   // 升の 1 辺 (m)。2 m の升 [2i, 2i+2) も 1 つの 16 m の箱に収まる (16 は 2 の倍数)
-  const box = boxGet(kind === 'fl' ? coarse.fl : coarse.all, Math.floor(i * s / CELL_BOX) * 100003 + Math.floor(j * s / CELL_BOX)) || [];
-  const big = kind === 'fl' ? coarse.bigFl : coarse.bigAll;
-  // 箱の一覧と big はどちらも b の昇順なので、小さい方から順に取って昇順にそろえる
-  const out = []; let p = 0, q = 0;
-  while (p < box.length || q < big.length) {
-    const b = q >= big.length || (p < box.length && box[p] < big[q]) ? box[p++] : big[q++];
-    if (triInCell(F, kind, b, i, j)) out.push(b);
-  }
-  const res = out.length ? Uint32Array.from(out) : null; M.set(key, res); return res;
+  return n;
 }
 // ----- CELLS_END -----
+let stampSeq = 0;   // 同じ三角形を 2 度見ないための印 (segHit。かたまりの ch.ST に書く)
+// ===== 読み込みの調整 (左の欄の「読み込みの調整」。下の「升のかたまりの出し入れ」・外判定が使う) =====
+// (2026-11-06、利用者の指示「今言った距離で作って、調整可能なようにページに設定を足すのは不可能なの？」。親の決定)
+//   d1・d2・d3: 距離の境 (m)。d1 以内は小・中・大、d2 以内は中・大、d3 以内は大。s1・s2・s3: 部品の大きさ (箱のいちばん長い辺) の境 (m)。小と中・中と大・大きな物体
+//   step: 見直す間隔 (m)、speed: 細かい物を読む速さの上限 (m/秒。初めの値は歩きの速さ)、outDist・outFloor: 外判定の距離と床の距離 (m)
+// 値は localStorage (view3d.load) に覚える (ほかのスイッチと同じ)
+const LOAD_DEF = { d1: 50, d2: 100, d3: 150, s1: 1, s2: 5, s3: 20, step: 10, speed: 2.8, outDist: 200, outFloor: 0.5 };
+const LOADCFG = { ...LOAD_DEF };
+try { const s = JSON.parse(localStorage.getItem('view3d.load') || '{}'); if (s && typeof s === 'object') for (const k of Object.keys(LOAD_DEF)) if (typeof s[k] === 'number' && isFinite(s[k]) && s[k] >= 0) LOADCFG[k] = s[k]; } catch (_) { }
 function buildGrid() { }
 function buildCeil() { }
 function ceilAt(x, y, zmin) {
   // (x, y) の真上で、zmin より高い下向きの面のいちばん低い所
-  const all = new Float32Array(curBuf); const l = cellGet('c', Math.floor(x / 2), Math.floor(y / 2)); let best = null;
-  if (l) for (const b of l) {
+  const n = cellTris('c', Math.floor(x / 2), Math.floor(y / 2)); let best = null;
+  for (let q = 0; q < n; q++) { const all = CT.C[q].F, b = CT.B[q];
     const ax = all[b], ay = all[b + 1], az_ = all[b + 2], bx = all[b + 3], by = all[b + 4], bz = all[b + 5], cx = all[b + 6], cy = all[b + 7], cz = all[b + 8];
     const v0x = bx - ax, v0y = by - ay, v1x = cx - ax, v1y = cy - ay, den = v0x * v1y - v1x * v0y; if (Math.abs(den) < 1e-12) continue;
     const wx = x - ax, wy = y - ay, s_ = (wx * v1y - v1x * wy) / den, t_ = (v0x * wy - wx * v0y) / den;
@@ -246,11 +239,11 @@ function ceilAt(x, y, zmin) {
 const BODY_R = 0.25;
 function buildWall() { }
 function segHit(ax, ay, az, bx, by, bz) {
-  const all = new Float32Array(curBuf); const dx = bx - ax, dy = by - ay, dz = bz - az; const seen = new Set();
+  const dx = bx - ax, dy = by - ay, dz = bz - az; const seen = new Set(), st = ++stampSeq;
   for (const [cx, cy] of [[ax, ay], [bx, by]]) {
-    const l = cellGet('w', Math.floor(cx), Math.floor(cy));
-    if (l) for (const b of l) {
-      if (seen.has(b)) continue; seen.add(b);
+    const n = cellTris('w', Math.floor(cx), Math.floor(cy));
+    for (let q = 0; q < n; q++) { const ch = CT.C[q], all = ch.F, b = CT.B[q];
+      if (ch.ST[b / 9] === st) continue; ch.ST[b / 9] = st;   // 両端の升の両方に入る三角形は 1 回だけ見る
       const e1x = all[b + 3] - all[b], e1y = all[b + 4] - all[b + 1], e1z = all[b + 5] - all[b + 2], e2x = all[b + 6] - all[b], e2y = all[b + 7] - all[b + 1], e2z = all[b + 8] - all[b + 2];
       const px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x, det = e1x * px + e1y * py + e1z * pz; if (Math.abs(det) < 1e-12) continue;
       const inv = 1 / det, tx = ax - all[b], ty = ay - all[b + 1], tz = az - all[b + 2]; const u = (tx * px + ty * py + tz * pz) * inv; if (u < 0 || u > 1) continue;
@@ -279,8 +272,8 @@ function blocked(x, y, z, nx, ny) {
 function fits(x, y, z) { if (noclip) return true; const c = ceilAt(x, y, z + 0.05); return c === null || c - z >= STANCE[stance].h; }
 function groundAt(x, y, zmax) {
   // (x, y) の真下で、zmax より低い歩く面のいちばん高い所
-  const all = new Float32Array(curBuf); const l = cellGet('f', Math.floor(x), Math.floor(y)); let best = null;
-  if (l) for (const b of l) {
+  const n = cellTris('f', Math.floor(x), Math.floor(y)); let best = null;
+  for (let q = 0; q < n; q++) { const all = CT.C[q].F, b = CT.B[q];
     const ax = all[b], ay = all[b + 1], az_ = all[b + 2], bx = all[b + 3], by = all[b + 4], bz = all[b + 5], cx = all[b + 6], cy = all[b + 7], cz = all[b + 8];
     const v0x = bx - ax, v0y = by - ay, v1x = cx - ax, v1y = cy - ay, den = v0x * v1y - v1x * v0y; if (Math.abs(den) < 1e-12) continue;
     const wx = x - ax, wy = y - ay, s_ = (wx * v1y - v1x * wy) / den, t_ = (v0x * wy - wx * v0y) / den;
@@ -296,8 +289,8 @@ function groundAt(x, y, zmax) {
 // 今の位置の真下と、まわり 0.5 m・1 m の各 8 点 (計 17 点) で、その点を含む歩く面のうち、いちばん低いものの高さ。どの点にも面が無ければ null
 const FALL_R = 1.0;
 function lowAt(x, y) {
-  const all = new Float32Array(curBuf); const l = cellGet('f', Math.floor(x), Math.floor(y)); let best = null;
-  if (l) for (const b of l) {
+  const n = cellTris('f', Math.floor(x), Math.floor(y)); let best = null;
+  for (let q = 0; q < n; q++) { const all = CT.C[q].F, b = CT.B[q];
     const ax = all[b], ay = all[b + 1], az_ = all[b + 2], bx = all[b + 3], by = all[b + 4], bz = all[b + 5], cx = all[b + 6], cy = all[b + 7], cz = all[b + 8];
     const v0x = bx - ax, v0y = by - ay, v1x = cx - ax, v1y = cy - ay, den = v0x * v1y - v1x * v0y; if (Math.abs(den) < 1e-12) continue;
     const wx = x - ax, wy = y - ay, s_ = (wx * v1y - v1x * wy) / den, t_ = (v0x * wy - wx * v0y) / den;
@@ -318,10 +311,10 @@ function lowestNear(x, y) {
 // (2026-11-05、利用者の指示「歩くモードで近く 5 m 以内の部品を裏で先に細かい形で調べる 見つけたら DB に入れる」「z +/- 50 cm とか」「荒いのと細かいのの差だけをチェックすれば 10m でも実用的にできないかな？」
 // 「そのエリアに荒いので部品がない場合、細かいのでチェック」「床でなく物体で」「床代わりの何かに対応できる。照明とかパネルとかチューブとか」)
 // 歩くモード中 1 秒ごと (nearCheck と同じ間引き) に、現在位置 wpos のまわり xy 半径 WALK_R m の 1 m の升 (当たり判定の升目と同じ升。鍵 i × 100003 + j) のうち、
-// 粗い形の三角形 (横の当たりの升 cellGet('w', …): ドア以外の全部) の z の範囲が足元 ±WALK_ZTOL m に 1 つも掛からない「物体の無い升」を、アプリに知らせる
+// 粗い形の三角形 (升のかたまりの三角形の全部。cellTris('a', …)) の z の範囲が足元 ±WALK_ZTOL m に 1 つも掛からない「物体の無い升」を、アプリに知らせる
 // ({type:'walkCheck', pos (足元。場所の座標), zTol, cells: [[升の中心 x, y], …] (場所の座標), site})。同じ升は 1 回の 3D の中で二度送らない (送った升を持つ。親の決定)。1 回に最大 WALK_MAX_CELLS 升 (親の決定。近い順)。
 // アプリが細かい形 (LOD0) で見つけた三角形 ({type:'walkFill', center, items:[{inst, name, tris}]}。tris は center からの相対) を extra に入れ、描き (部品の色の Mesh を root に足す。groups には入れない)、当たり判定に足す。
-// 升 (cellGet の f・c・w・fl) は粗い形の三角形 (curBuf) から作るものなので、extra は別の表 (三角形の並び Float32Array と、1 m の升ごとの添字の Map) に持ち、
+// 升 (cellTris の f・c・w・fl) は升のかたまりの三角形から引くものなので、extra は別の表 (三角形の並び Float32Array と、1 m の升ごとの添字の Map) に持ち、
 // ceilAt・segHit・groundAt・lowAt・onFloor で升目の結果に加えて見る (選び方は各関数の今の決まりのまま)。
 //   f (足元): 上向き (cz > 0)、c (頭の上): 下向き、w (横): 全部、fl (判定の床): 傾きが 46° 以内の上向き (親の決定。名前の除外と 1 m 未満の除外は掛けない)
 const WALK_R = 10, WALK_ZTOL = 0.5, WALK_MAX_CELLS = 400, FL_COS = Math.cos(46 * Math.PI / 180);
@@ -365,7 +358,7 @@ function extraIndex(li) {
     }
   }
 }
-// 描く: 部品の色 (COL.other) の Mesh (buildScene の部品と同じ作り: flatShading・両面・切る面)。root に足す。groups には入れない (pick は cur.ioffs の添字で引くため)
+// 描く: 部品の色 (COL.other) の Mesh (升のかたまりの形 (addChunk) と同じ作り: flatShading・両面・切る面)。root に足す。groups には入れない (pick はかたまりの部品の番号で引くため)
 function extraDraw(li) {
   const e = extra.list[li];
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(e.tris, 3));
@@ -373,7 +366,7 @@ function extraDraw(li) {
   me.renderOrder = 0; me.userData = { k: 'extra', li }; e.mesh = me; root.add(me);
 }
 function extraAdd(tris) { const li = extra.list.length; extra.list.push({ tris, mesh: null }); extraIndex(li); extraDraw(li); }
-// 読み込み直し (buildScene の入れ替えの後): keep なら、中心の差 off (新しい中心 − 前の中心) で座標を直し (新しい相対 = 前の相対 − off)、新しい root に描き直し、送った升も直す。keep でなければ捨てる
+// 読み込み直し (applyRegion の入れ替えの後。今は keep のとき原点が変わらないので off は 0): keep なら、中心の差 off (新しい中心 − 前の中心) で座標を直し (新しい相対 = 前の相対 − off)、新しい root に描き直し、送った升も直す。keep でなければ捨てる
 function extraRelocate(off, keep) {
   for (const m of [extra.f, extra.c, extra.w, extra.fl]) m.clear();
   if (!keep) { extra.list = []; extra.sent = []; extra.sentKeys.clear(); return; }
@@ -393,27 +386,36 @@ function onWalkFill(d) {
   extraAdd(F);
   window.__walkFill = { tris: (window.__walkFill?.tris || 0) + n / 9, items: (window.__walkFill?.items || 0) + d.items.length, last: d.items.map(it => [it.inst, it.name, (it.tris || []).length / 9]) };
 }
-// 1 秒ごとに、物体の無い升を探してアプリに送る
-let lastWalkCheck = 0;
-function walkCheckTick() {
-  if (!APP || !walk || !cur || loading || !coarse) return;
-  const now = performance.now(); if (now - lastWalkCheck < 1000) return; lastWalkCheck = now;
-  const F = new Float32Array(curBuf); const foot = wpos.z, z0 = foot - WALK_ZTOL, z1 = foot + WALK_ZTOL;
+// 1 秒ごとに、物体の無い升を探してアプリに送る。
+// (2026-11-06、利用者の報告「実用的でない 2 秒おきくらいで引っかかり」。親の決定) 前は 1 コマの中で、まわり WALK_R m の升 (約 300 個) を全部引いていた (初めての升はその場で作るので、動いていると 1 秒ごとに
+// 新しい升をまとめて作って止まった)。今は、探し始めたときの位置 (px, py, foot) で同じ升を同じ順に見るのを、毎コマ WALK_SLICE_MS ms までに区切って続ける (walkSweep。送る中身の決まりは前と同じ)
+const WALK_SLICE_MS = 2;
+let lastWalkCheck = 0, walkJob = null;
+function* walkSweep(px, py, foot) {
+  const z0 = foot - WALK_ZTOL, z1 = foot + WALK_ZTOL;
   const out = [];
-  for (let i = Math.floor(wpos.x - WALK_R); i <= Math.floor(wpos.x + WALK_R); i++) for (let j = Math.floor(wpos.y - WALK_R); j <= Math.floor(wpos.y + WALK_R); j++) {
-    const cx = i + 0.5, cy = j + 0.5, d = Math.hypot(cx - wpos.x, cy - wpos.y); if (d > WALK_R) continue;
-    const key = ekey(i, j); if (extra.sentKeys.has(sentKey(cx, cy, foot))) continue;
+  for (let i = Math.floor(px - WALK_R); i <= Math.floor(px + WALK_R); i++) for (let j = Math.floor(py - WALK_R); j <= Math.floor(py + WALK_R); j++) {
+    const cx = i + 0.5, cy = j + 0.5, d = Math.hypot(cx - px, cy - py); if (d > WALK_R) continue;
+    if (extra.sentKeys.has(sentKey(cx, cy, foot))) continue;
     let empty = true;
-    const l = cellGet('a', i, j);   // ドアも物体なので含めて見る (w はドアを除く)
-    if (l) for (const b of l) { if (Math.max(F[b + 2], F[b + 5], F[b + 8]) >= z0 && Math.min(F[b + 2], F[b + 5], F[b + 8]) <= z1) { empty = false; break; } }
+    const n = cellTris('a', i, j);   // ドアも物体なので含めて見る (w はドアを除く)
+    for (let q = 0; q < n; q++) { const F = CT.C[q].F, b = CT.B[q]; if (Math.max(F[b + 2], F[b + 5], F[b + 8]) >= z0 && Math.min(F[b + 2], F[b + 5], F[b + 8]) <= z1) { empty = false; break; } }
     if (empty) out.push([cx, cy, d]);
+    yield;
   }
   if (!out.length) return;
   out.sort((a, b) => a[2] - b[2]);
   const send = out.slice(0, WALK_MAX_CELLS), c = cur.center;
   for (const s of send) { extra.sent.push([s[0], s[1], foot]); extra.sentKeys.add(sentKey(s[0], s[1], foot)); }
   window.__walkCheck = { sent: (window.__walkCheck?.sent || 0) + send.length, last: send.length, pending: out.length - send.length };
-  window.chrome.webview.postMessage({ type: 'walkCheck', pos: [wpos.x + c[0], wpos.y + c[1], foot + c[2]], zTol: WALK_ZTOL, cells: send.map(s => [s[0] + c[0], s[1] + c[1]]), site: SITE });
+  window.chrome.webview.postMessage({ type: 'walkCheck', pos: [px + c[0], py + c[1], foot + c[2]], zTol: WALK_ZTOL, cells: send.map(s => [s[0] + c[0], s[1] + c[1]]), site: SITE });
+}
+function walkCheckTick() {
+  if (!APP || !walk || !cur || loading || !cur.index) { walkJob = null; return; }
+  const now = performance.now();
+  if (walkJob && walkJob.cur !== cur) walkJob = null;   // 地点が替わった (座標がずれる): 途中の分はやめる
+  if (!walkJob) { if (now - lastWalkCheck < 1000) return; lastWalkCheck = now; walkJob = { cur, it: walkSweep(wpos.x, wpos.y, wpos.z) }; }
+  for (;;) { if (walkJob.it.next().done) { walkJob = null; break; } if (performance.now() - now >= WALK_SLICE_MS) break; }
 }
 function updWalkUi() {
   const sn = { stand: '立つ', crouch: 'しゃがむ', prone: '寝そべる' }[stance];
@@ -447,8 +449,8 @@ function walkStep(dt) {
   if (!onLadder && keys.has('w')) onLadder = (cur.ladders || []).find(l => Math.max(l[2][0] - wpos.x, wpos.x - l[3][0], 0) ** 2 + Math.max(l[2][1] - wpos.y, wpos.y - l[3][1], 0) ** 2 <= 0.36 && wpos.z >= l[2][2] - 0.5 && wpos.z < l[3][2] - 0.1) || null;
   if (onLadder) {
     if (keys.has('w')) wpos.z += LADDER_V * dt; if (keys.has('s')) wpos.z -= LADDER_V * dt;
-    if (wpos.z >= onLadder[3][2]) { wpos.z = onLadder[3][2]; wpos.x += Math.cos(wyaw) * 0.6; wpos.y += Math.sin(wyaw) * 0.6; const g = groundAt(wpos.x, wpos.y, wpos.z + STEP); if (g !== null) wpos.z = g; onLadder = null; }
-    else if (wpos.z <= onLadder[2][2] - 0.5 || !keys.size) { if (!keys.has('w') && !keys.has('s')) {} else if (wpos.z <= onLadder[2][2]) onLadder = null; }
+    if (wpos.z >= onLadder[3][2]) { wpos.z = onLadder[3][2]; wpos.x += Math.cos(wyaw) * 0.6; wpos.y += Math.sin(wyaw) * 0.6; const g = groundAt(wpos.x, wpos.y, wpos.z + STEP); if (g !== null) wpos.z = g; onLadder = null; outRequest(); review(true); }   // はしごを登り終えた・下り終えた (次の行) ので、外判定を見直す (outTick)・出す升のかたまりを見直す (review)
+    else if (wpos.z <= onLadder[2][2] - 0.5 || !keys.size) { if (!keys.has('w') && !keys.has('s')) {} else if (wpos.z <= onLadder[2][2]) { onLadder = null; outRequest(); review(true); } }
     walkCam(); showElev(); recStep(dt); return;
   }
   const spd = (run ? RUN : WALK) * STANCE[stance].sp * dt;
@@ -715,9 +717,10 @@ const ELEV_BAND = 1.5, DOOR_STEP = 0.6, DOOR_NEAR = 6;
 function elevMove(from, t) {
   // 行き先の乗り場が読み込んだ範囲 (中心から ±r/2) の外なら (Orison のスペースポート → シャトル・ステーションは横に約 200 m・下に 212 m)、
   // 行き先の案内と同じく、乗り場のまわり ±FIRST_R m を先に読み込んでから立つ所を決め、続けて ±r m を裏で読み込む
-  const c = cur.center, h = cur.r / 2, xyAbs = [wpos.x + c[0], wpos.y + c[1]], yaw0 = wyaw;
+  const c = cur.cc, h = cur.r / 2, xyAbs = [wpos.x + cur.center[0], wpos.y + cur.center[1]], yaw0 = wyaw;
   hideTbox();
-  if (Math.abs(t[1][0] - c[0]) <= h && Math.abs(t[1][1] - c[1]) <= h && Math.abs(t[1][2] - c[2]) <= h) { elevPlace(t, xyAbs, yaw0); return; }
+  // 範囲の中なら、行き先の乗り場のまわりの升のかたまり (形と当たり) が出そろってから立つ所を決める (ensureNear。2026-11-06)
+  if (Math.abs(t[1][0] - c[0]) <= h && Math.abs(t[1][1] - c[1]) <= h && Math.abs(t[1][2] - c[2]) <= h) { const og = originGen; ensureNear(t[1].slice()).then(() => { if (og === originGen) elevPlace(t, xyAbs, yaw0); }); return; }
   const gen = ++goGen, r = regionR(), first = Math.min(FIRST_R, r), t0 = performance.now(); window.__elevLoad = {};
   loadRegion(t[1].slice(), first).then(() => {
     if (!cur || gen !== goGen) return; elevPlace(t, xyAbs, yaw0); window.__elevLoad.first = (performance.now() - t0) / 1000;
@@ -750,7 +753,7 @@ function elevPlace(t, xyAbs, yaw0) {
     else { wpos.set(sx, sy, tz); wyaw = yaw0 + Math.PI; window.__elevHow = 'none'; }
   }
   air = false; vz = 0; onLadder = null;
-  hideTbox(t); walkCam(); recJump();
+  hideTbox(t); walkCam(); recJump(); outRequest(); review(true);   // エレベーターで移り終えたので、外判定を見直す (outTick)・出す升のかたまりを見直す (review)
 }
 // トラム: 行き先の駅の乗り場の床へ、向きは反対。読み込んでいない所なら、行き先の案内と同じく ±FIRST_R m を先に、続けて ±r m を裏で (window.__tram に時間)
 function tramMove(t) { window.__tram = { to: t[4] }; travelTo(t[1], wyaw + Math.PI, t, window.__tram); }
@@ -758,9 +761,10 @@ function tramMove(t) { window.__tram = { to: t[4] }; travelTo(t[1], wyaw + Math.
 // 読み込んでいない所なら、行き先の案内と同じく ±FIRST_R m を先に、続けて ±r m を裏で
 function travelTo(abs, yaw, closeAt, tm, force) {
   const r = regionR();
-  const place = () => { const c = cur.center; const x = abs[0] - c[0], y = abs[1] - c[1], z = abs[2] - c[2]; const g = groundAt(x, y, z + STEP); wpos.set(x, y, g !== null ? g : z); wyaw = yaw; air = false; vz = 0; onLadder = null; hideTbox(closeAt); walkCam(); recJump(); };
-  const c = cur.center, h = cur.r / 2;
-  if (!force && Math.abs(abs[0] - c[0]) <= h && Math.abs(abs[1] - c[1]) <= h && Math.abs(abs[2] - c[2]) <= h) { place(); return Promise.resolve(); }
+  const place = () => { const c = cur.center; const x = abs[0] - c[0], y = abs[1] - c[1], z = abs[2] - c[2]; const g = groundAt(x, y, z + STEP); wpos.set(x, y, g !== null ? g : z); wyaw = yaw; air = false; vz = 0; onLadder = null; hideTbox(closeAt); walkCam(); recJump(); outRequest(); review(true); };   // 移り終えたので、外判定を見直す (outTick。トラム・マイハンガーのリフト・現在位置)・出す升のかたまりを見直す (review)
+  const c = cur.cc, h = cur.r / 2;
+  // 範囲の中なら、行き先のまわりの升のかたまり (形と当たり) が出そろってから立つ (ensureNear。2026-11-06)
+  if (!force && Math.abs(abs[0] - c[0]) <= h && Math.abs(abs[1] - c[1]) <= h && Math.abs(abs[2] - c[2]) <= h) { const og = originGen; return ensureNear(abs.slice()).then(() => { if (og === originGen) place(); }); }
   hideTbox(); const gen = ++goGen; const t0 = performance.now(); tm = tm || {};
   const first = Math.min(FIRST_R, r);
   return loadRegion(abs.slice(), first).then(() => {
@@ -915,40 +919,35 @@ function playStep(dt) {
   if (play.i >= P.length - 1) { play = null; document.getElementById('recInfo').textContent = '再生おわり'; }
 }
 // 確かめ用 (Edge headless の試しから呼ぶ)
-window.__probe = () => { cam.updateMatrixWorld(); ray.setFromCamera(new THREE.Vector2(0, 0), cam); const hs = ray.intersectObjects(Object.values(groups).filter(g => g).flat().filter(m => m.visible), false); if (!hs.length) return ['当たり無し', cam.position.toArray(), cam.getWorldDirection(new THREE.Vector3()).toArray()]; const h0 = hs[0]; const k = h0.object.userData.k; const io = cur.ioffs[k]; const id = io ? new Uint32Array(curBuf, io[0] * 4, io[1])[h0.object.userData.t0 + h0.faceIndex] : -1; return [k, +h0.distance.toFixed(2), id >= 0 ? cur.parts[id][1] : '', h0.point.toArray().map(v => +v.toFixed(2))]; };
-window.__cur = () => cur; window.__buf = () => curBuf; window.__tbox = (x, y, z) => showElev(new THREE.Vector3(x, y, z), true); window.__gravList = () => grav; window.__gravAt = (x, y, z) => gravAt(x, y, z); window.__loadAt = (c, r) => loadRegion(c, r);
+window.__probe = () => { cam.updateMatrixWorld(); ray.setFromCamera(new THREE.Vector2(0, 0), cam); const hs = ray.intersectObjects(Object.values(groups).filter(g => g).flat().filter(m => m.visible), false); if (!hs.length) return ['当たり無し', cam.position.toArray(), cam.getWorldDirection(new THREE.Vector3()).toArray()]; const h0 = hs[0]; const k = h0.object.userData.k; const pt = h0.object.userData.ch ? partAt(h0.object.userData.ch, k, h0.object.userData.t0 + h0.faceIndex) : null; return [k, +h0.distance.toFixed(2), pt ? pt[1] : '', h0.point.toArray().map(v => +v.toFixed(2))]; };
+window.__cur = () => cur; window.__buf = () => chunks; window.__tbox = (x, y, z) => showElev(new THREE.Vector3(x, y, z), true); window.__gravList = () => grav; window.__gravAt = (x, y, z) => gravAt(x, y, z); window.__loadAt = (c, r) => loadRegion(c, r);
 window.__walk = { low: (x, y) => lowestNear(x, y), setPitch: v => { wpitch = v; walkCam(); }, place: (x, y, z, yaw) => { wpos.set(x, y, z); wyaw = yaw; air = false; vz = 0; walkCam(); }, ground: (x, y, z) => groundAt(x, y, z), gaps: () => gapLog, seg: (...a) => segHit(...a), on: () => walk, pos: () => [wpos.x, wpos.y, wpos.z, wyaw, run, stance, air, noclip], cam, rec: () => rec, setRec: r => { play = { t: 0, i: 0, points: r.points, center: r.center }; showComments(r.comments || []); }, marks: () => cMarks.map(m => [m.visible, m.userData.t]), openComment, closeComment, keys };
 
+const WALK_DT_MAX = 0.1;
 function keyMove() {
-  const now = performance.now(), dt = Math.min(0.5, (now - lastT) / 1000); lastT = now;
+  const now = performance.now(), raw = (now - lastT) / 1000, dt = Math.min(0.5, raw); lastT = now;
   if (!cur) return;
-  if (walk) { walkStep(dt); return; }
-  if (!keys.size) return;
-  // 速さは時間で決める (描くのが遅くても進む): 毎秒 max(3 m, 中心までの距離) (Shift で 4 倍)
-  const sp = Math.max(3, dist) * dt * (keys.has('shift') ? 4 : 1);
-  const fwd = cam.getWorldDirection(new THREE.Vector3()), right = new THREE.Vector3(-Math.sin(az), Math.cos(az), 0);
-  if (keys.has('w')) tgt.addScaledVector(fwd, sp); if (keys.has('s')) tgt.addScaledVector(fwd, -sp);
-  if (keys.has('d')) tgt.addScaledVector(right, sp); if (keys.has('a')) tgt.addScaledVector(right, -sp);
-  if (keys.has('e')) tgt.z += sp; if (keys.has('q')) tgt.z -= sp;
-  upd();
+  // 歩くモードの 1 コマの動きに使う時間は WALK_DT_MAX 秒まで (2026-11-06、利用者の報告「止まってた間のキー入力を処理するから飛ぶ」。親の決定。前は上の 0.5 秒までで、走りだと 1 コマで 5 m 進んだ)
+  if (walk) walkStep(play ? dt : Math.min(WALK_DT_MAX, dt));   // 再生 (play) の時間は縮めない
+  else if (keys.size) {
+    // 速さは時間で決める (描くのが遅くても進む): 毎秒 max(3 m, 中心までの距離) (Shift で 4 倍)
+    const sp = Math.max(3, dist) * dt * (keys.has('shift') ? 4 : 1);
+    const fwd = cam.getWorldDirection(new THREE.Vector3()), right = new THREE.Vector3(-Math.sin(az), Math.cos(az), 0);
+    if (keys.has('w')) tgt.addScaledVector(fwd, sp); if (keys.has('s')) tgt.addScaledVector(fwd, -sp);
+    if (keys.has('d')) tgt.addScaledVector(right, sp); if (keys.has('a')) tgt.addScaledVector(right, -sp);
+    if (keys.has('e')) tgt.z += sp; if (keys.has('q')) tgt.z -= sp;
+    upd();
+  }
+  speedTick(raw);   // 速さ (細かい物を読むかの決まり。下の「升のかたまりの出し入れ」)
 }
 const ray = new THREE.Raycaster();
-// 三角形の位置 b (buf の中の float の位置) の部品の添字 (b の入る種類の範囲 offs[k] から ioffs[k] を引く)。無ければ -1
-function partOfTri(p, b) {
-  for (const k of Object.keys(COL)) {
-    const [o, n] = p.offs[k]; if (b < o || b >= o + n) continue;
-    const io = p.ioffs[k]; return new Uint32Array(curBuf, io[0] * 4, io[1])[(b - o) / 9];
-  }
-  return -1;
-}
-// 部品 pi の判定の面 (判定の色ごとの三角形の数と高さ)。判定の三角形は cur.labs[k] (元の三角形の位置 b の並び) で持つ (位置の複製は無い)
-function partFloors(p, pi) {
-  const all = new Float32Array(curBuf); const res = [];
+// 部品の判定の面 (判定の色ごとの三角形の数と高さ)。F = 三角形の位置、LB = 三角形ごとの判定の色 (LABK の番号)、ID・pi = かたまりの中の部品の番号 (ID が無ければ F の全部)
+function partFloors(F, LB, ID, pi) {
+  const res = [];
   for (const k of Object.keys(OCOL)) {
-    const L = p.labs && p.labs[k]; if (!L || !L.length) continue;
-    const hs = new Map(); let n = 0;
-    for (let t = 0; t < L.length; t++) { const b = L[t]; if (partOfTri(p, b) !== pi) continue;
-      n++; const z = (all[b + 2] + all[b + 5] + all[b + 8]) / 3 + p.center[2];
+    const li = LABK.indexOf(k), hs = new Map(); let n = 0;
+    for (let q = 0; q < LB.length; q++) { if (LB[q] !== li || (ID && ID[q] !== pi)) continue; const b = q * 9;
+      n++; const z = (F[b + 2] + F[b + 5] + F[b + 8]) / 3 + cur.center[2];
       const key = z.toFixed(1); hs.set(key, (hs.get(key) || 0) + 1);
     }
     if (n) res.push(`${NAME[k]} ${n} 三角形・高さ (絶対 m: 三角形の数) ` + [...hs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([z, c]) => `${z}: ${c}`).join(', ') + (hs.size > 12 ? ` ほか ${hs.size - 12} の高さ` : ''));
@@ -1088,7 +1087,7 @@ function pick(e) {
   ray.setFromCamera(new THREE.Vector2((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1), cam);
   const ms = Object.values(groups).filter(g => g).flat().filter(m => m.visible);
   const hit = ray.intersectObjects(ms, false).find(h => visZ(h.point.z));
-  if (hit) { hit.kind = hit.object.userData.k; hit.tri = hit.object.userData.t0 + hit.faceIndex; }
+  if (hit) { hit.kind = hit.object.userData.k; hit.tri = hit.object.userData.t0 + hit.faceIndex; hit.ch = hit.object.userData.ch; }
   const box = document.getElementById('pick');
   // DB のコメントの印の札 (文) を押したら、確認して消す (親の決定: 消せないと増える一方のため)。札は形より手前 (depthTest なし) に描いているので、形に当たっていても札を先に見る。
   // コメントの欄を開いている間は見ない (押した所に付ける方を優先)。形に当たらなくても (空中の札) 効く
@@ -1113,18 +1112,18 @@ function pick(e) {
     // 店の結び付いていない端末を押したときは、そう出す (何も出ないと押せていないのか分からない)
     if (tAny) { showSales({ title: '販売品', shops: [{ name: tAny.label || tAny.kind, note: 'この端末に結び付いた店が地図のデータにありません' }] }); return; } }
   if (!walk) setCenter(hit.point);
-  else { const k0 = hit.kind; const io0 = cur.ioffs[k0]; if (io0) { const id0 = new Uint32Array(curBuf, io0[0] * 4, io0[1])[hit.tri]; const w_ = cur.parts[id0][1].split('_');
+  else { if (hit.ch) { const w_ = partAt(hit.ch, hit.kind, hit.tri)[1].split('_');
       // エレベーターの操作盤: 名前の語に elevator と panel (hightech 型 console_elevator_1_panel_a など)、または elevator・console・freestanding
       // (util 型のハンガー・ステーションの console_elevator_1_freestanding_a。2026-11-05、親の決定。語の組は Data.p4k の形の名前で確かめた)
       if (w_.includes('elevator') && (w_.includes('panel') || (w_.includes('console') && w_.includes('freestanding')))) showElev(hit.point, true); }
     // トラム: 乗り場 (地図のデータの tram) から 5 m 以内のどの面を押しても、その駅の一覧を出す (トラムのパネルの部品の名前は確かめていないので、名前では決めない)
     if ((cur.transit || []).some(t => t[0] === 'tram' && stopDist(t, hit.point) < 5)) showElev(hit.point, true); }
-  const k = hit.kind; if (!cur.ioffs[k]) return;
-  const [o, n] = cur.ioffs[k]; const ids = new Uint32Array(curBuf, o * 4, n);
-  const part = cur.parts[ids[hit.tri]];
+  const k = hit.kind; if (!hit.ch) return;
+  const ch = hit.ch, pid = ch.ID[ch.offs[k][0] / 9 + hit.tri];
+  const part = ch.parts[pid];
   if (!DEBUG) return;   // 下部の枠 (#pick) は設定「マップのデバッグ表示」のときだけ (上の先頭の DEBUG)
   box.style.display = 'block';
-  box.textContent = `${part[1]}  (inst ${part[0]}・${part[4]})\n押した面: ${NAME[k]}\n部品の種類: ${NAME[part[2]]}\n部品の中の判定の面:\n${partFloors(cur, ids[hit.tri])}\n押した所の高さ: 中心から ${hit.point.z.toFixed(2)} m (絶対 ${(hit.point.z + cur.center[2]).toFixed(2)} m)
+  box.textContent = `${part[1]}  (inst ${part[0]}・${part[4]})\n押した面: ${NAME[k]}\n部品の種類: ${NAME[part[2]]}\n部品の中の判定の面:\n${partFloors(ch.F, ch.LB, ch.ID, pid)}\n押した所の高さ: 中心から ${hit.point.z.toFixed(2)} m (絶対 ${(hit.point.z + cur.center[2]).toFixed(2)} m)
 押した所 (絶対): ${(hit.point.x + cur.center[0]).toFixed(2)}, ${(hit.point.y + cur.center[1]).toFixed(2)}, ${(hit.point.z + cur.center[2]).toFixed(2)}`;
 }
 
@@ -1146,21 +1145,21 @@ async function loadGeo(gi) {
   let s = 0; for (const p of g.parts) { g.triStart.push(s); s += p[5]; } g.tris = s;
   geoCache.set(gi, g); return g;
 }
-// 地点: 中心 c (場所の座標) のまわり ±r m の立方体。立方体に掛かる区画の部品を全部描く (試験の頁と同じ)
+// 地点: 中心 c (場所の座標) のまわり ±r m の立方体 (アプリが区画を取り出す範囲)。形は、その中から升のかたまりごとに出す (下の「升のかたまりの出し入れ」)
 let loading = false;
 // keep: 近づいて読み込み直すとき (2026-11-04、利用者の指示「近づいたら書かないと」)。見ている所・歩いている所・選んだフロアをそのままにする
 // アプリのログに 1 行残す (2026-11-05、利用者の報告「何度も作画中を繰り返してる」の原因を追うため。呼び元の関数名も付ける)
 function logApp(message) { if (APP) try { window.chrome.webview.postMessage({ type: 'log', message }); } catch (_) { } }
 async function loadRegion(c, r, keep, small) {
-  if (loading) return; loading = true; prewarmStop();
-  logApp(`loadRegion c=${c.map(v => v.toFixed(1)).join(',')} r=${r} keep=${!!keep} small=${!!small} cur=${cur ? cur.center.map(v => v.toFixed(1)).join(',') + ' r=' + cur.r : '-'} wpos=${walk ? [wpos.x, wpos.y, wpos.z].map(v => v.toFixed(1)).join(',') : '-'} from=${((new Error().stack || '').split('\n')[2] || '').trim()}`);
+  if (loading) return; loading = true;
+  logApp(`loadRegion c=${c.map(v => v.toFixed(1)).join(',')} r=${r} keep=${!!keep} small=${!!small} cur=${cur ? cur.cc.map(v => v.toFixed(1)).join(',') + ' r=' + cur.r : '-'} wpos=${walk ? [wpos.x, wpos.y, wpos.z].map(v => v.toFixed(1)).join(',') : '-'} from=${((new Error().stack || '').split('\n')[2] || '').trim()}`);
   document.getElementById('prog').classList.toggle('small', !!small);
   const msg = document.getElementById('msg'); msg.textContent = ''; showProgress(0, 0);
   try {
     const t0 = performance.now();
     const rq = await requestRegion(c, r);
     const tReady = performance.now();
-    // 取り出しの後は、同じ大きさで「作画中」(2026-11-04、利用者の指示)。バーは解析の糸が読み込んだ区画の数、続けて GPU へ送った形の数
+    // 取り出しの後は、同じ大きさで「作画中」(2026-11-04、利用者の指示)。バーは解析の糸が用意した区画の数、続けて (別の所へ移ったときは) 中心のまわりの升のかたまりの数
     msg.textContent = ''; showProgress(0, 0, '作画中');
     REGBASE = rq.base; REG = await (await fetch(REGBASE + 'region.json')).json();
     // アプリの外で試すとき (?region=) は、前もって作った地点の中心と範囲を使う
@@ -1168,81 +1167,70 @@ async function loadRegion(c, r, keep, small) {
     window.__lastRegion = { app: rq, wait: (tReady - t0) / 1000 };
     const ph = window.__phase = { region: (tReady - t0) / 1000 }; let tp = performance.now();
     window.__stage = 'worker';
-    // 解析の結果の保存 (WC。view3d-worker.js): アプリが鍵・容量・ディスクの空きを渡す。鍵が無ければ保存しない。容量 0 なら今ある保存を消す
-    const wcache = rq.wkey ? { key: rq.wkey, budget: rq.wbudget, free: rq.wfree } : null;
-    if (!wcache && rq.wbudget === 0) worker.postMessage({ type: 'wstat', id: 0, budget: 0 });
-    prewarmStop();
-    const res = await workerBuild(new URL(REGBASE, location.href).href, REG, c, r, (d, n) => showProgress(d, n, '作画中'), bx => drawOutline(bx, c), wcache);
-    if (APP && res.wcache && typeof res.wcache.used === 'number') window.chrome.webview.postMessage({ type: 'wcacheUsed', bytes: res.wcache.used });
+    // 座標の原点 (cur.center): 読み込み直し (keep) は今の原点のまま (出ている升のかたまりをそのまま使う)。別の所へ移る (keep でない) ときは、その地点の中心を新しい原点にして、かたまりを全部捨てる
+    const kp = !!(keep && cur), origin = kp ? cur.center : c.slice(), og = kp ? originGen : originGen + 1;
+    const res = await workerCall({ type: 'build', og, base: new URL(REGBASE, location.href).href, region: REG, o: origin, c, r, keys: { col: Object.keys(COL), ocol: Object.keys(OCOL), labk: LABK }, names: NAME, pal: regionPalReq, site: SITE, sizes: [LOADCFG.s1, LOADCFG.s2, LOADCFG.s3] }, (d, n) => showProgress(d, n, '作画中'));
+    // 索引の数をアプリのログに 1 行出す (事実を数で確かめるため。画面には出さない): 大きさの組ごと (小・中・大・大きな物体) の 部品/三角形。外装、続けて内装
+    if (res.stat) {
+      const st = res.stat, pt = k => `${st.parts[k]}/${st.tris[k]}`;
+      logApp(`索引 c=${c.map(v => v.toFixed(1)).join(',')} r=${r} 区画 ${st.geos} (使い回し ${st.reused})・置かれた所 ${st.insts}・部品 ${st.partsAll}・かたまり ${res.index.keys.length} (部品/三角形) 外装 小 ${pt(0)} 中 ${pt(1)} 大 ${pt(2)} 大きな物体 ${pt(3)} 内装 小 ${pt(4)} 中 ${pt(5)} 大 ${pt(6)} 大きな物体 ${pt(7)}`);
+    }
     ph.worker = res.times; ph.workerAll = (performance.now() - tp) / 1000; tp = performance.now();
-    // 区画のファイルはもう要らない。アプリに置き場を消してもらう
+    // 区画のファイルはもう要らない (解析の糸が読んで持っている)。アプリに置き場を消してもらう
     if (APP && rq.id) window.chrome.webview.postMessage({ type: 'regionLoaded', id: rq.id });
     else if (!APP && qs.get('api') && rq.base) fetch(qs.get('api') + 'loaded?base=' + encodeURIComponent(rq.base)).catch(() => { });
-    window.__stage = 'makeCur'; const nc = makeCur(c, r, res);
+    window.__stage = 'makeCur'; const nc = makeCur(origin, c, r, res);
     ph.makeCur = (performance.now() - tp) / 1000; tp = performance.now();
-    await buildScene(nc, res, keep, t0);
+    applyRegion(nc, kp, t0);
+    // 別の所へ移ったとき (初めに開いたとき・行き先へ飛んだとき・エレベーターなどで遠くへ移ったとき) は、中心のまわりの升のかたまり (形と当たり) が出そろうまで待つ (呼んだ側が、その後に立つ所を決める)。
+    // 読み込み直し (keep) は待たない (今出ている物をそのまま出しておき、足りないかたまりは裏で足す)
+    if (!kp) { window.__stage = 'chunks'; await ensureNear(c); }
     ph.scene = (performance.now() - tp) / 1000;
     hideProgress();
     window.__lastRegion.total = (performance.now() - t0) / 1000;
-  } catch (e) { hideProgress(); removeOutline(); msg.textContent = '読み込めませんでした: ' + e.message; report('loadRegion', e); lastFail = { c: c.slice(), r, t: performance.now() }; }   // keep の読み込み直しでも隠さず出す (2026-11-05、利用者の報告「何度も作画中を繰り返してる」: 失敗が見えず原因が追えなかった)
+  } catch (e) { hideProgress(); msg.textContent = '読み込めませんでした: ' + e.message; report('loadRegion', e); lastFail = { c: c.slice(), r, t: performance.now() }; }   // keep の読み込み直しでも隠さず出す (2026-11-05、利用者の報告「何度も作画中を繰り返してる」: 失敗が見えず原因が追えなかった)
   finally {
     loading = false;
     if (pendingGo) { const [pt, pb] = pendingGo; pendingGo = null; setTimeout(() => goTarget(pt, pb), 0); }
   }
 }
-// 解析の糸 (view3d-worker.js) に地点の区画の読み取り・解析・当たり判定の升目を頼む
+// 解析の糸 (view3d-worker.js) に地点の区画の読み取り・索引・升のかたまり・外判定を頼む
 const worker = new Worker(new URL('./view3d-worker.js', import.meta.url));
 let workerSeq = 0; const workerWait = new Map();
 worker.onmessage = e => {
   const d = e.data;
   if (d.type === 'wstat') { if (APP && typeof d.used === 'number') window.chrome.webview.postMessage({ type: 'wcacheUsed', bytes: d.used }); return; }
+  if (d.type === 'chunk') { onChunk(d); return; }
+  if (d.type === 'out') { onOut(d); return; }
+  if (d.type === 'error' && d.kind === 'chunk') { onChunkError(d); return; }
+  if (d.type === 'error' && d.kind === 'out') { report('out', d.message); onOut({ id: d.id, error: true }); return; }
   const w = workerWait.get(d.id); if (!w) return;
-  if (d.type === 'progress') w.progress(d.done, d.total);
-  else if (d.type === 'boxes') w.boxes(d.boxes);
-  else if (d.type === 'done') { workerWait.delete(d.id); w.ok(d); }
+  if (d.type === 'progress') { if (w.progress) w.progress(d.done, d.total); }
   else if (d.type === 'error') { workerWait.delete(d.id); w.ng(new Error(d.message)); }
+  else { workerWait.delete(d.id); w.ok(d); }   // done (地点の索引)・index (分け直した索引)・part (部品の強調)
 };
-// 解析の糸の中で拾われない失敗 (メモリ不足など) があったら、待っているものを失敗にする (「作画中」のまま止まらないように)
+// 解析の糸の中で拾われない失敗 (メモリ不足など) があったら、待っているものを失敗にする (「作画中」のまま止まらないように)。頼んでいた升のかたまりも、待つのをやめる
 worker.onerror = e => {
   report('worker', e.message);
   for (const w of workerWait.values()) w.ng(new Error('解析の途中で止まりました' + (e.message ? ': ' + e.message : '')));
   workerWait.clear();
+  pend.clear(); wantQ = []; outBusy = null; ensureCheck();
 };
-function workerBuild(base, region, c, r, progress, boxes, wcache) {
+// 糸に頼んで返事を待つ (build・sizes・part)。progress: 途中の知らせ ({ type:'progress' })
+function workerCall(msg, progress) {
   const id = ++workerSeq;
-  return new Promise((ok, ng) => { workerWait.set(id, { ok, ng, progress, boxes }); worker.postMessage({ type: 'build', id, base, region, c, r, keys: { col: Object.keys(COL), ocol: Object.keys(OCOL), labk: LABK }, names: NAME, wcache }); });
+  return new Promise((ok, ng) => { workerWait.set(id, { ok, ng, progress }); worker.postMessage({ ...msg, id }); });
 }
-// 先読み (アプリが地点を保存した後、メモリに余裕があるときだけ頼んでくる): 画面の糸とは別の糸で解析して保存だけする (結果は返さない)。
-// 利用者が地点を頼んだら、すぐ止める (糸を捨てる = メモリを返す)
-var pw = null;
-function prewarmStop() { if (pw) { try { pw.w.terminate(); } catch (_) { } pw = null; } }
-async function prewarmStart(d) {
-  prewarmStop();
-  const reply = used => { if (APP) window.chrome.webview.postMessage({ type: 'prewarmDone', pid: d.pid, used }); };
-  if (loading) { reply(null); return; }
-  try {
-    const region = await (await fetch(d.base + 'region.json')).json();
-    if (loading) { reply(null); return; }
-    const w = new Worker(new URL('./view3d-worker.js', import.meta.url)); const me = pw = { w };
-    const fin = used => { if (pw === me) pw = null; try { w.terminate(); } catch (_) { } reply(used); };
-    w.onmessage = e => { const m = e.data; if (m.type === 'done' || m.type === 'error') fin(m.wcache && typeof m.wcache.used === 'number' ? m.wcache.used : null); };
-    w.onerror = () => fin(null);
-    w.postMessage({ type: 'build', id: 1, base: new URL(d.base, location.href).href, region, c: d.c, r: d.r, keys: { col: Object.keys(COL), ocol: Object.keys(OCOL), labk: LABK }, names: NAME, prewarm: true, wcache: { key: d.key, budget: d.budget, free: d.free } });
-  } catch (_) { reply(null); }
-}
-// 外形 (部品の箱の線): 細かい形の前に先に出す (2026-11-04、利用者の案「外形だけ先に書くとか」)。新しい地点の中心 c の座標で、今の中心からずらして置く
-let outlineG = null;
-function removeOutline() { if (outlineG) { scene.remove(outlineG); outlineG.geometry.dispose(); outlineG.material.dispose(); outlineG = null; } }
-function drawOutline(bx, c) {
-  removeOutline(); if (!bx.length) return;
-  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(bx, 3));
-  outlineG = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x88aacc, transparent: true, opacity: 0.6, clippingPlanes: [clip, clipLo] }));
-  if (cur) outlineG.position.set(c[0] - cur.center[0], c[1] - cur.center[1], c[2] - cur.center[2]);
-  scene.add(outlineG);
-}
-// 解析の結果から、地点の表 (cur) を作る (前の buildCur の後ろの半分。中身は同じ)
-function makeCur(c, r, res) {
-  const { offs, ioffs, labs, uoffs, toffs, parts, ladders, elevDoors, stairs, fz, fa } = res;
+// 前の形の保存 (解析の結果を丸ごとブラウザの私的なファイル領域 (OPFS) に置いていたもの) は使わなくなったので、開いたときに消し、合計 (0) をアプリに知らせる
+// (2026-11-06 の作り替え: 升のかたまりは、頼まれるたびに糸が作る。保存はしない)
+worker.postMessage({ type: 'wpurge', id: 0 });
+// 先読み (アプリが地点を保存した後に頼んでくる {type:'prewarm'}): 解析の結果を保存しなくなったので、何もせずに済んだと返す
+function prewarmStop() { }
+function prewarmStart(d) { if (APP) window.chrome.webview.postMessage({ type: 'prewarmDone', pid: d.pid, used: null }); }
+// 外形 (部品の箱の水色の線) を細かい形の前に先に出すのは、やめた (2026-11-06、利用者の指示「読み込みが済む前の水色の線は消した方がいい」。2026-11-04 に入れた物)
+// 解析の結果 (地点の索引) から、地点の表 (cur) を作る。O = 座標の原点 (cur.center。相対の座標は全部これから)、c・r = 地点の立方体 (アプリが取り出した範囲) の中心と半径 (cur.cc・cur.r)
+function makeCur(O, c, r, res) {
+  const { ladders, elevDoors, stairs, fz, fa } = res;
   window.__lightParts = new Set(res.lightParts);
   const near = q => Math.abs(q[0] - c[0]) <= r && Math.abs(q[1] - c[1]) <= r && Math.abs(q[2] - c[2]) <= r;
   // 乗り場: 立方体の中のものと、それと同じ路線のもの (試験の頁の transit と同じ)
@@ -1251,25 +1239,25 @@ function makeCur(c, r, res) {
   const shopNames = new Set(VIEW.targets.filter(t => ['shop', 'admin', 'pharmacy'].includes(t.kind) && near(t.pos)).map(t => t.name));
   const targets = VIEW.targets.filter(t => t.kind === 'stair' ? (near(t.pos) || near(t.top)) : near(t.pos));
   const floorsOld = VIEW.floors.filter(f => Math.abs(f[2] - c[2]) <= r);
-  // 店の入口 (部品の番号を、読み込んだ部品の番号に直す。無ければ -1)
-  const pidx = new Map(res.pidx);
+  // 店の入口 (部品は 'インスタンス:部品の番号' で持つ。地点の索引に無ければ -1。押したときに糸からその部品の三角形をもらう: focusPart)
+  const entOk = new Set(res.entParts || []);
   // 地点の立方体の中の店のもの (同じ名前の店がほかの所にもあるので位置で選ぶ。位置の無い前のデータは名前で)
-  const entrances = REG.entrances.filter(e => e.pos ? near(e.pos) : shopNames.has(e.shop)).map(e => ({ shop: e.shop, pos: e.pos, floor: e.floor, h: e.h, list: e.list.map(o => [pidx.has(o[0] + ':' + o[1]) ? pidx.get(o[0] + ':' + o[1]) : -1, o[2], o[0], o[3], o[4], o[5], o[6], o[7], o[8], o[9].map((v, a) => v - c[a]), o[10].map((v, a) => v - c[a]), o[11]]) }));
-  // 店のカウンターの箱 (region.json の counters: 店の名前 → [[下, 上], …]。中心からの相対に直す。前のデータに無ければ空)
+  const entrances = REG.entrances.filter(e => e.pos ? near(e.pos) : shopNames.has(e.shop)).map(e => ({ shop: e.shop, pos: e.pos, floor: e.floor, h: e.h, list: e.list.map(o => [entOk.has(o[0] + ':' + o[1]) ? o[0] + ':' + o[1] : -1, o[2], o[0], o[3], o[4], o[5], o[6], o[7], o[8], o[9].map((v, a) => v - O[a]), o[10].map((v, a) => v - O[a]), o[11]]) }));
+  // 店のカウンターの箱 (region.json の counters: 店の名前 → [[下, 上], …]。原点からの相対に直す。前のデータに無ければ空)
   const counters = {};
-  for (const [nm, lst] of Object.entries(REG.counters || {})) counters[nm] = lst.map(b => [b[0].map((v, a) => v - c[a]), b[1].map((v, a) => v - c[a])]);
+  for (const [nm, lst] of Object.entries(REG.counters || {})) counters[nm] = lst.map(b => [b[0].map((v, a) => v - O[a]), b[1].map((v, a) => v - O[a])]);
   const flist = floorList(fz, fa, transit, floorsOld);
   // 階段の行き先 (2026-11-04、利用者の決定「作り直す」。2D の地図の階段の一覧の代わり): 読み込んだ区画の階段の部品ごとに、下の端 (箱の低い所) を行き先にし、
   // 名前は「下の端の階 → 上の端の階」。行き先の一覧 (VIEW.targets) に足す (同じ位置 (0.1 m) のものは足さない。区画を読み込むたびに増える)
-  const flAt = z => { for (const fl of flist) if (fl.lo - 0.5 <= z + c[2] && z + c[2] <= fl.hi + 2.0) return fl.name; return `高さ ${(z + c[2]).toFixed(1)} m`; };
+  const flAt = z => { for (const fl of flist) if (fl.lo - 0.5 <= z + O[2] && z + O[2] <= fl.hi + 2.0) return fl.name; return `高さ ${(z + O[2]).toFixed(1)} m`; };
   const seen = new Set(VIEW.targets.filter(t => t.kind === 'stair').map(t => t.pos.map(v => v.toFixed(1)).join()));
   for (const [nm, lo, hi] of stairs || []) {
-    const pos = [(lo[0] + hi[0]) / 2 + c[0], (lo[1] + hi[1]) / 2 + c[1], lo[2] + c[2]], key = pos.map(v => v.toFixed(1)).join();
+    const pos = [(lo[0] + hi[0]) / 2 + O[0], (lo[1] + hi[1]) / 2 + O[1], lo[2] + O[2]], key = pos.map(v => v.toFixed(1)).join();
     if (seen.has(key)) continue; seen.add(key);
-    VIEW.targets.push({ kind: 'stair', label: '階段', name: nm, ja: `${flAt(lo[2])} → ${flAt(hi[2])}`, pos, top: [pos[0], pos[1], hi[2] + c[2]] });
+    VIEW.targets.push({ kind: 'stair', label: '階段', name: nm, ja: `${flAt(lo[2])} → ${flAt(hi[2])}`, pos, top: [pos[0], pos[1], hi[2] + O[2]] });
   }
   if (stairs && stairs.length) setTimeout(renderTargets, 0);
-  return { center: c, r, offs, ioffs, labs: labs || {}, uoffs, toffs, textures: REG && REG.textures || [], parts, ladders, elevDoors: elevDoors || [], transit, targets, entrances, counters, flist, guide: guideText(targets, entrances, flist), shops: VIEW.targets.filter(t => ['shop', 'admin', 'pharmacy'].includes(t.kind) && near(t.pos)), station: VIEW.station, label: `${VIEW.station} (${c.map(v => v.toFixed(0)).join(', ')})` };
+  return { center: O, cc: c, r, index: makeIndex(res.index), textures: res.textures || [], texGen: res.texGen, ladders, elevDoors: elevDoors || [], transit, targets, entrances, counters, flist, guide: guideText(targets, entrances, flist), shops: VIEW.targets.filter(t => ['shop', 'admin', 'pharmacy'].includes(t.kind) && near(t.pos)), station: VIEW.station, label: `${VIEW.station} (${c.map(v => v.toFixed(0)).join(', ')})` };
 }
 // フロア (利用者の「フロアについては 2M 程度で切ればいい」「床の高さをリスト化してエレベーターのボタンに合わせて名前を付ける」):
 // 判定 2 の床の三角形の高さを低い順に並べ、フロアのいちばん低い高さから 2.0 m を超えたら次のフロアにする。
@@ -1327,13 +1315,6 @@ function guideText(targets, entrances, flist) {
   }
   return res;
 }
-// 描く形は、種類ごとに CHUNK 三角形ずつのかたまり (Mesh) に分ける (2026-11-04、利用者の指摘「向かいの建物は観葉植物だけが掛かれてた」:
-// Crusader の地点で「部品」が 2,981 万三角形 (位置の配列 1.07 GB) になり、1 つの形として描けず、面が全部出なかった。輪郭の線と、小さな種類の形だけが出ていた)。
-// groups[k] はかたまりの配列。かたまりの userData.t0 は、その種類の中の最初の三角形の番号 (押したときに部品を引くのに使う)
-const CHUNK = 250_000;
-// 1 コマに足す形の上限 (ms。担当が決めた値)。形を作るのと、GPU へ送るのは次の描画なので、1 コマに足すかたまりも 2 つまで
-const FRAME_BUDGET = 8, FRAME_CHUNKS = 2;
-const nextFrame = () => new Promise(res => requestAnimationFrame(() => res()));
 // ===== ゲームの画像 (テクスチャ) (2026-11-05、利用者の指示「引いたときは色はビットマップ貼り付けにしてほしい」「端末は元々も色を貼ってほしい」) =====
 // region.json の textures ([{url, w, h, repeat:[u, v]}]) の画像を TextureLoader で読み、同じ url の画像は 1 つの Texture を共有 (繰り返しの違う材質は別の項目 = 別の url+repeat の鍵)。
 // UV は glTF と同じ向き (上下を返さない。前のステーションの 3D の viewer.html と同じ flipY = false)。別の場所に替わったとき (keep でない) に全部捨てる
@@ -1351,81 +1332,235 @@ function texOf(t) {
 }
 function disposeTextures() { for (const tx of texCache.values()) tx.dispose(); texCache.clear(); }
 const disposeMats = o => { const m = o.material; if (!m) return; (Array.isArray(m) ? m : [m]).forEach(x => x?.dispose?.()); for (const x of o.userData?.mats || []) x.dispose?.(); o.userData?.plain?.dispose?.(); };
-// 地点の形を作る。近づいて読み込み直すとき (keep) は、今の形を出したまま、新しい形を新しい中心の座標で横に足していき、全部できたら入れ替える
-// (見ている所・歩いている所は、入れ替えるときに新しい中心の座標に移す)。面は flatShading (三角形の向きの明るさ。前の computeVertexNormals と同じ見え方で、法線の配列を作らない)。
-// 判定の色の半透明の重ね (OCOLK) と輪郭の線は描かない (2026-11-05、利用者の指示「色分けはもうやめていい」。データは歩くモードの床の判定に使うので worker と保存には残す)。
-// 画像: COLK のかたまりの中は画像の番号の順 (worker が並べる) なので、同じ番号の続く区間を geometry.addGroup にし、材質の配列 (0 = 灰色、1〜 = 画像ごとの MeshLambertMaterial({map})) で描く。
-// 「テクスチャ」のチェックが OFF なら灰色の 1 つの材質 (userData.plain) に替える (applyVis)
-async function buildScene(p, res, keep, t0) {
-  const buf = res.buf, all = new Float32Array(buf);
-  const prevCenter = cur ? cur.center.slice() : null;
-  const off = keep && prevCenter ? [p.center[0] - prevCenter[0], p.center[1] - prevCenter[1], p.center[2] - prevCenter[2]] : [0, 0, 0];
-  if (!keep) { scene.remove(root); root.traverse(o => { o.geometry?.dispose(); disposeMats(o); }); disposeTextures(); root = new THREE.Group(); scene.add(root); for (const k of Object.keys(groups)) groups[k] = null; }
-  const nroot = new THREE.Group(); nroot.position.set(off[0], off[1], off[2]); scene.add(nroot);
-  const ngroups = {};
-  const jobs = [];
-  const texOn = document.getElementById('texOn').checked;
-  const TEXS = p.textures || [];
-  // UV・画像の番号は buf とは別の ArrayBuffer (res.uvbuf・res.texbuf。UV が無ければ null)
-  const uvAll = res.uvbuf ? new Float32Array(res.uvbuf) : null, texAll = res.texbuf ? new Int32Array(res.texbuf) : null;
+// ===== 升のかたまりの出し入れ (2026-11-06 の作り替え) =====
+// (利用者の指示「広いところならいいが、ステーション内なら 150m もみても仕方なくないか？ ほんらい遠いところも小さいパーツは省くべきで、近くなったら疲労、遠ざかったら捨てるが 50m 単位3段階くらいじゃないか？
+//  開けたとこでも150m 以上先は逆に建物など大まかなものが取れた方がいいし」「50 / 100 / 150 で区切り、10m 移動ごと、エレベータやリフトや階段はしごリフト移動ごとに見直し」
+//  「外判定時にはある程度以上小さなものは読み込まない方がいいと思う。内部まで読み込んでいる恐れがある。」「ターミナルは固定で全部品描いた方がいい 見た目が悪くなった」「距離に関係なく大きなびったいは書いた方がいいのかも」
+//  「建物内部で初期や行先やエレベーターで移動したときなどや移動速度が一定以下の時は細かいものを書くのが本当はいいんじゃない？」「50m以内とか」
+//  「細かく書く範囲戸当たり判定は一致しないとだめではないのか？ 読み込みで止まるんだからどっちかが短ければ意味ないよな？」。親の決定)
+// 前は、地点 (中心・半径の立方体) の形を丸ごと 1 回で読んで入れ替えていた (描く範囲は地点の中心に固定)。今は、解析の糸 (view3d-worker.js) が地点の部品を
+// 「升 (場所の座標で固定の 1 辺 CELL m の立方体) × 部品の大きさの組 (小・中・大・大きな物体) × 外装・内装」のかたまりに分けた索引 (cur.index) を返し、
+// ここが、歩いている位置・見ている所 (見るモードでは回転の中心。前の読み直しの判定と同じ) からの距離で、要るかたまりだけを糸に頼んで出し、要らなくなったかたまりを捨てる。
+// かたまりには描く形と当たりが一緒に入っている (上の「当たり」) ので、描く範囲と当たりの範囲は必ず同じになる。
+//   どのかたまりを出すか (距離 = 位置から升までのいちばん近い距離。境は「読み込みの調整」LOADCFG):
+//     d1 以内: 小・中・大。d1〜d2: 中・大。d2〜d3: 大。大きな物体は距離に関係なく全部 (索引にある分 = アプリが取り出した地点の立方体に掛かる区画の分)。
+//     「外」(外判定 outNow) のとき: 外装の区画のかたまりは d3 以内は小・中・大とも、大きな物体は全部。内装の区画のかたまりは出さない。
+//   いつ見直すか (review): 前に見直した位置から step m 動くごと (reviewTick)、エレベーター・トラム・リフト・はしごで移った後、行き先へ飛んだとき、地点を読み込んだとき (初め)、外判定が変わったとき、「読み込みの調整」を変えたとき。
+//     見直す = 要るかたまりを近い順に頼み (同時に MAX_PEND 個まで)、要らないかたまりを捨てる。届いたかたまりは 1 コマに FRAME_BUDGET ms まで足す (chunkTick)。
+//     地点を読み直して索引が替わったときは、かたまりの中身の印 (hash) が同じものはそのまま出しておき、違うものは新しいのが届いたときに入れ替える (届くまでは今出ている物のまま)。
+//   細かい物 (小の組): 建物の中 (「外」でない) では、速さが speed を超えている間は、新しく読まない (もう出ている物は、範囲の中なら出したまま)。
+//     速さ = 1 コマに動いた距離 ÷ 時間 (歩くモードは水平の距離。階段の上り下りは数えない。見るモードは回転の中心の動き)。速さが speed 以下に戻ったら見直す。
+//     地点を読み込んだとき・行き先へ飛んだとき・エレベーターなどで移った後の見直しは、速さに関係なく読む (review(true))。
+//   立つ所を決める前 (行き先へ飛ぶ・エレベーター・トラム・現在位置): その所のまわり d1 以内のかたまりが出そろうまで待つ (ensureNear)。待つ間は、今いる所と移る先の両方のまわりを出しておく
+const CELL = 10, MAX_PEND = 4;
+// 1 コマに足すかたまりの上限 (ms。担当が決めた値)
+const FRAME_BUDGET = 8;
+const chunks = new Map();              // 出ているかたまり: 鍵 'ix,iy,iz,cls' → かたまり
+let chunkG = new THREE.Group();        // かたまりの形の置き場 (root の子。root を作り直すときは付け替える)
+let originGen = 0;                     // 座標の原点の代 (別の所へ移るたびに増える。前の原点で作ったかたまりを使わないため)
+const pend = new Map();                // 糸に頼んでいるかたまり: 鍵 → { id, hash }
+let wantQ = [], arrived = [];          // これから頼むかたまり (近い順)・届いてまだ足していないかたまり
+const failed = new Set();              // 作れなかったかたまり (鍵|hash。同じ中身を頼み直さない)
+let reviewAt = null, ensureAt = null, ensureWait = [];   // 前に見直した位置・移る先 (場所の座標)・出そろうのを待っているもの
+let spLast = null, spWalk = false, fastNow = false, spSlowed = false;   // 速さ (speedTick)
+const focusAbs = () => { const c = cur.center, q = walk ? wpos : tgt; return [q.x + c[0], q.y + c[1], q.z + c[2]]; };
+// 位置 P (場所の座標) から升 i までのいちばん近い距離
+function cellDist(P, cells, i) {
+  const x0 = cells[i * 3] * CELL, y0 = cells[i * 3 + 1] * CELL, z0 = cells[i * 3 + 2] * CELL;
+  return Math.hypot(Math.max(x0 - P[0], 0, P[0] - x0 - CELL), Math.max(y0 - P[1], 0, P[1] - y0 - CELL), Math.max(z0 - P[2], 0, P[2] - z0 - CELL));
+}
+function makeIndex(ix) { const at = new Map(); for (let i = 0; i < ix.keys.length; i++) at.set(ix.keys[i], i); return { n: ix.keys.length, keys: ix.keys, cells: ix.cells, cls: ix.cls, tris: ix.tris, parts: ix.parts, hash: ix.hash, at }; }
+// 索引の i 番目のかたまりが要るか。要るなら位置からの距離 (移る先があれば近い方)、要らなければ -1。F・E = 見直した位置・移る先 (場所の座標)
+function chunkRange(ix, i, F, E, out) {
+  const cls = ix.cls[i], sz = cls & 3, L = LOADCFG;
+  if (out && (cls & 4)) return -1;
+  let d = cellDist(F, ix.cells, i); if (E) d = Math.min(d, cellDist(E, ix.cells, i));
+  if (sz !== 3 && d > (out ? L.d3 : sz === 0 ? L.d1 : sz === 1 ? L.d2 : L.d3)) return -1;
+  return d;
+}
+// 見直す。small: 細かい物を、速さに関係なく読む
+function review(small) {
+  if (!cur || !cur.index) return;
+  const ix = cur.index, F = focusAbs(), E = ensureAt, out = outNow && !SITE;
+  reviewAt = F; spSlowed = false;
+  if (small) { spLast = null; fastNow = false; }   // 位置を移した直後の 1 コマを「速い」と数えない
+  const gate = !out && fastNow && !small;
+  const keep = new Set(), q = [];
+  for (let i = 0; i < ix.n; i++) {
+    const d = chunkRange(ix, i, F, E, out); if (d < 0) continue;
+    const key = ix.keys[i], ch = chunks.get(key); keep.add(key);
+    if (ch && ch.hash === ix.hash[i]) continue;
+    if (failed.has(key + '|' + ix.hash[i])) continue;
+    if (gate && !ch && (ix.cls[i] & 3) === 0) continue;
+    q.push({ key, i, d: E ? cellDist(E, ix.cells, i) : d });
+  }
+  for (const [key, ch] of [...chunks]) if (!keep.has(key)) dropChunk(ch);
+  q.sort((a, b) => a.d - b.d); wantQ = q;
+  pump(); ensureCheck();
+}
+function pump() {
+  if (!cur || !cur.index) return;
+  const ix = cur.index;
+  while (pend.size < MAX_PEND && wantQ.length) {
+    const w = wantQ.shift(), hash = ix.hash[w.i], p = pend.get(w.key);
+    if (p && p.hash === hash) continue;
+    const id = ++workerSeq; pend.set(w.key, { id, hash });
+    worker.postMessage({ type: 'chunk', id, og: originGen, key: w.key });
+  }
+}
+function onChunk(d) {
+  const p = pend.get(d.key); if (p && p.id === d.id) pend.delete(d.key);
+  if (d.og === originGen && !d.missing) arrived.push(d);
+}
+function onChunkError(d) {
+  const p = pend.get(d.key);
+  if (p && p.id === d.id) { pend.delete(d.key); failed.add(d.key + '|' + p.hash); }
+  report('chunk ' + d.key, d.message);
+}
+// 届いたかたまりを足す (1 コマに FRAME_BUDGET ms まで)。続けて次のかたまりを頼む
+function chunkTick() {
+  if (!cur || !cur.index) return;
+  const ix = cur.index, t0 = performance.now(); let n = 0;
+  while (arrived.length && (n === 0 || performance.now() - t0 < FRAME_BUDGET)) {
+    const d = arrived.shift(); n++;
+    const i = ix.at.get(d.key);
+    // 索引が替わった後に届いた前の中身・もう要らなくなったかたまりは足さない
+    if (d.og !== originGen || i === undefined || ix.hash[i] !== d.hash || chunkRange(ix, i, reviewAt || focusAbs(), ensureAt, outNow && !SITE) < 0) continue;
+    // 画像の番号の並びが今の地点と違う代のかたまり (読み直しの前に糸が作ったもの) は足さず、頼み直す
+    if (d.texGen !== cur.texGen) { reviewAt = null; continue; }
+    addChunk(d);
+  }
+  pump();
+  if (n) { ensureCheck(); if (!arrived.length && !pend.size && !wantQ.length) showInfo(true); }
+}
+// 前に見直した位置から step m 動いた・速さが speed 以下に戻ったら、見直す
+function reviewTick() {
+  if (!cur || !cur.index || ensureAt) return;
+  const F = focusAbs();
+  if (!reviewAt || spSlowed || Math.hypot(F[0] - reviewAt[0], F[1] - reviewAt[1], F[2] - reviewAt[2]) >= Math.max(1, LOADCFG.step)) review(false);
+}
+// 速さ (keyMove が毎コマ呼ぶ。raw = 前のコマからの時間 (秒))
+function speedTick(raw) {
+  const q = walk ? wpos : tgt; let fast = false;
+  if (spLast && spWalk === walk && raw > 0) fast = Math.hypot(q.x - spLast.x, q.y - spLast.y, walk ? 0 : q.z - spLast.z) / raw > LOADCFG.speed * (1 + 1e-9) + 1e-9;
+  if (!spLast) spLast = new THREE.Vector3(); spLast.copy(q); spWalk = walk;
+  if (fastNow && !fast) spSlowed = true;
+  fastNow = fast;
+}
+// abs (場所の座標) のまわり d1 以内のかたまりが出そろうまで待つ。待つ間は右下に「作画中」と数を出す
+function ensureNear(abs) {
+  if (!cur || !cur.index) return Promise.resolve();
+  ensureAt = abs.slice(); review(true);
+  return new Promise(ok => { ensureWait.push({ abs: ensureAt, ok, total: 0 }); ensureCheck(); });
+}
+function ensureLeft(abs) {
+  const ix = cur.index, d1 = LOADCFG.d1; let n = 0;
+  const near = key => { const i = ix.at.get(key); return i !== undefined && cellDist(abs, ix.cells, i) <= d1; };
+  for (const k of pend.keys()) if (near(k)) n++;
+  for (const w of wantQ) if (cellDist(abs, ix.cells, w.i) <= d1) n++;
+  for (const d of arrived) if (near(d.key)) n++;
+  return n;
+}
+function ensureCheck() {
+  if (!ensureWait.length) return;
+  const rest = []; let last = null, left = 0;
+  for (const w of ensureWait) {
+    const n = cur && cur.index ? ensureLeft(w.abs) : 0; if (n > w.total) w.total = n;
+    if (n) { rest.push(w); last = w; left = n; } else w.ok();
+  }
+  ensureWait = rest;
+  if (!rest.length) { ensureAt = null; if (!loading) hideProgress(); }
+  else showProgress(last.total - left, last.total, '作画中');
+}
+// 画像・灰色の材質は、かたまりの間で共用する (同じ画像・色合いなら 1 つ)。別の所へ移ったとき (keep でない) に全部捨てる (disposeShared)
+const matCache = new Map();
+const matOptsOf = wall => ({ side: THREE.DoubleSide, flatShading: true, transparent: wall, opacity: wall ? 0.25 : 1, depthWrite: !wall, clippingPlanes: [clip, clipLo] });
+function matPlain(wall) { const key = wall ? 'plain|w' : 'plain'; let m = matCache.get(key); if (!m) matCache.set(key, m = new THREE.MeshLambertMaterial({ color: GRAY, ...matOptsOf(wall) })); return m; }
+// 色合い (textures の tint = 材質の層 1 の TintColor。無ければ白): hardsurface/layerblend 系は灰色の下地の画像に層の色を掛けて色を出すので map × color (2026-11-05、利用者の報告「かなり灰色になった」)
+function matTex(t, wall) {
+  const tn = t.tint || [1, 1, 1], key = (wall ? 'w|' : 'o|') + (t.url || '') + '|' + (t.repeat || [1, 1]).join(',') + '|' + tn.join(',');
+  let m = matCache.get(key); if (!m) matCache.set(key, m = new THREE.MeshLambertMaterial({ map: t.url ? texOf(t) : null, color: new THREE.Color(tn[0], tn[1], tn[2]), ...matOptsOf(wall) }));
+  return m;
+}
+function disposeShared() { for (const m of matCache.values()) m.dispose(); matCache.clear(); }
+const kindOn = k => { const cb = document.querySelector(`[data-k="${k}"]`); return !cb || cb.checked; };
+// 届いたかたまり d を出す (同じ鍵の前のかたまりがあれば入れ替える)。形は種類ごとに 1 つの Mesh (面は flatShading。前と同じ見え方)。
+// 画像: 種類の中は画像の番号の順 (糸が並べる) なので、同じ番号の続く区間を geometry.addGroup にし、材質の配列 (0 = 灰色、1〜 = 画像ごと) で描く。
+// 「テクスチャ」のチェックが OFF なら灰色の 1 つの材質 (userData.plain) で描く (applyVis)。判定の色の半透明の重ねと輪郭の線は描かない (2026-11-05、利用者の指示「色分けはもうやめていい」)
+function addChunk(d) {
+  const old = chunks.get(d.key); if (old) dropChunk(old);
+  const ch = { key: d.key, cls: d.cls, hash: d.hash, F: d.F, ID: d.ID, LB: d.LB, FL: d.FL, UV: d.UV, TX: d.TX, offs: d.offs, parts: d.parts, labN: d.labN, col: d.col, ST: new Uint32Array(d.ID.length), meshes: [], bytes: d.F.byteLength };
+  const texOn = document.getElementById('texOn').checked, TEXS = cur.textures || [];
   for (const k of Object.keys(COL)) {
-    const [o, n] = p.offs[k]; ngroups[k] = null; if (!n) continue; ngroups[k] = [];
-    const wall = k === 'wall';
-    const uo = uvAll && p.uoffs && p.uoffs[k] && p.uoffs[k][1] ? p.uoffs[k][0] : -1, to = texAll && p.toffs && p.toffs[k] && p.toffs[k][1] ? p.toffs[k][0] : -1;
-    for (let a = 0; a < n / 9; a += CHUNK) jobs.push(() => {
-      const cnt = Math.min(n / 9, a + CHUNK) - a;
-      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(all.subarray(o + a * 9, o + (a + cnt) * 9), 3));
-      const matOpts = { side: THREE.DoubleSide, flatShading: true, transparent: wall, opacity: wall ? 0.25 : 1, depthWrite: !wall, clippingPlanes: [clip, clipLo] };
-      const plain = new THREE.MeshLambertMaterial({ color: GRAY, ...matOpts });
-      let mats = null;
-      if (uo >= 0 && to >= 0 && TEXS.length) {
-        const T = texAll.subarray(to + a, to + a + cnt);
-        // 画像の番号の続く区間 (worker が番号の順に並べている)。画像のある区間が 1 つでもあれば uv とグループを付ける
-        const runs = []; let s = 0;
-        while (s < cnt) { let e = s + 1; const id = T[s]; while (e < cnt && T[e] === id) e++; runs.push([s, e, id]); s = e; }
-        // (2026-11-05) textures の color: true は画像なしの色だけの項目 (場所のパレットの色を指す、画像の無い面)。tint の色で描く (map なし)
-        const hasTex = id => id >= 0 && TEXS[id] && (TEXS[id].url || TEXS[id].color);
-        if (runs.some(([, , id]) => hasTex(id))) {
-          if (runs.some(([, , id]) => id >= 0 && TEXS[id] && TEXS[id].url)) g.setAttribute('uv', new THREE.BufferAttribute(uvAll.subarray(uo + a * 6, uo + (a + cnt) * 6), 2));
-          mats = [plain]; const mi = new Map();
-          for (const [s0, e0, id] of runs) {
-            let m = 0;
-            // 色合い (textures の tint = 材質の層 1 の TintColor。無ければ白): hardsurface/layerblend 系は灰色の下地の画像に層の色を掛けて色を出すので map × color (2026-11-05、利用者の報告「かなり灰色になった」)
-            if (hasTex(id)) { m = mi.get(id); if (m === undefined) { const tn = TEXS[id].tint || [1, 1, 1]; m = mats.length; mats.push(new THREE.MeshLambertMaterial({ map: TEXS[id].url ? texOf(TEXS[id]) : null, color: new THREE.Color(tn[0], tn[1], tn[2]), ...matOpts })); mi.set(id, m); } }
-            g.addGroup(s0 * 3, (e0 - s0) * 3, m);
-          }
+    const [o, n] = ch.offs[k] || [0, 0]; if (!n) continue;
+    const a = o / 9, cnt = n / 9, wall = k === 'wall';
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(ch.F.subarray(o, o + n), 3));
+    // 箱と球 (描くかどうか・押したときの当たりの前の見分けに three.js が使う。糸が求めた箱から作り、ここで点を全部は見ない)
+    const bx = d.box && d.box[k];
+    if (bx) { const lo = new THREE.Vector3(bx[0][0] - 0.001, bx[0][1] - 0.001, bx[0][2] - 0.001), hi = new THREE.Vector3(bx[1][0] + 0.001, bx[1][1] + 0.001, bx[1][2] + 0.001); g.boundingBox = new THREE.Box3(lo, hi); g.boundingSphere = g.boundingBox.getBoundingSphere(new THREE.Sphere()); }
+    const plain = matPlain(wall);
+    let mats = null;
+    if (ch.UV && ch.TX && TEXS.length) {
+      const T = ch.TX.subarray(a, a + cnt);
+      // 画像の番号の続く区間。画像のある区間が 1 つでもあれば uv とグループを付ける
+      const runs = []; let s = 0;
+      while (s < cnt) { let e = s + 1; const id = T[s]; while (e < cnt && T[e] === id) e++; runs.push([s, e, id]); s = e; }
+      // (2026-11-05) textures の color: true は画像なしの色だけの項目 (場所のパレットの色を指す、画像の無い面)。tint の色で描く (map なし)
+      const hasTex = id => id >= 0 && TEXS[id] && (TEXS[id].url || TEXS[id].color);
+      if (runs.some(([, , id]) => hasTex(id))) {
+        if (runs.some(([, , id]) => id >= 0 && TEXS[id] && TEXS[id].url)) g.setAttribute('uv', new THREE.BufferAttribute(ch.UV.subarray(a * 6, (a + cnt) * 6), 2));
+        mats = [plain]; const mi = new Map();
+        for (const [s0, e0, id] of runs) {
+          let m = 0;
+          if (hasTex(id)) { m = mi.get(id); if (m === undefined) { m = mats.length; mats.push(matTex(TEXS[id], wall)); mi.set(id, m); } }
+          g.addGroup(s0 * 3, (e0 - s0) * 3, m);
         }
       }
-      const me = new THREE.Mesh(g, texOn && mats ? mats : plain);
-      me.renderOrder = wall ? 1 : 0; me.userData = { k, t0: a, plain, mats }; ngroups[k].push(me); nroot.add(me);
-    });
+    }
+    const me = new THREE.Mesh(g, texOn && mats ? mats : plain);
+    // userData: k = 種類、t0 = その種類の中の最初の三角形の番号 (押したときに部品を引くのに使う。1 つの Mesh なので 0)、ch = かたまり
+    me.renderOrder = wall ? 1 : 0; me.userData = { k, t0: 0, plain, mats, ch }; me.visible = kindOn(k);
+    ch.meshes.push(me); chunkG.add(me); (groups[k] ??= []).push(me);
+    if (ghostG && me.visible) addGhost(me);
   }
-  for (const k of Object.keys(OCOL)) ngroups[k] = null;   // 判定の色の重ね・輪郭は描かない (判定の三角形の位置は cur.labs[k] に残る)
-  // 少しずつ足す (1 コマに FRAME_BUDGET ms・FRAME_CHUNKS 個まで)。見ている所に近いかたまりから、という並べ替えはしていない (種類の順)
-  let done = 0;
-  while (done < jobs.length) {
-    const st = performance.now(); let k = 0;
-    while (done < jobs.length && k < FRAME_CHUNKS && performance.now() - st < FRAME_BUDGET) { jobs[done++](); k++; }
-    showProgress(done, jobs.length, '作画中'); window.__stage = 'jobs ' + done + '/' + jobs.length;
-    await nextFrame();
+  colAdd(ch); chunks.set(ch.key, ch);
+}
+function dropChunk(ch) {
+  for (const me of ch.meshes) {
+    chunkG.remove(me);
+    if (me.userData.ghost) { ghostG?.remove(me.userData.ghost); me.userData.ghost = null; }
+    const a = groups[me.userData.k]; if (a) { const i = a.indexOf(me); if (i >= 0) { a[i] = a[a.length - 1]; a.pop(); } }
+    me.geometry.dispose();
   }
-  // 入れ替え
-  window.__stage = 'swap'; removeOutline();
-  if (keep) {
-    scene.remove(root); root.traverse(o => { o.geometry?.dispose(); disposeMats(o); });
-    const d = new THREE.Vector3(-off[0], -off[1], -off[2]); tgt.add(d); wpos.add(d); cam.position.add(d);
-  }
-  nroot.position.set(0, 0, 0); root = nroot;
-  for (const k of new Set([...Object.keys(groups), ...Object.keys(ngroups)])) groups[k] = ngroups[k] ?? null;
-  cur = p; curBuf = buf; curPal = regionPalReq;   // この地点を頼んだときの色付け (reloadForPalette)
-  // 当たり判定: 荒い区切り coarse を受け取り、作ってあった升は全部捨てる (keep でも中心が変わり、升の鍵がずれるため)
-  coarse = res.coarse; cellReset();
-  // 細かい形で補った面 (extra): keep なら中心の差 off で座標を直して新しい root に描き直す。別の場所に替わった (keep でない) なら捨てる
-  extraRelocate(off, !!keep);
+  colDrop(ch); chunks.delete(ch.key);
+}
+function dropAllChunks() {
+  for (const ch of [...chunks.values()]) dropChunk(ch);
+  colReset(); pend.clear(); wantQ = []; arrived = []; failed.clear(); reviewAt = null;
+}
+// かたまりの中の三角形 (種類 k の tri 番目) の部品
+const partAt = (ch, k, tri) => ch.parts[ch.ID[ch.offs[k][0] / 9 + tri]];
+// 読み込んだ地点 p を今の地点にする。keep (読み込み直し): 座標の原点はそのまま。出ているかたまりは捨てず、新しい索引で見直す (中身の違うものだけ入れ替わる)。
+// keep でない (別の所へ移った): 前の形・画像・材質を全部捨て、新しい原点で始める。印・札・一覧は show が作り直す
+function applyRegion(p, keep, t0) {
+  window.__stage = 'swap';
+  const nroot = new THREE.Group();
+  // フロアの薄い写しはかたまりの形 (geometry) を使っているので、形ごと捨てないよう先に外す (show の applyFloor が作り直す)
+  if (ghostG) { root.remove(ghostG); ghostG.userData.mat?.dispose(); ghostG = null; }
+  if (keep) nroot.add(chunkG);
+  else { dropAllChunks(); originGen++; for (const w of ensureWait) w.ok(); ensureWait = []; ensureAt = null; }
+  scene.remove(root); root.traverse(o => { o.geometry?.dispose(); disposeMats(o); });
+  if (!keep) { disposeTextures(); disposeShared(); chunkG = new THREE.Group(); nroot.add(chunkG); for (const k of Object.keys(groups)) groups[k] = null; }
+  scene.add(nroot); root = nroot;
+  cur = p; curPal = regionPalReq;   // この地点を頼んだときの色付け (reloadForPalette)
+  p.t0 = t0;
+  // 細かい形で補った面 (extra): keep なら新しい root に描き直す (原点は同じ)。別の所へ移った (keep でない) なら捨てる
+  extraRelocate([0, 0, 0], !!keep);
   // コメントの印は DB から show で出し直す (requestNotes。前の root と一緒に消えている)
   window.__stage = 'show'; show(t0, keep);
+  review(true);
 }
-// 地点の印・札・一覧などを作る (形は buildScene が作った後)
+// 地点の印・札・一覧などを作る (形は、升のかたまりが別に出す)
 function show(t0, keep) {
   const p = cur;
   hiM = null; ghostG = null; cMarks = []; noteMarks = []; if (!keep) selFloor = null; distLabels.length = 0;
@@ -1460,12 +1595,7 @@ function show(t0, keep) {
   // 開いたときは切らない (2026-11-04、利用者の指摘「crusader の本社の建物がない」: 前は「この高さより上を消す」の初めの値 25 m で、中心から 25 m より上が消えていた)
   if (keep) { applyFloor(); applyVis(); if (walk) walkCam(); else upd(); }
   else { document.getElementById('cut').value = 25; applyFloor(); applyVis(); tgt.set(0, 0, 0); dist = p.r * 1.6; upd(); }
-  document.getElementById('info').textContent = `${p.station}\n中心 (${c.map(v => v.toFixed(1)).join(', ')})、中心から ±${p.r} m の立方体\n部品 ${p.parts.length}\n三角形: ` +
-    Object.keys(COL).filter(k => p.offs[k][1]).map(k => `${NAME[k]} ${p.offs[k][1] / 9}`).join(' / ') +
-    `\n重ねた面の三角形: ` + Object.keys(OCOL).map(k => `${NAME[k]} ${p.labs && p.labs[k] ? p.labs[k].length : 0}`).join(' / ') +
-    `\n読み込み ${((performance.now() - (t0 || performance.now())) / 1000).toFixed(1)} 秒・${(curBuf.byteLength / 1048576).toFixed(0)} MB` +
-    (REG.missing.length ? `\n形の出なかった socpak (この地点): ${REG.missing.length}` : '') +
-    (window.__lastRegion?.app?.extractSeconds != null ? `\n時間: 選んでから描き終わるまで ${(((performance.now() - (t0 || performance.now())) / 1000)).toFixed(1)} 秒 = 区画の用意 ${window.__lastRegion.wait.toFixed(1)} 秒 (取り出し ${window.__lastRegion.app.extractSeconds.toFixed(1)} 秒・計算 ${window.__lastRegion.app.computeSeconds.toFixed(1)} 秒。どちらも同時に動かした分の足し合わせ) + ビューアの読み込みと描く用意 ${(((performance.now() - (t0 || performance.now())) / 1000) - window.__lastRegion.wait).toFixed(1)} 秒` : '');
+  showInfo(false);
   renderGuide();
   drawHereMark();
   if (pendingHere && !pendingHereSince) setTimeout(runPendingHere, 0);   // 待つのをやめていた here (runPendingHere) を、地点を読み込めたので出す   // 現在位置の印 (地点の中心が変わったので置き直す)
@@ -1517,7 +1647,7 @@ function show(t0, keep) {
   // 「行き先 ×数」(数が 1 なら行き先だけ) を、いちばん高い乗り口の 2.4 m 上に出す (端末の札 (0.8 m 上) と重ならないように高くした)
   window.__elevLabels = [];
   {
-    const cc = p.center, near = q => Math.abs(q[0] - cc[0]) <= p.r && Math.abs(q[1] - cc[1]) <= p.r && Math.abs(q[2] - cc[2]) <= p.r;
+    const cc = p.center, kc = p.cc, near = q => Math.abs(q[0] - kc[0]) <= p.r && Math.abs(q[1] - kc[1]) <= p.r && Math.abs(q[2] - kc[2]) <= p.r;
     const st = (p.transit || []).filter(t => (t[0] === 'elevator' || t[0] === 'tram') && near(t[1]));
     const usedE = new Set();
     for (let i = 0; i < st.length; i++) {
@@ -1538,48 +1668,66 @@ function show(t0, keep) {
   // 店の入口を探した直線 (緑・赤) は出さない (2026-11-05、利用者「デバッグモードとして…色分けしたりするのはもうやめていい」。データは cur.entrances に残す)
   const sf = document.getElementById('shopforms'); sf.innerHTML = '';
   const addH = t => { const h = document.createElement('div'); h.style.marginTop = '4px'; h.textContent = t; sf.appendChild(h); };
-  const addB = (pi, t) => { const b = document.createElement('button'); b.textContent = t; b.onclick = () => { if (pi >= 0) focusPart(p, pi, b); }; sf.appendChild(b); };
+  const addB = (pi, t) => { const b = document.createElement('button'); b.textContent = t; b.onclick = () => { if (pi !== -1) focusPart(p, pi, b); }; sf.appendChild(b); };
   addH('店の入口 (名前の語に door・doors・doorway・window・opening のある部品で、店の中心から 10 m 以内。店の中心の真下の床 + 1 m の高さで、店の中心から開口部へ水平に引いた直線が、どの三角形にも当たらないもの)');
   for (const en of (p.entrances || [])) {
     addH(`■ ${en.shop}: 店の中心の床 ${en.floor ? en.floor[0] + ' m (' + en.floor[1] + ')' : 'なし'}・直線の高さ ${en.h ?? '-'} m`);
     en.list.forEach(o => addB(o[0], `${o[5] ? '入口' : '×'} ${o[1]} (inst ${o[2]}) 中心から ${o[3]} m・当たり ${o[4]}${o[11] && o[11].length ? ' (' + o[11].join(', ') + ')' : ''}・道の点 ${o[6]}・${o[8] ? '乗り場につながる' : 'つながらない'}`));
   }
 }
-function focusPart(p, pi, btn) {
-  document.querySelectorAll('#shopforms button').forEach(b => b.classList.remove('on')); btn.classList.add('on');
-  if (hiM) { root.remove(hiM); hiM.geometry.dispose(); }
-  const all = new Float32Array(curBuf); const arr = [];
-  for (const k of Object.keys(COL)) {
-    const [o, n] = p.offs[k], [io, inn] = p.ioffs[k]; if (!n) continue;
-    const ids = new Uint32Array(curBuf, io * 4, inn);
-    for (let t = 0; t < inn; t++) if (ids[t] === pi) for (let j = 0; j < 9; j++) arr.push(all[o + t * 9 + j]);
+// 左下の数字 (地点・出ているかたまりの部品と三角形の数・読み込みの時間)。かたまりが出そろったとき (final) にも書き直す
+function showInfo(final) {
+  const p = cur; if (!p) return;
+  const c = p.cc, nk = {}, nl = new Array(LABK.length).fill(0); let parts = 0, bytes = 0;
+  for (const ch of chunks.values()) {
+    parts += ch.parts.length; bytes += ch.bytes;
+    for (const k of Object.keys(COL)) { const o = ch.offs[k]; if (o && o[1]) nk[k] = (nk[k] || 0) + o[1] / 9; }
+    for (let i = 1; i < LABK.length; i++) nl[i] += ch.labN[i] || 0;
   }
-  const a = new Float32Array(arr);
+  const elapsed = (performance.now() - (p.t0 || performance.now())) / 1000;
+  if (final && p.sec == null) p.sec = elapsed;
+  const sec = p.sec ?? elapsed;
+  document.getElementById('info').textContent = `${p.station}\n中心 (${c.map(v => v.toFixed(1)).join(', ')})、中心から ±${p.r} m の立方体\n部品 ${parts}\n三角形: ` +
+    Object.keys(COL).filter(k => nk[k]).map(k => `${NAME[k]} ${nk[k]}`).join(' / ') +
+    `\n重ねた面の三角形: ` + Object.keys(OCOL).map(k => `${NAME[k]} ${nl[LABK.indexOf(k)]}`).join(' / ') +
+    `\n読み込み ${sec.toFixed(1)} 秒・${(bytes / 1048576).toFixed(0)} MB` +
+    (REG.missing.length ? `\n形の出なかった socpak (この地点): ${REG.missing.length}` : '') +
+    (window.__lastRegion?.app?.extractSeconds != null ? `\n時間: 選んでから描き終わるまで ${sec.toFixed(1)} 秒 = 区画の用意 ${window.__lastRegion.wait.toFixed(1)} 秒 (取り出し ${window.__lastRegion.app.extractSeconds.toFixed(1)} 秒・計算 ${window.__lastRegion.app.computeSeconds.toFixed(1)} 秒。どちらも同時に動かした分の足し合わせ) + ビューアの読み込みと描く用意 ${(sec - window.__lastRegion.wait).toFixed(1)} 秒` : '');
+}
+// 店の入口の部品を強調する。key = 'インスタンス:部品の番号'。部品の三角形は、出ているかたまりに無くても出せるよう、解析の糸からもらう
+async function focusPart(p, key, btn) {
+  document.querySelectorAll('#shopforms button').forEach(b => b.classList.remove('on')); btn.classList.add('on');
+  const og = originGen; let res;
+  try { res = await workerCall({ type: 'part', og, key }); } catch (e) { report('focusPart', e); return; }
+  if (res.missing || og !== originGen || !cur) return;
+  if (hiM) { root.remove(hiM); hiM.geometry.dispose(); }
+  const a = res.tris;
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(a, 3)); g.computeVertexNormals(); g.computeBoundingBox();
   hiM = new THREE.LineSegments(new THREE.EdgesGeometry(g, 20), new THREE.LineBasicMaterial({ color: 0x33ffff, depthTest: false, transparent: true, opacity: 0.9, clippingPlanes: [clip, clipLo] }));
   hiM.renderOrder = 10; root.add(hiM);
   if (!walk) { const bb = g.boundingBox; bb.getCenter(tgt); const s = bb.getSize(new THREE.Vector3()); dist = Math.max(8, Math.min(120, Math.max(s.x, s.y, s.z) * 1.3)); upd(); }
-  const part = p.parts[pi];
+  const part = res.part;
   const box = document.getElementById('pick'); box.style.display = 'block';
-  box.textContent = `${part[1]}  (inst ${part[0]}・${part[4]})\n種類: ${NAME[part[2]]}\n強調した三角形 ${a.length / 9} (部品まるごと。水色の縁取り)\n部品の中の判定の面:\n${partFloors(p, pi)}`;
+  box.textContent = `${part[1]}  (inst ${part[0]}・${part[4]})\n種類: ${NAME[part[2]]}\n強調した三角形 ${a.length / 9} (部品まるごと。水色の縁取り)\n部品の中の判定の面:\n${partFloors(a, res.lab, null, 0)}`;
 }
 // 選んだフロアの床 (いちばん低い高さ − 0.1 m) から H m までを描き、床より下のほかの階は薄い写し (濃さ ghostA %) で描く。
 // 切る高さより上は、薄い写しも描かない (2026-11-04、利用者の指示「切った方が作画が早くて良くないか？」・親の指示「薄く出す形にはしません」)
 function applyFloor() {
-  if (ghostG) { root.remove(ghostG); ghostG.traverse(o => o.material?.dispose?.()); ghostG = null; }
+  if (ghostG) { root.remove(ghostG); ghostG.userData.mat?.dispose(); ghostG = null; }
   if (!selFloor || !cur) { clip.constant = 1e9; clipLo.constant = 1e9; document.getElementById('cutv').textContent = '切らない'; return; }
   const H = +document.getElementById('cutH').value || 2, A = Math.max(0, Math.min(100, +document.getElementById('ghostA').value)) / 100;
   const z0 = selFloor.lo - cur.center[2] - 0.1;
   clip.constant = z0 + 0.1 + H; clipLo.constant = -z0; document.getElementById('cutv').textContent = (z0 + 0.1 + H).toFixed(1);
-  ghostG = new THREE.Group();
+  ghostG = new THREE.Group(); ghostG.userData.mat = new THREE.MeshBasicMaterial({ color: GRAY, transparent: true, opacity: A, depthWrite: false, side: THREE.DoubleSide, clippingPlanes: [clip] });
   // 薄い写しは灰色 (材質が画像ごとの配列のこともあるので、材質の色は見ない。判定の色の重ね (OCOL) の groups は描いていないので無い)
   for (const k of [...Object.keys(COL), ...Object.keys(OCOL)]) for (const g of groups[k] || []) {
     if (!g.visible) continue;
-    const m = new THREE.Mesh(g.geometry, new THREE.MeshBasicMaterial({ color: GRAY, transparent: true, opacity: A, depthWrite: false, side: THREE.DoubleSide, clippingPlanes: [clip] }));
-    m.renderOrder = -1; ghostG.add(m);
+    addGhost(g);
   }
   root.add(ghostG);
 }
+// 形 g の薄い写しを足す (applyFloor・フロアを選んでいる間に足した升のかたまり)
+function addGhost(g) { const m = new THREE.Mesh(g.geometry, ghostG.userData.mat); m.renderOrder = -1; g.userData.ghost = m; ghostG.add(m); }
 function applyVis() {
   document.querySelectorAll('[data-k]').forEach(cb => { for (const m of groups[cb.dataset.k] || []) m.visible = cb.checked; });
   // 「テクスチャ」: ON なら画像の材質の配列、OFF なら灰色の 1 つの材質 (形のグループはそのまま。1 つの材質ならグループ全部に同じ材質で描かれる)
@@ -1592,7 +1740,7 @@ function applyVis() {
 }
 document.querySelectorAll('.lg input').forEach(i => i.addEventListener('change', applyVis));
 // 「テクスチャ」のスイッチ (右上の #swPanel): 切り替えたら localStorage (view3d.tex = "1"・"0") に覚え、次に開いたとき (別の場所・別ウィンドウ・［マップ］タブ・次の起動) もその状態で始める。
-// OFF で開いたときは、buildScene が初めから灰色の材質で作る (2026-11-05、利用者の指示「テクスチャを貼るのは ON OFF できるように、切り替えたら覚えておいて以降はそれに従うようにしてほしい」)
+// OFF で開いたときは、addChunk が初めから灰色の材質で作る (2026-11-05、利用者の指示「テクスチャを貼るのは ON OFF できるように、切り替えたら覚えておいて以降はそれに従うようにしてほしい」)
 try { const t = localStorage.getItem('view3d.tex'); if (t === '1' || t === '0') document.getElementById('texOn').checked = t === '1'; } catch (_) { }
 document.getElementById('texOn').addEventListener('change', e => { try { localStorage.setItem('view3d.tex', e.target.checked ? '1' : '0'); } catch (_) { } applyVis(); refreshPalSwitch(); });
 // 「色付け」のスイッチ (右上の #swPanel の「テクスチャ」の下。2026-11-05、利用者の指示「1 で。右のスイッチに入れて自動保存にして」「色付けは場所に寄らず、どこの場所でも全体で共通でいいです」):
@@ -1608,7 +1756,7 @@ function reloadForPalette() {
   if (loading) { setTimeout(reloadForPalette, 500); return; }
   if (!cur) return;
   if (curPal === palOn()) return;
-  loadRegion(cur.center.slice(), cur.r, true);
+  loadRegion(cur.cc.slice(), cur.r, true);
 }
 document.getElementById('palOn').addEventListener('change', e => { try { localStorage.setItem('view3d.pal', e.target.checked ? '1' : '0'); } catch (_) { } reloadForPalette(); });
 refreshPalSwitch();
@@ -1645,12 +1793,87 @@ const commentShow = () => markOn('comment') && !extView;
 //   「印」の 5 つのスイッチは押せない形、「キャプション」のスイッチは押せる形 (数が 0 の種類は押せないまま)。内部で見ている間はその逆。「テクスチャ」はいつでも押せる。
 //   押せない形にしてもスイッチの ON・OFF (覚えている状態) は変えない。部品の形は消さない
 let extView = false;
-const extViewNow = () => !!cur && !walk && !SITE && dist >= cur.r;
+// ----- 見ている位置の外判定 -----
+// (2026-11-06、利用者の指示「外に出てるのに外判定がない。宇宙空間にあって xyz 各方向 +/-200m のどちらかに何もなければ外判定がいいかな？」「外判定は弱い」。親の決定)
+// 見ている位置 (カメラの位置。歩くモードでは歩いている位置の目の高さ = カメラ) から x・y・z の ＋・− の 6 つの向きへ LOADCFG.outDist m の線分を引き、地点の部品の三角形に 1 つも当たらない向きが
+// 1 つでもあれば「外」、6 つ全部が当たれば「中」(outNow)。上の決まり (回転の中心からの距離) に足して、どちらかが真なら外部視点にする (extViewNow)。マイハンガーの中は今までどおり外部視点にしない。
+//   当てる三角形 (2026-11-06 の作り替え): 解析の糸 (view3d-worker.js の outScan) が、地点の全部の部品 (大きさ・距離・外装か内装かに関係なく) の三角形で見る。
+//   前は、読み込んである三角形だけで見ていた。今は、出す升のかたまりを外判定で変える (「外」のときは内装の区画を出さない) ので、出しているかたまりに左右されないようにした。切る面 visZ・細かい形の補い extra は見ない (前と同じ)。
+//   地点の立方体 (中心 cur.cc から ±cur.r m) の外へ出る線分は、立方体の端までで見る (端に届いたら「何も無い」)。見ている位置が立方体の外なら「外」。
+//   見直すとき (2026-11-06、利用者の指示「外判定は、初期、エレベーターなどで移動したとき、ドア・壁を通り抜けたとき」。親の決定。ただ動いた・止まっただけでは見直さない):
+//     (a) 初期: 地点を読み込んで表示が替わったとき (cur が替わる)。行き先へ飛んだとき (goTarget)・歩くモードを切り替えたとき (下の床の決まりの足の位置が替わるので) も頼む (outRequest)
+//     (b) エレベーターなどで移動したとき: 位置を移す仕組みで移り終えた所で頼む (outRequest。elevPlace・travelTo の place・はしごを登り終えた/下り終えた所)
+//     (c) ドア・壁を通り抜けたとき: 止まったときに、前に外判定した位置から今の位置までの線分が地点の部品の三角形に当たるか (糸の outCross) を 1 回見て、当たれば見直す
+//   見直し・(c) の線分を見るのは、見ている位置が止まってから OUT.IDLE_MS ms たった後だけ。動いている間は何も見ず、前の結果のまま (途中で動いたら、その見直しはやめる = 糸の返事を捨てる)
+//   (2026-11-06、利用者の報告「動きがかなりぎこちない。もうちょっとどうにかならないかなぁ？ 前よりかなり悪い」。親の決定)。
+//   床の決まり (2026-11-06、利用者の指示「外判定に一個追加。外でも足の 0.5m 以内に床があれば中判定。 ORISON などの屋外想定」。親の決定):
+//     足の下 LOADCFG.outFloor m 以内に立てる面があれば、6 つの向きを見ずに「中」。モードに関係なく当てる (利用者の指摘「モード関係なく、足位置の想定があるだろ？」)。
+//     まず出ているかたまりの当たり (groundAt) で見て (outFloorNear)、無ければ糸が地点の全部の部品の三角形で同じ決まりを見る (内装の区画を出していない「外」の間でも、内装の床の上なら「中」に戻る)。
+//     足の位置: 歩くモードでは歩いている位置 (wpos)。歩くモードでないときは、見ている位置 (カメラ) から重力の向きへ目の高さ (STANCE.stand.eye) だけ下がった点
+//     (利用者の指示「建物(最後の位置の床)方向を重力方向としておけばいいだけじゃない？ 主には Z マイナス方向」。親の決定)。
+//     重力の向き: 歩くモードの上下の印 inv (上下が逆の範囲に立っていたら true。歩くモードを OFF にすると false に戻る)。false なら Z マイナス (床 = groundAt)、true なら Z プラス (床 = 下向きの面 ceilAt。invStep と同じ)
+//   見直しは糸が行うので、画面の糸は止まらない。見直しが済む (返事が届く) までは前の結果のまま。
+// 外判定 (outNow) は、外部視点 (着陸パッドなどのキャプション) と、出す升のかたまりの決まり (上の「升のかたまりの出し入れ」) の両方に使う
+const OUT = { IDLE_MS: 500 };
+// outPos: 前に外判定した (済んだ) 位置。outBusy: 糸に頼んでいる見直し { id, kind ('scan' = 6 つの向き、'cross' = 通り抜けの線分), pos }。outTried: 前に見直し・線分を済ませた位置。
+// outWant: 見直しを頼まれている。outLast・outMoveAt: 前のコマの見ている位置と、最後に動いた時刻
+let outNow = false, outBusy = null, outPos = null, outTried = null, outWant = false, outCur = null, outLast = null, outMoveAt = 0;
+// 足 (歩くモード: wpos。歩くモードでない: カメラから重力の向きへ目の高さだけ下がった点) の下 LOADCFG.outFloor m 以内に、立てる面があるか (立っている面も入る)。出ているかたまりの当たりで見る
+const outFloorNear = () => {
+  const FL = LOADCFG.outFloor;
+  if (walk) { const g = groundAt(wpos.x, wpos.y, wpos.z + 0.05); return g !== null && wpos.z - g <= FL; }
+  const p = cam.position, e = STANCE.stand.eye;
+  if (inv) { const fz = p.z + e, g = ceilAt(p.x, p.y, fz - 0.05); return g !== null && g - fz <= FL; }
+  const fz = p.z - e, g = groundAt(p.x, p.y, fz + 0.05); return g !== null && fz - g <= FL;
+};
+// 外判定の見直しを頼む (エレベーター・トラム・はしごなど、位置を移す仕組みで移り終えたとき・行き先へ飛んだとき)。見直すのは次に止まったとき (outTick)
+function outRequest() { outWant = true; }
+// 外判定が変わったら、出すかたまりを見直す (「外」のときは内装の区画を出さない。上の「升のかたまりの出し入れ」)
+function outSet(v) { if (v === outNow) return; outNow = v; review(false); }
+function outTick() {
+  if (!cur || !cur.index || SITE) { outNow = false; outBusy = null; outPos = null; outCur = null; outLast = null; outTried = null; outWant = false; return; }
+  const p = cam.position, now = performance.now();
+  // 動いたか (前のコマの位置と比べる)。動いたら、途中の見直しはやめる (糸の返事は捨てる)
+  if (!outLast) { outLast = p.clone(); outMoveAt = now; }
+  else if (outLast.distanceToSquared(p) > 1e-8) { outLast.copy(p); outMoveAt = now; outBusy = null; }
+  // (a) 地点を読み込んで表示が替わった
+  if (outCur !== cur) { outCur = cur; outBusy = null; outPos = null; outTried = null; outWant = true; }
+  if (now - outMoveAt < OUT.IDLE_MS || outBusy) return;
+  // 頼まれていず、止まった位置が前に見直し・線分を済ませた位置のままなら、何もしない
+  if (!outWant && outPos && outTried && outTried.distanceToSquared(p) <= 1e-8) return;
+  const c = cur.center, cc = cur.cc, r = cur.r, abs = v => [v.x + c[0], v.y + c[1], v.z + c[2]], pa = abs(p);
+  // 地点の立方体の外にいるときは、線分を見ずに見直す (糸がすぐ「外」を返す)
+  if (outWant || !outPos || Math.abs(pa[0] - cc[0]) > r || Math.abs(pa[1] - cc[1]) > r || Math.abs(pa[2] - cc[2]) > r) {
+    // 床の決まり: 足の下に床があれば、6 つの向きを見ずに「中」(出ているかたまりに床が無ければ、糸が地点の全部の部品でもう一度見る)
+    if (outFloorNear()) { outPos = p.clone(); outTried = outPos; outWant = false; outSet(false); return; }
+    const e = STANCE.stand.eye, foot = walk ? { p: abs(wpos), mode: 'g' } : inv ? { p: [pa[0], pa[1], pa[2] + e], mode: 'c' } : { p: [pa[0], pa[1], pa[2] - e], mode: 'g' };
+    outBusy = { id: ++workerSeq, kind: 'scan', pos: p.clone() };
+    worker.postMessage({ type: 'out', id: outBusy.id, og: originGen, kind: 'scan', p: pa, dist: LOADCFG.outDist, floor: LOADCFG.outFloor, foot });
+  }
+  // (c) 止まった位置が変わっていれば、前に外判定した位置からの線分を 1 回見る
+  else {
+    outBusy = { id: ++workerSeq, kind: 'cross', pos: p.clone() };
+    worker.postMessage({ type: 'out', id: outBusy.id, og: originGen, kind: 'cross', a: abs(outPos), b: pa });
+  }
+}
+// 糸の返事 (頼んだ後に動いていたら捨てる)
+function onOut(d) {
+  const b = outBusy; if (!b || b.id !== d.id) return;
+  outBusy = null;
+  // 糸が見られなかった (失敗): この位置は済んだことにして、繰り返し頼まない。地点が替わった直後の返事 (stale) は、次のコマで頼み直す
+  if (d.error) { outTried = b.pos; outPos = outPos || b.pos; outWant = false; return; }
+  if (d.stale) return;
+  outTried = b.pos;
+  if (b.kind === 'scan') { outPos = b.pos; outWant = false; outSet(!!d.outside); }
+  else if (d.hit) outWant = true;   // 通り抜けた: 続けて (止まったままなら次のコマから) 見直す
+}
+const extViewNow = () => !!cur && !SITE && ((!walk && dist >= cur.r) || outNow);
 function refreshSwitches() {
   document.querySelectorAll('.mk').forEach(cb => { cb.disabled = extView; });
   for (const id of ['chkExtPad', 'chkExtDock', 'chkExtFreight', 'chkExtHangar']) { const cb = document.getElementById(id); if (cb) cb.disabled = !extView || cb.dataset.zero === '1'; }
 }
 function updExtView() {
+  outTick();
   const v = extViewNow(); if (v === extView) return;
   extView = v; applyVis(); applyMarkVis(); refreshSwitches();
   if (gravG) gravG.visible = !extView;   // 重力の範囲の箱 (drawGravity) も、内部の印と同じ値で出す・消す
@@ -1662,6 +1885,7 @@ document.querySelectorAll('.mk').forEach(cb => cb.addEventListener('change', app
 const ORBIT_D = 10;
 document.getElementById('walkBtn').onclick = () => {
   if (!cur) return; walk = !walk; document.getElementById('walkBtn').textContent = '歩くモード: ' + (walk ? 'ON' : 'OFF');
+  outRequest();   // 外判定を見直す (足の位置が、歩いている位置とカメラの下とで替わるので、結果が変わりうる。outTick)
   if (walk) { buildGrid(); buildCeil(); buildWall(); air = false; vz = 0; onLadder = null; stance = 'stand';
     // 今のカメラの xy のまま、カメラの真下の面に立つ (面が無ければカメラの高さ − 目の高さ)。向きもカメラのまま
     const st0 = cam.position.clone(); wpos.set(st0.x, st0.y, st0.z - STANCE.stand.eye);
@@ -1711,17 +1935,20 @@ const cut = document.getElementById('cut'); cut.addEventListener('input', () => 
 //   店 (shop・admin・pharmacy) は上の 2・3 を使わず、端末の前 → カウンターの前 (standAtCounter) → 店の点そのもの (placeStart の中の説明。2026-11-05、利用者の指示)
 // 決めたものは window.__startHow に書く (確かめ用)
 function doorHit(ax, ay, az, bx, by, bz) {
-  const [o, n] = cur.offs.door || [0, 0]; if (!n) return false; const F = new Float32Array(curBuf);
   const x0 = Math.min(ax, bx), x1 = Math.max(ax, bx), y0 = Math.min(ay, by), y1 = Math.max(ay, by), z0 = Math.min(az, bz), z1 = Math.max(az, bz);
   const dx = bx - ax, dy = by - ay, dz = bz - az;
-  for (let t = 0; t < n / 9; t++) {
-    const b = o + t * 9;
-    if (Math.max(F[b], F[b + 3], F[b + 6]) < x0 || Math.min(F[b], F[b + 3], F[b + 6]) > x1 || Math.max(F[b + 1], F[b + 4], F[b + 7]) < y0 || Math.min(F[b + 1], F[b + 4], F[b + 7]) > y1 || Math.max(F[b + 2], F[b + 5], F[b + 8]) < z0 || Math.min(F[b + 2], F[b + 5], F[b + 8]) > z1) continue;
-    const e1x = F[b + 3] - F[b], e1y = F[b + 4] - F[b + 1], e1z = F[b + 5] - F[b + 2], e2x = F[b + 6] - F[b], e2y = F[b + 7] - F[b + 1], e2z = F[b + 8] - F[b + 2];
-    const px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x, det = e1x * px + e1y * py + e1z * pz; if (Math.abs(det) < 1e-12) continue;
-    const inv = 1 / det, tx = ax - F[b], ty = ay - F[b + 1], tz = az - F[b + 2]; const u = (tx * px + ty * py + tz * pz) * inv; if (u < 0 || u > 1) continue;
-    const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x; const v = (dx * qx + dy * qy + dz * qz) * inv; if (v < 0 || u + v > 1) continue;
-    const tt = (e2x * qx + e2y * qy + e2z * qz) * inv; if (tt > 0 && tt < 1 && visZ(az + dz * tt)) return true;
+  // 出ているかたまりのドアの形 (種類 door) の三角形を全部見る
+  for (const me of groups.door || []) {
+    const ch = me.userData.ch, [o, n] = ch.offs.door, F = ch.F;
+    for (let t = 0; t < n / 9; t++) {
+      const b = o + t * 9;
+      if (Math.max(F[b], F[b + 3], F[b + 6]) < x0 || Math.min(F[b], F[b + 3], F[b + 6]) > x1 || Math.max(F[b + 1], F[b + 4], F[b + 7]) < y0 || Math.min(F[b + 1], F[b + 4], F[b + 7]) > y1 || Math.max(F[b + 2], F[b + 5], F[b + 8]) < z0 || Math.min(F[b + 2], F[b + 5], F[b + 8]) > z1) continue;
+      const e1x = F[b + 3] - F[b], e1y = F[b + 4] - F[b + 1], e1z = F[b + 5] - F[b + 2], e2x = F[b + 6] - F[b], e2y = F[b + 7] - F[b + 1], e2z = F[b + 8] - F[b + 2];
+      const px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x, det = e1x * px + e1y * py + e1z * pz; if (Math.abs(det) < 1e-12) continue;
+      const inv = 1 / det, tx = ax - F[b], ty = ay - F[b + 1], tz = az - F[b + 2]; const u = (tx * px + ty * py + tz * pz) * inv; if (u < 0 || u > 1) continue;
+      const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x; const v = (dx * qx + dy * qy + dz * qz) * inv; if (v < 0 || u + v > 1) continue;
+      const tt = (e2x * qx + e2y * qy + e2z * qz) * inv; if (tt > 0 && tt < 1 && visZ(az + dz * tt)) return true;
+    }
   }
   return false;
 }
@@ -1740,8 +1967,8 @@ function segHitLong(ax, ay, az, bx, by, bz) {
 // 判定の床 (床・筒の底の色の三角形) の上か (2026-11-04、利用者の指示「床のある側に」): (x, y) を含む床の色の三角形で、高さが g から 2 cm 以内のものがあるか
 function buildFloorGrid() { }
 function onFloor(x, y, g) {
-  const F = new Float32Array(curBuf); const l = cellGet('fl', Math.floor(x), Math.floor(y));
-  if (l) for (const b of l) {
+  const n = cellTris('fl', Math.floor(x), Math.floor(y));
+  for (let q = 0; q < n; q++) { const F = CT.C[q].F, b = CT.B[q];
     const v0x = F[b + 3] - F[b], v0y = F[b + 4] - F[b + 1], v1x = F[b + 6] - F[b], v1y = F[b + 7] - F[b + 1], den = v0x * v1y - v1x * v0y; if (Math.abs(den) < 1e-12) continue;
     const wx = x - F[b], wy = y - F[b + 1], s_ = (wx * v1y - v1x * wy) / den, t_ = (v0x * wy - wx * v0y) / den; if (s_ < 0 || t_ < 0 || s_ + t_ > 1) continue;
     const z = F[b + 2] + s_ * (F[b + 5] - F[b + 2]) + t_ * (F[b + 8] - F[b + 2]); if (Math.abs(z - g) <= 0.02 && visZ(z)) return true;
@@ -1766,14 +1993,13 @@ function tallObjectAt(x, y, z) {
 }
 // 足元の面の部品の名前 (確かめ用)
 function groundPart(x, y, zmax) {
-  const g = groundAt(x, y, zmax); if (g === null) return null; const F = new Float32Array(curBuf);
-  for (const k of Object.keys(COL)) {
-    const [o, n] = cur.offs[k]; const io = cur.ioffs[k]; const ids = new Uint32Array(curBuf, io[0] * 4, io[1]);
-    for (let t = 0; t < n / 9; t++) { const b = o + t * 9; const xs = [F[b], F[b + 3], F[b + 6]], ys = [F[b + 1], F[b + 4], F[b + 7]];
-      if (Math.min(...xs) > x || Math.max(...xs) < x || Math.min(...ys) > y || Math.max(...ys) < y) continue;
-      const v0x = F[b + 3] - F[b], v0y = F[b + 4] - F[b + 1], v1x = F[b + 6] - F[b], v1y = F[b + 7] - F[b + 1], den = v0x * v1y - v1x * v0y; if (Math.abs(den) < 1e-12) continue;
-      const wx = x - F[b], wy = y - F[b + 1], s_ = (wx * v1y - v1x * wy) / den, t_ = (v0x * wy - wx * v0y) / den; if (s_ < 0 || t_ < 0 || s_ + t_ > 1) continue;
-      const z = F[b + 2] + s_ * (F[b + 5] - F[b + 2]) + t_ * (F[b + 8] - F[b + 2]); if (Math.abs(z - g) < 1e-4) return [cur.parts[ids[t]][1], cur.parts[ids[t]][0]]; } }
+  const g = groundAt(x, y, zmax); if (g === null) return null;
+  // 足元の升の上向きの三角形のうち、(x, y) での高さが g のものの部品
+  const n = cellTris('f', Math.floor(x), Math.floor(y));
+  for (let q = 0; q < n; q++) { const ch = CT.C[q], F = ch.F, b = CT.B[q];
+    const v0x = F[b + 3] - F[b], v0y = F[b + 4] - F[b + 1], v1x = F[b + 6] - F[b], v1y = F[b + 7] - F[b + 1], den = v0x * v1y - v1x * v0y; if (Math.abs(den) < 1e-12) continue;
+    const wx = x - F[b], wy = y - F[b + 1], s_ = (wx * v1y - v1x * wy) / den, t_ = (v0x * wy - wx * v0y) / den; if (s_ < 0 || t_ < 0 || s_ + t_ > 1) continue;
+    const z = F[b + 2] + s_ * (F[b + 5] - F[b + 2]) + t_ * (F[b + 8] - F[b + 2]); if (Math.abs(z - g) < 1e-4) { const pt = ch.parts[ch.ID[b / 9]]; return [pt[1], pt[0]]; } }
   return null;
 }
 function placeStart(t) {
@@ -1919,19 +2145,20 @@ const FIRST_R = 30;
 function regionR() { return Math.max(10, +document.getElementById('regionR').value || 150); }
 // 読み込み中に行き先を選んだら、今の読み込みが終わってから、その行き先を始める (前は押しても読み込まれなかった)。
 // 行き先を選び直したら、前の行き先の残りの読み込み (裏の ±R) はしない (goGen)
-let goGen = 0, pendingGo = null;
+let goGen = 0, pendingGo = null, focusTk = 0;
 function goTarget(t, btn) {
   // 文字の道案内も、押した先の項目に合わせる (今の地点に無ければ、読み込んだ後の show で合わせる)。道案内の無い種類 (エレベーター・トラム・hangar_lobby) は合わせない
   if (!['elevator', 'tram', 'hangar_lobby'].includes(t.kind)) { guideWant = t; renderGuide(); }
   if (loading) { pendingGo = [t, btn]; document.querySelectorAll('#tlist button').forEach(b => b.classList.remove('on')); btn?.classList.add('on'); ++goGen; return; }
   document.querySelectorAll('#tlist button').forEach(b => b.classList.remove('on')); btn?.classList.add('on');
   const q = t.pos, r = regionR();
-  const inside = cur && cur.r === r && Math.abs(q[0] - cur.center[0]) <= r && Math.abs(q[1] - cur.center[1]) <= r && Math.abs(q[2] - cur.center[2]) <= r;
+  const inside = cur && cur.r === r && Math.abs(q[0] - cur.cc[0]) <= r && Math.abs(q[1] - cur.cc[1]) <= r && Math.abs(q[2] - cur.cc[2]) <= r;
   // 最初の見え方: 行き先の印を中心に、印から 8 m・上へ約 3.5 m (傾き 0.45) から見下ろす (2026-11-04、利用者の指摘「初期位置の問題」。前は 25 m・約 14 m 上で、上の階・屋根の中から見ていた)
-  const focus = () => { if (walk) return; startAt = null; placeStart(t); };
+  const focus = () => { if (walk) return; startAt = null; placeStart(t); outRequest(); review(true); };   // 行き先へ飛んだので、外判定を見直す (outTick)・出す升のかたまりを見直す (review)
   // まだ読み込んでいない所なら、まず行き先のまわり ±FIRST_R m だけを取り出して描き、始める所に立つ (操作できる)。
   // 続けて ±r m 全部を裏で取り出し、できたら見ている所・歩いている所をそのままに入れ替える (先に作った区画は使い回されるので、取り出し直さない)
-  if (inside) focus();
+  // 読み込んである範囲の中なら、行き先のまわりの升のかたまり (形と当たり) が出そろってから始める所を決める (ensureNear。2026-11-06。歩くモードでは位置を移さないので待たない)
+  if (inside) { if (walk) focus(); else { const og = originGen, tk = ++focusTk; ensureNear(q.slice()).then(() => { if (og === originGen && tk === focusTk) focus(); }); } }
   else if (r <= FIRST_R) loadRegion(q.slice(), r).then(() => { if (cur) focus(); });
   else {
     const gen = ++goGen;
@@ -1991,7 +2218,9 @@ function nearCheck() {
   if (!walk && dist >= r) return;
   // 読み直しが失敗した直後 (FAIL_HOLD_MS) は、同じ半径では読み直さない (失敗 → 1 秒後にまた読み直す、の繰り返しを止める。2026-11-05、親の決定)
   if (lastFail && lastFail.r === regionR() && performance.now() - lastFail.t < FAIL_HOLD_MS) return;
-  if (Math.abs(q.x) > r / 2 || Math.abs(q.y) > r / 2 || Math.abs(q.z) > r / 2) loadRegion([q.x + cur.center[0], q.y + cur.center[1], q.z + cur.center[2]], regionR(), true);
+  // 地点の立方体の中心 (cur.cc) から半径の半分より離れたら、今の位置を中心に区画を取り出し直す (座標の原点・出ている升のかたまりはそのまま。足りないかたまりだけ裏で足す。2026-11-06)
+  const a = [q.x + cur.center[0], q.y + cur.center[1], q.z + cur.center[2]];
+  if (Math.abs(a[0] - cur.cc[0]) > r / 2 || Math.abs(a[1] - cur.cc[1]) > r / 2 || Math.abs(a[2] - cur.cc[2]) > r / 2) loadRegion(a, regionR(), true);
 }
 // ===== 外から見たときの印と見出し (着陸パッド・ハンガー・ドッキングポート) =====
 // (2026-11-05、利用者の指示「Seraphim なんか引いて行って外部視点になったときパッドなんかは引き出し線とか前にさんざんやったのを表示するように」「一度作ってんだから、今回入れてよ。外部になったときだけ出して」)
@@ -2531,7 +2760,7 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { }, ex
   // 置き直しの間引き (旧方式の frame と同じ): 動いている間は軽い置き方 (full=false)、止まって SETTLE_MS たったら仕上げの置き方 (full=true) をもう 1 回
   let lastLayoutAt = 0, lastLayoutMs = 0;
   const LAYOUT_SLOW_MS = 40, LAYOUT_THROTTLE_MS = 200, SETTLE_MS = 250;
-  let lastDirtyAt = 0, needFull = false, wasOn = false, lastSig = '';
+  let lastDirtyAt = 0, needFull = false, wasOn = false, lastSig = '', lastMoveAt = 0;
   let got = false;   // 印の知らせ ({type:'exterior'}) が届いたか (extReady)
   requestExterior = () => { marks = []; got = false; clear(); if (APP) window.chrome.webview.postMessage({ type: 'exteriorGet' }); };
   extReady = () => got;
@@ -2572,8 +2801,16 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { }, ex
     if (!on) { if (wasOn) { clear(); wasOn = false; needFull = false; } return; }
     const { w, h } = size();
     const sig = [cam.position.x, cam.position.y, cam.position.z, cam.quaternion.x, cam.quaternion.y, cam.quaternion.z, cam.quaternion.w, w, h, cur.center.join()].map(x => typeof x === 'number' ? x.toFixed(4) : x).join(',');
-    if (!wasOn || sig !== lastSig) { dirty = true; lastSig = sig; }
+    // lazy: 見ている位置の外判定だけで外部視点になっているとき (歩くモード・回転の中心からの距離が地点の半径未満。2026-11-06 に足した外部視点)。
+    // カメラが動いている間は置き直さず (出ている見出しはそのまま)、止まって SETTLE_MS たったら仕上げの置き直しを 1 回だけする
+    // (2026-11-06、利用者の報告「動きがかなりぎこちない。…前よりかなり悪い」。親の決定: 前は走っていなかった所なので、動いている間の置き直しを足さない)
+    const lazy = !(!walk && dist >= cur.r);
+    if (!wasOn || sig !== lastSig) { dirty = true; lastSig = sig; if (lazy) lastMoveAt = now; }
     wasOn = true;
+    if (lazy) {
+      if ((dirty || needFull) && now - lastMoveAt >= SETTLE_MS) { dirty = false; needFull = false; layout(true); lastLayoutAt = performance.now(); }
+      return;
+    }
     if (dirty && now - lastLayoutAt >= (lastLayoutMs > LAYOUT_SLOW_MS ? LAYOUT_THROTTLE_MS : 0)) { dirty = false; layout(false); lastLayoutAt = performance.now(); lastDirtyAt = now; needFull = true; }
     else if (!dirty && needFull && now - lastDirtyAt >= SETTLE_MS) { needFull = false; layout(true); lastLayoutAt = performance.now(); }
   };
@@ -2581,7 +2818,7 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { }, ex
 // 確かめ用: いちばん長い 1 コマ (ms。window.__frameMax = 0 で計り直す) と、読み込みの段ごとの時間 (window.__phase)
 // window.__frames: 長いコマの上位 8 件 [コマの間 ms, そのうち描画 (R.render) ms, その間の段 (window.__stage)]
 let lastFrame = performance.now(), lastRender = 0; window.__frameMax = 0; window.__frames = []; window.__stage = '';
-(function loop() { requestAnimationFrame(loop); { const nowF = performance.now(), gap = nowF - lastFrame; window.__frameMax = Math.max(window.__frameMax, gap); if (gap > 50) { const f = window.__frames; f.push([+gap.toFixed(0), +lastRender.toFixed(0), window.__stage]); f.sort((a, b) => b[0] - a[0]); f.length = Math.min(f.length, 8); } lastFrame = nowF; } try { nearCheck(); } catch (e) { window.__err = String(e && e.stack || e); } try { refreshDistLabels(); } catch (e) { window.__err = String(e && e.stack || e); } try { walkCheckTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { keyMove(); } catch (e) { window.__err = String(e && e.stack || e); } try { updExtView(); } catch (e) { window.__err = String(e && e.stack || e); } const tr = performance.now(); R.render(scene, cam); lastRender = performance.now() - tr; try { extTick(performance.now()); } catch (e) { window.__err = String(e && e.stack || e); } window.__stage = loading ? window.__stage : ''; })();
+(function loop() { requestAnimationFrame(loop); { const nowF = performance.now(), gap = nowF - lastFrame; window.__frameMax = Math.max(window.__frameMax, gap); if (gap > 50) { const f = window.__frames; f.push([+gap.toFixed(0), +lastRender.toFixed(0), window.__stage]); f.sort((a, b) => b[0] - a[0]); f.length = Math.min(f.length, 8); } lastFrame = nowF; } try { nearCheck(); } catch (e) { window.__err = String(e && e.stack || e); } try { refreshDistLabels(); } catch (e) { window.__err = String(e && e.stack || e); } try { walkCheckTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { keyMove(); } catch (e) { window.__err = String(e && e.stack || e); } try { chunkTick(); reviewTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { updExtView(); } catch (e) { window.__err = String(e && e.stack || e); } const tr = performance.now(); R.render(scene, cam); lastRender = performance.now() - tr; try { extTick(performance.now()); } catch (e) { window.__err = String(e && e.stack || e); } window.__stage = loading ? window.__stage : ''; })();
 // ===== 始め =====
 (async () => {
   try {
@@ -2708,7 +2945,7 @@ function drawHereMark() {
   const c = cur.center, q = hereData.pos;
   // 読み込んだ地点の範囲 (中心から ±cur.r m の立方体) の外の点には出さない (札は画面での大きさが変わらないので、数 km 先の点の札が大きく見えてしまうため。
   // 2026-11-05、親の決定「見ている地点の読み込んだ範囲の外の印は出さない」)。その点の地点を読み込めば (［現在位置］など) 出る
-  if (Math.abs(q[0] - c[0]) > cur.r || Math.abs(q[1] - c[1]) > cur.r || Math.abs(q[2] - c[2]) > cur.r) return;
+  if (Math.abs(q[0] - cur.cc[0]) > cur.r || Math.abs(q[1] - cur.cc[1]) > cur.r || Math.abs(q[2] - cur.cc[2]) > cur.r) return;
   const t = new Date(hereData.utc * 1000); const hhmm = [t.getHours(), t.getMinutes(), t.getSeconds()].map(v => String(v).padStart(2, '0')).join(':');
   hereG = new THREE.Group(); hereG.position.set(q[0] - c[0], q[1] - c[1], q[2] - c[2]);
   const ball = new THREE.Mesh(new THREE.SphereGeometry(0.5), new THREE.MeshBasicMaterial({ color: 0x00e5ff, depthTest: false }));
@@ -2783,3 +3020,22 @@ function runExteriorView() {
 }
 // マイハンガーの中から、ステーションへ戻る (［現在位置］で移るとき。移る先は呼ぶ側が決める)
 function leaveHangarQuiet() { if (!stationSaved) return; SITE = ''; VIEW = stationSaved.VIEW; BASE = stationSaved.BASE; document.getElementById('title').textContent = stationSaved.title; stationSaved = null; hangarBack = null; document.getElementById('hangarBar').style.display = 'none'; renderTargets(); }
+// ===== 読み込みの調整 (左の欄。値は LOADCFG。2026-11-06、利用者の指示「今言った距離で作って、調整可能なようにページに設定を足すのは不可能なの？」) =====
+// 数字を変えたら覚えて (localStorage の view3d.load)、その場で効かせる: 部品の大きさの境は、解析の糸に索引を分け直してもらってから見直す (中身の変わったかたまりだけ入れ替わる)。
+// 外判定の距離・床の距離は、外判定を見直す。ほかは、出すかたまりを見直す。地点を読み込んでいる最中は、終わってから効かせる
+function loadCfgChanged(keys) {
+  try { localStorage.setItem('view3d.load', JSON.stringify(LOADCFG)); } catch (_) { }
+  if (loading) { setTimeout(() => loadCfgChanged(keys), 500); return; }
+  if (!cur || !cur.index) return;
+  if (keys.some(k => k === 's1' || k === 's2' || k === 's3')) {
+    const og = originGen, p = cur;
+    workerCall({ type: 'sizes', og, sizes: [LOADCFG.s1, LOADCFG.s2, LOADCFG.s3] }).then(d => { if (d.stale || og !== originGen || p !== cur) return; cur.index = makeIndex(d.index); failed.clear(); review(true); }).catch(e => report('sizes', e));
+  }
+  if (keys.some(k => k === 'outDist' || k === 'outFloor')) outRequest();
+  review(true);
+}
+document.querySelectorAll('input.ld').forEach(inp => {
+  const k = inp.dataset.k; inp.value = LOADCFG[k];
+  inp.addEventListener('change', () => { const v = parseFloat(inp.value); if (!isFinite(v) || v < 0) { inp.value = LOADCFG[k]; return; } LOADCFG[k] = v; loadCfgChanged([k]); });
+});
+document.getElementById('ldReset').onclick = () => { Object.assign(LOADCFG, LOAD_DEF); document.querySelectorAll('input.ld').forEach(inp => { inp.value = LOADCFG[inp.dataset.k]; }); loadCfgChanged(Object.keys(LOAD_DEF)); };
