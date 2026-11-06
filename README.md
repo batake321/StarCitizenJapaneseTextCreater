@@ -141,9 +141,9 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v2.6.11-win-x64.zip (最新 v2.6.11 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.6.11/StarCitizenJapaneseTextCreater-v2.6.11-win-x64.zip)**
+> **[StarCitizenJapaneseTextCreater-v2.6.12-win-x64.zip (最新 v2.6.12 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.6.12/StarCitizenJapaneseTextCreater-v2.6.12-win-x64.zip)**
 >
-> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.6.11-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
+> zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v2.6.12-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
 >
 > **[sc_japanese_backup.zip (翻訳データベース 4.10.2 対応 2026/10/21 更新)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v2.2.0/sc_japanese_backup.zip)** — アプリの「インポート (復元)」から取り込めます。
 
@@ -1057,10 +1057,20 @@ MIT License
 
 新しい版が上です。前の版の分は畳んであります（▶ を押すと開きます）。
 
-### 🚀 v2.6.11 更新内容
+### 🚀 v2.6.12 更新内容
+
+- **コメントの編集**: 3D のコメントの札を押すと、文を直せます（空にすると消します）
+- **コメントの札の高さ**: 札を、印の玉のすぐ上に出すようにしました（前は 1.5 m 上で、近くで見えませんでした）
+- **札の見え方**: 3D の左の欄に「札の見え方」を足しました。札の透明度を変えられ、「遠いほど薄く」で遠くの札を薄く出します
+- **コメントの入力で動けなくなる不具合**: コメントの欄を閉じた後にキーが効かなくなっていたのを直しました。日本語の変換中の Enter・Esc で欄が閉じないようにしました
+
+<details>
+<summary>v2.6.11 更新内容</summary>
 
 - **録画の再生**: 3D の「録画」に［再生］を足しました。いちばん新しい録画を、保存・読み込みをせずにその場で再生します（再生中に押すと止まります）
 - **一定速度で再生**: 「一定速度」にチェックを入れると、録画の時刻ではなく、決めた速さ（m/秒）で道のりを進みます（止まっていた所は飛ばします）
+
+</details>
 
 <details>
 <summary>v2.6.10 更新内容</summary>

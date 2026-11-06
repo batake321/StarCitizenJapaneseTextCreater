@@ -130,7 +130,8 @@ const keys = new Set();
 addEventListener('keydown', e => { if (document.getElementById('cbox').style.display === 'block') return; if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || (e.target.tagName === 'INPUT' && /^(text|search|number)$/.test(e.target.type))) return; keys.add(e.key.toLowerCase()); if ('wasdqe'.includes(e.key.toLowerCase())) e.preventDefault(); });
 addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
 addEventListener('keydown', e => {
-  if (document.getElementById('cbox').style.display === 'block') { if (e.key === 'Enter') { e.preventDefault(); closeComment(true); } else if (e.key === 'Escape') closeComment(false); return; }
+  // (2026-11-06、利用者の報告「エンターで文字を入れる途中でおかしくなって ESC で抜けて動けなくなった」) 日本語の変換中の Enter・Esc (確定・取り消し) では閉じない
+  if (document.getElementById('cbox').style.display === 'block') { if (e.isComposing || e.keyCode === 229) return; if (e.key === 'Enter') { e.preventDefault(); closeComment(true); } else if (e.key === 'Escape') closeComment(false); return; }
   if (e.target.id === 'salesQ') return;   // 販売品の枠の検索の欄に打っている間は、Enter (コメント)・歩く操作のキーを取らない
   if (e.target.tagName === 'SELECT') return;   // ドロップダウン (文字の道案内) にフォーカスがある間は、歩く操作を取らない
   if (walk && e.key === 'Enter') { e.preventDefault(); keys.clear(); openComment(); return; }   // 録画中でなくても (2026-11-05、利用者「enter で文字入れて印付けるのは、いつでもできて入力したら即反映してほしい」)
@@ -817,7 +818,9 @@ addEventListener('keydown', e => {
 let recAcc = 0, cPos = null, cMarks = [];
 function openComment() { cPos = null; document.getElementById('cpos').textContent = '(位置: 今の目線の高さ)'; const b = document.getElementById('cbox'); b.style.display = 'block'; const i = document.getElementById('ctext'); i.value = ''; i.focus(); }
 function closeComment(ok) {
-  const b = document.getElementById('cbox'); const t = document.getElementById('ctext').value.trim(); b.style.display = 'none';
+  const b = document.getElementById('cbox'); const ct = document.getElementById('ctext'); const t = ct.value.trim(); b.style.display = 'none';
+  // 閉じたら欄からフォーカスを外し、押されていたキーを消す (欄にフォーカスが残ると、歩く操作のキーが全部欄へ行き、動けなくなっていた)
+  ct.blur(); keys.clear();
   if (ok && t && cur) {
     const q = cPos || cam.position;
     if (rec) {
@@ -861,6 +864,19 @@ function onNoteAdded(d) {
   if (!g) return;
   const note = g.userData.note; note.id = d.id;
   if (note.deleted && APP) window.chrome.webview.postMessage({ type: 'noteDelete', id: note.id });   // id が付く前に消していた
+  else if (note.pendingText && APP) { window.chrome.webview.postMessage({ type: 'noteUpdate', id: note.id, text: note.pendingText }); note.pendingText = null; }
+}
+// 編集 (2026-11-06、利用者の指示「削除だけでなく編集できるようにしてほしい」): 札を押すと文を直す窓を出す。空にして決めると消す (確認する)。やめると何もしない
+function editNote(g) {
+  const note = g.userData.note;
+  const t = window.prompt('コメントを直す（空にすると消します）', note.text); keys.clear();
+  if (t === null) return;
+  const text = t.trim();
+  if (!text) { if (window.confirm(`このコメントを消しますか？\n「${note.text}」`)) deleteNote(g); return; }
+  if (text === note.text) return;
+  note.text = text; noteDispose(g); noteMarks = noteMarks.filter(m => m !== g); noteDraw(note);
+  if (note.id != null && APP) window.chrome.webview.postMessage({ type: 'noteUpdate', id: note.id, text });
+  else note.pendingText = text;   // id が付く前に直した: id が付いたときに送る (onNoteAdded)
 }
 function deleteNote(g) {
   const note = g.userData.note; note.deleted = true;
@@ -882,6 +898,31 @@ function refreshDistLabels(force) {
     const asp = nsp.scale.x / nsp.scale.y, h = 0.04 * lines.length; sp.scale.set(h * asp, h, 1);
   }
 }
+// ===== 札の見え方 (2026-11-06、利用者の指示「キャプションが遠いほど薄くする機能や、そもそも透明度を変えられるようにしてほしい」) =====
+// 文字の札 (textSprite で作った物。店・端末・乗り口・コメントなど) の透明度を左の欄「札の見え方」で決める。「遠いほど薄く」が ON なら、
+// 自分 (歩くモードなら立っている所、見るモードなら回転の中心) から LABEL_FADE.near m までは決めた透明度のまま、LABEL_FADE.far m で LABEL_FADE.min 倍まで薄くする (間は直線)。
+// 0.2 秒ごとに当て直す。値は localStorage (view3d.labels) に覚える
+const LABEL_FADE = { near: 20, far: 150, min: 0.25 };
+const labelSprites = new Set();
+const labelCfg = { alpha: 1, fade: true };
+try { const s = JSON.parse(localStorage.getItem('view3d.labels') || '{}'); if (typeof s.alpha === 'number' && s.alpha >= 0.1 && s.alpha <= 1) labelCfg.alpha = s.alpha; if (typeof s.fade === 'boolean') labelCfg.fade = s.fade; } catch (_) { }
+let lastLabelFade = 0;
+function labelFadeTick(force) {
+  const now = performance.now(); if (!force && now - lastLabelFade < 200) return; lastLabelFade = now;
+  const q = walk ? wpos : tgt, wp = new THREE.Vector3();
+  for (const sp of labelSprites) {
+    if (!sp.parent) { if (now - sp.userData.born > 2000) labelSprites.delete(sp); continue; }   // 消された札は一覧から外す (作ってすぐ、まだ置かれていない札は残す)
+    let a = labelCfg.alpha;
+    if (labelCfg.fade) { sp.getWorldPosition(wp); const d = wp.distanceTo(q); const k = d <= LABEL_FADE.near ? 1 : d >= LABEL_FADE.far ? LABEL_FADE.min : 1 - (1 - LABEL_FADE.min) * (d - LABEL_FADE.near) / (LABEL_FADE.far - LABEL_FADE.near); a *= k; }
+    if (sp.material.opacity !== a) sp.material.opacity = a;
+  }
+}
+{
+  const r = document.getElementById('lblAlpha'), v = document.getElementById('lblAlphaV'), f = document.getElementById('lblFade');
+  const save = () => { try { localStorage.setItem('view3d.labels', JSON.stringify(labelCfg)); } catch (_) { } };
+  if (r) { r.value = Math.round(labelCfg.alpha * 100); v.textContent = r.value; r.addEventListener('input', () => { labelCfg.alpha = +r.value / 100; v.textContent = r.value; save(); labelFadeTick(true); }); }
+  if (f) { f.checked = labelCfg.fade; f.addEventListener('change', () => { labelCfg.fade = f.checked; save(); labelFadeTick(true); }); }
+}
 // 文字の札 (1 行の文字か、行の配列)
 function textSprite(text, frame = '#ffee66', ink = '#ffffff') {
   const lines = Array.isArray(text) ? text : [text];
@@ -889,15 +930,18 @@ function textSprite(text, frame = '#ffee66', ink = '#ffffff') {
   const w = Math.ceil(Math.max(...lines.map(l => g.measureText(l).width))) + 24, hh = 44 * lines.length; c.width = w; c.height = hh; g.font = '28px sans-serif';
   g.fillStyle = 'rgba(0,0,0,0.75)'; g.fillRect(0, 0, w, hh); g.strokeStyle = frame; g.strokeRect(1, 1, w - 2, hh - 2); g.fillStyle = ink;
   lines.forEach((l, i) => g.fillText(l, 12, 31 + 44 * i));
-  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false })); sp.scale.set(w / 44 * 0.5, 0.5 * lines.length, 1); sp.renderOrder = 20; return sp;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false, transparent: true })); sp.scale.set(w / 44 * 0.5, 0.5 * lines.length, 1); sp.renderOrder = 20;
+  sp.userData.born = performance.now(); labelSprites.add(sp); return sp;
 }
 // コメントの印 (地点に玉、そこから上へ 1.5 m の引き出し線、その先に文)。co: 記録の中心 − 今の中心。list: 入れる一覧 (再生・録画は cMarks、DB の印は noteMarks)。
 // userData.shown = 出すべきか (再生の時刻で変わる)。実際の visible はそれと「表示」のチェック (comment) の両方 (applyMarkVis)
+// 引き出し線の長さ (2026-11-06、利用者の指摘「キャプションの初期位置が高すぎる」「近くで見えない」。前は 1.5 m・札はその 0.3 m 上)
+const COMMENT_LIFT = 0.4;
 function commentMark(cm, co, visible, list = cMarks) {
-  const g = new THREE.Group(); const p0 = new THREE.Vector3(cm.pos[0] + co[0], cm.pos[1] + co[1], cm.pos[2] + co[2]), p1 = p0.clone(); p1.z += 1.5;
+  const g = new THREE.Group(); const p0 = new THREE.Vector3(cm.pos[0] + co[0], cm.pos[1] + co[1], cm.pos[2] + co[2]), p1 = p0.clone(); p1.z += COMMENT_LIFT;
   const ball = new THREE.Mesh(new THREE.SphereGeometry(0.12), new THREE.MeshBasicMaterial({ color: 0xffee66, depthTest: false })); ball.position.copy(p0); ball.renderOrder = 20;
   const lg = new THREE.BufferGeometry().setFromPoints([p0, p1]); const line = new THREE.Line(lg, new THREE.LineBasicMaterial({ color: 0xffee66, depthTest: false })); line.renderOrder = 20;
-  const sp = textSprite(cm.text); sp.position.copy(p1); sp.position.z += 0.3;
+  const sp = textSprite(cm.text); sp.position.copy(p1); sp.position.z += sp.scale.y / 2;   // 札の下の端を線の先に付ける
   g.add(ball, line, sp); g.userData.shown = visible; g.visible = visible && commentShow(); g.userData.t = cm.t; g.userData.cat = 'comment'; g.userData.sp = sp; root.add(g); list.push(g);
   return g;
 }
@@ -1102,7 +1146,7 @@ function pick(e) {
   // コメントの欄を開いている間は見ない (押した所に付ける方を優先)。形に当たらなくても (空中の札) 効く
   if (document.getElementById('cbox').style.display !== 'block') {
     const sps = noteMarks.filter(g => g.visible).map(g => g.userData.sp); const nh = sps.length ? ray.intersectObjects(sps, false)[0] : null;
-    if (nh && (!hit || nh.distance <= hit.distance + 1.5)) { const g = nh.object.parent; const note = g.userData.note; if (window.confirm(`このコメントを消しますか？\n「${note.text}」`)) deleteNote(g); return; }
+    if (nh && (!hit || nh.distance <= hit.distance + 1.5)) { const g = nh.object.parent; const note = g.userData.note; editNote(g); return; }
   }
   // 歩くモードで乗り場の印 (エレベーター・トラムの黄色の玉) を押したら、その印のまわりの乗り場の行き先の窓を開く (操作盤を押したときと同じ。着いた直後の 3 m の決まりにも掛からない)
   // (2026-11-05、親の決定)。印は形より手前に描いているので、コメントの札と同じく、形に当たっていても印を先に見る
@@ -2850,7 +2894,7 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { }, ex
 // 確かめ用: いちばん長い 1 コマ (ms。window.__frameMax = 0 で計り直す) と、読み込みの段ごとの時間 (window.__phase)
 // window.__frames: 長いコマの上位 8 件 [コマの間 ms, そのうち描画 (R.render) ms, その間の段 (window.__stage)]
 let lastFrame = performance.now(), lastRender = 0; window.__frameMax = 0; window.__frames = []; window.__stage = '';
-(function loop() { requestAnimationFrame(loop); { const nowF = performance.now(), gap = nowF - lastFrame; window.__frameMax = Math.max(window.__frameMax, gap); if (gap > 50) { const f = window.__frames; f.push([+gap.toFixed(0), +lastRender.toFixed(0), window.__stage]); f.sort((a, b) => b[0] - a[0]); f.length = Math.min(f.length, 8); } lastFrame = nowF; } try { nearCheck(); } catch (e) { window.__err = String(e && e.stack || e); } try { refreshDistLabels(); } catch (e) { window.__err = String(e && e.stack || e); } try { walkCheckTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { keyMove(); } catch (e) { window.__err = String(e && e.stack || e); } try { chunkTick(); reviewTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { updExtView(); } catch (e) { window.__err = String(e && e.stack || e); } const tr = performance.now(); R.render(scene, cam); lastRender = performance.now() - tr; try { extTick(performance.now()); } catch (e) { window.__err = String(e && e.stack || e); } window.__stage = loading ? window.__stage : ''; })();
+(function loop() { requestAnimationFrame(loop); { const nowF = performance.now(), gap = nowF - lastFrame; window.__frameMax = Math.max(window.__frameMax, gap); if (gap > 50) { const f = window.__frames; f.push([+gap.toFixed(0), +lastRender.toFixed(0), window.__stage]); f.sort((a, b) => b[0] - a[0]); f.length = Math.min(f.length, 8); } lastFrame = nowF; } try { nearCheck(); } catch (e) { window.__err = String(e && e.stack || e); } try { refreshDistLabels(); labelFadeTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { walkCheckTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { keyMove(); } catch (e) { window.__err = String(e && e.stack || e); } try { chunkTick(); reviewTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { updExtView(); } catch (e) { window.__err = String(e && e.stack || e); } const tr = performance.now(); R.render(scene, cam); lastRender = performance.now() - tr; try { extTick(performance.now()); } catch (e) { window.__err = String(e && e.stack || e); } window.__stage = loading ? window.__stage : ''; })();
 // ===== 始め =====
 (async () => {
   try {

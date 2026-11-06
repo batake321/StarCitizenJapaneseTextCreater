@@ -63,6 +63,27 @@ internal static class StationNotes
         }
     }
 
+    // 文を直す (無ければ何もしない。2026-11-06)
+    public static void Update(long id, string text)
+    {
+        lock (WriteLock)
+        {
+            try
+            {
+                var path = DbPath;
+                if (!File.Exists(path)) return;
+                using var c = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path};Mode=ReadWriteCreate;Pooling=False");
+                c.Open();
+                using var cmd = c.CreateCommand();
+                cmd.CommandText = "UPDATE notes SET text = $t WHERE id = $i";
+                cmd.Parameters.AddWithValue("$t", text);
+                cmd.Parameters.AddWithValue("$i", id);
+                cmd.ExecuteNonQuery();
+            }
+            finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); }
+        }
+    }
+
     // 消す (無ければ何もしない)
     public static void Delete(long id)
     {

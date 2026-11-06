@@ -324,7 +324,7 @@ public sealed class StationView3DView : Grid
             //   {type:'notesGet', req} → {type:'notes', req, list:[{id,pos,text}]} (この場所の全部。pos は場所の座標)
             //   {type:'noteAdd', pos, text, tmp} → DB に入れて {type:'noteAdded', id, pos, text, tmp} (tmp はビューアが印を結び付けるための番号。そのまま返す)
             //   {type:'noteDelete', id} → DB から消す。失敗は {type:'noteError', message} とログ
-            if (type is "notesGet" or "noteAdd" or "noteDelete")
+            if (type is "notesGet" or "noteAdd" or "noteDelete" or "noteUpdate")
             {
                 await NoteMessageAsync(type, r);
                 return;
@@ -467,6 +467,15 @@ public sealed class StationView3DView : Grid
                 var id = await Task.Run(() => StationNotes.Add(record, pos, text));
                 if (_closed) return;
                 Post(new { type = "noteAdded", id, pos, text, tmp });
+            }
+            else if (type == "noteUpdate")
+            {
+                // 文を直す (2026-11-06、利用者の指示「削除だけでなく編集できるようにしてほしい」)
+                if (!r.TryGetProperty("id", out var uv) || uv.ValueKind != JsonValueKind.Number) return;
+                var text = r.TryGetProperty("text", out var tv) ? tv.GetString() ?? "" : "";
+                if (text.Length == 0) return;
+                var id = uv.GetInt64();
+                await Task.Run(() => StationNotes.Update(id, text));
             }
             else if (type == "noteDelete")
             {
