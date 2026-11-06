@@ -435,7 +435,20 @@ function groundGap(x, y, zmax) {
   if (best !== null && (c0 === null || c0 < best - 0.05) && gapLog.length < 200) gapLog.push([+x.toFixed(2), +y.toFixed(2), c0 === null ? null : +c0.toFixed(2), +best.toFixed(2)]);
   return best;
 }
-function walkCam() { cam.position.copy(wpos); cam.position.z += inv ? -STANCE[stance].eye : STANCE[stance].eye; cam.up.set(0, 0, inv ? -1 : 1); const d = new THREE.Vector3(Math.cos(wpitch) * Math.cos(wyaw), Math.cos(wpitch) * Math.sin(wyaw), Math.sin(wpitch)); cam.lookAt(cam.position.clone().add(d)); }
+// 向きの滑らかさ (2026-11-06、利用者の指示「向きがちょこちょこ変わると見にくいので向きの変化を滑らかにする設定も欲しい」): 歩くモード・再生のカメラの向きを、
+// 本当の向き (wyaw・wpitch) へ「向きの滑らかさ」秒の時定数で寄せる (0 なら今までどおりすぐ合わせる)。値は localStorage (view3d.turnSmooth) に覚える。
+// 寄せている途中は毎コマ walkCam を呼んで寄せ切る (下の loop の camEaseTick)
+let turnSmooth = 0, camYaw = null, camPitch = 0, camT = 0;
+try { const v = +localStorage.getItem('view3d.turnSmooth'); if (isFinite(v) && v >= 0 && v <= 3) turnSmooth = v; } catch (_) { }
+{ const ti = document.getElementById('turnSmooth'); if (ti) { ti.value = turnSmooth; ti.addEventListener('change', () => { const v = +ti.value; turnSmooth = isFinite(v) ? Math.min(3, Math.max(0, v)) : 0; ti.value = turnSmooth; try { localStorage.setItem('view3d.turnSmooth', String(turnSmooth)); } catch (_) { } }); } }
+const angDiff = (a, b) => { let d = (a - b) % (2 * Math.PI); if (d > Math.PI) d -= 2 * Math.PI; if (d < -Math.PI) d += 2 * Math.PI; return d; };
+function walkCam() {
+  const now = performance.now(), dt = camT ? Math.min(0.5, (now - camT) / 1000) : 0; camT = now;
+  if (turnSmooth <= 0 || camYaw === null) { camYaw = wyaw; camPitch = wpitch; }
+  else { const k = 1 - Math.exp(-dt / turnSmooth); camYaw += angDiff(wyaw, camYaw) * k; camPitch += (wpitch - camPitch) * k; }
+  cam.position.copy(wpos); cam.position.z += inv ? -STANCE[stance].eye : STANCE[stance].eye; cam.up.set(0, 0, inv ? -1 : 1); const d = new THREE.Vector3(Math.cos(camPitch) * Math.cos(camYaw), Math.cos(camPitch) * Math.sin(camYaw), Math.sin(camPitch)); cam.lookAt(cam.position.clone().add(d));
+}
+function camEaseTick() { if (walk && turnSmooth > 0 && camYaw !== null && (Math.abs(angDiff(wyaw, camYaw)) > 1e-4 || Math.abs(wpitch - camPitch) > 1e-4)) walkCam(); }
 function walkStep(dt) {
   const f = new THREE.Vector3(Math.cos(wyaw), Math.sin(wyaw), 0), r = new THREE.Vector3(Math.sin(wyaw), -Math.cos(wyaw), 0);
   if (keys.has('q')) wyaw += TURN * dt; if (keys.has('e')) wyaw -= TURN * dt;
@@ -2894,7 +2907,7 @@ let extTick = () => { }, onExterior = () => { }, requestExterior = () => { }, ex
 // 確かめ用: いちばん長い 1 コマ (ms。window.__frameMax = 0 で計り直す) と、読み込みの段ごとの時間 (window.__phase)
 // window.__frames: 長いコマの上位 8 件 [コマの間 ms, そのうち描画 (R.render) ms, その間の段 (window.__stage)]
 let lastFrame = performance.now(), lastRender = 0; window.__frameMax = 0; window.__frames = []; window.__stage = '';
-(function loop() { requestAnimationFrame(loop); { const nowF = performance.now(), gap = nowF - lastFrame; window.__frameMax = Math.max(window.__frameMax, gap); if (gap > 50) { const f = window.__frames; f.push([+gap.toFixed(0), +lastRender.toFixed(0), window.__stage]); f.sort((a, b) => b[0] - a[0]); f.length = Math.min(f.length, 8); } lastFrame = nowF; } try { nearCheck(); } catch (e) { window.__err = String(e && e.stack || e); } try { refreshDistLabels(); labelFadeTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { walkCheckTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { keyMove(); } catch (e) { window.__err = String(e && e.stack || e); } try { chunkTick(); reviewTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { updExtView(); } catch (e) { window.__err = String(e && e.stack || e); } const tr = performance.now(); R.render(scene, cam); lastRender = performance.now() - tr; try { extTick(performance.now()); } catch (e) { window.__err = String(e && e.stack || e); } window.__stage = loading ? window.__stage : ''; })();
+(function loop() { requestAnimationFrame(loop); { const nowF = performance.now(), gap = nowF - lastFrame; window.__frameMax = Math.max(window.__frameMax, gap); if (gap > 50) { const f = window.__frames; f.push([+gap.toFixed(0), +lastRender.toFixed(0), window.__stage]); f.sort((a, b) => b[0] - a[0]); f.length = Math.min(f.length, 8); } lastFrame = nowF; } try { nearCheck(); } catch (e) { window.__err = String(e && e.stack || e); } try { refreshDistLabels(); labelFadeTick(); camEaseTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { walkCheckTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { keyMove(); } catch (e) { window.__err = String(e && e.stack || e); } try { chunkTick(); reviewTick(); } catch (e) { window.__err = String(e && e.stack || e); } try { updExtView(); } catch (e) { window.__err = String(e && e.stack || e); } const tr = performance.now(); R.render(scene, cam); lastRender = performance.now() - tr; try { extTick(performance.now()); } catch (e) { window.__err = String(e && e.stack || e); } window.__stage = loading ? window.__stage : ''; })();
 // ===== 始め =====
 (async () => {
   try {
@@ -3144,3 +3157,13 @@ async function onBig(d) {
     if (res.stat) logApp(`場所の全部の大きな物体 境 ${d.s3} m: 部品 ${res.stat.bigAll}・今の地点に足した部品/三角形 ${res.stat.big[0]}/${res.stat.big[1]}・読み込み ${res.stat.bigLoad.toFixed(1)} 秒`);
   } catch (e) { report('big', e); }
 }
+
+// ===== 全画面 (2026-11-06、利用者の指示「別ウィンドウの場合はファンクションキーで左のメニューも右のオンオフも消して全画面表示可能に」) =====
+// 別ウィンドウ (［マップ］タブの中でない) のときだけ、F11 で左の欄と右上のスイッチを隠し、窓を枠なしの最大にする (アプリへ {type:'fullscreen', on})。もう一度 F11 で戻す
+addEventListener('keydown', e => {
+  if (e.key !== 'F11' || (APP && qs.get('tab') === '1')) return;
+  e.preventDefault();
+  const on = !document.body.classList.contains('full'); document.body.classList.toggle('full', on);
+  if (APP) window.chrome.webview.postMessage({ type: 'fullscreen', on });
+  setTimeout(() => { try { size(); } catch (_) { } }, 50);
+});

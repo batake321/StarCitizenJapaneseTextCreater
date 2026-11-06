@@ -54,6 +54,8 @@ public sealed class StationView3DView : Grid
     // ［マップ］タブの中に出している 3D か (ビューアに ?tab=1 を渡す。遠ざかり切ったら {type:'leave'} が来て LeaveRequested を起こす)
     public bool InTab { get; init; }
     public event Action? LeaveRequested;
+    // 全画面の前の窓の形 (fullscreen の知らせ)
+    private (WindowStyle Style, WindowState State)? _fullPrev;
     private readonly string _record, _shortName, _title;
     private readonly WebView2 _web = new();
     private readonly TextBlock _overlay = new() { Foreground = Brushes.White, FontSize = 28, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(16), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
@@ -270,6 +272,18 @@ public sealed class StationView3DView : Grid
                 var en = r.TryGetProperty("entity", out var ev) ? ev.GetString() ?? "" : "";
                 var msg = _shopSales?.Invoke(g, en);
                 Post(msg ?? new { type = "sales", title = "販売品", shops = new List<object> { new { name = en, note = "販売データが紐づいていません。" } } });
+                return;
+            }
+            // 全画面 (2026-11-06、利用者の指示「別ウィンドウの場合はファンクションキーで左のメニューも右のオンオフも消して全画面表示可能に」):
+            // 別ウィンドウのときだけ、窓を枠なしの最大にする / 戻す (ビューアの F11 から {type:'fullscreen', on})
+            if (type == "fullscreen")
+            {
+                if (!InTab && Window.GetWindow(this) is { } win)
+                {
+                    var on = r.TryGetProperty("on", out var ov) && ov.ValueKind == JsonValueKind.True;
+                    if (on) { _fullPrev = (win.WindowStyle, win.WindowState); win.WindowState = WindowState.Normal; win.WindowStyle = WindowStyle.None; win.WindowState = WindowState.Maximized; }
+                    else if (_fullPrev is { } p) { win.WindowStyle = p.Style; win.WindowState = p.State; _fullPrev = null; }
+                }
                 return;
             }
             if (type == "leave")

@@ -4,6 +4,8 @@
 <style>
 body{margin:0;display:flex;height:100vh;font:13px "Yu Gothic UI","Segoe UI",sans-serif;background:#111;color:#ddd}
 #side{width:360px;overflow:auto;padding:8px;box-sizing:border-box;border-right:1px solid #333}
+/* 全画面 (2026-11-06。別ウィンドウで F11): 左の欄と右上のスイッチを隠す */
+body.full #side,body.full #swPanel{display:none!important}
 #tbox button,#sbox button{display:block;width:100%;text-align:left;margin:0;padding:6px 8px;background:#222;color:#ddd;border:0;border-bottom:1px solid #333;cursor:pointer;font-size:14px}#tbox button:hover{background:#345}#tbox button.cur{color:#9cf}#sbox table{border-collapse:collapse;margin:4px 0 10px}#sbox td,#sbox th{border:1px solid #445;padding:2px 6px;font-size:13px}#sbox th{background:#2a3038}
 #side button{display:block;width:100%;text-align:left;margin:2px 0;padding:5px;background:#222;color:#ddd;border:1px solid #444;cursor:pointer}
 #side button.on{background:#264;border-color:#4a8}
@@ -99,6 +101,7 @@ details.more>summary{cursor:pointer;color:#9cf;font-size:12px;margin:4px 0}
 <button id="ldReset" style="display:inline;width:auto">初めの値に戻す</button>
 </details>
 <details class="sec" id="secWalk" open><summary>歩くモード</summary>
+<div>向きの滑らかさ <input type="number" id="turnSmooth" value="0" min="0" max="3" step="0.1" style="width:4em"> 秒</div>
 <div><button id="walkBtn">歩くモード: OFF</button> <button id="hereBtn" style="display:inline;width:auto">現在位置</button> <span id="walkInfo"></span><div><button id="runBtn" style="display:inline;width:auto">走る: OFF</button> <button id="stBtn" style="display:inline;width:auto">姿勢: 立つ</button> <button id="ncBtn" style="display:inline;width:auto">すり抜け: OFF</button></div></div>
 </details>
 <details class="sec" id="secRec"><summary>録画</summary>
