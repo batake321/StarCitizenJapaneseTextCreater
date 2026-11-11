@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 260" width="900" height="260" role="img" aria-labelledby="t d">
+  <title id="t">初回セットアップの流れ</title>
+  <desc id="d">ダウンロードして展開、GamePath の確認、翻訳タブで 日本語化 を押して出た窓で 次へ・実行、ゲームを起動、の 4 ステップです。AI 設定は任意で、新しいパッチを自分で訳したいときやチャットを使いたいときだけ必要です。</desc>
+  <style>
+    .f  { font-family: "Segoe UI","Yu Gothic UI",Meiryo,sans-serif; }
+    .no { font-size: 15px; fill: #0b1017; font-weight: 700; }
+    .ti { font-size: 14.5px; fill: #e6eef7; font-weight: 600; }
+    .sm { font-size: 12px; fill: #93a7bd; }
+    .op { font-size: 12px; fill: #7f8fa0; }
+  </style>
+  <defs>
+    <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#7f97ad"/>
+    </marker>
+  </defs>
+
+  <text class="f sm" x="20" y="28">翻訳はもう終わっています。AI の設定なしで、ここまでやれば日本語になります</text>
+
+  <g>
+    <rect x="20" y="44" width="190" height="120" rx="10" fill="#16202c" stroke="#33465c"/>
+    <circle cx="46" cy="70" r="14" fill="#38bdf8"/><text class="f no" x="46" y="75" text-anchor="middle">1</text>
+    <text class="f ti" x="70" y="75">展開</text>
+    <text class="f sm" x="36" y="105">zip をダウンロードして</text>
+    <text class="f sm" x="36" y="124">好きな場所に展開し、</text>
+    <text class="f sm" x="36" y="143">exe を起動</text>
+  </g>
+  <line x1="210" y1="104" x2="222" y2="104" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar2)"/>
+
+  <g>
+    <rect x="228" y="44" width="190" height="120" rx="10" fill="#16202c" stroke="#33465c"/>
+    <circle cx="254" cy="70" r="14" fill="#38bdf8"/><text class="f no" x="254" y="75" text-anchor="middle">2</text>
+    <text class="f ti" x="278" y="75">GamePath</text>
+    <text class="f sm" x="244" y="105">上部バーの表示を確認。</text>
+    <text class="f sm" x="244" y="124">空なら [参照...] で指定し、</text>
+    <text class="f sm" x="244" y="143">チャンネルを選ぶ</text>
+  </g>
+  <line x1="418" y1="104" x2="430" y2="104" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar2)"/>
+
+  <g>
+    <rect x="436" y="44" width="200" height="120" rx="10" fill="#123146" stroke="#38bdf8" stroke-width="2"/>
+    <circle cx="462" cy="70" r="14" fill="#38bdf8"/><text class="f no" x="462" y="75" text-anchor="middle">3</text>
+    <text class="f ti" x="486" y="75" fill="#bfe6ff">翻訳タブ</text>
+    <text class="f ti" x="452" y="107" fill="#bfe6ff">[日本語化] を押す</text>
+    <text class="f sm" x="452" y="129" fill="#a9d6ef">出た窓で [次へ] → [実行]。</text>
+    <text class="f sm" x="452" y="147" fill="#a9d6ef">読み取りも中で自動で行います</text>
+  </g>
+  <line x1="636" y1="104" x2="648" y2="104" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar2)"/>
+
+  <g>
+    <rect x="654" y="44" width="190" height="120" rx="10" fill="#16202c" stroke="#33465c"/>
+    <circle cx="680" cy="70" r="14" fill="#56c271"/><text class="f no" x="680" y="75" text-anchor="middle">4</text>
+    <text class="f ti" x="704" y="75">起動</text>
+    <text class="f sm" x="670" y="105">Star Citizen を起動して</text>
+    <text class="f sm" x="670" y="124">日本語になっていれば</text>
+    <text class="f sm" x="670" y="143">完了</text>
+  </g>
+
+  <rect x="20" y="184" width="824" height="60" rx="8" fill="#141c26" stroke="#2a3a4d" stroke-dasharray="5 4"/>
+  <text class="f op" x="38" y="206">任意 — [AI 設定] と [AI翻訳] が要るのは、次の場合だけです。</text>
+  <text class="f op" x="38" y="228">・同梱の翻訳データがまだ対応していない新しいパッチの未翻訳を、自分で訳したいとき　・訳の言い回しを変えたいとき　・AI チャットを使いたいとき</text>
+</svg>

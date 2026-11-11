@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 340" width="900" height="340" role="img" aria-labelledby="t d">
+  <title id="t">Web チャットの構成</title>
+  <desc id="d">PC 上のアプリが Web サーバーになり、同じ Wi-Fi のスマホのブラウザからチャットできます。マイクを使う場合は HTTPS ポート 8100 を使います。</desc>
+  <style>
+    .f  { font-family: "Segoe UI","Yu Gothic UI",Meiryo,sans-serif; }
+    .ti { font-size: 15.5px; fill: #e6eef7; font-weight: 600; }
+    .sm { font-size: 12.5px; fill: #93a7bd; }
+    .mono { font-family: Consolas,"Courier New",monospace; font-size: 12.5px; fill: #8fd6ff; }
+  </style>
+  <defs>
+    <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#7f97ad"/>
+    </marker>
+  </defs>
+
+  <text class="f sm" x="30" y="30">設定タブの [サーバー起動] を押すと、PC がチャット用の Web サーバーになります</text>
+
+  <!-- PC -->
+  <rect x="30" y="52" width="360" height="212" rx="12" fill="#16202c" stroke="#33465c"/>
+  <text class="f ti" x="50" y="80">PC（Star Citizen を遊んでいる機械）</text>
+
+  <rect x="50" y="96" width="320" height="76" rx="8" fill="#123146" stroke="#38bdf8"/>
+  <text class="f ti" x="66" y="120" fill="#bfe6ff">Star Citizen Japanese Text Creator</text>
+  <text class="f sm" x="66" y="142" fill="#a9d6ef">Web チャットサーバー</text>
+  <text class="f mono" x="66" y="162">HTTP :8099　/　HTTPS :8100</text>
+
+  <rect x="50" y="184" width="320" height="62" rx="8" fill="#1c1830" stroke="#5b4b8a"/>
+  <text class="f ti" x="66" y="208" fill="#cfc2f5">VoiceVox（任意・無料）</text>
+  <text class="f mono" x="66" y="230" fill="#cfc2f5">http://localhost:50021</text>
+
+  <!-- network -->
+  <path d="M390 158 L520 158" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar4)"/>
+  <path d="M520 178 L390 178" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar4)"/>
+  <rect x="404" y="86" width="106" height="52" rx="26" fill="#101a24" stroke="#33465c"/>
+  <text class="f ti" x="457" y="118" text-anchor="middle">同じ Wi-Fi</text>
+  <text class="f sm" x="457" y="206" text-anchor="middle">LAN 内のみ</text>
+
+  <!-- phone -->
+  <rect x="530" y="52" width="150" height="212" rx="16" fill="#16202c" stroke="#33465c"/>
+  <rect x="546" y="76" width="118" height="164" rx="6" fill="#0d141d" stroke="#33465c"/>
+  <text class="f sm" x="605" y="102" text-anchor="middle">ブラウザ</text>
+  <text class="f sm" x="605" y="130" text-anchor="middle" fill="#a9d6ef">チャット</text>
+  <text class="f sm" x="605" y="152" text-anchor="middle" fill="#a9d6ef">音声入力</text>
+  <text class="f sm" x="605" y="174" text-anchor="middle" fill="#a9d6ef">読み上げ</text>
+  <text class="f ti" x="605" y="220" text-anchor="middle">スマホ</text>
+
+  <!-- URLs -->
+  <rect x="700" y="52" width="170" height="212" rx="10" fill="#101a24" stroke="#33465c"/>
+  <text class="f ti" x="716" y="78">アクセス先</text>
+  <text class="f sm" x="716" y="104">PC から</text>
+  <text class="f mono" x="716" y="122">localhost:8099</text>
+  <text class="f sm" x="716" y="150">スマホから</text>
+  <text class="f mono" x="716" y="168">192.168.x.x:8099</text>
+  <text class="f sm" x="716" y="196">スマホでマイクを</text>
+  <text class="f sm" x="716" y="214">使うなら HTTPS</text>
+  <text class="f mono" x="716" y="234" fill="#ffd98a">192.168.x.x:8100</text>
+
+  <rect x="30" y="282" width="840" height="42" rx="8" fill="#2a2110" stroke="#8a6d2a"/>
+  <text class="f sm" x="48" y="300" fill="#f5d493">初回のみ UAC と証明書インストールの確認が出ます。[はい] を押すと、証明書・ポート登録・ファイアウォールを自動で設定します。</text>
+  <text class="f sm" x="48" y="317" fill="#f5d493">スマホのマイクはブラウザの仕様で HTTPS (8100) でないと使えません。先に /cert から証明書をスマホに入れておきます。</text>
+</svg>

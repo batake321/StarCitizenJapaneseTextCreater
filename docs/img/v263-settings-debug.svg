@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 470" width="900" height="470" role="img" aria-labelledby="t d">
+  <title id="t">設定タブの「マップのデバッグ表示」と「船・装備・武器の 3D の色付け」（仮の図）</title>
+  <desc id="d">設定タブの「3D モデル」の欄で、「ステーションのテクスチャ (px)」の行の右に「マップのデバッグ表示」のチェックがあります。既定はオフで、入れると、ステーションの 3D で形を押したときに画面の下部に部品の名前・判定などの細かい文を出します。「3D モデルを保存しない」の右に「船・装備・武器の 3D の色付け」のチェックがあり、既定はオンです。</desc>
+  <style>
+    .f  { font-family: sans-serif; }
+    .tx { font-size: 13px; fill: #1a1a1a; }
+    .gy { font-size: 12.5px; fill: #666; }
+    .gb { font-size: 13px; fill: #1a1a1a; }
+    .dk { font-size: 12px; fill: #fff; }
+    .no { font-size: 15px; fill: #fff; font-weight: 700; }
+    .cap { font-size: 12.5px; fill: #c9d6e3; }
+  </style>
+  <defs>
+    <g id="cbOff"><rect x="0" y="-11" width="13" height="13" fill="#fff" stroke="#333"/></g>
+    <g id="cbOn"><rect x="0" y="-11" width="13" height="13" fill="#fff" stroke="#333"/><path d="M2.5 -4.5 L5.5 -1.5 L10.5 -8" fill="none" stroke="#1a1a1a" stroke-width="1.8"/></g>
+  </defs>
+
+  <rect x="0" y="0" width="900" height="470" rx="8" fill="#1b222c"/>
+
+  <!-- 設定タブ (明るい窓) -->
+  <rect x="20" y="20" width="860" height="270" fill="#f3f3f3" stroke="#8a8a8a"/>
+  <rect x="36" y="42" width="828" height="232" fill="none" stroke="#d5dfe5" rx="3"/>
+  <rect x="48" y="34" width="76" height="16" fill="#f3f3f3"/>
+  <text class="f gb" x="54" y="47">3D モデル</text>
+
+  <text class="f tx" x="52" y="78">置き場所:</text>
+  <rect x="262" y="62" width="490" height="22" fill="#fff" stroke="#adadad"/>
+  <rect x="762" y="62" width="80" height="22" fill="#fdfdfd" stroke="#adadad"/><text class="f tx" x="802" y="78" text-anchor="middle">参照…</text>
+  <rect x="262" y="94" width="300" height="10" fill="#ddd"/>
+
+  <text class="f tx" x="52" y="132">最大容量 (MB):</text>
+  <rect x="262" y="116" width="90" height="22" fill="#fff" stroke="#adadad"/>
+  <rect x="364" y="122" width="60" height="10" fill="#ddd"/>
+  <use href="#cbOff" x="440" y="133"/><text class="f tx" x="459" y="132">3D モデルを保存しない</text>
+  <rect x="618" y="114" width="210" height="26" fill="none" stroke="#ff5a36" stroke-width="2" rx="3"/>
+  <use href="#cbOn" x="626" y="133"/><text class="f tx" x="645" y="132">船・装備・武器の 3D の色付け</text>
+
+  <text class="f tx" x="52" y="166">ステーション (GB):</text>
+  <rect x="262" y="150" width="90" height="22" fill="#fff" stroke="#adadad"/>
+  <rect x="364" y="156" width="130" height="10" fill="#ddd"/>
+
+  <text class="f tx" x="52" y="200">ステーションのテクスチャ (px):</text>
+  <rect x="262" y="184" width="90" height="22" fill="#fff" stroke="#adadad"/><text class="f tx" x="268" y="200">512</text>
+  <text class="f gy" x="364" y="200">0 なら画像を貼らない (単色)</text>
+  <rect x="544" y="182" width="170" height="26" fill="none" stroke="#ff5a36" stroke-width="2" rx="3"/>
+  <use href="#cbOff" x="552" y="201"/><text class="f tx" x="571" y="200">マップのデバッグ表示</text>
+
+  <rect x="52" y="226" width="200" height="30" fill="#fdfdfd" stroke="#adadad"/><text class="f tx" x="152" y="246" text-anchor="middle">船舶・車両をまとめて取り込む</text>
+  <rect x="262" y="226" width="180" height="30" fill="#fdfdfd" stroke="#adadad"/><text class="f tx" x="352" y="246" text-anchor="middle">マップをまとめて取り込む</text>
+
+  <!-- 入れたときの 3D の下部 -->
+  <rect x="20" y="314" width="860" height="120" fill="#111" stroke="#444"/>
+  <rect x="20" y="314" width="860" height="120" fill="#2b2a28" opacity="0.45"/>
+  <rect x="28" y="370" width="844" height="56" fill="rgba(0,0,0,0.75)"/>
+  <text class="f dk" x="36" y="390">（押した部品の名前・判定の面・押した所の高さなど）</text>
+  <text class="f dk" x="36" y="410">「マップのデバッグ表示」を入れたときだけ、3D で形を押すと画面の下部に出ます</text>
+
+  <text class="f cap" x="16" y="456">仮の図。入力欄の値などは省いています。実際の画面と細部が違うことがあります</text>
+
+  <!-- 番号 -->
+  <g class="f">
+    <circle cx="734" cy="195" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="734" y="200" text-anchor="middle">1</text>
+    <circle cx="860" cy="372" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="860" y="377" text-anchor="middle">2</text>
+    <circle cx="848" cy="127" r="13" fill="#ff5a36" stroke="#fff" stroke-width="2"/><text class="no" x="848" y="132" text-anchor="middle">3</text>
+  </g>
+</svg>

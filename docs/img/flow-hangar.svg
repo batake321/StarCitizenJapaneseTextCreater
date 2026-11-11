@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 380" width="900" height="380" role="img" aria-labelledby="t d">
+  <title id="t">My Hangar 同期の流れ</title>
+  <desc id="d">同期ボタンを押すと内蔵ブラウザが開き、自分で RSI にログインします。アプリはページを読み取るだけで、所持船タブとアップグレード管理タブに反映されます。</desc>
+  <style>
+    .f  { font-family: "Segoe UI","Yu Gothic UI",Meiryo,sans-serif; }
+    .ti { font-size: 15.5px; fill: #e6eef7; font-weight: 600; }
+    .sm { font-size: 12.5px; fill: #93a7bd; }
+    .no { font-size: 13px; fill: #0b1017; font-weight: 700; }
+  </style>
+  <defs>
+    <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#7f97ad"/>
+    </marker>
+  </defs>
+
+  <text class="f sm" x="30" y="30">船舶管理タブ &gt; 所持船 / アップグレード管理 の [My Hangar と同期] を押したあとの流れ</text>
+
+  <g>
+    <rect x="30" y="52" width="240" height="106" rx="10" fill="#16202c" stroke="#33465c"/>
+    <circle cx="54" cy="78" r="12" fill="#38bdf8"/><text class="f no" x="54" y="83" text-anchor="middle">1</text>
+    <text class="f ti" x="76" y="83">同期を開始</text>
+    <text class="f sm" x="46" y="112">[My Hangar と同期] を押すと</text>
+    <text class="f sm" x="46" y="132">「My Hangar 同期」ウィンドウが</text>
+    <text class="f sm" x="46" y="146">開きます</text>
+  </g>
+  <line x1="270" y1="105" x2="322" y2="105" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar3)"/>
+
+  <g>
+    <rect x="328" y="52" width="240" height="106" rx="10" fill="#123146" stroke="#38bdf8" stroke-width="2"/>
+    <circle cx="352" cy="78" r="12" fill="#38bdf8"/><text class="f no" x="352" y="83" text-anchor="middle">2</text>
+    <text class="f ti" x="374" y="83" fill="#bfe6ff">ご自身でログイン</text>
+    <text class="f sm" x="344" y="112" fill="#a9d6ef">内蔵ブラウザ (WebView2) に</text>
+    <text class="f sm" x="344" y="132" fill="#a9d6ef">RSI のページが表示されるので、</text>
+    <text class="f sm" x="344" y="146" fill="#a9d6ef">そこでログインします</text>
+  </g>
+  <line x1="568" y1="105" x2="620" y2="105" stroke="#7f97ad" stroke-width="2" marker-end="url(#ar3)"/>
+
+  <g>
+    <rect x="626" y="52" width="244" height="106" rx="10" fill="#16202c" stroke="#33465c"/>
+    <circle cx="650" cy="78" r="12" fill="#38bdf8"/><text class="f no" x="650" y="83" text-anchor="middle">3</text>
+    <text class="f ti" x="672" y="83">ページを読み取り</text>
+    <text class="f sm" x="642" y="112">保有 pledge・船・保険・</text>
+    <text class="f sm" x="642" y="132">アップグレード権利 (CCU) を</text>
+    <text class="f sm" x="642" y="146">取り込みます</text>
+  </g>
+
+  <path d="M748 158 L748 186 L300 186 L300 212" stroke="#7f97ad" stroke-width="2" fill="none" marker-end="url(#ar3)"/>
+  <path d="M748 186 L748 212" stroke="#7f97ad" stroke-width="2" fill="none" marker-end="url(#ar3)"/>
+
+  <g>
+    <rect x="180" y="214" width="240" height="88" rx="10" fill="#16202c" stroke="#33465c"/>
+    <text class="f ti" x="196" y="240">所持船タブ</text>
+    <text class="f sm" x="196" y="266">[同期した船を所持船に反映] で</text>
+    <text class="f sm" x="196" y="286">一覧に取り込み（手入力分は保護）</text>
+  </g>
+
+  <g>
+    <rect x="628" y="214" width="242" height="88" rx="10" fill="#16202c" stroke="#33465c"/>
+    <text class="f ti" x="644" y="240">アップグレード管理タブ</text>
+    <text class="f sm" x="644" y="266">Upgrade / Undo / Sell で</text>
+    <text class="f sm" x="644" y="286">CCU と melt をシミュレーション</text>
+  </g>
+
+  <rect x="30" y="322" width="840" height="42" rx="8" fill="#2a2110" stroke="#8a6d2a"/>
+  <text class="f sm" x="48" y="340" fill="#f5d493">アプリは ID / パスワードを扱いません。ページ上のクリックや送信も行わず、表示されている内容を読み取るだけです。</text>
+  <text class="f sm" x="48" y="357" fill="#f5d493">[ログイン状態を保持する] にチェックすると、Windows のデータ保護 API (DPAPI) で暗号化して保存します。</text>
+</svg>
