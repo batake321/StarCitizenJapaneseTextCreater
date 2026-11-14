@@ -20,7 +20,7 @@
   <text class="f ti" x="50" y="80">PC（Star Citizen を遊んでいる機械）</text>
 
   <rect x="50" y="96" width="320" height="76" rx="8" fill="#123146" stroke="#38bdf8"/>
-  <text class="f ti" x="66" y="120" fill="#bfe6ff">Star Citizen Japanese Text Creator</text>
+  <text class="f ti" x="66" y="120" fill="#bfe6ff">StarCitizenMultiTool</text>
   <text class="f sm" x="66" y="142" fill="#a9d6ef">Web チャットサーバー</text>
   <text class="f mono" x="66" y="162">HTTP :8099　/　HTTPS :8100</text>
 

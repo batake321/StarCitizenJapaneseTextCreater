@@ -14,7 +14,7 @@
   <circle cx="44" cy="35" r="5" fill="#3b4c60"/>
   <circle cx="62" cy="35" r="5" fill="#3b4c60"/>
   <circle cx="80" cy="35" r="5" fill="#3b4c60"/>
-  <text class="f tt" x="102" y="40">Star Citizen Japanese Text Creator</text>
+  <text class="f tt" x="102" y="40">StarCitizenMultiTool</text>
   <line x1="20" y1="54" x2="880" y2="54" stroke="#2a3a4d"/>
 
   <!-- toolbar -->
