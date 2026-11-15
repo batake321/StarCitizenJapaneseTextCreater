@@ -150,7 +150,7 @@ AI チャットによるゲーム情報検索、音声読み上げ、スマホ�
 
 ## ダウンロード
 
-> **[StarCitizenJapaneseTextCreater-v3.3.3-win-x64.zip (最新 v3.3.3 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v3.3.3/StarCitizenJapaneseTextCreater-v3.3.3-win-x64.zip)**
+> **[StarCitizenMultiTool v3.3.3 をダウンロード (最新 / 翻訳DB同梱)](https://github.com/batake321/StarCitizenJapaneseTextCreater/releases/download/v3.3.3/StarCitizenJapaneseTextCreater-v3.3.3-win-x64.zip)**
 >
 > zip の中の exe を実行しても、zip の中の `SCJPTextCreator-v3.3.3-Setup.exe` でインストールしても動きます。インストーラーでは作業ディレクトリ (一時ファイルの場所) を選べて、無ければ作成します。exe を直接使う場合は、起動後に設定タブで設定してください。
 >
